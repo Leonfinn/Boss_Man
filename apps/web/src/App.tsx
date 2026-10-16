@@ -7,6 +7,9 @@ import { usePoll, useRoute } from "./hooks";
 import { Auth } from "./pages/Auth";
 import { Board } from "./pages/Board";
 import { Decisions } from "./pages/Decisions";
+import { Engagement, Engagements } from "./pages/Engagements";
+import { Run } from "./pages/Run";
+import { Runs } from "./pages/Runs";
 import { Funding } from "./pages/Funding";
 
 type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
@@ -76,6 +79,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Board companies={list} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "funding" ? (
           <Funding companies={list} />
+        ) : page === "runs" ? (
+          route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
+        ) : page === "engagements" ? (
+          route[1] ? <Engagement id={route[1]} /> : <Engagements />
         ) : (
           <Decisions decisions={decisions.data ?? []} companies={list} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} onAnswered={decisions.reload} />
         )}

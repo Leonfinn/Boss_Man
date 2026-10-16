@@ -77,6 +77,33 @@ export type BudgetRow = {
   policy: { id: string; scopeKind: string; scopeId: string; windowKind: string; limitMicros: number; onLimit: string };
   status: { usedMicros: number; limitMicros: number; fractionUsed: number; state: string };
 };
-export type ActiveRun = { id: string; companyId: string; agentId: string | null; ticketId: string | null; model: string | null; startedAt: string };
+export type ActiveRun = RunRow;
 
 export const usd = (micros: number) => `$${(micros / 1e6).toFixed(2)}`;
+
+export type RunRow = {
+  id: string;
+  companyId: string;
+  agent: string | null;
+  agentId: string | null;
+  ticketId: string | null;
+  ticket: string | null;
+  model: string | null;
+  startedAt: string;
+  endedAt?: string | null;
+  outcome?: string | null;
+  costMicros?: number;
+};
+export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
+export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };
+
+export type EngagementRow = { id: string; title: string; status: string; requester: string; provider: string; budgetCapUsd: number | null };
+export type EngagementView = EngagementRow & {
+  scope: string;
+  deliverables: string | null;
+  acceptanceCriteria: string[];
+  spentUsd: number;
+  counterTerms: unknown;
+  delivery: { summary?: string; refs?: string[] } | null;
+  thread: Array<{ from: string; fromCompanyId: string; kind: string; body: string; at: string }>;
+};

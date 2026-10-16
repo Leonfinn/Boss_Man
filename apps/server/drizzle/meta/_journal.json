@@ -85,6 +85,13 @@
       "when": 1792173445899,
       "tag": "0011_disk",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1792176068479,
+      "tag": "0012_run_transcript",
+      "breakpoints": true
     }
   ]
 }

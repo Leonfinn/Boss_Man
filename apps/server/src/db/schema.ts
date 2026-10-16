@@ -102,7 +102,11 @@ export const runnerEvents = pgTable(
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("runner_events_runner_seq").on(t.runnerId, t.seq)],
+  (t) => [
+    uniqueIndex("runner_events_runner_seq").on(t.runnerId, t.seq),
+    // A run's transcript is read by the run id inside the event (R43).
+    index("runner_events_run").on(sql`(${t.payload}->>'runId')`, t.seq),
+  ],
 );
 
 // ---------- Work structure ----------

@@ -716,6 +716,15 @@ export async function buildApp(opts: AppOptions) {
       const b = z.object({ text: z.string().trim().min(1).max(20_000), interrupt: z.boolean().optional() }).parse(req.body);
       return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
     });
+    owner.get("/api/runs/recent", async (req) => {
+      const q = z.object({ companyId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
+      return runsSvc.recent(q.limit, q.companyId);
+    });
+    owner.get("/api/runs/:id/transcript", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const q = z.object({ after: z.coerce.number().int().min(0).optional(), limit: z.coerce.number().int().min(1).max(1000).optional() }).parse(req.query);
+      return runsSvc.transcript(id, q).catch(runErrors(reply));
+    });
     owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));
 
     // Stale-blocker and stalled-run sweeps (R21, R32); also run on a timer.

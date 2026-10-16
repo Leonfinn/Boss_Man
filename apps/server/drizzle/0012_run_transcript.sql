@@ -1,0 +1,1 @@
+CREATE INDEX "runner_events_run" ON "runner_events" USING btree (("payload"->>'runId'),"seq");
