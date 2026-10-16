@@ -3,7 +3,7 @@
 // requires it → work on the provider's own tickets → deliver → sign-off or revision.
 // The requester sees the status and the thread, never the provider's tickets.
 import { and, asc, eq, inArray, or } from "drizzle-orm";
-import { findCredential, usdToMicros } from "@boss-man/shared";
+import { findCredential, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, projects, ticketDependencies } from "../db/schema.js";
 
@@ -78,8 +78,13 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
 
   async function wakeCeo(companyId: string, e: Engagement, note: string, causedByRunId?: string | null) {
     const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
-    if (ceo && wake) await wake({ agentId: ceo.id, reason: "engagement", note: `Engagement ${e.id} "${e.title}": ${note}`, causedByRunId });
+    // The provider didn't write the title; it's the requester's text (R51).
+    const title = companyId === e.providerCompanyId ? `\n${untrusted(await companyName(e.requesterCompanyId), `Title: ${e.title}`)}\n` : ` "${e.title}": `;
+    if (ceo && wake) await wake({ agentId: ceo.id, reason: "engagement", note: `Engagement ${e.id}${title}${note}`, causedByRunId });
   }
+
+  /** Another company's words, marked as untrusted for the agent reading them (R51). */
+  const from = async (companyId: string, text: string) => untrusted(await companyName(companyId), text);
 
   async function setStatus(e: Engagement, status: Engagement["status"], extra: Partial<Engagement> = {}) {
     const [row] = await db.update(engagements).set({ status, ...extra }).where(eq(engagements.id, e.id)).returning();
@@ -151,11 +156,11 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
         })
         .returning();
       await post(e!, actor.companyId, "requested", input.scope);
-      const from = await companyName(actor.companyId);
+      const fromName = await companyName(actor.companyId);
       await wakeCeo(
         input.providerCompanyId,
         e!,
-        `${from} asks for this work. Scope: ${input.scope}\nAcceptance criteria: ${input.acceptanceCriteria.join("; ")}${input.budgetCapUsd != null ? `\nCost cap: $${input.budgetCapUsd}` : ""}\nUse the engagement tool to accept, reject, or counter with changed terms.`,
+        `${fromName} asks for this work.\n${untrusted(fromName, `Scope: ${input.scope}\nAcceptance criteria: ${input.acceptanceCriteria.join("; ")}`)}${input.budgetCapUsd != null ? `\nCost cap: $${input.budgetCapUsd}` : ""}\nUse the engagement tool to accept, reject, or counter with changed terms.`,
         actor.runId,
       );
       return e!;
@@ -179,14 +184,14 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
           guard(a.message);
           e = await setStatus(e, "rejected");
           await post(e, actor.companyId, "rejected", a.message ?? "Declined.");
-          await wakeCeo(other, e, `${await companyName(actor.companyId)} declined: ${a.message ?? "no reason given"}. Find another way, or drop the dependency on it.`, actor.runId);
+          await wakeCeo(other, e, `${await companyName(actor.companyId)} declined.\n${await from(actor.companyId, a.message ?? "No reason given.")}\nFind another way, or drop the dependency on it.`, actor.runId);
           return { engagement: e, note: "Declined." };
         case "counter": {
           guard(a.message, a.scope, a.deliverables, ...(a.acceptanceCriteria ?? []));
           const terms: Terms = { scope: a.scope, deliverables: a.deliverables, acceptanceCriteria: a.acceptanceCriteria, budgetCapUsd: a.budgetCapUsd };
           e = await setStatus(e, "countered", { counterTerms: terms });
           await post(e, actor.companyId, "countered", a.message);
-          await wakeCeo(other, e, `${await companyName(actor.companyId)} proposes changes: ${a.message}\nProposed terms: ${JSON.stringify(terms)}\nUse the engagement tool to accept_counter, or withdraw.`, actor.runId);
+          await wakeCeo(other, e, `${await companyName(actor.companyId)} proposes changes.\n${await from(actor.companyId, `${a.message}\nProposed terms: ${JSON.stringify(terms)}`)}\nUse the engagement tool to accept_counter, or withdraw.`, actor.runId);
           return { engagement: e, note: "Counter-proposal sent." };
         }
         case "accept_counter": {
@@ -210,7 +215,7 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
         case "message":
           guard(a.message);
           await post(e, actor.companyId, "message", a.message);
-          await wakeCeo(other, e, `new message from ${await companyName(actor.companyId)}: ${a.message}`, actor.runId);
+          await wakeCeo(other, e, `new message from ${await companyName(actor.companyId)}:\n${await from(actor.companyId, a.message)}`, actor.runId);
           return { engagement: e, note: "Sent." };
         case "deliver": {
           guard(a.summary, ...(a.refs ?? []));
@@ -219,7 +224,7 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
           await wakeCeo(
             other,
             e,
-            `${await companyName(actor.companyId)} has delivered: ${a.summary}\nCheck it against the acceptance criteria (${(e.acceptanceCriteria as string[]).join("; ")}), then sign_off or request_revision.`,
+            `${await companyName(actor.companyId)} has delivered:\n${await from(actor.companyId, [a.summary, ...(a.refs ?? []).map((r) => `- ${r}`)].join("\n"))}\nCheck it against your acceptance criteria (${(e.acceptanceCriteria as string[]).join("; ")}), then sign_off or request_revision.`,
             actor.runId,
           );
           return { engagement: e, note: "Delivered. The requester signs off or asks for a revision." };
@@ -237,7 +242,7 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
           guard(a.message);
           e = await setStatus(e, "in_progress");
           await post(e, actor.companyId, "revision_requested", a.message);
-          await wakeCeo(other, e, `${await companyName(actor.companyId)} asks for a revision: ${a.message}`, actor.runId);
+          await wakeCeo(other, e, `${await companyName(actor.companyId)} asks for a revision:\n${await from(actor.companyId, a.message)}`, actor.runId);
           return { engagement: e, note: "Revision requested." };
       }
     },
@@ -270,24 +275,29 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
       const e = await load(id);
       if (companyId && companyId !== e.requesterCompanyId && companyId !== e.providerCompanyId) throw new EngagementError(404, "No such engagement.");
       const thread = await db
-        .select({ from: companies.name, kind: engagementMessages.kind, body: engagementMessages.body, at: engagementMessages.createdAt })
+        .select({ from: companies.name, fromCompanyId: engagementMessages.fromCompanyId, kind: engagementMessages.kind, body: engagementMessages.body, at: engagementMessages.createdAt })
         .from(engagementMessages)
         .innerJoin(companies, eq(companies.id, engagementMessages.fromCompanyId))
         .where(eq(engagementMessages.engagementId, id))
         .orderBy(asc(engagementMessages.createdAt));
+      // For an agent of one side, everything the other side wrote is untrusted (R51).
+      const theirs = companyId ? (companyId === e.requesterCompanyId ? e.providerCompanyId : e.requesterCompanyId) : null;
+      const theirName = theirs ? await companyName(theirs) : null;
+      const mark = (text: string, authorCompanyId: string) => (theirs && authorCompanyId === theirs ? untrusted(theirName!, text) : text);
       return {
+        ...(theirs ? { notice: UNTRUSTED_NOTE } : {}),
         id: e.id,
-        title: e.title,
+        title: mark(e.title, e.requesterCompanyId),
         status: e.status,
         requester: await companyName(e.requesterCompanyId),
         provider: await companyName(e.providerCompanyId),
-        scope: e.scope,
-        deliverables: e.deliverables,
+        scope: mark(e.scope, e.requesterCompanyId),
+        deliverables: e.deliverables ? mark(e.deliverables, e.requesterCompanyId) : null,
         acceptanceCriteria: e.acceptanceCriteria,
         budgetCapUsd: e.budgetCapMicros != null ? e.budgetCapMicros / 1e6 : null,
-        counterTerms: e.counterTerms,
-        delivery: e.delivery,
-        thread,
+        counterTerms: e.counterTerms && theirs === e.providerCompanyId ? untrusted(theirName!, JSON.stringify(e.counterTerms)) : e.counterTerms,
+        delivery: e.delivery && theirs === e.providerCompanyId ? untrusted(theirName!, JSON.stringify(e.delivery)) : e.delivery,
+        thread: thread.map((m) => ({ ...m, body: mark(m.body, m.fromCompanyId) })),
       };
     },
 

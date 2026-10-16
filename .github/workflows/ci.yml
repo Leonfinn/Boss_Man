@@ -39,6 +39,8 @@ jobs:
           docker run --rm --entrypoint claude boss-man-runner:ci --version
           docker run --rm --entrypoint git boss-man-runner:ci --version
           docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000 && test -n "$CLAUDE_CODE_EXECUTABLE"'
+      - name: Canary - a Claude session works inside the image, with no network (R52)
+        run: docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true boss-man-runner:ci node_modules/.bin/tsx src/canary-main.ts
       - name: Runner refuses to start without a token
         run: |
           if docker run --rm boss-man-runner:ci 2> err.txt; then echo "expected failure"; exit 1; fi

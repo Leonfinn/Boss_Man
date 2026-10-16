@@ -19,6 +19,7 @@ mkdirSync(dataDir, { recursive: true });
 const journal = new Journal(path.join(dataDir, "journal.jsonl"));
 const log = (m: string) => console.log(`[runner] ${m}`);
 
+const workspaces = new Workspaces(env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces");
 let connection: RunnerConnection;
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
@@ -29,7 +30,7 @@ const sessions = new SessionManager({
     return ((await res.json()) as { env: Record<string, string> }).env;
   },
   stateFile: path.join(dataDir, "active-runs.json"),
-  workspaces: new Workspaces(env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces"),
+  workspaces,
   reply: (requestId, result) => connection.reply(requestId, result),
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
@@ -54,6 +55,20 @@ const interrupted = sessions.recoverInterrupted();
 if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) for recovery`);
 connection.start();
 
+// Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled
+// like any event, so it reaches the server once the connection is up.
+const housekeeping = async () => {
+  try {
+    const report = await workspaces.housekeeping();
+    if (report.removed.length) log(`removed ${report.removed.length} orphaned workspace folder(s)`);
+    connection.emit({ type: "runner.disk", ...report });
+  } catch (err) {
+    log(`workspace clean-up failed: ${(err as Error).message}`);
+  }
+};
+void housekeeping();
+const sweep = setInterval(() => void housekeeping(), 3_600_000);
+
 // The container healthcheck reads this file: it's touched while the server connection is live.
 const marker = path.join(dataDir, "connected");
 const beat = setInterval(() => {
@@ -67,6 +82,7 @@ const beat = setInterval(() => {
 
 const stop = () => {
   clearInterval(beat);
+  clearInterval(sweep);
   rmSync(marker, { force: true });
   sessions.shutdown();
   connection.stop();

@@ -19,6 +19,9 @@
 # server (wss:// behind HTTPS). Runners only dial out, so they need no published ports.
 
 x-runner: &runner
+  # scripts/update-runner.sh builds this tag and only promotes a build that passes the
+  # canary (R52); `docker compose build` also works but skips that check.
+  image: boss-man-runner:current
   build:
     context: .
     dockerfile: apps/runner/Dockerfile

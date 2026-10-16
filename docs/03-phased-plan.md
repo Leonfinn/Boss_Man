@@ -11,10 +11,13 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 | 2 Agent execution | Merged (#3). |
 | 3 Work management and scheduler | Merged (#4). |
 | 4 Decision queue | Merged (#5): ranked queue, stale-blocker sweep and stalled-run rows. The queue UI isn't built. |
-| 5 Engagements and deploy targets | Engagement lifecycle merged (#6): counter, owner approval, deliver, sign-off, credential guard, charge-back cap. Deploy targets in review: production deploys go to the owner, and target secrets reach only the approved deploy run. |
-| 6 Budgets | Mostly built early with credit tracking: funding sources, billing cycles, quota samples, budgets that pause, fail-closed admission. Still to do: alert-once hygiene (R34). |
-| Web UI | Not started. The screens are designed on the canvas. |
-| Production runner image | Not started. The spike image proves the approach. |
+| 5 Engagements and deploy targets | Merged (#6, #8): counter, owner approval, deliver, sign-off, credential guard, charge-back cap. Production deploys go to the owner, and target secrets reach only the approved deploy run. |
+| 6 Budgets | Mostly built early with credit tracking: funding sources, billing cycles, quota samples, budgets that pause, fail-closed admission. Instance-wide, project and per-ticket caps are in review (#19). Still to do: alert-once hygiene (R34). |
+| Runs: steering, recovery, workspaces | Merged: steering messages (#11), resume after a crash (#12, #13), one scheduler pass at a time (#14), a git worktree per ticket (#15). |
+| Review, merge, loop guards | In review: diffs and line comments (#17), verify then merge (#18), review-loop, circular-failure and spend caps (#19). |
+| Safety | In review: untrusted-content labels (R51), the image canary with promote and rollback (R52), workspace clean-up and disk caps (R54). |
+| Web UI | Not started. The screens are designed on the canvas and the artwork is in `assets/brand/` (#7). |
+| Production runner image | Merged (#9): Claude Code from npm, a non-root user, volumes for workspaces, the journal and Claude's transcripts, and a healthcheck. CI builds it and runs the canary in it with networking off. |
 
 ## Phase 0: spikes (settle the unknowns before building on them)
 

@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { UNTRUSTED_NOTE } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
@@ -80,6 +81,7 @@ export function schedulerService(
       "",
       "Use the bossman tools to report back: set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished; raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
       "Ending your turn does not move the ticket.",
+      UNTRUSTED_NOTE,
     );
     return lines.join("\n");
   }

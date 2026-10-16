@@ -1,7 +1,7 @@
 // R38 against a real local "remote" repo: worktree per ticket, pinned base, patch save and
 // restore, serialised creation, and credentials that never touch disk.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -118,3 +118,36 @@ describe("git workspaces (R38)", () => {
   });
 });
 
+describe("workspace clean-up (R54)", () => {
+  it("prunes worktrees whose folder went, removes folders git doesn't know, and reports disk use", async () => {
+    const r = remote();
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root);
+    const a = await ws.ensure({ projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" });
+    const b = await ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" });
+    writeFileSync(path.join(a.path, "big.bin"), Buffer.alloc(256 * 1024, 1));
+    // b's folder vanishes behind git's back, then something unrelated appears in tickets/.
+    rmSync(b.path, { recursive: true, force: true });
+    const stray = path.join(root, "tickets", "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+    mkdirSync(stray, { recursive: true });
+    writeFileSync(path.join(stray, "leftover.txt"), "x");
+    mkdirSync(path.join(root, "tmp"), { recursive: true });
+    writeFileSync(path.join(root, "tmp", "old.index"), "x");
+
+    // Fresh folders are left alone in case a worktree is being made right now.
+    expect((await ws.housekeeping()).removed).toEqual([]);
+    expect(existsSync(stray)).toBe(true);
+
+    const later = await ws.housekeeping(Date.now() + 2 * 3_600_000);
+    expect(later.removed).toEqual(["cccccccc-cccc-4ccc-8ccc-cccccccccccc"]);
+    expect(existsSync(stray)).toBe(false);
+    expect(existsSync(path.join(root, "tmp", "old.index"))).toBe(false);
+    expect(git(ws.repoDir(ids.project), "worktree", "list")).not.toContain(ids.b);
+    expect(later.tickets).toEqual([{ ticketId: ids.a, projectId: ids.project, bytes: expect.any(Number) }]);
+    expect(later.tickets[0]!.bytes).toBeGreaterThan(256 * 1024);
+    expect(later.repos).toEqual([{ projectId: ids.project, bytes: expect.any(Number) }]);
+    expect(later.usedBytes).toBe(later.tickets[0]!.bytes + later.repos[0]!.bytes);
+    // The ticket's branch survives its worktree.
+    expect(git(ws.repoDir(ids.project), "branch", "--list", branchFor(ids.b))).toContain(ids.b);
+  });
+});
