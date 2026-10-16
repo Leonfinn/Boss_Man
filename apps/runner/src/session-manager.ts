@@ -31,6 +31,8 @@ export type SessionManagerOptions = {
   stateFile?: string;
   /** Git worktrees per ticket (R38). Without it, runs use the cwd they're given. */
   workspaces?: Workspaces;
+  /** Answers request commands such as workspace.diff. */
+  reply?: (requestId: string, result: { ok: true; data: unknown } | { ok: false; error: string }) => void;
   log?: (msg: string) => void;
 };
 
@@ -138,6 +140,18 @@ export class SessionManager {
           ?.release({ projectId: command.projectId, ticketId: command.ticketId })
           .catch((err) => this.opts.emit({ type: "runner.log", level: "warn", message: `Couldn't release the workspace for ticket ${command.ticketId}: ${String((err as Error)?.message ?? err)}` }));
         return;
+      case "workspace.diff": {
+        const reply = this.opts.reply ?? (() => {});
+        if (!this.opts.workspaces) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        this.opts.workspaces.diff({ projectId: command.projectId, ticketId: command.ticketId }).then(
+          (data) => reply(command.requestId, { ok: true, data }),
+          (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) }),
+        );
+        return;
+      }
       case "run.message": {
         const run = this.runs.get(command.runId);
         if (!run) {

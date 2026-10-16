@@ -30,6 +30,7 @@ const sessions = new SessionManager({
   },
   stateFile: path.join(dataDir, "active-runs.json"),
   workspaces: new Workspaces(env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces"),
+  reply: (requestId, result) => connection.reply(requestId, result),
   log,
 });
 

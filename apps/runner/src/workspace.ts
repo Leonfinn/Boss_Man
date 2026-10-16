@@ -12,6 +12,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { WorkspaceDiff } from "@boss-man/shared";
 
 const run = promisify(execFile);
 
@@ -153,6 +154,39 @@ export class Workspaces {
       await this.git(["worktree", "prune"], { cwd: repo });
       return { savedPatch };
     });
+  }
+
+  /**
+   * The ticket's changes against its base: committed, uncommitted and untracked, honouring
+   * .gitignore. A throwaway index is used, so the agent's own index is untouched.
+   */
+  async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
+    const repo = this.repoDir(spec.projectId);
+    const dir = this.ticketDir(spec.ticketId);
+    if (!existsSync(path.join(dir, ".git"))) throw new Error("That ticket has no workspace on this runner.");
+    const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
+    const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..HEAD`], { cwd: dir });
+    const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
+    const index = path.join(this.root, "tmp", `${spec.ticketId}.index`);
+    mkdirSync(path.dirname(index), { recursive: true });
+    const env = { GIT_INDEX_FILE: index };
+    try {
+      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
+      await this.git(["add", "-A"], { cwd: dir, env });
+      const numstat = await this.git(["diff", "--cached", "--numstat", baseCommit], { cwd: dir, env });
+      const files = numstat
+        ? numstat.split("\n").map((l) => {
+            const [a, r, ...p] = l.split("\t");
+            return { path: p.join("\t"), added: a === "-" ? 0 : Number(a), removed: r === "-" ? 0 : Number(r) };
+          })
+        : [];
+      const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env });
+      const truncated = Buffer.byteLength(full) > maxBytes;
+      return { baseCommit, head, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
+    } finally {
+      rmSync(index, { force: true });
+    }
   }
 
   /** For tests and the run view: the saved patch, if any. */

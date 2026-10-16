@@ -94,6 +94,9 @@ export async function runnerSocketRoutes(
                 socket.close(1011, "ingest failed");
               });
             return;
+          case "reply":
+            runners.resolveReply(msg);
+            return;
           case "ping":
             send({ type: "pong" });
             return;

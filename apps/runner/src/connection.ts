@@ -52,6 +52,11 @@ export class RunnerConnection {
     return entry;
   }
 
+  /** Answers a request command directly. Replies aren't journalled; the server asks again if one is lost. */
+  reply(requestId: string, result: { ok: true; data: unknown } | { ok: false; error: string }) {
+    this.send({ type: "reply", requestId, ...result });
+  }
+
   /** Test hook: drop the socket without the usual close handshake, as a network fault would. */
   breakConnection() {
     this.ws?.terminate();

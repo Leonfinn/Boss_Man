@@ -16,6 +16,7 @@ import { EngagementError, engagementsService } from "./services/engagements.js";
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
+import { ReviewError, reviewService } from "./services/review.js";
 import { workService, WorkError } from "./services/work.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -103,11 +104,13 @@ export async function buildApp(opts: AppOptions) {
     }
   });
   const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   const work = workService(db, {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
   });
+  const review = reviewService(db, { runners, runs: runsSvc, work });
+  review.setWakeHook((w) => scheduler.wake(w));
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -579,6 +582,31 @@ export async function buildApp(opts: AppOptions) {
     owner.delete("/api/deploy-targets/:id", async (req, reply) => ((await deploysSvc.deleteTarget(IdParam.parse(req.params).id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" })));
     owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
 
+    // Review (R39): diffs, line comments back to the agent, and commit / PR prompts.
+    const reviewErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof ReviewError) return reply.code(err.status).send({ error: "review", message: err.message });
+      throw err;
+    };
+    const ReviewComment = z.object({ path: z.string().min(1).max(500), line: z.number().int().positive(), body: z.string().trim().min(1).max(5000), code: z.string().max(2000).optional() });
+    owner.get("/api/tickets/:id/diff", async (req, reply) => review.diff(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
+    owner.post("/api/tickets/:id/review", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z
+        .object({ verdict: z.enum(["approved", "changes_requested"]), comments: z.array(ReviewComment).max(100).optional(), summary: z.string().max(5000).optional() })
+        .parse(req.body);
+      return review.submit(id, { ...b, reviewer: "the owner" }).catch(reviewErrors(reply));
+    });
+    owner.post("/api/tickets/:id/git-action", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { action } = z.object({ action: z.enum(["commit", "pr"]) }).parse(req.body);
+      return review.gitAction(id, action).catch(reviewErrors(reply));
+    });
+    owner.get("/api/companies/:id/git-templates", async (req) => review.templates(IdParam.parse(req.params).id));
+    owner.put("/api/companies/:id/git-templates", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return review.setTemplates(id, z.object({ commit: z.string().min(1).max(5000), pr: z.string().min(1).max(5000) }).partial().parse(req.body));
+    });
+
     // Steering and stopping running agents (R37).
     const runErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof RunError) return reply.code(err.status).send({ error: "run", message: err.message });
@@ -596,5 +624,5 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review };
 }

@@ -15,6 +15,7 @@ import type { decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
+import { ReviewError, type reviewService } from "./services/review.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -30,9 +31,9 @@ const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], is
 
 export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
 
-type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService>; runs: ReturnType<typeof runsService> };
+type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService>; runs: ReturnType<typeof runsService>; review: ReturnType<typeof reviewService> };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -289,6 +290,48 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs }: Services
         return text(r.delivered === "woken" ? "That run had ended; the agent is woken again with your message." : `Message ${r.delivered}.`);
       } catch (err) {
         if (err instanceof RunError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "review",
+    {
+      description:
+        "For CEOs: review a ticket in your company that's ready for review. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary). You can't review a ticket assigned to you.",
+      inputSchema: {
+        action: z.enum(["diff", "submit"]),
+        ticketId: z.string().uuid(),
+        verdict: z.enum(["approved", "changes_requested"]).optional(),
+        comments: z.array(z.object({ path: z.string(), line: z.number().int().positive(), body: z.string().min(1) })).max(50).optional(),
+        summary: z.string().max(5000).optional(),
+      },
+    },
+    async (input) => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO reviews tickets.");
+      try {
+        if (input.action === "diff") {
+          const d = await review.diff(input.ticketId, scope.companyId);
+          // Keep the agent's context in check: the file list always, the patch up to 60 KB.
+          const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
+          const patch = d.diff.length > 60_000 ? `${d.diff.slice(0, 60_000)}\n[diff truncated]` : d.diff;
+          return text(`Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+        }
+        if (!input.verdict) return fail("Give the verdict.");
+        const r = await review.submit(input.ticketId, {
+          verdict: input.verdict,
+          comments: input.comments,
+          summary: input.summary,
+          reviewer: `${me.name} (CEO)`,
+          reviewerAgentId: scope.agentId,
+          companyId: scope.companyId,
+          causedByRunId: scope.runId,
+        });
+        return text(r.verdict === "approved" ? "Approved; the ticket is done." : `Changes requested; ${r.delivered}.`);
+      } catch (err) {
+        if (err instanceof ReviewError) return fail(err.message);
         throw err;
       }
     },

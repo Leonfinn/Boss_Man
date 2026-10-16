@@ -16,6 +16,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   let onPermission: PermissionHook | null = null;
   const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
   const connectListeners: Array<(runnerId: string) => unknown> = [];
+  /** Requests waiting for a runner's reply, by request id. */
+  const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
 
@@ -158,6 +160,33 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     },
 
     isConnected: (runnerId: string) => connected.has(runnerId),
+
+    /** Sends a request command and waits for the runner's reply. */
+    request<T>(runnerId: string, build: (requestId: string) => RunnerCommand, timeoutMs = 15_000): Promise<T> {
+      const requestId = randomBytes(12).toString("base64url");
+      return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(requestId);
+          reject(new Error("The runner didn't answer in time."));
+        }, timeoutMs);
+        pending.set(requestId, { resolve: resolve as (d: unknown) => void, reject, timer });
+        if (!connected.get(runnerId)?.(build(requestId))) {
+          clearTimeout(timer);
+          pending.delete(requestId);
+          reject(new Error("The company's runner is offline."));
+        }
+      });
+    },
+
+    /** Delivers a runner's reply to whoever asked. */
+    resolveReply(reply: { requestId: string; ok: boolean; data?: unknown; error?: string }) {
+      const p = pending.get(reply.requestId);
+      if (!p) return;
+      pending.delete(reply.requestId);
+      clearTimeout(p.timer);
+      if (reply.ok) p.resolve(reply.data);
+      else p.reject(new Error(reply.error ?? "The runner couldn't do that."));
+    },
 
     setPermissionHook(hook: PermissionHook) {
       onPermission = hook;
