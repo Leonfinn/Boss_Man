@@ -48,6 +48,7 @@ connection = new RunnerConnection({
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
   log,
   onCommand: (command) => sessions.handle(command),
+  pendingPermissions: () => sessions.pendingPermissions(),
 });
 
 // Runs the previous process didn't finish go into the journal as interrupted before we connect (R42).

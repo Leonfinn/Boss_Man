@@ -82,6 +82,8 @@ export async function runnerSocketRoutes(
                 return true;
               });
               send({ type: "welcome", lastSeq: await runners.lastSeq(runner.id) });
+              // Verdicts that may have been lost in a dropped connection are sent again.
+              if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id }, "re-sending verdicts failed"));
             });
             return;
           case "event":

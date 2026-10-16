@@ -16,6 +16,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   let onPermission: PermissionHook | null = null;
   const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
   const connectListeners: Array<(runnerId: string) => unknown> = [];
+  const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
   /** Requests waiting for a runner's reply, by request id. */
   const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
   /** Live connections, so commands can reach a runner. */
@@ -195,6 +196,14 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     /** Called whenever a runner (re)connects, e.g. to re-send verdicts it missed. */
     onConnect(listener: (runnerId: string) => unknown) {
       connectListeners.push(listener);
+    },
+
+    /** Called when a reconnecting runner lists the permission requests it's still waiting on. */
+    onResume(listener: (runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown) {
+      resumeListeners.push(listener);
+    },
+    async resumed(runner: Runner, pending: Array<{ runId: string; requestId: string }>) {
+      for (const l of resumeListeners) await l(runner, pending);
     },
 
     /** Called after each newly stored event's effects are applied. */
