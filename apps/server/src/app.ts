@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { HORIZONS, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, usdToMicros } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -23,6 +23,7 @@ import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
+import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -122,6 +123,7 @@ export async function buildApp(opts: AppOptions) {
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const deploysSvc = deploysService(db, { now: opts.now });
   const chapters = chaptersService(db, { now: opts.now });
+  const feedback = feedbackService(db, { now: opts.now });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const chat = chatService(db, { wake: (input) => scheduler.wake(input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
   const scheduler = schedulerService(db, {
@@ -213,7 +215,7 @@ export async function buildApp(opts: AppOptions) {
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof SecretRejected) return reply.code(422).send({ error: "secret_rejected", problems: err.problems });
-    if (err instanceof WorkError) return reply.code(err.status).send({ error: "rejected", message: err.message });
+    if (err instanceof WorkError || err instanceof FeedbackError) return reply.code(err.status).send({ error: "rejected", message: err.message });
     const code = pgCode(err);
     if (code === "23505") return reply.code(409).send({ error: "already_exists" });
     if (code === "23503") return reply.code(422).send({ error: "unknown_reference" });
@@ -690,6 +692,73 @@ export async function buildApp(opts: AppOptions) {
 
     owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
 
+    // Feature requests: feedback notes, features and prioritisation.
+    const Text = (max: number) => z.string().trim().min(1).max(max);
+    const CustomerIn = z.object({ name: Text(200), email: z.string().trim().email().max(320).nullable().optional(), segment: z.string().trim().max(100).nullable().optional() });
+    const FeatureFields = z.object({
+      title: Text(200),
+      description: z.string().max(20_000).nullable(),
+      status: z.enum(FEATURE_STATUSES),
+      areaId: Uuid.nullable(),
+      parentId: Uuid.nullable(),
+      effort: z.number().int().min(1).max(5).nullable(),
+      driverScores: z.record(Uuid, z.number().int().min(0).max(5).nullable()),
+      milestoneId: Uuid.nullable(),
+      portalVisible: z.boolean(),
+    });
+    owner.get("/api/companies/:id/feedback-settings", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const s = await feedback.settings(id);
+      return { ...s, drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
+    });
+    owner.patch("/api/companies/:id/feedback-settings", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ demandWeight: z.number().int().min(0).max(10), ceoTriage: z.boolean() }).partial().parse(req.body);
+      return feedback.setSettings(id, b);
+    });
+    owner.post("/api/companies/:id/feature-drivers", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return reply.code(201).send(await feedback.addDriver(id, z.object({ name: Text(80), weight: z.number().int().min(0).max(10).default(1) }).parse(req.body)));
+    });
+    owner.patch("/api/feature-drivers/:id", async (req) => feedback.updateDriver(IdParam.parse(req.params).id, z.object({ name: Text(80), weight: z.number().int().min(0).max(10), position: z.number().int().min(0) }).partial().parse(req.body)));
+    owner.delete("/api/feature-drivers/:id", async (req, reply) => (await feedback.removeDriver(IdParam.parse(req.params).id), reply.code(204).send()));
+    owner.post("/api/companies/:id/feature-areas", async (req, reply) => reply.code(201).send(await feedback.addArea(IdParam.parse(req.params).id, z.object({ name: Text(80) }).parse(req.body).name)));
+    owner.patch("/api/feature-areas/:id", async (req) => feedback.updateArea(IdParam.parse(req.params).id, z.object({ name: Text(80), position: z.number().int().min(0) }).partial().parse(req.body)));
+    owner.delete("/api/feature-areas/:id", async (req, reply) => (await feedback.removeArea(IdParam.parse(req.params).id), reply.code(204).send()));
+
+    owner.get("/api/companies/:id/features", async (req) => feedback.scored(IdParam.parse(req.params).id));
+    owner.post("/api/companies/:id/features", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return reply.code(201).send(await feedback.createFeature(id, FeatureFields.partial().required({ title: true }).parse(req.body)));
+    });
+    owner.get("/api/features/:id", async (req) => feedback.featureDetail(IdParam.parse(req.params).id));
+    owner.patch("/api/features/:id", async (req) => feedback.updateFeature(IdParam.parse(req.params).id, FeatureFields.partial().parse(req.body)));
+    owner.delete("/api/features/:id", async (req, reply) => (await feedback.removeFeature(IdParam.parse(req.params).id), reply.code(204).send()));
+
+    owner.get("/api/companies/:id/feedback-customers", async (req) => feedback.customers(IdParam.parse(req.params).id, z.object({ q: z.string().max(100).optional() }).parse(req.query).q));
+    owner.get("/api/feedback/unprocessed", async () => feedback.unprocessedCount());
+    owner.get("/api/companies/:id/feedback", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const q = z.object({ state: z.enum(["unprocessed", "processed", "archived"]).optional(), q: z.string().max(200).optional(), before: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
+      return feedback.notes(id, q);
+    });
+    owner.post("/api/companies/:id/feedback", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ title: z.string().trim().max(200).nullable().optional(), text: Text(20_000), source: z.enum(NOTE_SOURCES).exclude(["portal", "agent", "chat"]).optional(), customerId: Uuid.nullable().optional(), customer: CustomerIn.nullable().optional() }).parse(req.body);
+      return reply.code(201).send(await feedback.createNote(id, b));
+    });
+    owner.get("/api/feedback/:id", async (req) => feedback.noteDetail(IdParam.parse(req.params).id));
+    owner.patch("/api/feedback/:id", async (req) => {
+      const b = z.object({ title: z.string().trim().max(200).nullable(), state: z.enum(["unprocessed", "processed", "archived"]), customerId: Uuid.nullable(), customer: CustomerIn.nullable() }).partial().parse(req.body);
+      return feedback.updateNote(IdParam.parse(req.params).id, b);
+    });
+    owner.delete("/api/feedback/:id", async (req, reply) => (await feedback.removeNote(IdParam.parse(req.params).id), reply.code(204).send()));
+    owner.post("/api/feedback/:id/insights", async (req, reply) => {
+      const b = z.object({ featureId: Uuid, importance: z.enum(IMPORTANCE).default("important"), highlight: z.string().max(2000).nullable().optional() }).parse(req.body);
+      return reply.code(201).send(await feedback.link(IdParam.parse(req.params).id, { ...b, createdBy: "the owner" }));
+    });
+    owner.delete("/api/insights/:id", async (req, reply) => (await feedback.unlink(IdParam.parse(req.params).id), reply.code(204).send()));
+
     // The owner chat (v1.1): plain language in, tickets and links out.
     owner.get("/api/companies/:id/chat", async (req) => chat.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/chat", async (req, reply) => {
@@ -919,5 +988,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback };
 }
