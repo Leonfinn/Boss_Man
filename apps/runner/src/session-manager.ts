@@ -4,6 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -102,7 +103,14 @@ export class SessionManager {
       return;
     }
 
-    const bin = this.opts.adapterBins?.[cmd.agentKind] ?? defaultBin(cmd.agentKind);
+    let bin: string;
+    try {
+      mkdirSync(cmd.cwd, { recursive: true });
+      bin = this.opts.adapterBins?.[cmd.agentKind] ?? defaultBin(cmd.agentKind);
+    } catch (err) {
+      emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: String((err as Error)?.message ?? err) });
+      return;
+    }
     const child = spawn(bin, [], { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stderr = "";
     child.stderr?.on("data", (d) => {

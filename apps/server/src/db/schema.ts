@@ -45,6 +45,8 @@ export const companies = pgTable("companies", {
   id: id(),
   name: text("name").notNull().unique(),
   mission: text("mission"),
+  /** Company kill switch (R30): no new runs start while set. */
+  paused: boolean("paused").notNull().default(false),
   createdAt: createdAt(),
 });
 
@@ -246,6 +248,44 @@ export const ticketDependencies = pgTable(
       sql`num_nonnulls(${t.blockerTicketId}, ${t.blockerEngagementId}, ${t.blockerDecisionId}) = 1`,
     ),
   ],
+);
+
+// ---------- Scheduling (R30) ----------
+
+/** Instance-wide settings, e.g. the global kill switch and launch limits. */
+export const settings = pgTable("settings", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").notNull(),
+});
+
+export const wakeStatus = pgEnum("wake_status", ["queued", "deferred", "launched", "dropped"]);
+
+/** Requests to start an agent. Durable, so a restart doesn't lose queued work. */
+export const wakes = pgTable(
+  "wakes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    reason: text("reason").notNull(),
+    /** Extra context for the prompt, e.g. a decision's answer. */
+    note: text("note"),
+    /** Higher launches first. */
+    priority: integer("priority").notNull().default(2),
+    /** How many wake-ups led to this one; capped to stop loops. */
+    causationDepth: integer("causation_depth").notNull().default(0),
+    causedByRunId: uuid("caused_by_run_id"),
+    /** The agent whose run caused this wake, for the self-wake limit. */
+    causedByAgentId: uuid("caused_by_agent_id"),
+    status: wakeStatus("status").notNull().default("queued"),
+    statusReason: text("status_reason"),
+    notBefore: timestamp("not_before", { withTimezone: true }),
+    runId: uuid("run_id"),
+    createdAt: createdAt(),
+    launchedAt: timestamp("launched_at", { withTimezone: true }),
+  },
+  (t) => [index("wakes_status_priority").on(t.status, t.priority)],
 );
 
 // ---------- Runs, funding and cost ----------

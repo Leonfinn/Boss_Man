@@ -16,7 +16,10 @@ export type DecisionContext =
 const ALLOW = "Allow once";
 const DENY = "Deny";
 
+type WakeHook = (input: { agentId: string; reason: string; ticketId?: string | null; note?: string | null }) => Promise<unknown>;
+
 export function decisionsService(db: Db, send: Sender) {
+  let wake: WakeHook | null = null;
   async function rulesFor(companyId: string): Promise<PolicyRuleSpec[]> {
     const rows = await db
       .select()
@@ -100,6 +103,10 @@ export function decisionsService(db: Db, send: Sender) {
       return row!;
     },
 
+    setWakeHook(hook: WakeHook) {
+      wake = hook;
+    },
+
     async listOpen() {
       return db.select().from(decisions).where(eq(decisions.status, "open")).orderBy(asc(decisions.createdAt));
     },
@@ -121,12 +128,22 @@ export function decisionsService(db: Db, send: Sender) {
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+      let unblocked: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
-        await db
+        unblocked = await db
           .update(tickets)
           .set({ systemState: "ready", lastActivityAt: new Date() })
-          .where(and(inArray(tickets.id, freed.map((f) => f.ticketId)), eq(tickets.systemState, "blocked")));
+          .where(and(inArray(tickets.id, freed.map((f) => f.ticketId)), eq(tickets.systemState, "blocked")))
+          .returning();
+      }
+      // The agent that asked is woken with the answer (on the ticket it blocked, if any).
+      if (wake && d.kind === "question" && d.raisedByAgentId) {
+        const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `The owner answered your question "${d.question}": ${answer}` });
+      }
+      for (const t of unblocked) {
+        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id });
       }
       return { id, answer, delivered };
     },

@@ -14,6 +14,7 @@ export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type
 
 export function runnersService(db: Db, funding: ReturnType<typeof fundingService>) {
   let onPermission: PermissionHook | null = null;
+  const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
 
@@ -23,7 +24,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         await db
           .insert(runs)
           .values({ id: event.runId, companyId: runner.companyId, agentId: event.agentId, acpSessionId: event.acpSessionId, model: event.model, startedAt: at })
-          .onConflictDoNothing();
+          // The scheduler creates the run row at launch; the runner fills in the session.
+          .onConflictDoUpdate({ target: runs.id, set: { acpSessionId: event.acpSessionId, model: event.model } });
         return;
       case "run.ended":
         await db.update(runs).set({ endedAt: at, outcome: event.error ? `error: ${event.error}` : event.stopReason }).where(eq(runs.id, event.runId));
@@ -94,7 +96,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           .returning({ id: runnerEvents.id });
         return rows.length > 0;
       });
-      if (inserted) await apply(runner, entry.event, at);
+      if (inserted) {
+        await apply(runner, entry.event, at);
+        for (const l of listeners) l(runner, entry.event);
+      }
       return inserted;
     },
 
@@ -117,6 +122,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
     setPermissionHook(hook: PermissionHook) {
       onPermission = hook;
+    },
+
+    /** Called after each newly stored event's effects are applied. */
+    onEvent(listener: (runner: Runner, event: RunnerEvent) => void) {
+      listeners.push(listener);
     },
   };
 }

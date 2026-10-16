@@ -29,7 +29,12 @@ type TicketPatch = {
   overLimit?: boolean;
 };
 
-export function workService(db: Db) {
+export type WorkHooks = {
+  onAssigned?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
+  onDone?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
+};
+
+export function workService(db: Db, hooks: WorkHooks = {}) {
   async function project(id: string) {
     const [p] = await db.select().from(projects).where(eq(projects.id, id));
     if (!p) throw new WorkError(404, "No such project.");
@@ -153,6 +158,7 @@ export function workService(db: Db) {
           customFields: input.customFields ?? {},
         })
         .returning();
+      if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);
       return t!;
     },
 
@@ -174,6 +180,8 @@ export function workService(db: Db) {
         })
         .where(eq(tickets.id, ticketId))
         .returning();
+      if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
+      if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);
       return updated!;
     },
 
