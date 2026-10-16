@@ -1,5 +1,6 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
+import websocket from "@fastify/websocket";
 import { count, eq, gt, and } from "drizzle-orm";
 import { z, ZodError } from "zod";
 import { SECRET_KINDS, usdToMicros } from "@boss-man/shared";
@@ -8,7 +9,9 @@ import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, owners, sessions } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
+import { runnersService } from "./services/runners.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
+import { runnerSocketRoutes } from "./routes/runner-socket.js";
 
 export type AppOptions = {
   db: Db;
@@ -17,6 +20,8 @@ export type AppOptions = {
   /** Mark cookies Secure. Turn off only for plain-HTTP local development. */
   secureCookies?: boolean;
   logger?: boolean;
+  /** Runner heartbeat interval; tests shorten it. */
+  heartbeatMs?: number;
 };
 
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
@@ -38,9 +43,12 @@ export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
   const app = Fastify({ logger: opts.logger ?? false });
   await app.register(cookie);
+  await app.register(websocket);
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
+  const runners = runnersService(db, funding);
+  await runnerSocketRoutes(app, runners, { heartbeatMs: opts.heartbeatMs });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -192,6 +200,12 @@ export async function buildApp(opts: AppOptions) {
       return (await secretsSvc.revoke(id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
     });
 
+    /** Issues the company's runner token. It is shown once; issuing again replaces it. */
+    owner.post("/api/companies/:id/runner", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return reply.code(201).send(await runners.register(id));
+    });
+
     owner.get("/api/companies/:id/grants", async (req) => {
       const { id } = IdParam.parse(req.params);
       return secretsSvc.grantsForCompany(id);
@@ -277,5 +291,5 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/budgets", async () => funding.budgetStatuses());
   });
 
-  return { app, secrets: secretsSvc, funding };
+  return { app, secrets: secretsSvc, funding, runners };
 }

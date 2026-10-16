@@ -80,6 +80,21 @@ export const runners = pgTable("runners", {
   createdAt: createdAt(),
 });
 
+/** Every event a runner has delivered, stored once per (runner, seq) (R31). */
+export const runnerEvents = pgTable(
+  "runner_events",
+  {
+    id: id(),
+    runnerId: uuid("runner_id").notNull().references(() => runners.id, { onDelete: "cascade" }),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    type: text("type").notNull(),
+    payload: jsonb("payload").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("runner_events_runner_seq").on(t.runnerId, t.seq)],
+);
+
 // ---------- Work structure ----------
 
 export const systemState = pgEnum("system_state", ["backlog", "ready", "in_progress", "blocked", "review", "done"]);

@@ -1,0 +1,94 @@
+// The WebSocket a runner dials out to (R31). Auth: `Authorization: Bearer <runner token>`.
+import { randomUUID } from "node:crypto";
+import type { FastifyInstance } from "fastify";
+import { HEARTBEAT_MS, PROTOCOL_VERSION, RunnerMessage, type ServerMessage } from "@boss-man/shared";
+import type { runnersService } from "../services/runners.js";
+
+type Runners = ReturnType<typeof runnersService>;
+
+export async function runnerSocketRoutes(app: FastifyInstance, runners: Runners, opts: { heartbeatMs?: number } = {}) {
+  const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
+
+  app.get(
+    "/api/runner/connect",
+    {
+      websocket: true,
+      // Reject before the upgrade so an unauthenticated client never gets a socket.
+      preValidation: async (req, reply) => {
+        const header = req.headers.authorization;
+        const runner = await runners.authenticate(header?.startsWith("Bearer ") ? header.slice(7) : undefined);
+        if (!runner) return reply.code(401).send({ error: "unknown_runner" });
+        (req as unknown as { runner: typeof runner }).runner = runner;
+      },
+    },
+    (socket, req) => {
+      const runner = (req as unknown as { runner: NonNullable<Awaited<ReturnType<Runners["authenticate"]>>> }).runner;
+      const send = (m: ServerMessage) => {
+        if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(m));
+      };
+      let lastHeard = Date.now();
+      let release: (() => void) | null = null;
+      // Ingest strictly in arrival order so acks stay cumulative.
+      let queue = Promise.resolve();
+
+      const timer = setInterval(() => {
+        if (Date.now() - lastHeard > heartbeatMs * 3) {
+          socket.terminate();
+          return;
+        }
+        send({ type: "ping" });
+      }, heartbeatMs);
+
+      socket.on("message", (raw) => {
+        lastHeard = Date.now();
+        let msg: RunnerMessage;
+        try {
+          msg = RunnerMessage.parse(JSON.parse(String(raw)));
+        } catch {
+          send({ type: "error", message: "Malformed message" });
+          return;
+        }
+        switch (msg.type) {
+          case "hello":
+            if (msg.protocol !== PROTOCOL_VERSION) {
+              send({ type: "error", message: `Protocol ${msg.protocol} is not supported; expected ${PROTOCOL_VERSION}.` });
+              socket.close(4000, "protocol");
+              return;
+            }
+            queue = queue.then(async () => {
+              await runners.touch(runner, msg.imageVersion);
+              release = runners.connect(runner.id, (command) => {
+                if (socket.readyState !== socket.OPEN) return false;
+                send({ type: "command", id: randomUUID(), command });
+                return true;
+              });
+              send({ type: "welcome", lastSeq: await runners.lastSeq(runner.id) });
+            });
+            return;
+          case "event":
+            queue = queue
+              .then(async () => {
+                await runners.ingest(runner, msg.entry);
+                send({ type: "ack", upTo: msg.entry.seq });
+              })
+              .catch((err) => {
+                app.log.error({ err, runnerId: runner.id, seq: msg.entry.seq }, "runner event failed");
+                // No ack: the runner keeps the entry and resends it after reconnecting.
+                socket.close(1011, "ingest failed");
+              });
+            return;
+          case "ping":
+            send({ type: "pong" });
+            return;
+          case "pong":
+            return;
+        }
+      });
+
+      socket.on("close", () => {
+        clearInterval(timer);
+        release?.();
+      });
+    },
+  );
+}
