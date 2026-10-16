@@ -123,6 +123,8 @@ export const projects = pgTable("projects", {
   defaultBranch: text("default_branch").notNull().default("main"),
   /** A check that must pass in a ticket's worktree before it can be merged and done (R47). */
   verifyCommand: text("verify_command"),
+  /** An extra, slower check run before merging high and critical risk tickets (R48). */
+  deepVerifyCommand: text("deep_verify_command"),
   /** Default spend ceiling per ticket across all its runs (R53). */
   ticketCostCapMicros: micros("ticket_cost_cap_micros"),
   createdAt: createdAt(),
@@ -167,6 +169,8 @@ export const milestones = pgTable("milestones", {
   targetDate: date("target_date"),
 });
 
+export const riskTier = pgEnum("risk_tier", ["trivial", "low", "medium", "high", "critical"]);
+
 export const tickets = pgTable(
   "tickets",
   {
@@ -195,6 +199,12 @@ export const tickets = pgTable(
     mergeCommit: text("merge_commit"),
     /** Spend ceiling across all of this ticket's runs (R53); falls back to the project's default. */
     costCapMicros: micros("cost_cap_micros"),
+    /** Risk tier (R48): who reviews it, how deep the checks go, staging first. Null is medium. */
+    risk: riskTier("risk"),
+    /** Plan-first (R40): the agent starts in plan mode until its plan is approved. */
+    planFirst: boolean("plan_first").notNull().default(false),
+    plan: text("plan"),
+    planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),

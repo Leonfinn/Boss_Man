@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, inArray } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, type ColumnSpec, type SystemState } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, engagements, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
@@ -25,6 +25,10 @@ type TicketPatch = {
   keyResultId?: string | null;
   dueDate?: string | null;
   customFields?: Record<string, unknown>;
+  /** Risk tier (R48); null means medium. */
+  risk?: RiskTier | null;
+  /** Start in plan mode until a plan is approved (R40). */
+  planFirst?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
 };
@@ -156,6 +160,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           keyResultId: input.keyResultId ?? null,
           dueDate: input.dueDate ?? null,
           customFields: input.customFields ?? {},
+          risk: input.risk ?? null,
+          planFirst: input.planFirst ?? false,
         })
         .returning();
       if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);

@@ -103,7 +103,7 @@ These sit between the budget work and the self-hosting milestone:
 ## v1.1
 Started 16 Oct 2026, alongside the v1 install. Built in this order, each as its own PR:
 1. Owner controls: configurable decision rules (R19) and the secrets screen. **In review.**
-2. Plan-first tickets (R40) and risk tiers (R48).
+2. Plan-first tickets (R40) and risk tiers (R48), with the CEO's own decision tool and a ticket page for reviewing. **In review.**
 3. The notification ladder with quiet hours (R44).
 4. Roadmap and plan views.
 5. CEO continuity and graded planning, then last-turn diffs (R39) and the owner chat.

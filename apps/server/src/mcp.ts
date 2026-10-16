@@ -8,10 +8,11 @@ import { and, eq, gt, ne, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
+import { RISK_TIERS } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
-import type { decisionsService } from "./services/decisions.js";
+import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
@@ -46,10 +47,17 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: 
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for.",
-      inputSchema: { title: z.string().min(1).max(200), body: z.string().max(10_000).optional(), project: z.string().optional(), engagementId: z.string().uuid().optional() },
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. Set planFirst for work that should be planned and approved before anything changes.",
+      inputSchema: {
+        title: z.string().min(1).max(200),
+        body: z.string().max(10_000).optional(),
+        project: z.string().optional(),
+        engagementId: z.string().uuid().optional(),
+        risk: z.enum(RISK_TIERS).optional(),
+        planFirst: z.boolean().optional(),
+      },
     },
-    async ({ title, body, project, engagementId }) => {
+    async ({ title, body, project, engagementId, risk, planFirst }) => {
       const p = await resolveProject(project);
       if (!p) {
         const names = (await db.select({ name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId))).map((r) => r.name);
@@ -81,7 +89,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: 
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? false })
         .returning({ id: tickets.id });
       return text(`Created ticket ${t!.id} in ${p.name}.`);
     },
@@ -305,6 +313,51 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: 
   );
 
   server.registerTool(
+    "decisions",
+    {
+      description:
+        "For CEOs: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). The owner sees the same queue and may answer first. You can't answer your own requests.",
+      inputSchema: {
+        action: z.enum(["list", "answer"]),
+        id: z.string().uuid().optional(),
+        answer: z.string().max(200).optional(),
+        note: z.string().max(2000).optional(),
+      },
+    },
+    async (input) => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO answers decisions.");
+      if (input.action === "list") {
+        const open = await db
+          .select()
+          .from(decisionsTable)
+          .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), eq(decisionsTable.tier, "ceo")))
+          .orderBy(decisionsTable.createdAt);
+        if (!open.length) return text("No decisions are waiting for you.");
+        return text(
+          open
+            .map((d) => {
+              const plan = (d.context as { planText?: string | null }).planText;
+              return [`${d.id}: ${d.question}`, `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
+            })
+            .join("\n\n"),
+        );
+      }
+      if (!input.id || !input.answer) return fail("Give the decision's id and your answer.");
+      const [d] = await db.select().from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
+      if (!d || d.tier !== "ceo") return fail("No decision with that id is waiting for you.");
+      if (d.raisedByAgentId === scope.agentId) return fail("That's your own request; the owner answers it.");
+      try {
+        const r = await decisions.answer(input.id, input.answer, { note: input.note });
+        return r ? text(`Answered: ${input.answer}.`) : fail("That decision has already been answered.");
+      } catch (err) {
+        if (err instanceof AnswerError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
     "review",
     {
       description:
@@ -338,7 +391,15 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: 
           companyId: scope.companyId,
           causedByRunId: scope.runId,
         });
-        return text(r.verdict === "approved" ? "Approved; the ticket is done." : `Changes requested; ${r.delivered}.`);
+        if (r.verdict !== "approved") return text(`Changes requested; ${r.delivered}.`);
+        const outcome = "outcome" in r ? r.outcome : "done";
+        return text(
+          outcome === "owner_review"
+            ? `Approved. ${r.delivered}: the owner signs it off before it merges.`
+            : outcome === "merged" || outcome === "done"
+              ? "Approved; the ticket is done."
+              : `Approved, but it couldn't merge yet (${outcome.replace(/_/g, " ")}); it's gone back to the assignee with what to fix.`,
+        );
       } catch (err) {
         if (err instanceof ReviewError) return fail(err.message);
         throw err;

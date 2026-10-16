@@ -36,7 +36,9 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[] };
-export type Project = { id: string; companyId: string; name: string; repoUrl: string | null; defaultBranch: string; verifyCommand: string | null };
+export type Project = { id: string; companyId: string; name: string; repoUrl: string | null; defaultBranch: string; verifyCommand: string | null; deepVerifyCommand: string | null };
+export type Risk = "trivial" | "low" | "medium" | "high" | "critical";
+export const RISKS: Risk[] = ["trivial", "low", "medium", "high", "critical"];
 
 export type Decision = {
   id: string;
@@ -54,6 +56,7 @@ export type Decision = {
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
   dueDate: string | null;
+  context?: { type?: string; planText?: string | null; ticketId?: string | null };
 };
 
 export type Ticket = {
@@ -66,7 +69,13 @@ export type Ticket = {
   dueDate: string | null;
   blockedBy: Array<{ ticketId: string | null; engagementId: string | null; decisionId: string | null }>;
   branch: string | null;
+  risk: Risk | null;
+  planFirst: boolean;
+  plan: string | null;
+  planApprovedAt: string | null;
 };
+export type TicketDetail = Ticket & { body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string };
+export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean };
 export type Board = { project: Project; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 
 export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null };

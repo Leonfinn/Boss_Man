@@ -3,7 +3,7 @@
 // target; production targets wait for the owner. Only the run that carries out an approved
 // deploy receives the target's secrets, and only while the deploy is running.
 import { and, asc, eq } from "drizzle-orm";
-import { findCredential } from "@boss-man/shared";
+import { findCredential, riskOf, stagingFirst } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, decisions, deploys, deployTargets, tickets } from "../db/schema.js";
 
@@ -129,8 +129,24 @@ export function deploysService(db: Db, deps: { now?: () => Date } = {}) {
       const cred = findCredential(`${input.ref} ${input.notes ?? ""}`);
       if (cred) throw new DeployError(422, `That looks like it contains ${cred}. Deploy requests never carry credentials.`);
       if (input.ticketId) {
-        const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, actor.companyId)));
+        const [tk] = await db.select({ id: tickets.id, risk: tickets.risk }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, actor.companyId)));
         if (!tk) throw new DeployError(422, "No ticket with that ID in your company.");
+        // High and critical work goes to staging first (R48): the same ref must have deployed
+        // successfully to a non-production target for this ticket.
+        if (t.isProduction && stagingFirst(tk.risk)) {
+          const staged = await db
+            .select({ id: deploys.id })
+            .from(deploys)
+            .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
+            .where(and(eq(deploys.ticketId, tk.id), eq(deploys.ref, input.ref), eq(deploys.status, "succeeded"), eq(deployTargets.isProduction, false)));
+          if (!staged.length) {
+            const stagingTargets = all.filter((x) => !x.isProduction).map((x) => x.name);
+            throw new DeployError(
+              409,
+              `This ticket is rated ${riskOf(tk.risk)} risk, so ${input.ref} has to deploy to staging first.${stagingTargets.length ? ` Deploy it to ${stagingTargets.join(" or ")}, then ask for production again.` : " Your company has no staging target yet; ask the owner to add one."}`,
+            );
+          }
+        }
       }
       const [d] = await db
         .insert(deploys)

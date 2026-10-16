@@ -30,7 +30,7 @@ export function Sidebar(props: {
       <ul>
         {NAV.map((n) => (
           <li key={n.id}>
-            <a className="nav" href={`#/${n.id}`} aria-current={props.active === n.id ? "page" : undefined}>
+            <a className="nav" href={`#/${n.id}`} aria-current={props.active === n.id || (props.active === "tickets" && n.id === "board") ? "page" : undefined}>
               <span>{n.label}</span>
               {n.id === "decisions" && props.decisions.length > 0 && <span className="count" aria-label={`${props.decisions.length} waiting`}>{props.decisions.length}</span>}
             </a>

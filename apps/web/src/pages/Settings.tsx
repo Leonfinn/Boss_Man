@@ -335,12 +335,12 @@ function Funding({ company, onChanged }: { company: Company; onChanged: () => vo
 }
 
 function ProjectRow({ p }: { p: Project }) {
-  const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "" });
+  const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "" });
   const act = useAction();
   const save = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
-      await api(`/api/projects/${p.id}`, { method: "PATCH", body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null } });
+      await api(`/api/projects/${p.id}`, { method: "PATCH", body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null } });
       return "Saved.";
     });
   };
@@ -358,6 +358,10 @@ function ProjectRow({ p }: { p: Project }) {
       <div className="field">
         <label htmlFor={`verify-${p.id}`}>Check before merging</label>
         <input id={`verify-${p.id}`} className="mono" placeholder="pnpm install && pnpm test" value={form.verifyCommand} onChange={(e) => setForm({ ...form, verifyCommand: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={`deep-${p.id}`}>Deeper check for high-risk work</label>
+        <input id={`deep-${p.id}`} className="mono" placeholder="pnpm test:e2e" value={form.deepVerifyCommand} onChange={(e) => setForm({ ...form, deepVerifyCommand: e.target.value })} />
       </div>
       <button className="btn" type="submit" disabled={act.busy}>
         Save
