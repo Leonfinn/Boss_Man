@@ -10,6 +10,7 @@ COPY apps/web/package.json apps/web/
 RUN --mount=type=secret,id=extra_ca,required=false \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
  && pnpm install --frozen-lockfile --filter "@boss-man/web..."
+COPY tsconfig.base.json ./
 COPY apps/web apps/web
 COPY assets/brand assets/brand
 RUN pnpm --filter @boss-man/web build
