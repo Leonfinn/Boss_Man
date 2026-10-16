@@ -80,6 +80,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     resumeSessionId: z.string().optional(),
     /** The prompt to send instead if resumeSessionId can't be reopened, so a fresh session still gets its full context. */
     freshPrompt: z.string().optional(),
+    /** No built-in tools (files, shell, web): only the Boss Man MCP tools. For the owner chat. */
+    boardToolsOnly: z.boolean().optional(),
     /** Start in plan mode (R40): the agent plans and asks for approval before changing anything. */
     mode: z.enum(["plan"]).optional(),
     /** Git workspace (R38): the run works in the ticket's worktree instead of cwd. */

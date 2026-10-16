@@ -35,6 +35,7 @@ export type DecisionContext =
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
 export const DROP = "Drop dependency";
+const BOSSMAN_TOOL = /^(mcp__bossman__|mcp\.bossman\.)/;
 export const KEEP_WAITING = "Keep waiting";
 export const CANCEL_RUN = "Cancel run";
 export const RAISE_BUDGET = "Raise it by half";
@@ -185,9 +186,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** Called for every permission request a runner reports. */
     async onPermissionRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
       // An agent asking to leave plan mode is presenting its plan for approval (R40).
-      if (event.kind === "switch_mode") return planRequest(runner, event);
+      if (event.kind === "switch_mode") {
+        const [r] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
+        if (r?.purpose !== "chat") return planRequest(runner, event);
+      }
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput };
-      const { outcome, rule } = evaluatePermission(info, await rulesFor(runner.companyId));
+      // The owner chat may use Boss Man's own (board) tools and nothing else.
+      const [asking] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
+      const { outcome, rule } =
+        asking?.purpose === "chat"
+          ? BOSSMAN_TOOL.test(event.title ?? "")
+            ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
+            : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
+          : evaluatePermission(info, await rulesFor(runner.companyId));
       if (outcome === "allow" || outcome === "deny") {
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event

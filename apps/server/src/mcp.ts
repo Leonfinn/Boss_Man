@@ -4,14 +4,14 @@
 // to use each tool so Claude Code's tool search finds them.
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, eq, gt, ne, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { planFirstByDefault, RISK_TIERS } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets } from "./db/schema.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -19,6 +19,7 @@ import { RunError, type runsService } from "./services/runs.js";
 import { ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
+import { WorkError, type workService } from "./services/work.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -42,6 +43,7 @@ type Services = {
   review: ReturnType<typeof reviewService>;
   notes: ReturnType<typeof notificationsService>;
   chapters: ReturnType<typeof chaptersService>;
+  work: ReturnType<typeof workService>;
 };
 
 function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters }: Services, scope: Scope, hooks: McpHooks) {
@@ -473,6 +475,104 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   return server;
 }
 
+/**
+ * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
+ * not an agent's, and go through the same checks as the board's own forms.
+ */
+function buildChatServer(db: Db, { work }: Services, scope: Scope) {
+  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
+  const workFail = (err: unknown) => {
+    if (err instanceof WorkError) return fail(err.message);
+    throw err;
+  };
+
+  server.registerTool(
+    "board",
+    { description: "See the company's board: projects, objectives with their milestones, agents, and open tickets with their ids.", inputSchema: {} },
+    async () => {
+      const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId)).orderBy(asc(projects.name));
+      const os = await db.select({ id: objectives.id, title: objectives.title, priority: objectives.priority }).from(objectives).where(and(eq(objectives.companyId, scope.companyId), eq(objectives.status, "active")));
+      const ms = os.length ? await db.select({ id: milestones.id, objectiveId: milestones.objectiveId, title: milestones.title, targetDate: milestones.targetDate }).from(milestones).where(inArray(milestones.objectiveId, os.map((o) => o.id))) : [];
+      const as = await db.select({ id: agents.id, name: agents.name, role: agents.role }).from(agents).where(eq(agents.companyId, scope.companyId));
+      const ts = await db
+        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, projectId: tickets.projectId, milestoneId: tickets.milestoneId, assigneeAgentId: tickets.assigneeAgentId, risk: tickets.risk })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, scope.companyId), ne(tickets.systemState, "done")))
+        .orderBy(asc(tickets.createdAt))
+        .limit(300);
+      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as, openTickets: ts }));
+    },
+  );
+
+  server.registerTool(
+    "create_ticket",
+    {
+      description:
+        "Create a ticket for the owner. Give the project by name when there's more than one. Rate its risk: trivial, low, medium (the default), high or critical. Optionally put it in a milestone, assign it to an agent by name, and list tickets it waits on.",
+      inputSchema: {
+        title: z.string().min(1).max(200),
+        body: z.string().max(10_000).optional(),
+        project: z.string().optional(),
+        risk: z.enum(RISK_TIERS).optional(),
+        planFirst: z.boolean().optional(),
+        milestoneId: z.string().uuid().optional(),
+        assignee: z.string().optional(),
+        waitsOn: z.array(z.string().uuid()).max(20).optional(),
+      },
+    },
+    async (input) => {
+      const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId));
+      const p = input.project ? ps.find((x) => x.name.toLowerCase() === input.project!.toLowerCase()) : ps.length === 1 ? ps[0] : undefined;
+      if (!p) return fail(ps.length ? `Name the project: one of ${ps.map((x) => x.name).join(", ")}.` : "The company has no projects yet; the owner creates them on the Board.");
+      let assigneeAgentId: string | undefined;
+      if (input.assignee) {
+        const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${input.assignee})`));
+        if (!a) return fail(`No agent called ${input.assignee}. Use board to see who there is.`);
+        assigneeAgentId = a.id;
+      }
+      for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
+      try {
+        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId });
+        for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id });
+        return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
+      } catch (err) {
+        return workFail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "link_tickets",
+    { description: "Make one ticket wait on another: ticketId can't start until waitsOnTicketId is done.", inputSchema: { ticketId: z.string().uuid(), waitsOnTicketId: z.string().uuid() } },
+    async ({ ticketId, waitsOnTicketId }) => {
+      if (!(await ownTicket(ticketId))) return fail("No such ticket in this company.");
+      try {
+        await work.addDependency(ticketId, { ticketId: waitsOnTicketId });
+        return text(`#/tickets/${ticketId} now waits on #/tickets/${waitsOnTicketId}.`);
+      } catch (err) {
+        return workFail(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_milestone",
+    { description: "Put a ticket in a milestone, or take it out with milestoneId null.", inputSchema: { ticketId: z.string().uuid(), milestoneId: z.string().uuid().nullable() } },
+    async ({ ticketId, milestoneId }) => {
+      if (!(await ownTicket(ticketId))) return fail("No such ticket in this company.");
+      try {
+        await work.updateTicket(ticketId, { milestoneId });
+        return text(milestoneId ? `#/tickets/${ticketId} is in the milestone now.` : `#/tickets/${ticketId} has no milestone now.`);
+      } catch (err) {
+        return workFail(err);
+      }
+    },
+  );
+
+  return server;
+}
+
 export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services, hooks: McpHooks = {}) {
   const handler = async (req: import("fastify").FastifyRequest, reply: import("fastify").FastifyReply) => {
     const header = req.headers.authorization;
@@ -485,8 +585,9 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       : [];
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 
-    // Stateless: a fresh server and transport per request.
-    const server = buildServer(db, services, scope, hooks);
+    // Stateless: a fresh server and transport per request. Owner chat runs get board tools only.
+    const [run] = await db.select({ purpose: runsTable.purpose }).from(runsTable).where(eq(runsTable.id, scope.runId));
+    const server = run?.purpose === "chat" ? buildChatServer(db, services, scope) : buildServer(db, services, scope, hooks);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {

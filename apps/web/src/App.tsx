@@ -17,6 +17,7 @@ import { Secrets } from "./pages/Secrets";
 import { Funding } from "./pages/Funding";
 import { Notifications } from "./pages/Notifications";
 import { Plan } from "./pages/Plan";
+import { ChatPage } from "./pages/Chat";
 import { Roadmap } from "./pages/Roadmap";
 
 type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
@@ -88,6 +89,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           </State>
         ) : page === "board" ? (
           <Board companies={list} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
+        ) : page === "chat" ? (
+          <ChatPage companies={list} companyId={route[1]} go={go} />
         ) : page === "roadmap" ? (
           <Roadmap companies={list} />
         ) : page === "plan" ? (

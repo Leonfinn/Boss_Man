@@ -23,6 +23,7 @@ import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
+import { ChatError, chatService } from "./services/chat.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
@@ -121,9 +122,12 @@ export async function buildApp(opts: AppOptions) {
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const deploysSvc = deploysService(db, { now: opts.now });
   const chapters = chaptersService(db, { now: opts.now });
+  // The scheduler is made below; the chat only needs it once a message is sent.
+  const chat = chatService(db, { wake: (input) => scheduler.wake(input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
   const scheduler = schedulerService(db, {
     runners,
     chapters,
+    chat,
     funding,
     deploys: deploysSvc,
     limits: opts.limits,
@@ -150,6 +154,11 @@ export async function buildApp(opts: AppOptions) {
     if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err }, "chapter update failed"));
     if (event.type === "run.context") void chapters.onContext(event.runId, event.used, event.size).catch((err) => app.log.error({ err }, "chapter update failed"));
     if (event.type === "run.ended") void chapters.onRunEnded(event.runId).catch((err) => app.log.error({ err }, "chapter close failed"));
+    // The owner chat's answers.
+    if (event.type === "run.update" && (event.update as { kind?: string } | null)?.kind === "agent_message") {
+      void chat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "chat reply failed"));
+    }
+    if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "chat end failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
@@ -198,7 +207,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -679,6 +688,19 @@ export async function buildApp(opts: AppOptions) {
     });
 
     owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
+
+    // The owner chat (v1.1): plain language in, tickets and links out.
+    owner.get("/api/companies/:id/chat", async (req) => chat.list(IdParam.parse(req.params).id));
+    owner.post("/api/companies/:id/chat", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).parse(req.body);
+      try {
+        return reply.code(201).send(await chat.send(id, text));
+      } catch (err) {
+        if (err instanceof ChatError) return reply.code(err.status).send({ error: "rejected", message: err.message });
+        throw err;
+      }
+    });
 
     // CEO continuity: the CEO's chapters, and asking for a new one.
     owner.get("/api/companies/:id/chapters", async (req) => chapters.list(IdParam.parse(req.params).id));
