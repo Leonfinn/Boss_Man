@@ -1,0 +1,21 @@
+{
+  "name": "boss-man",
+  "private": true,
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "dev": "pnpm --filter @boss-man/server dev",
+    "db:generate": "pnpm --filter @boss-man/server db:generate"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

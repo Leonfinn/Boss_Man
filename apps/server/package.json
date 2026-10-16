@@ -1,0 +1,27 @@
+{
+  "name": "@boss-man/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@boss-man/shared": "workspace:*",
+    "@electric-sql/pglite": "0.5.10",
+    "@fastify/cookie": "11.1.3",
+    "drizzle-orm": "0.45.4",
+    "fastify": "5.12.7",
+    "pg": "8.23.1",
+    "tsx": "4.23.15",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1",
+    "drizzle-kit": "0.31.11"
+  }
+}
