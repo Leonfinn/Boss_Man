@@ -56,3 +56,21 @@ export function checkSecretFormat(kind: SecretKind, value: string): SecretCheck 
 export function secretHint(value: string): string {
   return value.length <= 8 ? "••••" : `••••${value.slice(-4)}`;
 }
+
+// Engagement threads and deliverables must never carry credentials (R24). These are the
+// shapes of common secrets; a match blocks the message and names what it looked like.
+const CREDENTIAL_PATTERNS: Array<[string, RegExp]> = [
+  ["an Anthropic key or token", /sk-ant-[A-Za-z0-9_-]{10,}/],
+  ["an OpenAI key", /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/],
+  ["a GitHub token", /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/],
+  ["an AWS access key", /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/],
+  ["a Slack token", /\bxox[abprs]-[A-Za-z0-9-]{10,}/],
+  ["a private key", /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
+  ["a password in a URL", /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s/@]+@/i],
+];
+
+/** Returns what a text looks like it contains if it holds a credential, otherwise null. */
+export function findCredential(text: string): string | null {
+  for (const [what, re] of CREDENTIAL_PATTERNS) if (re.test(text)) return what;
+  return null;
+}

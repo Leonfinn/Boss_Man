@@ -1,10 +1,10 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { eq, max, sql } from "drizzle-orm";
+import { and, eq, isNotNull, max, sql } from "drizzle-orm";
 import type { JournalEntry, RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
-import { engagements, runnerEvents, runners, runs } from "../db/schema.js";
+import { costEvents, decisions, engagements, runnerEvents, runners, runs } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 type Runner = typeof runners.$inferSelect;
@@ -37,21 +37,48 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       case "run.cost": {
         if (event.costMicrosDelta === 0) return;
         const [run] = await db.select().from(runs).where(eq(runs.id, event.runId));
-        // Engagement work is charged to the requester (R26).
         const [eng] = run?.engagementId ? await db.select().from(engagements).where(eq(engagements.id, run.engagementId)) : [];
-        await funding.recordCost({
+        const base = {
           fundingSourceId: event.fundingSourceId,
           companyId: runner.companyId,
           runId: event.runId,
           agentId: run?.agentId ?? null,
           engagementId: run?.engagementId ?? null,
-          chargedCompanyId: eng?.requesterCompanyId ?? null,
-          chargedProjectId: eng?.requesterProjectId ?? null,
           model: event.model,
-          costMicros: event.costMicrosDelta,
-          basis: "list_estimate",
+          basis: "list_estimate" as const,
           occurredAt: at,
-        });
+        };
+        if (!eng) {
+          await funding.recordCost({ ...base, costMicros: event.costMicrosDelta });
+          return;
+        }
+        // Engagement work is charged to the requester (R26), up to the engagement's cap;
+        // anything past the cap stays with the provider.
+        let charged = event.costMicrosDelta;
+        if (eng.budgetCapMicros != null) {
+          const [sum] = await db
+            .select({ total: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+            .from(costEvents)
+            .where(and(eq(costEvents.engagementId, eng.id), isNotNull(costEvents.chargedCompanyId)));
+          const left = Math.max(0, eng.budgetCapMicros - Number(sum?.total ?? 0));
+          charged = Math.min(event.costMicrosDelta, left);
+          if (charged < event.costMicrosDelta) {
+            await db
+              .insert(decisions)
+              .values({
+                companyId: eng.requesterCompanyId,
+                kind: "budget",
+                question: `"${eng.title}" has used its $${(eng.budgetCapMicros / 1e6).toFixed(2)} cost cap. Further work on it is charged to the providing company.`,
+                options: ["Got it"],
+                recommendedOption: "Got it",
+                dedupeKey: `engagement-cap:${eng.id}`,
+                context: { type: "question" },
+              })
+              .onConflictDoNothing();
+          }
+        }
+        if (charged > 0) await funding.recordCost({ ...base, costMicros: charged, chargedCompanyId: eng.requesterCompanyId, chargedProjectId: eng.requesterProjectId });
+        if (event.costMicrosDelta - charged > 0) await funding.recordCost({ ...base, costMicros: event.costMicrosDelta - charged });
         return;
       }
       case "run.quota":

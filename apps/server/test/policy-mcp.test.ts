@@ -10,7 +10,7 @@ import { Journal, RunnerConnection } from "@boss-man/runner";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, engagements, policyRules, projects, tickets } from "../src/db/schema.js";
+import { decisions, engagements, policyRules, projects, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 5000): Promise<T> {
@@ -107,7 +107,7 @@ describe("Boss Man MCP server", () => {
   it("exposes a small, described tool set", async () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const { tools } = await c.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["create_ticket", "list_my_work", "raise_decision", "report_key_result", "request_engagement", "set_ticket_state"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["create_ticket", "engagement", "list_my_work", "raise_decision", "report_key_result", "request_engagement", "set_ticket_state"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
     await c.close();
   });
@@ -146,7 +146,7 @@ describe("Boss Man MCP server", () => {
     await c.close();
   });
 
-  it("request_engagement offers work to the other company, which can accept", async () => {
+  it("request_engagement wakes the other company's CEO, whose acceptance the owner approves", async () => {
     await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" });
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const self = await c.callTool({ name: "request_engagement", arguments: { providerCompany: "App Co", title: "x", scope: "x", acceptanceCriteria: ["x"] } });
@@ -158,10 +158,18 @@ describe("Boss Man MCP server", () => {
     expect(textOf(ok)).toMatch(/sent to Homelab Co/);
     const [eng] = await ctx.db.select().from(engagements);
     expect(eng).toMatchObject({ status: "requested", budgetCapMicros: 25_000_000, providerCompanyId: ctx.homelab.company.id });
-    const [offer] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "engagement"));
-    expect(offer).toMatchObject({ companyId: ctx.homelab.company.id, question: "App Co asks: Deploy v1.4" });
-    await ctx.app.inject({ method: "POST", url: `/api/decisions/${offer!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Accept" } });
+    expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.homelab.ceo.id, reason: "engagement" })]);
+
+    // Homelab's CEO accepts; the owner approves before work starts.
+    const h = await client(ctx.homelab.company.id, ctx.homelab.ceo.id);
+    const wrongSide = await c.callTool({ name: "engagement", arguments: { action: "accept", engagementId: eng!.id } });
+    expect(textOf(wrongSide)).toBe("Only the provider can accept.");
+    expect(textOf(await h.callTool({ name: "engagement", arguments: { action: "accept", engagementId: eng!.id } }))).toMatch(/owner approves/);
+    const [approval] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "engagement"));
+    expect(approval).toMatchObject({ companyId: ctx.homelab.company.id, question: 'Homelab Co has agreed to do "Deploy v1.4" for App Co, capped at $25.00. Approve the work?', recommendedOption: "Approve" });
+    await ctx.app.inject({ method: "POST", url: `/api/decisions/${approval!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Approve" } });
     expect((await ctx.db.select().from(engagements))[0]!.status).toBe("accepted");
     await c.close();
+    await h.close();
   });
 });

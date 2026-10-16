@@ -65,6 +65,7 @@ export function schedulerService(
       if (t) {
         lines.push("", `Ticket ${t.t.id} in project "${t.project}": ${t.t.title}`);
         if (t.t.body) lines.push("", t.t.body);
+        if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
       }
     }
     if (w.note) lines.push("", w.note);
@@ -84,7 +85,9 @@ export function schedulerService(
     if (!runner || !deps.runners.isConnected(runner.id)) return { ok: false, reason: "runner offline" };
 
     const runId = randomUUID();
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, model: agent.model, startedAt: now() });
+    // Work on a provider ticket for an engagement is charged back to the requester (R26).
+    const [ticket] = w.ticketId ? await db.select({ engagementId: tickets.engagementId }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, model: agent.model, startedAt: now() });
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     const sent = deps.runners.send(runner.id, {
       type: "run.start",
