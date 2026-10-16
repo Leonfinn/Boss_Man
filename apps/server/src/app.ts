@@ -1,5 +1,7 @@
-import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import path from "node:path";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
+import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
@@ -24,6 +26,7 @@ import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
+import { loginLimiter, type LoginLimits } from "./login-limit.js";
 
 export type AppOptions = {
   db: Db;
@@ -42,6 +45,10 @@ export type AppOptions = {
   sweepLimits?: Partial<SweepLimits>;
   /** Review-loop and circular-failure limits (R49, R50). */
   loopLimits?: Partial<LoopLimits>;
+  /** The built web UI (apps/web/dist). Without it the server is API-only, e.g. under `vite dev`. */
+  webDir?: string;
+  /** Login failures allowed per address and per username in a window (R45). */
+  loginLimits?: LoginLimits;
   /** Default disk cap and how long done tickets keep their worktrees (R54). */
   diskLimits?: Partial<DiskLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
@@ -64,6 +71,33 @@ function pgCode(err: unknown): string | undefined {
 }
 
 const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
+// The UI is one static page that only talks to this origin, so the policy can be strict.
+const WEB_CSP = "default-src 'self'; img-src 'self' data:; font-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
+
+/** Serves the built web UI. Hashed assets are cached for good; the page itself never is. */
+async function serveWeb(app: FastifyInstance, root: string) {
+  await app.register(fastifyStatic, {
+    root,
+    wildcard: false,
+    cacheControl: false,
+    index: ["index.html"],
+    setHeaders(res, file) {
+      res.header("cache-control", file.includes(`${path.sep}assets${path.sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
+    },
+  });
+  app.addHook("onSend", async (req, reply) => {
+    if (req.url.startsWith("/api/") || req.url === "/mcp") return;
+    reply.header("content-security-policy", WEB_CSP);
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("referrer-policy", "same-origin");
+  });
+  app.setNotFoundHandler((req, reply) => {
+    // The UI routes after "#", so anything else that isn't a file is simply not found.
+    if (req.method === "GET" && !req.url.startsWith("/api/")) return reply.code(404).type("text/plain").send("Not found");
+    return reply.code(404).send({ error: "Not Found", message: `Route ${req.method}:${req.url} not found`, statusCode: 404 });
+  });
+}
 
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
@@ -203,12 +237,23 @@ export async function buildApp(opts: AppOptions) {
     return reply.code(201).send({ username: owner!.username });
   });
 
+  const logins = loginLimiter(opts.loginLimits, () => (opts.now ? opts.now().getTime() : Date.now()));
   app.post("/api/login", async (req, reply) => {
     const body = Credentials.parse(req.body);
+    const wait = logins.retryAfter(req.ip, body.username);
+    if (wait > 0) {
+      const minutes = Math.ceil(wait / 60_000);
+      return reply
+        .code(429)
+        .header("retry-after", String(Math.ceil(wait / 1000)))
+        .send({ error: "too_many_attempts", message: `Too many failed logins. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.` });
+    }
     const [owner] = await db.select().from(owners).where(eq(owners.username, body.username));
     if (!owner || !(await verifyPassword(body.password, owner.passwordHash))) {
+      logins.failed(req.ip, body.username);
       return reply.code(401).send({ error: "wrong_username_or_password" });
     }
+    logins.succeeded(req.ip, body.username);
     await startSession(reply, owner.id);
     return { username: owner.username };
   });
@@ -425,6 +470,11 @@ export async function buildApp(opts: AppOptions) {
       dueDate: DateStr.nullable(),
       customFields: z.record(z.string(), z.unknown()),
       overLimit: z.boolean(),
+    });
+
+    owner.get("/api/companies/:id/projects", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return db.select().from(projects).where(eq(projects.companyId, id)).orderBy(projects.name);
     });
 
     owner.post("/api/companies/:id/projects", async (req, reply) => {
@@ -671,6 +721,8 @@ export async function buildApp(opts: AppOptions) {
     // Stale-blocker and stalled-run sweeps (R21, R32); also run on a timer.
     owner.post("/api/sweep", async () => sweeps.run());
   });
+
+  if (opts.webDir) await serveWeb(app, opts.webDir);
 
   return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk };
 }

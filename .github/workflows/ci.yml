@@ -18,6 +18,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm build
       - name: Migrations match the schema
         run: |
           pnpm --filter @boss-man/server exec drizzle-kit generate --name ci-check
@@ -41,6 +42,9 @@ jobs:
           docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000 && test -n "$CLAUDE_CODE_EXECUTABLE"'
       - name: Canary - a Claude session works inside the image, with no network (R52)
         run: docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true boss-man-runner:ci node_modules/.bin/tsx src/canary-main.ts
+      - name: Server image serves the web UI
+        run: |
+          docker run --rm --entrypoint sh boss-man-server:ci -c 'test -f /app/web/index.html && ls /app/web/assets | grep -q "\.js$"'
       - name: Runner refuses to start without a token
         run: |
           if docker run --rm boss-man-runner:ci 2> err.txt; then echo "expected failure"; exit 1; fi

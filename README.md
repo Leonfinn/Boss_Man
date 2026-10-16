@@ -15,7 +15,25 @@ It fixes the following problems in Paperclip:
 - Claude sign-in expires.
 - Goals have been retired, and there is no roadmap view.
 
-> **Status:** scoping complete (2026-10-16). There is no code yet.
+> **Status (2026-10-16):** the server, runner and a first web UI are built and tested; v1 isn't finished. [docs/03-phased-plan.md](docs/03-phased-plan.md) has the current state.
+
+## Trying it
+
+You need Node 22 and pnpm 10. The master key encrypts stored secrets, so keep the same one between restarts.
+
+```sh
+pnpm install
+mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
+BOSSMAN_MASTER_KEY_FILE="$PWD/secrets/master.key" BOSSMAN_INSECURE_COOKIES=1 pnpm dev
+```
+
+In a second terminal, start the web UI. It opens on http://localhost:5173 and sends API calls to the server on port 3100:
+
+```sh
+pnpm dev:web
+```
+
+Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite) under `apps/server/data/`. For a real install, use `docker compose up -d`: the server image includes the built UI on port 3100, and the runners are added with `--profile runners`.
 
 ## Documents
 
