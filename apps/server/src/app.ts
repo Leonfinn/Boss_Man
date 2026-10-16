@@ -123,7 +123,24 @@ export async function buildApp(opts: AppOptions) {
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const deploysSvc = deploysService(db, { now: opts.now });
   const chapters = chaptersService(db, { now: opts.now });
-  const feedback = feedbackService(db, { now: opts.now });
+  const feedback = feedbackService(db, {
+    now: opts.now,
+    // New feedback wakes the CEO to triage it, when the owner has asked for that; one wake at a time.
+    onNote: async (n) => {
+      if (!(await feedback.settings(n.companyId)).ceoTriage) return;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, n.companyId), eq(agents.role, "ceo")));
+      if (!ceo || n.createdByAgentId === ceo.id) return;
+      const [waiting] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, ceo.id), eq(wakes.reason, "feedback"), inArray(wakes.status, ["queued", "deferred"])));
+      if (waiting) return;
+      await scheduler.wake({
+        agentId: ceo.id,
+        reason: "feedback",
+        priority: 1,
+        note: "New feedback is waiting. Use the feedback tool: read the inbox, link each request to a feature (create one if none fits) with how much it matters to them, and mark each note processed. Don't build anything yet; just triage.",
+      });
+    },
+    onReleased: (f) => notes.notify({ companyId: f.companyId, level: "note", title: `Released: ${f.title}`, body: "Every ticket delivering it is done.", link: `#/features/${f.companyId}/${f.id}` }),
+  });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const chat = chatService(db, { wake: (input) => scheduler.wake(input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
   const scheduler = schedulerService(db, {
@@ -209,7 +226,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -589,6 +606,7 @@ export async function buildApp(opts: AppOptions) {
       customFields: z.record(z.string(), z.unknown()),
       risk: z.enum(RISK_TIERS).nullable(),
       planFirst: z.boolean(),
+      featureId: Uuid.nullable(),
       overLimit: z.boolean(),
     });
 
@@ -733,6 +751,17 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/features/:id", async (req) => feedback.featureDetail(IdParam.parse(req.params).id));
     owner.patch("/api/features/:id", async (req) => feedback.updateFeature(IdParam.parse(req.params).id, FeatureFields.partial().parse(req.body)));
     owner.delete("/api/features/:id", async (req, reply) => (await feedback.removeFeature(IdParam.parse(req.params).id), reply.code(204).send()));
+    /** A ticket that delivers the feature, described from what people asked for. */
+    owner.post("/api/features/:id/tickets", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ projectId: Uuid, title: Text(200).optional(), risk: z.enum(RISK_TIERS).optional(), assigneeAgentId: Uuid.optional(), state: z.enum(SYSTEM_STATES).optional() }).parse(req.body);
+      const { feature: f, body } = await feedback.brief(id);
+      const [p] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, b.projectId));
+      if (!p || p.companyId !== f.companyId) return reply.code(422).send({ error: "rejected", message: "Pick a project of the feature's company." });
+      const t = await work.createTicket(b.projectId, { title: b.title ?? f.title, body, featureId: id, risk: b.risk, assigneeAgentId: b.assigneeAgentId, state: b.state });
+      if (f.status === "idea" || f.status === "considering") await feedback.updateFeature(id, { status: "planned" });
+      return reply.code(201).send(t);
+    });
 
     owner.get("/api/companies/:id/feedback-customers", async (req) => feedback.customers(IdParam.parse(req.params).id, z.object({ q: z.string().max(100).optional() }).parse(req.query).q));
     owner.get("/api/feedback/unprocessed", async () => feedback.unprocessedCount());

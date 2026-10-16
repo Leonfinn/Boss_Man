@@ -35,5 +35,5 @@ Checked on 16 Oct 2026 against Productboard's help centre and public portals:
 
 1. Server: notes, insights, features, areas, criteria, customers and scoring. **In review.**
 2. Web: the feedback inbox (select a passage, pick or create a feature, set importance), the features list with inline prioritisation, and the feature page. **In review.**
-3. Agents and tickets.
+3. Agents and tickets: the `feedback` MCP tool (anyone logs and reads; the CEO links, creates features and marks notes), optional CEO triage wakes, the chat's `log_feedback` and `features`, tickets made from a feature (described from its feedback, with outside words marked untrusted), and features following their tickets to in progress and released. **In review.**
 4. The portal.

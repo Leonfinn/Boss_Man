@@ -5,11 +5,14 @@ import {
   FEATURE_STATUSES,
   IMPORTANCE_LABEL,
   type Company,
+  RISKS,
   type Driver,
   type Feature,
   type FeatureDetail,
   type FeatureStatus,
   type FeedbackSettingsView,
+  type Project,
+  type Risk,
   type ScoredFeatures,
 } from "../api";
 import { usePoll } from "../hooks";
@@ -364,6 +367,61 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
   );
 }
 
+/** A ticket that delivers this feature, described from what people asked for. */
+function CreateTicket({ featureId, companyId, title, go }: { featureId: string; companyId: string; title: string; go: (to: string) => void }) {
+  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${companyId}/projects`, { signal }), 120_000, `projects-${companyId}`);
+  const [projectId, setProjectId] = useState("");
+  const [risk, setRisk] = useState<Risk>("medium");
+  const [name, setName] = useState(title);
+  const [error, setError] = useState<string | null>(null);
+  const list = projects.data ?? [];
+  const pid = projectId || list[0]?.id || "";
+  if (projects.data && !list.length)
+    return (
+      <p className="muted" style={{ fontSize: 14 }}>
+        Create a project on the Board to turn this into tickets.
+      </p>
+    );
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    void api<{ id: string }>(`/api/features/${featureId}/tickets`, { method: "POST", body: { projectId: pid, title: name.trim() || title, risk } }).then((t) => go(`tickets/${t.id}`), (err: Error) => setError(err.message));
+  };
+  return (
+    <form onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }} aria-label="Create a ticket for this feature">
+      <div className="field" style={{ flex: "2 1 220px" }}>
+        <label htmlFor="ft-title">New ticket</label>
+        <input id="ft-title" maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
+      </div>
+      {list.length > 1 && (
+        <div className="field">
+          <label htmlFor="ft-project">Project</label>
+          <select id="ft-project" value={pid} onChange={(e) => setProjectId(e.target.value)}>
+            {list.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      <div className="field">
+        <label htmlFor="ft-risk">Risk</label>
+        <select id="ft-risk" value={risk} onChange={(e) => setRisk(e.target.value as Risk)}>
+          {RISKS.map((r) => (
+            <option key={r} value={r}>
+              {r[0]!.toUpperCase() + r.slice(1)}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button className="btn primary" type="submit" disabled={!pid}>
+        Create ticket
+      </button>
+      {error && <p className="error">{error}</p>}
+    </form>
+  );
+}
+
 type Tree = Array<{ id: string; title: string; milestones: Array<{ id: string; title: string; targetDate: string | null }> }>;
 
 function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go: (to: string) => void }) {
@@ -568,6 +626,16 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             No feedback linked yet. Link passages to it from the <a href={`#/feedback/${companyId}`}>feedback inbox</a>.
           </p>
         )}
+      </section>
+
+      <section className="card" aria-labelledby="f-work-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <h2 id="f-work-h" style={{ fontSize: 17, fontWeight: 600 }}>
+          Delivery
+        </h2>
+        <p className="muted" style={{ fontSize: 13 }}>
+          A ticket made here is described from the feature and what people asked for, strongest first. The feature moves to in progress when work on a ticket starts, and to released when every ticket is done.
+        </p>
+        <CreateTicket featureId={id} companyId={companyId} title={f.title} go={go} />
       </section>
 
       {(d.subfeatures.length > 0 || d.tickets.length > 0) && (

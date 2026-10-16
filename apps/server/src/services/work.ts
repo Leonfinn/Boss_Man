@@ -2,7 +2,7 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, engagements, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
+import { agents, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export class WorkError extends Error {
   constructor(
@@ -27,6 +27,8 @@ type TicketPatch = {
   customFields?: Record<string, unknown>;
   /** Risk tier (R48); null means medium. */
   risk?: RiskTier | null;
+  /** The feature request this ticket delivers. */
+  featureId?: string | null;
   /** Start in plan mode until a plan is approved (R40). */
   planFirst?: boolean;
   /** Move past a full column anyway. */
@@ -62,6 +64,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       .innerJoin(objectives, eq(objectives.id, table.objectiveId))
       .where(and(eq(table.id, id), eq(objectives.companyId, companyId)));
     if (!row) throw new WorkError(422, `That ${kind === "milestone" ? "milestone" : "key result"} isn't in this company.`);
+  }
+
+  async function assertFeatureInCompany(id: string, companyId: string) {
+    const [f] = await db.select({ id: features.id }).from(features).where(and(eq(features.id, id), eq(features.companyId, companyId)));
+    if (!f) throw new WorkError(422, "That feature isn't in this company.");
   }
 
   /** Resolves where a ticket lands and enforces the column's card limit. */
@@ -143,6 +150,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (input.assigneeAgentId) await assertAgentInCompany(input.assigneeAgentId, p.companyId);
       if (input.milestoneId) await assertLinkInCompany("milestone", input.milestoneId, p.companyId);
       if (input.keyResultId) await assertLinkInCompany("keyResult", input.keyResultId, p.companyId);
+      if (input.featureId) await assertFeatureInCompany(input.featureId, p.companyId);
       const col = await placement(projectId, { columnId: input.columnId, state: input.state }, { overLimit: input.overLimit });
       const [t] = await db
         .insert(tickets)
@@ -163,6 +171,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           risk: input.risk ?? null,
           // Graded planning: high and critical work is planned first unless the creator says otherwise.
           planFirst: input.planFirst ?? (input.risk ? planFirstByDefault(input.risk) : false),
+          featureId: input.featureId ?? null,
         })
         .returning();
       if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);
@@ -175,6 +184,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (patch.assigneeAgentId) await assertAgentInCompany(patch.assigneeAgentId, t.companyId);
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
+      if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
       const moves = patch.columnId !== undefined || patch.state !== undefined;
       const col = moves ? await placement(t.projectId, { columnId: patch.columnId, state: patch.state }, { ticketId, overLimit: patch.overLimit }) : null;
       const { overLimit: _ignored, state: _s, columnId: _c, ...fields } = patch;
