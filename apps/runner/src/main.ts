@@ -5,6 +5,7 @@ import path from "node:path";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
+import { Workspaces } from "./workspace.js";
 
 const env = process.env;
 const wsUrl = env.BOSSMAN_URL ?? "ws://server:3100/api/runner/connect";
@@ -28,6 +29,7 @@ const sessions = new SessionManager({
     return ((await res.json()) as { env: Record<string, string> }).env;
   },
   stateFile: path.join(dataDir, "active-runs.json"),
+  workspaces: new Workspaces(env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces"),
   log,
 });
 

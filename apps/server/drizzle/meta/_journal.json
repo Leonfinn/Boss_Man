@@ -57,6 +57,13 @@
       "when": 1792170567805,
       "tag": "0007_recovery",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792171194655,
+      "tag": "0008_workspaces",
+      "breakpoints": true
     }
   ]
 }

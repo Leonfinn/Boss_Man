@@ -11,6 +11,7 @@ import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { gitAuthEnv, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -28,6 +29,8 @@ export type SessionManagerOptions = {
   adapterBins?: Partial<Record<string, string>>;
   /** Where active runs are recorded, so a restart can report them as interrupted (R42). */
   stateFile?: string;
+  /** Git worktrees per ticket (R38). Without it, runs use the cwd they're given. */
+  workspaces?: Workspaces;
   log?: (msg: string) => void;
 };
 
@@ -130,6 +133,11 @@ export class SessionManager {
       case "permission.decide":
         this.runs.get(command.runId)?.pendingPermissions.get(command.requestId)?.(command.verdict);
         return;
+      case "workspace.release":
+        void this.opts.workspaces
+          ?.release({ projectId: command.projectId, ticketId: command.ticketId })
+          .catch((err) => this.opts.emit({ type: "runner.log", level: "warn", message: `Couldn't release the workspace for ticket ${command.ticketId}: ${String((err as Error)?.message ?? err)}` }));
+        return;
       case "run.message": {
         const run = this.runs.get(command.runId);
         if (!run) {
@@ -147,7 +155,8 @@ export class SessionManager {
     const base = this.opts.baseEnv ?? process.env;
     const env: NodeJS.ProcessEnv = {};
     for (const k of BASE_ENV_KEYS) if (base[k] !== undefined) env[k] = base[k];
-    Object.assign(env, secrets, { DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
+    // A granted GIT_TOKEN reaches git through the environment only, for the agent's pushes too (R38).
+    Object.assign(env, secrets, gitAuthEnv(secrets), { DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
     if (cmd.agentKind === "claude" && cmd.model && !CLAUDE_ALIASES.has(cmd.model)) {
       // ACP refuses unlisted models; pinning the alias at launch works (spike S2).
       env.ANTHROPIC_DEFAULT_OPUS_MODEL = cmd.model;
@@ -168,11 +177,29 @@ export class SessionManager {
     let messageText = "";
 
     let env: NodeJS.ProcessEnv;
+    let secrets: Record<string, string>;
     try {
-      env = this.launchEnv(cmd, await this.opts.resolveEnv(cmd.runId));
+      secrets = await this.opts.resolveEnv(cmd.runId);
+      env = this.launchEnv(cmd, secrets);
     } catch (err) {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't load the company's secrets: ${String(err)}` });
       return;
+    }
+
+    if (cmd.workspace) {
+      if (!this.opts.workspaces) {
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: "This runner has no workspace directory configured." });
+        return;
+      }
+      try {
+        const spec = cmd.workspace;
+        const ws = await this.opts.workspaces.ensure(spec, secrets);
+        cmd = { ...cmd, cwd: ws.path };
+        emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
+      } catch (err) {
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't prepare the git workspace: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
+        return;
+      }
     }
 
     let bin: string;
