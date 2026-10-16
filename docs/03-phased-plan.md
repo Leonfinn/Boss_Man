@@ -11,7 +11,7 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 | 2 Agent execution | Merged (#3). |
 | 3 Work management and scheduler | Merged (#4). |
 | 4 Decision queue | Merged (#5): ranked queue, stale-blocker sweep and stalled-run rows. The queue UI isn't built. |
-| 5 Engagements | Request, accept, engagement blockers and charge-back are built. Still to do: deliver, sign-off and deploy targets. |
+| 5 Engagements and deploy targets | Engagement lifecycle merged (#6): counter, owner approval, deliver, sign-off, credential guard, charge-back cap. Deploy targets in review: production deploys go to the owner, and target secrets reach only the approved deploy run. |
 | 6 Budgets | Mostly built early with credit tracking: funding sources, billing cycles, quota samples, budgets that pause, fail-closed admission. Still to do: alert-once hygiene (R34). |
 | Web UI | Not started. The screens are designed on the canvas. |
 | Production runner image | Not started. The spike image proves the approach. |

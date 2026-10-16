@@ -13,6 +13,7 @@ import type { Db } from "./db/client.js";
 import { companies, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
 import type { decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
+import { DeployError, type deploysService } from "./services/deploys.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -28,9 +29,9 @@ const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], is
 
 export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
 
-type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService> };
+type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService> };
 
-function buildServer(db: Db, { decisions, engagements }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -191,6 +192,42 @@ function buildServer(db: Db, { decisions, engagements }: Services, scope: Scope,
         return text(`${result.note} The engagement is now ${result.engagement.status.replace("_", " ")}.`);
       } catch (err) {
         if (err instanceof EngagementError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "deploy",
+    {
+      description:
+        "Ship work to one of your company's deploy targets. action: targets (list them), request (target, ref, optional notes and ticketId; production targets wait for the owner, and you're woken in a run that holds the target's secrets once approved), report (deployId and outcome, from that run, when the deploy is done).",
+      inputSchema: {
+        action: z.enum(["targets", "request", "report"]),
+        target: z.string().optional(),
+        ref: z.string().min(1).max(200).optional(),
+        notes: z.string().max(2000).optional(),
+        ticketId: z.string().uuid().optional(),
+        deployId: z.string().uuid().optional(),
+        outcome: z.enum(["succeeded", "failed"]).optional(),
+      },
+    },
+    async (input) => {
+      try {
+        if (input.action === "targets") {
+          const ts = await deploys.listTargets(scope.companyId);
+          return text(JSON.stringify(ts.map((t) => ({ name: t.name, kind: t.kind, endpoint: t.endpoint, production: t.isProduction }))));
+        }
+        if (input.action === "request") {
+          if (!input.target || !input.ref) return fail("Give the target and the ref to deploy.");
+          const r = await deploys.request({ companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId }, { target: input.target, ref: input.ref, notes: input.notes, ticketId: input.ticketId });
+          return text(`Deploy ${r.deploy.id}: ${r.note}`);
+        }
+        if (!input.deployId || !input.outcome) return fail("Give the deployId and the outcome.");
+        const d = await deploys.report({ companyId: scope.companyId, runId: scope.runId }, { deployId: input.deployId, outcome: input.outcome, notes: input.notes });
+        return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.`);
+      } catch (err) {
+        if (err instanceof DeployError) return fail(err.message);
         throw err;
       }
     },

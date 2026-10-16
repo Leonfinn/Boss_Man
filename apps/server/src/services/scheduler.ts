@@ -34,6 +34,8 @@ export type WakeInput = {
   note?: string | null;
   priority?: number;
   causedByRunId?: string | null;
+  /** The wake carries out this approved deploy; its run gets the target's secrets. */
+  deployId?: string | null;
 };
 
 type Alert = (companyId: string, question: string) => Promise<unknown>;
@@ -44,6 +46,8 @@ export function schedulerService(
     runners: ReturnType<typeof runnersService>;
     funding: ReturnType<typeof fundingService>;
     alert: Alert;
+    /** Binds a deploy to its run before launch, so the run's first secrets fetch includes the target. */
+    deploys?: { bindRun(deployId: string, runId: string): Promise<unknown>; unbindRun(deployId: string): Promise<unknown> };
     workspaceRoot?: string;
     limits?: Partial<Limits>;
     now?: () => Date;
@@ -89,6 +93,7 @@ export function schedulerService(
     const [ticket] = w.ticketId ? await db.select({ engagementId: tickets.engagementId }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, model: agent.model, startedAt: now() });
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
+    if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     const sent = deps.runners.send(runner.id, {
       type: "run.start",
       runId,
@@ -101,6 +106,7 @@ export function schedulerService(
       mcpToken,
     });
     if (!sent) {
+      if (w.deployId) await deps.deploys?.unbindRun(w.deployId);
       await db.delete(runs).where(eq(runs.id, runId));
       return { ok: false, reason: "runner offline" };
     }
@@ -133,6 +139,7 @@ export function schedulerService(
         causationDepth: depth,
         causedByRunId: input.causedByRunId ?? null,
         causedByAgentId,
+        deployId: input.deployId ?? null,
       };
 
       if (depth > limits.maxDepth) {

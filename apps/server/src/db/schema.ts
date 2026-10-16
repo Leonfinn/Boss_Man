@@ -293,6 +293,8 @@ export const wakes = pgTable(
     statusReason: text("status_reason"),
     notBefore: timestamp("not_before", { withTimezone: true }),
     runId: uuid("run_id"),
+    /** Set when this wake carries out an approved deploy; that run alone gets the target's secrets. */
+    deployId: uuid("deploy_id").references((): AnyPgColumn => deploys.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     launchedAt: timestamp("launched_at", { withTimezone: true }),
   },
@@ -432,6 +434,26 @@ export const deployTargets = pgTable("deploy_targets", {
   isProduction: boolean("is_production").notNull().default(false),
   rules: jsonb("rules").notNull().default({}),
   createdAt: createdAt(),
+});
+
+export const deployStatus = pgEnum("deploy_status", ["pending_approval", "approved", "rejected", "running", "succeeded", "failed"]);
+
+/** A request to ship something to a deploy target (R14, R15). Production targets wait for the owner. */
+export const deploys = pgTable("deploys", {
+  id: id(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  targetId: uuid("target_id").notNull().references(() => deployTargets.id, { onDelete: "cascade" }),
+  agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+  /** What to ship: a git ref, image tag or release name. */
+  ref: text("ref").notNull(),
+  notes: text("notes"),
+  status: deployStatus("status").notNull().default("pending_approval"),
+  /** The run that carries the deploy out; only it receives the target's secrets. */
+  runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+  outcome: text("outcome"),
+  createdAt: createdAt(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
 });
 
 export const secretGrants = pgTable(
