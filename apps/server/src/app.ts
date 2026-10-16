@@ -7,11 +7,12 @@ import { SECRET_KINDS, SYSTEM_STATES, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, owners, sessions } from "./db/schema.js";
+import { agents, companies, engagements, owners, sessions } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
+import { EngagementError, engagementsService } from "./services/engagements.js";
 import { workService, WorkError } from "./services/work.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -74,11 +75,14 @@ export async function buildApp(opts: AppOptions) {
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
   });
   decisionsSvc.setWakeHook((w) => scheduler.wake(w));
+  const engagementsSvc = engagementsService(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now });
+  engagementsSvc.setWakeHook((w) => scheduler.wake(w));
+  decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
   runners.onEvent((_runner, event) => {
     if (event.type === "run.ended") void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed"));
   });
   const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now });
-  await mcpRoutes(app, db, decisionsSvc, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   const work = workService(db, {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
@@ -186,6 +190,13 @@ export async function buildApp(opts: AppOptions) {
         return { company: company!, ceo: ceo! };
       });
       return reply.code(201).send(result);
+    });
+
+    owner.patch("/api/companies/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean() }).partial().parse(req.body);
+      const [c] = await db.update(companies).set(b).where(eq(companies.id, id)).returning();
+      return c ?? reply.code(404).send({ error: "not_found" });
     });
 
     owner.get("/api/companies", async () => {
@@ -444,9 +455,56 @@ export async function buildApp(opts: AppOptions) {
       }
     });
 
+    // Engagements (R23–R26). The owner can act for either side.
+    const Terms = {
+      scope: z.string().min(1).max(5000),
+      deliverables: z.string().max(2000).optional(),
+      acceptanceCriteria: z.array(z.string().min(1)).min(1).max(10),
+      budgetCapUsd: z.number().positive().optional(),
+    };
+    const engagementErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof EngagementError) return reply.code(err.status).send({ error: "engagement", message: err.message });
+      throw err;
+    };
+    owner.get("/api/engagements", async () => engagementsSvc.list());
+    owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id).catch(engagementErrors(reply)));
+    owner.post("/api/engagements", async (req, reply) => {
+      const b = z
+        .object({ requesterCompanyId: Uuid, providerCompanyId: Uuid, requesterProjectId: Uuid.optional(), title: z.string().trim().min(1).max(200), ...Terms })
+        .parse(req.body);
+      return engagementsSvc
+        .request({ companyId: b.requesterCompanyId, agentId: null }, b)
+        .then((e) => reply.code(201).send(e))
+        .catch(engagementErrors(reply));
+    });
+    owner.post("/api/engagements/:id/actions", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const Msg = z.string().min(1).max(5000);
+      const b = z
+        .object({ as: z.enum(["requester", "provider"]) })
+        .and(
+          z.discriminatedUnion("action", [
+            z.object({ action: z.literal("accept") }),
+            z.object({ action: z.literal("reject"), message: Msg.optional() }),
+            z.object({ action: z.literal("counter"), message: Msg, ...z.object(Terms).partial().shape }),
+            z.object({ action: z.literal("accept_counter") }),
+            z.object({ action: z.literal("withdraw"), message: Msg.optional() }),
+            z.object({ action: z.literal("message"), message: Msg }),
+            z.object({ action: z.literal("deliver"), summary: Msg, refs: z.array(z.string().max(500)).max(20).optional() }),
+            z.object({ action: z.literal("sign_off"), message: Msg.optional() }),
+            z.object({ action: z.literal("request_revision"), message: Msg }),
+          ]),
+        )
+        .parse(req.body);
+      const [e] = await db.select().from(engagements).where(eq(engagements.id, id));
+      if (!e) return reply.code(404).send({ error: "not_found" });
+      const { as, ...action } = b;
+      return engagementsSvc.act(id, { companyId: as === "requester" ? e.requesterCompanyId : e.providerCompanyId, agentId: null }, action).catch(engagementErrors(reply));
+    });
+
     // Stale-blocker and stalled-run sweeps (R21, R32); also run on a timer.
     owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc };
 }

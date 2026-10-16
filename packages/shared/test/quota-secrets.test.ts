@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { normaliseUtilization, parseAcpUsageCost, parseClaudeRateLimit, parseCodexRateLimits } from "../src/quota.js";
-import { checkSecretFormat, normaliseSecret, secretHint } from "../src/secrets.js";
+import { checkSecretFormat, findCredential, normaliseSecret, secretHint } from "../src/secrets.js";
 
 describe("parseClaudeRateLimit", () => {
   // Shape copied from spike S2's real run (claude-agent-acp 0.91.0, setup-token).
@@ -98,5 +98,19 @@ describe("secrets", () => {
   it("shows at most the last four characters", () => {
     expect(secretHint("sk-ant-oat01-abcdefgh1234")).toBe("••••1234");
     expect(secretHint("short")).toBe("••••");
+  });
+});
+
+describe("findCredential", () => {
+  it("spots common secret shapes", () => {
+    expect(findCredential("token sk-ant-oat01-abcdefghijklmnop")).toBe("an Anthropic key or token");
+    expect(findCredential("use ghp_0123456789abcdefghijABCDEFGHIJ")).toBe("a GitHub token");
+    expect(findCredential("-----BEGIN OPENSSH PRIVATE KEY-----")).toBe("a private key");
+    expect(findCredential("postgres://app:hunter2@db:5432/app")).toBe("a password in a URL");
+    expect(findCredential("AKIAIOSFODNN7EXAMPLE")).toBe("an AWS access key");
+  });
+  it("lets ordinary deliverables through", () => {
+    expect(findCredential("Deployed v1.4 (git tag v1.4.0, commit 7d2d5cb). Health check: https://app.lan/healthz")).toBeNull();
+    expect(findCredential("Set APP_TOKEN from the grant named app-deploy; the value is in the secrets store.")).toBeNull();
   });
 });

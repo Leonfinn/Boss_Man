@@ -8,11 +8,11 @@ import { and, eq, gt, ne } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { usdToMicros } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { companies, engagements, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
+import { companies, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
 import type { decisionsService } from "./services/decisions.js";
+import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -28,7 +28,9 @@ const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], is
 
 export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
 
-function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, scope: Scope, hooks: McpHooks) {
+type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService> };
+
+function buildServer(db: Db, { decisions, engagements }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -40,16 +42,25 @@ function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, sco
   server.registerTool(
     "create_ticket",
     {
-      description: "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one.",
-      inputSchema: { title: z.string().min(1).max(200), body: z.string().max(10_000).optional(), project: z.string().optional() },
+      description:
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for.",
+      inputSchema: { title: z.string().min(1).max(200), body: z.string().max(10_000).optional(), project: z.string().optional(), engagementId: z.string().uuid().optional() },
     },
-    async ({ title, body, project }) => {
+    async ({ title, body, project, engagementId }) => {
       const p = await resolveProject(project);
       if (!p) {
         const names = (await db.select({ name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId))).map((r) => r.name);
         return fail(names.length ? `Name the project: one of ${names.join(", ")}.` : "Your company has no projects yet; ask your CEO to create one.");
       }
-      const [t] = await db.insert(tickets).values({ companyId: scope.companyId, projectId: p.id, title, body }).returning({ id: tickets.id });
+      if (engagementId) {
+        try {
+          await engagements.linkTicket(engagementId, scope.companyId);
+        } catch (err) {
+          if (err instanceof EngagementError) return fail(err.message);
+          throw err;
+        }
+      }
+      const [t] = await db.insert(tickets).values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null }).returning({ id: tickets.id });
       return text(`Created ticket ${t!.id} in ${p.name}.`);
     },
   );
@@ -137,21 +148,51 @@ function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, sco
         return fail(`No other company called "${input.providerCompany}". Companies: ${names.join(", ") || "none"}.`);
       }
       const project = input.project ? await resolveProject(input.project) : await resolveProject();
-      const [eng] = await db
-        .insert(engagements)
-        .values({
-          requesterCompanyId: scope.companyId,
-          requesterProjectId: project?.id ?? null,
-          providerCompanyId: provider.id,
-          title: input.title,
-          scope: input.scope,
-          deliverables: input.deliverables,
-          acceptanceCriteria: input.acceptanceCriteria,
-          budgetCapMicros: input.budgetCapUsd != null ? usdToMicros(input.budgetCapUsd) : null,
-        })
-        .returning({ id: engagements.id });
-      await decisions.offerEngagement(eng!.id);
-      return text(`Engagement ${eng!.id} sent to ${provider.name}.`);
+      try {
+        const eng = await engagements.request(
+          { companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId },
+          { ...input, providerCompanyId: provider.id, requesterProjectId: project?.id ?? null },
+        );
+        return text(`Engagement ${eng.id} sent to ${provider.name}. You'll be woken when they respond. To make a ticket wait for it, the owner can add the engagement as a dependency.`);
+      } catch (err) {
+        if (err instanceof EngagementError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "engagement",
+    {
+      description:
+        "Work on an engagement between your company and another. action: list (your company's engagements), view (status, terms and thread), message, and the lifecycle steps. As the provider: accept, reject, counter (with changed terms), deliver (summary plus refs). As the requester: accept_counter, withdraw, sign_off, request_revision. Never put credentials in an engagement.",
+      inputSchema: {
+        action: z.enum(["list", "view", "accept", "reject", "counter", "accept_counter", "withdraw", "message", "deliver", "sign_off", "request_revision"]),
+        engagementId: z.string().uuid().optional(),
+        message: z.string().max(5000).optional(),
+        summary: z.string().max(5000).optional(),
+        refs: z.array(z.string().max(500)).max(20).optional(),
+        scope: z.string().max(5000).optional(),
+        deliverables: z.string().max(2000).optional(),
+        acceptanceCriteria: z.array(z.string().min(1)).max(10).optional(),
+        budgetCapUsd: z.number().positive().optional(),
+      },
+    },
+    async (input) => {
+      try {
+        if (input.action === "list") return text(JSON.stringify(await engagements.list(scope.companyId)));
+        if (!input.engagementId) return fail("Give the engagementId.");
+        if (input.action === "view") return text(JSON.stringify(await engagements.view(input.engagementId, scope.companyId)));
+        const needs = (field: "message" | "summary") => (input[field] ? null : fail(`The ${input.action.replace("_", " ")} action needs a ${field}.`));
+        const missing =
+          input.action === "counter" || input.action === "message" || input.action === "request_revision" ? needs("message") : input.action === "deliver" ? needs("summary") : null;
+        if (missing) return missing;
+        const result = await engagements.act(input.engagementId, { companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId }, input as EngagementAction);
+        return text(`${result.note} The engagement is now ${result.engagement.status.replace("_", " ")}.`);
+      } catch (err) {
+        if (err instanceof EngagementError) return fail(err.message);
+        throw err;
+      }
     },
   );
 
@@ -171,7 +212,7 @@ function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, sco
   return server;
 }
 
-export async function mcpRoutes(app: FastifyInstance, db: Db, decisions: ReturnType<typeof decisionsService>, hooks: McpHooks = {}) {
+export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services, hooks: McpHooks = {}) {
   const handler = async (req: import("fastify").FastifyRequest, reply: import("fastify").FastifyReply) => {
     const header = req.headers.authorization;
     const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
@@ -184,7 +225,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, decisions: ReturnT
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 
     // Stateless: a fresh server and transport per request.
-    const server = buildServer(db, decisions, scope, hooks);
+    const server = buildServer(db, services, scope, hooks);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {

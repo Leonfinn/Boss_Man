@@ -41,8 +41,11 @@ const DENY = "Deny";
 
 type WakeHook = (input: { agentId: string; reason: string; ticketId?: string | null; note?: string | null; priority?: number }) => Promise<unknown>;
 
+type EngagementHook = (engagementId: string, approved: boolean) => Promise<unknown>;
+
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date()) {
   let wake: WakeHook | null = null;
+  let onEngagement: EngagementHook | null = null;
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true) {
@@ -171,23 +174,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       });
     },
 
-    async offerEngagement(engagementId: string) {
-      const [eng] = await db.select().from(engagements).where(eq(engagements.id, engagementId));
-      if (!eng) return null;
-      const [from] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, eng.requesterCompanyId));
-      const [row] = await db
-        .insert(decisions)
-        .values({
-          companyId: eng.providerCompanyId,
-          kind: "engagement",
-          question: `${from?.name ?? "A company"} asks: ${eng.title}`,
-          options: ["Accept", "Decline"],
-          recommendedOption: "Accept",
-          context: { type: "engagement", engagementId },
-          dedupeKey: `engagement:${engagementId}`,
-        })
-        .returning();
-      return row!;
+    /** Moves a blocked ticket to ready once nothing blocks it, and wakes its assignee. */
+    release: (ticketId: string) => releaseIfFree(ticketId),
+
+    setEngagementHook(hook: EngagementHook) {
+      onEngagement = hook;
     },
 
     setWakeHook(hook: WakeHook) {
@@ -310,7 +301,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // The agent resumes now, so the wait for the owner doesn't count as a stall.
         await db.update(runs).set({ lastEventAt: now() }).where(eq(runs.id, ctx.runId));
       } else if (ctx.type === "engagement") {
-        await db.update(engagements).set({ status: answer === "Accept" ? "accepted" : "rejected" }).where(eq(engagements.id, ctx.engagementId));
+        await onEngagement?.(ctx.engagementId, answer === "Approve");
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {

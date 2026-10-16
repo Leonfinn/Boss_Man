@@ -2,6 +2,7 @@
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   check,
@@ -47,6 +48,8 @@ export const companies = pgTable("companies", {
   mission: text("mission"),
   /** Company kill switch (R30): no new runs start while set. */
   paused: boolean("paused").notNull().default(false),
+  /** An engagement this company agrees to provide waits for the owner's approval (R23). */
+  ownerApprovesEngagements: boolean("owner_approves_engagements").notNull().default(true),
   createdAt: createdAt(),
 });
 
@@ -161,6 +164,8 @@ export const tickets = pgTable(
     columnId: uuid("column_id").references(() => workflowColumns.id, { onDelete: "set null" }),
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
     keyResultId: uuid("key_result_id").references(() => keyResults.id, { onDelete: "set null" }),
+    /** Set on the provider's tickets that do work for an engagement; their runs are charged back (R26). */
+    engagementId: uuid("engagement_id").references((): AnyPgColumn => engagements.id, { onDelete: "set null" }),
     assigneeAgentId: uuid("assignee_agent_id").references(() => agents.id, { onDelete: "set null" }),
     assignedToOwner: boolean("assigned_to_owner").notNull().default(false),
     dueDate: date("due_date"),
@@ -220,6 +225,10 @@ export const engagements = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").notNull().default([]),
     budgetCapMicros: micros("budget_cap_micros"),
     status: engagementStatus("status").notNull().default("requested"),
+    /** The provider's proposed changes while status is countered. */
+    counterTerms: jsonb("counter_terms"),
+    /** What the provider handed over: a summary plus git refs, artifact links or instructions. */
+    delivery: jsonb("delivery"),
     createdAt: createdAt(),
   },
   (t) => [check("engagements_distinct_companies", sql`${t.requesterCompanyId} <> ${t.providerCompanyId}`)],
@@ -229,6 +238,8 @@ export const engagementMessages = pgTable("engagement_messages", {
   id: id(),
   engagementId: uuid("engagement_id").notNull().references(() => engagements.id, { onDelete: "cascade" }),
   fromCompanyId: uuid("from_company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  /** What the message records: a plain message, or a step such as "accepted" or "delivered". */
+  kind: text("kind").notNull().default("message"),
   body: text("body").notNull(),
   createdAt: createdAt(),
 });
