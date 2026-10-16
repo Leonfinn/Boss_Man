@@ -10,7 +10,8 @@ import type { Db } from "./db/client.js";
 import { agents, companies, owners, sessions } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
-import { decisionsService } from "./services/decisions.js";
+import { AnswerError, decisionsService } from "./services/decisions.js";
+import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { workService, WorkError } from "./services/work.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -30,6 +31,10 @@ export type AppOptions = {
   limits?: Partial<Limits>;
   /** Where runners put each ticket's workspace. */
   workspaceRoot?: string;
+  /** Stale-blocker and stalled-run thresholds (R21, R32). */
+  sweepLimits?: Partial<SweepLimits>;
+  /** Clock for scheduling, sweeps and ranking; tests move it forward. */
+  now?: () => Date;
 };
 
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
@@ -57,13 +62,14 @@ export async function buildApp(opts: AppOptions) {
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
-  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command));
+  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now);
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const scheduler = schedulerService(db, {
     runners,
     funding,
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
+    now: opts.now,
     // Loop and runaway alerts land in the owner's decision queue.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
   });
@@ -71,6 +77,7 @@ export async function buildApp(opts: AppOptions) {
   runners.onEvent((_runner, event) => {
     if (event.type === "run.ended") void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed"));
   });
+  const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now });
   await mcpRoutes(app, db, decisionsSvc, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   const work = workService(db, {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
@@ -422,20 +429,24 @@ export async function buildApp(opts: AppOptions) {
       return { paused };
     });
 
-    // Decisions (ranking arrives in Phase 4; for now oldest first).
-    owner.get("/api/decisions", async () => decisionsSvc.listOpen());
+    // The decision queue (R20), ranked, with what each row holds up.
+    owner.get("/api/decisions", async () => decisionsSvc.queue());
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer } = z.object({ answer: z.string().min(1) }).parse(req.body);
+      const { answer, assigneeAgentId } = z.object({ answer: z.string().min(1), assigneeAgentId: Uuid.optional() }).parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer);
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
-        return reply.code(422).send({ error: "invalid_answer", message: (err as Error).message });
+        if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
+        throw err;
       }
     });
+
+    // Stale-blocker and stalled-run sweeps (R21, R32); also run on a timer.
+    owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps };
 }

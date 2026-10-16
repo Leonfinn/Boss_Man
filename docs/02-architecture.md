@@ -32,7 +32,7 @@ flowchart LR
     ACP1 & ACP2 & ACP3 -->|"MCP tools"| MCP
     RBG -->|"deploy target<br/>(socket proxy / SSH / GitOps)"| DT["Homelab services"]
   end
-  LED -.->|"optional later: Admin API cost_report"| ANT["Anthropic Console"]
+  LED -.->|"only with a Console organisation: Admin API cost_report"| ANT["Anthropic Console"]
 ```
 
 ### Server (`boss-man`)

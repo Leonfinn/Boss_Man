@@ -1,6 +1,6 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { eq, max } from "drizzle-orm";
+import { eq, max, sql } from "drizzle-orm";
 import type { JournalEntry, RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
@@ -19,13 +19,17 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   const connected = new Map<string, CommandSender>();
 
   async function apply(runner: Runner, event: RunnerEvent, at: Date) {
+    // Any word from a run counts as a sign of life for stall detection (R32).
+    if ("runId" in event && event.type !== "run.started") {
+      await db.update(runs).set({ lastEventAt: sql`greatest(${runs.lastEventAt}, ${at.toISOString()}::timestamptz)` }).where(eq(runs.id, event.runId));
+    }
     switch (event.type) {
       case "run.started":
         await db
           .insert(runs)
-          .values({ id: event.runId, companyId: runner.companyId, agentId: event.agentId, acpSessionId: event.acpSessionId, model: event.model, startedAt: at })
+          .values({ id: event.runId, companyId: runner.companyId, agentId: event.agentId, acpSessionId: event.acpSessionId, model: event.model, startedAt: at, lastEventAt: at })
           // The scheduler creates the run row at launch; the runner fills in the session.
-          .onConflictDoUpdate({ target: runs.id, set: { acpSessionId: event.acpSessionId, model: event.model } });
+          .onConflictDoUpdate({ target: runs.id, set: { acpSessionId: event.acpSessionId, model: event.model, lastEventAt: at } });
         return;
       case "run.ended":
         await db.update(runs).set({ endedAt: at, outcome: event.error ? `error: ${event.error}` : event.stopReason }).where(eq(runs.id, event.runId));

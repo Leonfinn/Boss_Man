@@ -2,6 +2,20 @@
 
 Each phase ends with a working build that has tests. The phases deal with the riskiest work first. Sizes are relative guesses (S/M/L), not commitments.
 
+## Status (16 Oct 2026)
+
+| Step | Status |
+|---|---|
+| Spikes S1–S3 | Answered. Quota windows are visible under a setup-token. There is no Admin API on an individual account, so credit is tracked from Boss Man's own run costs. |
+| 1 Foundation | Merged (#2). It reached `main` through #3. |
+| 2 Agent execution | In review (#3, targets `main`). |
+| 3 Work management and scheduler | In review (#4, stacked on #3). |
+| 4 Decision queue | Built: ranked queue, stale-blocker sweep and stalled-run rows. The queue UI isn't built. |
+| 5 Engagements | Request, accept, engagement blockers and charge-back are built. Still to do: deliver, sign-off and deploy targets. |
+| 6 Budgets | Mostly built early with credit tracking: funding sources, billing cycles, quota samples, budgets that pause, fail-closed admission. Still to do: alert-once hygiene (R34). |
+| Web UI | Not started. The screens are designed on the canvas. |
+| Production runner image | Not started. The spike image proves the approach. |
+
 ## Phase 0: spikes (settle the unknowns before building on them)
 
 | Spike | Question | Pass condition | If it fails |
@@ -52,7 +66,8 @@ Each phase ends with a working build that has tests. The phases deal with the ri
    - Deploy targets (socket proxy, SSH, git) with granted credentials.
 6. **Budgets (M)**
    - Funding sources and budget policies (billing-cycle, monthly and lifetime windows; soft and hard limits).
-   - API-credit spend from Boss Man's own run records (the Admin API cost-report poller is optional, for later).
+   - API-credit spend from Boss Man's own run records. The Admin API isn't available on an individual Console account (S3). A cost-report poller only becomes possible if the owner later moves to a Console organisation.
+   - Quota windows from `_claude/rateLimit` (S1 passed, so this is v1 rather than v1.1), with the scheduler holding low-priority work while a window is full.
    - Pausing a scope when its hard limit is reached.
 
 **v1 is done when Boss Man can build itself.** At that point:
@@ -66,7 +81,6 @@ Until then, development continues in Claude Code, with Paperclip still in use fo
 - Roadmap view: a milestone timeline grouped by objective and company.
 - Plan view: a dependency graph with blocked chains highlighted.
 - Configurable CEO decision rules.
-- Quota display, if S1 passes.
 - Secrets management screen: rotation, grants, and the access log.
 
 ## Later
