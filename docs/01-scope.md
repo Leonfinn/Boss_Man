@@ -67,6 +67,7 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 ### Companies, security and secrets
 
 - **R12.** Each company has its **own runner container**, its own workspace volumes and its own secrets.
+- **R13a.** When a token is saved, Boss Man strips whitespace and checks it with a cheap test call. Spike S2's first real run failed with HTTP 401 because a pasted setup-token held a stray whitespace character.
 - **R13.** A **master secrets store** is owned by the owner. Companies receive **grants**, which are references to a secret rather than copies. Every use is logged. Rotating a secret updates every grant.
 - **R14.** **Deploy targets** are named connections: an SSH host, a Docker endpoint or a git repo. Each has granted credentials and rules. The docs recommend a Docker socket proxy, GitOps or a restricted SSH user, never the raw `docker.sock`.
 - **R15.** Any action that touches production goes through the decision tiers. Production deploys go to the owner by default.

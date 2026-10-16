@@ -7,7 +7,28 @@
 - answer `session/request_permission` by policy;
 - pass Boss Man's MCP server through to the agent?
 
-**Status (2026-10-16):** **passed with a stub model.** Every check below passed for both agents inside the runner container, which ran with no network access. A run against a **real model** is still to do, using your own credentials (see below).
+**Status (2026-10-16):**
+- **Claude Code: passed against the real model.** It ran in the runner image on the owner's Mac with a `claude setup-token` token.
+- **Codex: passed with a stub model only.** Its real-model run is still to do.
+
+## Real-model run (Claude Code, setup-token)
+
+**Results.** 3 concurrent sessions, about 25 s in total, with 16–23 s per session.
+- Every session completed: it wrote `spike.txt`, created a ticket through Boss Man's MCP server with its own session token, and had `rm -rf /srv/precious` denied by policy. It then replied `SPIKE_DONE`.
+- Claude reported the denial as "User refused permission to run tool" and carried on.
+
+**What the run showed:**
+- **Default model.** A session with no model chosen ran on **`claude-sonnet-5-5`**. Boss Man must set the model explicitly for each agent.
+- **MCP tools are deferred.** Claude Code first called `ToolSearch` to load `mcp__bossman__create_ticket`, then called it. Nothing extra is needed, but MCP tool descriptions should be clear enough for the search to find them.
+- **Spike S1 is largely answered.** Under a setup-token, `usage_update._meta["_claude/rateLimit"]` carries the subscription quota windows. This field is an adapter-specific extension, not part of the ACP spec, and could change. Example:
+  ```json
+  {"status":"rejected","rateLimitType":"seven_day","overageStatus":"allowed","isUsingOverage":true,
+   "unifiedWindows":{"five_hour":{"utilization":0,"resetsAt":1792177800},
+                     "seven_day":{"utilization":1,"resetsAt":1792245600}}}
+  ```
+  So 5-hour and 7-day utilisation, reset times and overage state *are* available to Boss Man through ACP.
+- **Costs.** `usage_update.cost` gave a list-price estimate of about $0.032 per session.
+- **Token hygiene.** The first real attempt failed with HTTP 401 "Not logged in". The pasted setup-token held a stray whitespace character. **Boss Man's secrets store must strip whitespace and check a Claude token with a test call when it is saved.**
 
 ## What was tested
 
