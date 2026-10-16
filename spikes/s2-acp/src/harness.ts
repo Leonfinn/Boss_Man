@@ -255,7 +255,7 @@ async function main() {
           });
           s.stopReason = r.stopReason;
         } catch (e: any) {
-          s.error = String(e?.message ?? e);
+          s.error = String(e?.message ?? e) + (e?.data !== undefined ? ` ${JSON.stringify(e.data)}` : "");
         }
         s.ms = Date.now() - t0;
         s.markerFile = existsSync(path.join(s.cwd, "spike.txt"));
