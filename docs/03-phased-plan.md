@@ -8,9 +8,9 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 |---|---|
 | Spikes S1–S3 | Answered. Quota windows are visible under a setup-token. There is no Admin API on an individual account, so credit is tracked from Boss Man's own run costs. |
 | 1 Foundation | Merged (#2). It reached `main` through #3. |
-| 2 Agent execution | In review (#3, targets `main`). |
-| 3 Work management and scheduler | In review (#4, stacked on #3). |
-| 4 Decision queue | Built: ranked queue, stale-blocker sweep and stalled-run rows. The queue UI isn't built. |
+| 2 Agent execution | Merged (#3). |
+| 3 Work management and scheduler | Merged (#4). |
+| 4 Decision queue | In review (#5): ranked queue, stale-blocker sweep and stalled-run rows. The queue UI isn't built. |
 | 5 Engagements | Request, accept, engagement blockers and charge-back are built. Still to do: deliver, sign-off and deploy targets. |
 | 6 Budgets | Mostly built early with credit tracking: funding sources, billing cycles, quota samples, budgets that pause, fail-closed admission. Still to do: alert-once hygiene (R34). |
 | Web UI | Not started. The screens are designed on the canvas. |
