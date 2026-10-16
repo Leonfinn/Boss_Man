@@ -5,6 +5,7 @@ import { and, asc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
+  ownerReviews,
   rankDecision,
   recommendedVerdict,
   type BlockedTicket,
@@ -20,7 +21,7 @@ type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null }
   | { type: "engagement"; engagementId: string }
   | { type: "question" }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -28,7 +29,8 @@ export type DecisionContext =
   | { type: "deploy"; deployId: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
   | { type: "ticket_cap"; ticketId: string }
-  | { type: "budget_limit"; policyId: string };
+  | { type: "budget_limit"; policyId: string }
+  | { type: "risk_review"; ticketId: string; reviewer: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -38,10 +40,18 @@ export const CANCEL_RUN = "Cancel run";
 export const RAISE_BUDGET = "Raise it by half";
 export const HARD_STOP = "Make it a hard stop";
 export const LEAVE_BUDGET = "Leave it";
+export const APPROVE_PLAN = "Approve plan";
+export const KEEP_PLANNING = "Keep planning";
+export const APPROVE_MERGE = "Approve and merge";
+export const SEND_IT_BACK = "Send it back";
 
 export class AnswerError extends Error {}
 
-export type AnswerExtra = { assigneeAgentId?: string };
+export type AnswerExtra = {
+  assigneeAgentId?: string;
+  /** What to tell the agent, e.g. why a plan or a review went back. */
+  note?: string;
+};
 
 const ALLOW = "Allow once";
 const DENY = "Deny";
@@ -54,6 +64,8 @@ export type LoopHooks = {
   sendBack(ticketId: string, text: string, reviewer: string): Promise<unknown>;
   stopTicket(ticketId: string): Promise<unknown>;
   raiseCap(ticketId: string): Promise<unknown>;
+  /** Merges an approved ticket once the owner has signed off on it (R48). */
+  land(ticketId: string, reviewer: string): Promise<unknown>;
 };
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date()) {
@@ -136,9 +148,44 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return rows.map((r) => ({ name: r.name, match: r.condition as PolicyRuleSpec["match"], outcome: r.outcome }));
   }
 
+  /** Wakes the company's CEO to answer a decision put to it (R19). */
+  async function tellCeo(companyId: string, question: string) {
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
+    if (ceo && wake) await wake({ agentId: ceo.id, reason: "decision", note: `A decision is waiting for you: ${question}\nUse the decisions tool to read it and answer.` });
+  }
+
+  /** A plan from a plan-first ticket, put to the CEO, or to the owner for high-risk work (R40, R48). */
+  async function planRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
+    const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+    const [t] = run?.ticketId ? await db.select().from(tickets).where(eq(tickets.id, run.ticketId)) : [];
+    const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
+    const plan = event.detail ?? null;
+    if (t && plan) await db.update(tickets).set({ plan, lastActivityAt: now() }).where(eq(tickets.id, t.id));
+    const tier = !t || ownerReviews(t.risk) || agent?.role === "ceo" ? "owner" : "ceo";
+    const [row] = await db
+      .insert(decisions)
+      .values({
+        companyId: runner.companyId,
+        kind: "approval",
+        question: t ? `${agent?.name ?? "An agent"}'s plan for "${t.title}": approve it to start building?` : `${agent?.name ?? "An agent"} has a plan and wants to start building. Approve it?`,
+        options: [APPROVE_PLAN, KEEP_PLANNING],
+        recommendedOption: APPROVE_PLAN,
+        raisedByAgentId: run?.agentId ?? null,
+        tier,
+        dedupeKey: `permission:${event.requestId}`,
+        context: { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan },
+      })
+      .onConflictDoNothing()
+      .returning({ id: decisions.id, question: decisions.question });
+    if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
+    return { outcome: tier, rule: "Plans are approved before work starts", decisionId: row?.id ?? null };
+  }
+
   return {
     /** Called for every permission request a runner reports. */
     async onPermissionRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
+      // An agent asking to leave plan mode is presenting its plan for approval (R40).
+      if (event.kind === "switch_mode") return planRequest(runner, event);
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput };
       const { outcome, rule } = evaluatePermission(info, await rulesFor(runner.companyId));
       if (outcome === "allow" || outcome === "deny") {
@@ -166,9 +213,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return { outcome, rule, decisionId: row?.id ?? null };
       }
       const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, event.runId));
-      const [agent] = run?.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, run.agentId)) : [];
+      const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
       const what = (event.rawInput as { command?: unknown } | null)?.command;
       const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId };
+      // A CEO never approves its own request: those go to the owner.
+      const tier = outcome === "ceo" && agent?.role === "ceo" ? "owner" : outcome;
       const [row] = await db
         .insert(decisions)
         .values({
@@ -178,12 +227,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           options: [ALLOW, DENY],
           recommendedOption: recommendedVerdict(info) === "deny" ? DENY : ALLOW,
           raisedByAgentId: run?.agentId ?? null,
-          tier: outcome,
+          tier,
           dedupeKey: `permission:${event.requestId}`,
           context: { ...context, rule },
         })
         .onConflictDoNothing()
-        .returning({ id: decisions.id });
+        .returning({ id: decisions.id, question: decisions.question });
+      if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
@@ -217,7 +267,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const ctx = d.context as Extract<DecisionContext, { type: "permission" }> & { delivered?: boolean | "run_ended" };
         if (ctx.delivered !== false || ctx.runnerId !== runnerId) continue;
         const [run] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, ctx.runId));
-        const ok = !run?.endedAt && send(runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: d.answer === ALLOW ? "allow" : "deny" });
+        const ok = !run?.endedAt && send(runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: d.answer === ALLOW || d.answer === APPROVE_PLAN ? "allow" : "deny" });
         // Delivered, or the run is gone and there's nothing left to deliver to.
         if (ok || run?.endedAt || !run) {
           await db.update(decisions).set({ context: { ...ctx, delivered: ok ? true : "run_ended" } }).where(eq(decisions.id, d.id));
@@ -366,7 +416,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
       let delivered: boolean | null = null;
       if (ctx.type === "permission") {
-        delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: answer === ALLOW ? "allow" : "deny" });
+        const allowed = answer === ALLOW || answer === APPROVE_PLAN;
+        if (ctx.plan && allowed && ctx.ticketId) await db.update(tickets).set({ planApprovedAt: now() }).where(eq(tickets.id, ctx.ticketId));
+        if (ctx.plan && !allowed) {
+          // Sent before the verdict, so the agent picks it up as its next turn and keeps planning.
+          send(ctx.runnerId, {
+            type: "run.message",
+            runId: ctx.runId,
+            text: `Your plan wasn't approved yet.${extra.note ? ` Feedback: ${extra.note}` : ""} Revise the plan and present it again with ExitPlanMode.`,
+            interrupt: false,
+          });
+        }
+        delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: allowed ? "allow" : "deny" });
         if (!delivered) {
           // Never fail silently (R22): flag it, and re-send when the runner reconnects.
           await db.update(decisions).set({ context: { ...ctx, delivered: false } }).where(eq(decisions.id, id));
@@ -395,6 +456,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (answer === "Stop work on it") await loopHooks?.stopTicket(ctx.ticketId);
         else if (ctx.type === "review_loop") await loopHooks?.sendBack(ctx.ticketId, ctx.message, ctx.reviewer);
         else await loopHooks?.raiseCap(ctx.ticketId);
+      } else if (ctx.type === "risk_review") {
+        await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+        if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
+        else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "budget_limit") {
         const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
         if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));

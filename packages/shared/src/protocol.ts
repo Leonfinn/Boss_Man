@@ -24,6 +24,8 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     kind: z.string().nullable(),
     rawInput: z.unknown(),
     optionKinds: z.array(z.string()),
+    /** Text the agent attached to the request, e.g. the plan when it asks to leave plan mode (R40). */
+    detail: z.string().max(20_000).optional(),
   }),
   z.object({
     type: z.literal("run.cost"),
@@ -73,6 +75,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     mcpToken: z.string(),
     /** Recovery (R42): try to reopen this ACP session; start a fresh one if it can't be loaded. */
     resumeSessionId: z.string().optional(),
+    /** Start in plan mode (R40): the agent plans and asks for approval before changing anything. */
+    mode: z.enum(["plan"]).optional(),
     /** Git workspace (R38): the run works in the ticket's worktree instead of cwd. */
     workspace: z.object({ projectId: Uuid, ticketId: Uuid, repoUrl: z.string(), baseRef: z.string() }).optional(),
   }),

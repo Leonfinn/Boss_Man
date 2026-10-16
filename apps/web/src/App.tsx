@@ -11,6 +11,7 @@ import { Engagement, Engagements } from "./pages/Engagements";
 import { Run } from "./pages/Run";
 import { Runs } from "./pages/Runs";
 import { Settings } from "./pages/Settings";
+import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
 import { Funding } from "./pages/Funding";
@@ -84,6 +85,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Funding companies={list} />
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
+        ) : page === "tickets" && route[1] ? (
+          <Ticket key={route[1]} id={route[1]} />
         ) : page === "rules" ? (
           <Rules companies={list} companyId={route[1]} go={go} />
         ) : page === "secrets" ? (

@@ -38,6 +38,14 @@ export type SessionManagerOptions = {
   log?: (msg: string) => void;
 };
 
+type ToolCallContent = { type: string; content?: { type: string; text?: string } };
+const isEmpty = (v: unknown) => v == null || (typeof v === "object" && Object.keys(v as object).length === 0);
+/** The text parts of a tool call's content. */
+const textOf = (content: ToolCallContent[] | null | undefined) =>
+  (content ?? [])
+    .flatMap((c) => (c.type === "content" && c.content?.type === "text" && c.content.text ? [c.content.text] : []))
+    .join("\n\n");
+
 const CLAUDE_ALIASES = new Set(["default", "opus", "sonnet", "haiku", "fable"]);
 const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
 
@@ -256,12 +264,18 @@ export class SessionManager {
     });
 
     const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
+    const toolCalls = new Map<string, { rawInput: unknown; text: string }>();
     this.runs.set(cmd.runId, state);
     this.saveState();
 
     const onPermission = (req: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
       const requestId = randomUUID();
       const pick = (kind: string) => req.options.find((o) => o.kind === kind);
+      // The request only adds what's new since the tool call was announced, so fill in its input
+      // and text (e.g. the plan when the agent asks to leave plan mode) from what was seen then.
+      const seen = toolCalls.get(req.toolCall.toolCallId);
+      const rawInput = isEmpty(req.toolCall.rawInput) ? (seen?.rawInput ?? req.toolCall.rawInput ?? null) : req.toolCall.rawInput;
+      const detail = (textOf(req.toolCall.content) || seen?.text || "").slice(0, 20_000);
       // Register for the verdict before announcing the request, so a fast verdict can't be lost.
       const verdict = new Promise<RequestPermissionResponse>((resolve) => {
         const settle = (v: "allow" | "deny") => {
@@ -279,8 +293,9 @@ export class SessionManager {
         requestId,
         title: req.toolCall.title ?? null,
         kind: req.toolCall.kind ?? null,
-        rawInput: req.toolCall.rawInput ?? null,
+        rawInput,
         optionKinds: req.options.map((o) => o.kind),
+        ...(detail ? { detail } : {}),
       });
       return verdict;
     };
@@ -289,9 +304,18 @@ export class SessionManager {
       const u = n.update as Record<string, unknown> & { sessionUpdate: string };
       switch (u.sessionUpdate) {
         case "tool_call":
-        case "tool_call_update":
+        case "tool_call_update": {
+          // Remembered for a permission request about the same call; bounded per run.
+          const id = u.toolCallId as string | undefined;
+          if (id) {
+            const prev = toolCalls.get(id) ?? { rawInput: null, text: "" };
+            const text = textOf(u.content as ToolCallContent[] | undefined);
+            toolCalls.set(id, { rawInput: isEmpty(u.rawInput) ? prev.rawInput : u.rawInput, text: text || prev.text });
+            if (toolCalls.size > 200) toolCalls.delete(toolCalls.keys().next().value!);
+          }
           emit({ type: "run.update", runId: cmd.runId, update: { kind: u.sessionUpdate, title: u.title ?? null, toolKind: u.kind ?? null, status: u.status ?? null } });
           return;
+        }
         case "agent_message_chunk": {
           const content = u.content as { type?: string; text?: string } | undefined;
           if (content?.type === "text" && content.text) messageText += content.text;
@@ -360,19 +384,19 @@ export class SessionManager {
       const mcpServers = [{ type: "http" as const, name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
       // Recovery (R42): reopen the interrupted session if the agent can, else start fresh.
       // A crash before Claude Code flushes its transcript leaves nothing to load (spike S4).
-      const openSession = async (): Promise<{ sessionId: string; configOptions?: unknown[] | null }> => {
+      const openSession = async (): Promise<{ sessionId: string; configOptions?: unknown[] | null; resumed: boolean }> => {
         if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
           try {
             const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers });
             emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
-            return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null };
+            return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null, resumed: true };
           } catch (err) {
             this.opts.log?.(`couldn't reopen session ${cmd.resumeSessionId}: ${String((err as Error)?.message ?? err)}; starting fresh`);
           }
         }
         const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers });
         if (cmd.resumeSessionId) emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "fresh" } });
-        return fresh as { sessionId: string; configOptions?: unknown[] | null };
+        return { ...(fresh as { sessionId: string; configOptions?: unknown[] | null }), resumed: false };
       };
       const session = await openSession();
       state.sessionId = session.sessionId;
@@ -383,6 +407,10 @@ export class SessionManager {
         // Listed aliases are selected directly; anything else was pinned to "opus" at launch.
         const value = CLAUDE_ALIASES.has(cmd.model) ? cmd.model : "opus";
         await agent.request(methods.agent.session.setConfigOption, { sessionId: session.sessionId, configId: "model", value } as never);
+      }
+      // Plan-first tickets (R40) start in plan mode; a reopened session keeps the mode it had.
+      if (cmd.mode === "plan" && !session.resumed && cmd.agentKind === "claude") {
+        await agent.request(methods.agent.session.setMode, { sessionId: session.sessionId, modeId: "plan" });
       }
       if (!model) {
         const opt = (session.configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { currentValue?: string } | undefined;

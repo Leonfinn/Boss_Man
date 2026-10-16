@@ -2,9 +2,9 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { DEFAULT_GIT_TEMPLATES, formatReviewComments, renderTemplate, type MergeResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, ownerReviews, renderTemplate, riskOf, type MergeResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { projects, runners, runs, settings, tickets } from "../db/schema.js";
+import { decisions, projects, runners, runs, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 import type { runsService } from "./runs.js";
 import type { workService } from "./work.js";
@@ -30,7 +30,7 @@ export function reviewService(
 
   async function ticketWithRepo(ticketId: string, companyId?: string) {
     const [row] = await db
-      .select({ t: tickets, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, verifyCommand: projects.verifyCommand })
+      .select({ t: tickets, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, verifyCommand: projects.verifyCommand, deepVerifyCommand: projects.deepVerifyCommand })
       .from(tickets)
       .innerJoin(projects, eq(projects.id, tickets.projectId))
       .where(eq(tickets.id, ticketId));
@@ -91,6 +91,25 @@ export function reviewService(
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
       if (input.verdict === "approved") {
         await deps.loops.approved(ticketId, input.reviewer);
+        // High and critical work is the owner's to approve (R48): an agent's approval asks them.
+        if (input.reviewerAgentId && ownerReviews(t.risk)) {
+          const [d] = await db
+            .insert(decisions)
+            .values({
+              companyId: t.companyId,
+              kind: "approval",
+              question: `${input.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?`,
+              options: ["Approve and merge", "Send it back"],
+              recommendedOption: "Approve and merge",
+              raisedByAgentId: input.reviewerAgentId,
+              tier: "owner",
+              dedupeKey: `risk-review:${ticketId}:${Date.now()}`,
+              context: { type: "risk_review", ticketId, reviewer: input.reviewer },
+            })
+            .returning({ id: decisions.id });
+          await db.insert(ticketDependencies).values({ blockedTicketId: ticketId, blockerDecisionId: d!.id });
+          return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
+        }
         return { verdict: "approved" as const, ...(await this.land(ticketId, input.reviewer, input.causedByRunId)) };
       }
       if (!input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
@@ -118,7 +137,7 @@ export function reviewService(
      * uncommitted work sends the ticket back to the agent with what to do.
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null): Promise<{ outcome: "done" | "merged" | "verify_failed" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
-      const { t, repoUrl, defaultBranch, verifyCommand } = await ticketWithRepo(ticketId);
+      const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand } = await ticketWithRepo(ticketId);
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null };
@@ -137,13 +156,15 @@ export function reviewService(
         return tellAgent({ ...t, systemState: "in_progress" }, text, reason, reviewer, causedByRunId);
       };
 
-      if (verifyCommand) {
-        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command: verifyCommand }), 11 * 60_000);
+      // The project's check, plus its deeper one for high and critical work (R47, R48).
+      const checks = [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
+      for (const command of checks) {
+        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), 11 * 60_000);
         if (!v.ok) {
           const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
           // The same failing check again and again means the agent is going round in circles (R50).
-          const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${verifyCommand}` : v.output, what: "The check" });
-          const delivered = await sendBack(`The review was approved, but the check \`${verifyCommand}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
+          const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });
+          const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
           return { outcome: "verify_failed", delivered, detail: v };
         }
       }

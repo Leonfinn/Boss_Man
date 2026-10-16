@@ -8,6 +8,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   budget: { label: "Budget", tone: "blue" },
   engagement: { label: "Engagement", tone: "green" },
   approval: { label: "Approval", tone: "blue" },
+  plan: { label: "Plan", tone: "blue" },
   stale_blocker: { label: "Stale blocker", tone: "amber" },
   stalled_run: { label: "Stalled run", tone: "amber" },
   question: { label: "Question", tone: "" },
@@ -16,7 +17,8 @@ const KIND: Record<string, { label: string; tone: string }> = {
 
 function kindOf(d: Decision) {
   const ctx = (d as Decision & { context?: { type?: string } }).context;
-  return KIND[ctx?.type === "deploy" ? "deploy" : d.kind] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
+  const key = ctx?.type === "deploy" ? "deploy" : d.options.includes("Approve plan") ? "plan" : d.kind;
+  return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
 export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void }) {
@@ -24,13 +26,15 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [notes, setNotes] = useState<Record<string, string>>({});
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
   const answer = async (d: Decision, option: string) => {
     setBusy(d.id);
     try {
-      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option } });
+      const note = notes[d.id]?.trim();
+      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
@@ -113,6 +117,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <span key={r}>{r}</span>
                       ))}
                     </div>
+                    {d.context?.planText && (
+                      <details className="plan" open={!done}>
+                        <summary>The plan</summary>
+                        <pre>{d.context.planText}</pre>
+                      </details>
+                    )}
                     {done ? (
                       <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.</p>
                     ) : (
@@ -122,6 +132,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <strong>RECOMMENDED</strong>
                             {d.recommendedOption}
                           </p>
+                        )}
+                        {d.options.some((o) => o === "Keep planning" || o === "Send it back") && (
+                          <div className="field">
+                            <label htmlFor={`note-${d.id}`}>Note for the agent (if you send it back)</label>
+                            <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
+                          </div>
                         )}
                         <div className="actions">
                           {d.options.map((o) => (

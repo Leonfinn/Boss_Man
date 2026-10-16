@@ -75,6 +75,9 @@ export function schedulerService(
         lines.push("", `Ticket ${t.t.id} in project "${t.project}": ${t.t.title}`);
         if (t.t.body) lines.push("", t.t.body);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
+        if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
+        if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
+        else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", t.t.plan);
       }
     }
     if (w.note) lines.push("", w.note);
@@ -105,7 +108,7 @@ export function schedulerService(
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
     const [ticket] = w.ticketId
       ? await db
-          .select({ engagementId: tickets.engagementId, projectId: tickets.projectId, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch })
+          .select({ engagementId: tickets.engagementId, projectId: tickets.projectId, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt })
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(eq(tickets.id, w.ticketId))
@@ -124,6 +127,8 @@ export function schedulerService(
       fundingSourceId: agent.fundingSourceId,
       cwd: path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
+      // A plan-first ticket starts in plan mode until its plan is approved (R40).
+      ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && w.ticketId ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       prompt: await prompt(w, agent, company.name),
       mcpToken,

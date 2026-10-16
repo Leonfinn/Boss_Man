@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { api, type Board as BoardData, type Company, type Project } from "../api";
+import { api, RISKS, type Board as BoardData, type Company, type Project, type Risk } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
@@ -41,6 +41,58 @@ function QuickAdd({ label, button, onAdd }: { label: string; button: string; onA
       </div>
       <button className="btn primary" type="submit" disabled={busy}>
         {button}
+      </button>
+      {error && (
+        <p className="error" role="alert" style={{ flexBasis: "100%" }}>
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+/** New ticket: a title, how risky it is, and whether it should be planned first (R40, R48). */
+function NewTicket({ onAdd }: { onAdd: (t: { title: string; risk: Risk | null; planFirst: boolean }) => Promise<unknown> }) {
+  const [title, setTitle] = useState("");
+  const [risk, setRisk] = useState<Risk | "">("");
+  const [planFirst, setPlanFirst] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) return;
+    try {
+      await onAdd({ title: title.trim(), risk: risk || null, planFirst });
+      setTitle("");
+      setRisk("");
+      setPlanFirst(false);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  return (
+    <form onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
+      <div className="field" style={{ flex: "1 1 260px" }}>
+        <label htmlFor="new-ticket">New ticket</label>
+        <input id="new-ticket" value={title} onChange={(e) => setTitle(e.target.value)} />
+      </div>
+      <div className="field">
+        <label htmlFor="new-risk">Risk</label>
+        <select id="new-risk" value={risk} onChange={(e) => setRisk(e.target.value as Risk | "")}>
+          <option value="">Medium (default)</option>
+          {RISKS.filter((r) => r !== "medium").map((r) => (
+            <option key={r} value={r}>
+              {r[0]!.toUpperCase() + r.slice(1)}
+            </option>
+          ))}
+        </select>
+      </div>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
+        <input type="checkbox" checked={planFirst} onChange={(e) => setPlanFirst(e.target.checked)} />
+        Plan first
+      </label>
+      <button className="btn primary" type="submit">
+        Add to backlog
       </button>
       {error && (
         <p className="error" role="alert" style={{ flexBasis: "100%" }}>
@@ -116,11 +168,9 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
         )}
       </header>
       {current && (
-        <QuickAdd
-          label="New ticket"
-          button="Add to backlog"
-          onAdd={async (title) => {
-            await api(`/api/projects/${current.id}/tickets`, { method: "POST", body: { title } });
+        <NewTicket
+          onAdd={async (t) => {
+            await api(`/api/projects/${current.id}/tickets`, { method: "POST", body: t });
             board.reload();
           }}
         />
@@ -154,7 +204,15 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
                   const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
                   return (
                     <article className="ticket" key={t.id}>
-                      <h3>{t.title}</h3>
+                      <h3>
+                        <a href={`#/tickets/${t.id}`}>{t.title}</a>
+                      </h3>
+                      {(t.risk === "high" || t.risk === "critical" || (t.planFirst && !t.planApprovedAt)) && (
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {(t.risk === "high" || t.risk === "critical") && <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`}>{t.risk} risk</span>}
+                          {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
+                        </div>
+                      )}
                       {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a ticket") : `${t.blockedBy.length} things`}</span>}
                       {t.outcome === "cancelled" && <span className="tag">Cancelled</span>}
                       <div className="row">

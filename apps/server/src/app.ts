@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { SECRET_KINDS, SYSTEM_STATES, findCredential, usdToMicros } from "@boss-man/shared";
+import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, findCredential, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -168,6 +168,12 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
+    // A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
+    land: (ticketId, reviewer) =>
+      review.land(ticketId, reviewer).catch(async (err) => {
+        const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it" });
+      }),
     stopTicket: async (ticketId) => {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
@@ -517,6 +523,8 @@ export async function buildApp(opts: AppOptions) {
       keyResultId: Uuid.nullable(),
       dueDate: DateStr.nullable(),
       customFields: z.record(z.string(), z.unknown()),
+      risk: z.enum(RISK_TIERS).nullable(),
+      planFirst: z.boolean(),
       overLimit: z.boolean(),
     });
 
@@ -545,6 +553,7 @@ export async function buildApp(opts: AppOptions) {
             .nullable(),
           defaultBranch: z.string().trim().min(1).max(200),
           verifyCommand: z.string().trim().min(1).max(1000).nullable(),
+          deepVerifyCommand: z.string().trim().min(1).max(1000).nullable(),
           ticketCostCapUsd: z.number().positive().nullable(),
         })
         .partial()
@@ -569,6 +578,19 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const body = TicketFields.partial().required({ title: true }).parse(req.body);
       return reply.code(201).send(await work.createTicket(id, body));
+    });
+
+    /** One ticket with its project and assignee, for the ticket page. */
+    owner.get("/api/tickets/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [row] = await db
+        .select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, assignee: agents.name })
+        .from(tickets)
+        .innerJoin(projects, eq(projects.id, tickets.projectId))
+        .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+        .where(eq(tickets.id, id));
+      if (!row) return reply.code(404).send({ error: "not_found" });
+      return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, assignee: row.assignee };
     });
 
     owner.patch("/api/tickets/:id", async (req) => {
@@ -645,9 +667,9 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId } = z.object({ answer: z.string().min(1), assigneeAgentId: Uuid.optional() }).parse(req.body);
+      const { answer, assigneeAgentId, note } = z.object({ answer: z.string().min(1), assigneeAgentId: Uuid.optional(), note: z.string().trim().max(2000).optional() }).parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
