@@ -147,6 +147,7 @@ export async function buildApp(opts: AppOptions) {
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
   runners.onConnect((runnerId) => decisionsSvc.redeliver(runnerId));
+  runners.onResume((runner, pending) => decisionsSvc.resume(runner, pending));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   runners.onEvent((runner, event) => {
