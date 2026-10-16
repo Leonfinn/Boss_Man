@@ -1,0 +1,416 @@
+import { useState, type FormEvent, type ReactNode } from "react";
+import { api, type Company, type FundingSource, type Project } from "../api";
+import { usePoll } from "../hooks";
+import { when } from "./Runs";
+
+type RunnerStatus = { registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null };
+type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null };
+type Secret = { id: string; name: string; kind: string; hint: string | null };
+
+/** What each kind of credential is called inside an agent's environment by default. */
+const CREDENTIALS = [
+  { kind: "claude_oauth_token", label: "Claude setup-token", env: "CLAUDE_CODE_OAUTH_TOKEN", help: "Run `claude setup-token` on your own computer and paste the token it prints." },
+  { kind: "generic", label: "GitHub token", env: "GIT_TOKEN", help: "A fine-grained token for the company's repos, with Contents and Pull requests read and write." },
+  { kind: "anthropic_api_key", label: "Anthropic API key", env: "ANTHROPIC_API_KEY", help: "From the Anthropic Console. Runs on it are billed to your API credit." },
+  { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },
+  { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
+] as const;
+
+function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  return (
+    <section className="card" aria-labelledby={id} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <h2 id={id} style={{ fontSize: 17, fontWeight: 600 }}>
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+function useAction() {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const run = async (fn: () => Promise<string | void>) => {
+    setBusy(true);
+    try {
+      const msg = await fn();
+      setNote(msg ? { ok: true, text: msg } : null);
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const view = note && (
+    <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
+      {note.text}
+    </p>
+  );
+  return { busy, run, view };
+}
+
+function Runner({ company }: { company: Company }) {
+  const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
+  const [token, setToken] = useState<string | null>(null);
+  const act = useAction();
+  const s = status.data;
+  const issue = () =>
+    act.run(async () => {
+      if (s?.registered && !window.confirm("Issuing a new token disconnects the runner using the old one until you update it. Continue?")) return;
+      setToken((await api<{ token: string }>(`/api/companies/${company.id}/runner`, { method: "POST" })).token);
+      status.reload();
+    });
+  const file = `secrets/runner-${company.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}.token`;
+  return (
+    <Section id="runner-h" title="Runner">
+      {s && !s.registered && <p>This company has no runner yet. A runner is the container its agents work in; it connects out to this server, so it needs no open ports.</p>}
+      {s?.registered && (
+        <p style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", alignItems: "center" }}>
+          {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>}
+          {s.lastSeenAt && <span className="muted">Last seen {when(s.lastSeenAt)}</span>}
+          {s.imageVersion && <span className="mono muted">Image {s.imageVersion}</span>}
+          {s.diskUsedBytes != null && <span className="muted">Workspaces use {(s.diskUsedBytes / 1024 ** 3).toFixed(1)} GB</span>}
+        </p>
+      )}
+      {token ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <p>
+            <strong>Copy this token now; it isn't shown again.</strong> On the server, save it as <code className="mono">{file}</code> next to <code className="mono">docker-compose.yml</code>, readable only by uid 1000, then start the runner.
+          </p>
+          <pre className="mono codebox">{token}</pre>
+          <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={() => void navigator.clipboard?.writeText(token)}>
+            Copy token
+          </button>
+        </div>
+      ) : (
+        <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={act.busy} onClick={() => void issue()}>
+          {s?.registered ? "Issue a new runner token" : "Register a runner"}
+        </button>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
+function Credentials({ company }: { company: Company }) {
+  const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
+  const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
+  const [choice, setChoice] = useState(0);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [env, setEnv] = useState<string>(CREDENTIALS[0].env);
+  const [existing, setExisting] = useState("");
+  const act = useAction();
+  const c = CREDENTIALS[choice]!;
+
+  const add = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      let secretId = existing;
+      let warnings: string[] = [];
+      if (!secretId) {
+        const created = await api<{ secret: { id: string }; warnings: string[] }>("/api/secrets", { method: "POST", body: { name: name || `${company.name} ${c.label}`, kind: c.kind, value } });
+        secretId = created.secret.id;
+        warnings = created.warnings;
+      }
+      await api(`/api/secrets/${secretId}/grants`, { method: "POST", body: { companyId: company.id, envName: env } });
+      setValue("");
+      setName("");
+      setExisting("");
+      grants.reload();
+      secrets.reload();
+      return `Saved. ${company.name}'s agents now get it as ${env}.${warnings.length ? ` Note: ${warnings.join(" ")}` : ""}`;
+    });
+  };
+
+  return (
+    <Section id="creds-h" title="Credentials">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Values are encrypted on the server and never shown again; agents get them as environment variables. Each value is checked when saved, e.g. for stray spaces.
+      </p>
+      {grants.data?.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Variable</th>
+                <th scope="col">Secret</th>
+                <th scope="col">Ends in</th>
+                <th scope="col">Used for</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grants.data.map((g) => (
+                <tr key={g.id}>
+                  <td className="mono">{g.envName}</td>
+                  <td>{g.secretName}</td>
+                  <td className="mono muted">{g.hint ?? ""}</td>
+                  <td>{g.deployTargetId ? "One deploy target" : "Every run"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p>No credentials yet. Agents need at least a Claude setup-token or an API key to run.</p>
+      )}
+      <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", alignItems: "end" }}>
+        <div className="field">
+          <label htmlFor="cred-kind">Add</label>
+          <select
+            id="cred-kind"
+            value={choice}
+            onChange={(e) => {
+              const i = Number(e.target.value);
+              setChoice(i);
+              setEnv(CREDENTIALS[i]!.env);
+            }}
+          >
+            {CREDENTIALS.map((k, i) => (
+              <option key={k.label} value={i}>
+                {k.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {(secrets.data?.length ?? 0) > 0 && (
+          <div className="field">
+            <label htmlFor="cred-existing">Value</label>
+            <select id="cred-existing" value={existing} onChange={(e) => setExisting(e.target.value)}>
+              <option value="">A new value</option>
+              {secrets.data!.map((s) => (
+                <option key={s.id} value={s.id}>
+                  Reuse {s.name}
+                  {s.hint ? ` (${s.hint})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {!existing && (
+          <>
+            <div className="field">
+              <label htmlFor="cred-name">Name</label>
+              <input id="cred-name" placeholder={`${company.name} ${c.label}`} value={name} onChange={(e) => setName(e.target.value)} />
+            </div>
+            <div className="field">
+              <label htmlFor="cred-value">Value</label>
+              <input id="cred-value" type="password" autoComplete="off" spellCheck={false} required value={value} onChange={(e) => setValue(e.target.value)} />
+            </div>
+          </>
+        )}
+        <div className="field">
+          <label htmlFor="cred-env">Variable name</label>
+          <input id="cred-env" className="mono" required pattern="[A-Z_][A-Z0-9_]*" value={env} onChange={(e) => setEnv(e.target.value.toUpperCase())} />
+        </div>
+        <button className="btn primary" type="submit" disabled={act.busy}>
+          Save
+        </button>
+      </form>
+      <p className="muted" style={{ fontSize: 13 }}>
+        {c.help.split("`").map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part))}
+      </p>
+      {act.view}
+    </Section>
+  );
+}
+
+function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 30_000, "sources");
+  const [form, setForm] = useState({ name: "", kind: "subscription", provider: "anthropic", grant: "", anchor: "" });
+  const act = useAction();
+  const add = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      await api("/api/funding-sources", {
+        method: "POST",
+        body: {
+          name: form.name,
+          kind: form.kind,
+          provider: form.provider,
+          ...(form.kind === "api_credit" && form.grant ? { monthlyGrantUsd: Number(form.grant) } : {}),
+          ...(form.kind === "api_credit" && form.anchor ? { cycleAnchor: form.anchor } : {}),
+        },
+      });
+      setForm({ ...form, name: "", grant: "", anchor: "" });
+      sources.reload();
+      return "Added.";
+    });
+  };
+  const setAgent = (agentId: string, patch: Record<string, unknown>) =>
+    void act.run(async () => {
+      await api(`/api/agents/${agentId}`, { method: "PATCH", body: patch });
+      onChanged();
+      return "Saved.";
+    });
+  return (
+    <Section id="funding-h" title="Agents and what pays for them">
+      {sources.data?.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Agent</th>
+                <th scope="col">Kind</th>
+                <th scope="col">Model</th>
+                <th scope="col">Paid from</th>
+              </tr>
+            </thead>
+            <tbody>
+              {company.agents.map((a) => (
+                <tr key={a.id}>
+                  <th scope="row" style={{ fontWeight: 500 }}>
+                    {a.name}
+                    {a.role === "ceo" && <span className="muted"> · CEO</span>}
+                  </th>
+                  <td>{a.agentKind}</td>
+                  <td>
+                    <input
+                      aria-label={`Model for ${a.name}`}
+                      className="mono"
+                      defaultValue={a.model ?? ""}
+                      placeholder="default"
+                      style={{ minHeight: 36, padding: "4px 8px", border: "1px solid var(--line-strong)", borderRadius: 6, width: "100%" }}
+                      onBlur={(e) => e.target.value !== (a.model ?? "") && setAgent(a.id, { model: e.target.value || null })}
+                    />
+                  </td>
+                  <td>
+                    <select aria-label={`Funding for ${a.name}`} value={a.fundingSourceId ?? ""} onChange={(e) => setAgent(a.id, { fundingSourceId: e.target.value || null })} style={{ minHeight: 36 }}>
+                      <option value="">Not set</option>
+                      {sources.data!.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p>No funding sources yet. Add the subscription or API account agents run on, so their cost and quota are tracked.</p>
+      )}
+      <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", alignItems: "end" }}>
+        <div className="field">
+          <label htmlFor="fs-name">New funding source</label>
+          <input id="fs-name" required placeholder="Claude Max" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="fs-kind">Kind</label>
+          <select id="fs-kind" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+            <option value="subscription">Subscription (setup-token)</option>
+            <option value="api_credit">API credit, monthly grant</option>
+            <option value="api_payg">API, pay as you go</option>
+            <option value="usage_credits">Usage credits</option>
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="fs-provider">Provider</label>
+          <select id="fs-provider" value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value })}>
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI</option>
+          </select>
+        </div>
+        {form.kind === "api_credit" && (
+          <>
+            <div className="field">
+              <label htmlFor="fs-grant">Monthly grant (USD)</label>
+              <input id="fs-grant" type="number" min="0" step="0.01" value={form.grant} onChange={(e) => setForm({ ...form, grant: e.target.value })} />
+            </div>
+            <div className="field">
+              <label htmlFor="fs-anchor">Cycle starts on</label>
+              <input id="fs-anchor" type="date" value={form.anchor} onChange={(e) => setForm({ ...form, anchor: e.target.value })} />
+            </div>
+          </>
+        )}
+        <button className="btn primary" type="submit" disabled={act.busy}>
+          Add
+        </button>
+      </form>
+      {act.view}
+    </Section>
+  );
+}
+
+function ProjectRow({ p }: { p: Project }) {
+  const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "" });
+  const act = useAction();
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      await api(`/api/projects/${p.id}`, { method: "PATCH", body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null } });
+      return "Saved.";
+    });
+  };
+  return (
+    <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
+      <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>{p.name}</p>
+      <div className="field">
+        <label htmlFor={`repo-${p.id}`}>Git repo (HTTPS)</label>
+        <input id={`repo-${p.id}`} className="mono" placeholder="https://github.com/you/repo.git" value={form.repoUrl} onChange={(e) => setForm({ ...form, repoUrl: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={`branch-${p.id}`}>Default branch</label>
+        <input id={`branch-${p.id}`} className="mono" required value={form.defaultBranch} onChange={(e) => setForm({ ...form, defaultBranch: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={`verify-${p.id}`}>Check before merging</label>
+        <input id={`verify-${p.id}`} className="mono" placeholder="pnpm install && pnpm test" value={form.verifyCommand} onChange={(e) => setForm({ ...form, verifyCommand: e.target.value })} />
+      </div>
+      <button className="btn" type="submit" disabled={act.busy}>
+        Save
+      </button>
+      <div style={{ gridColumn: "1 / -1" }}>{act.view}</div>
+    </form>
+  );
+}
+
+function Projects({ company }: { company: Company }) {
+  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `projects-${company.id}`);
+  return (
+    <Section id="projects-h" title="Projects">
+      <p className="muted" style={{ fontSize: 14 }}>
+        With a repo, each ticket gets its own branch and worktree, approved work is checked and merged into the default branch, and the token in <span className="mono">GIT_TOKEN</span> is used to clone and push. Don't put a token in the URL.
+      </p>
+      {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} />) : <p>No projects yet: create one on the Board.</p>}
+    </Section>
+  );
+}
+
+export function Settings({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
+  const company = companies.find((c) => c.id === companyId) ?? companies[0];
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <h1>Settings</h1>
+          <p className="sub">What each company needs to run: a runner, credentials, funding and its repos.</p>
+        </div>
+        {companies.length > 1 && (
+          <div className="field">
+            <label htmlFor="settings-company">Company</label>
+            <select id="settings-company" value={company?.id} onChange={(e) => go(`settings/${e.target.value}`)}>
+              {companies.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </header>
+      {!company ? (
+        <p>Create a company on the Board first.</p>
+      ) : (
+        <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <Runner company={company} />
+          <Credentials company={company} />
+          <Funding company={company} onChanged={onChanged} />
+          <Projects company={company} />
+        </div>
+      )}
+    </>
+  );
+}

@@ -1,4 +1,5 @@
 # Boss Man: server + Postgres. Runs on any Docker host.
+# On TrueNAS SCALE, follow docs/06-install-truenas.md instead of the steps below.
 #
 # First run:
 #   mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
@@ -17,6 +18,10 @@
 # For another company, copy the runner-app-co block under a new name, with its own token
 # file and its own three volumes (workspaces, journal, Claude sessions). A runner can also run on another machine: point BOSSMAN_URL at the
 # server (wss:// behind HTTPS). Runners only dial out, so they need no published ports.
+
+# A fixed project name keeps this stack apart from anything else on the host, e.g. TrueNAS's
+# own apps (which are named ix-<app>).
+name: boss-man
 
 x-runner: &runner
   # scripts/update-runner.sh builds this tag and only promotes a build that passes the

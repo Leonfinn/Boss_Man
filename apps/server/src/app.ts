@@ -9,7 +9,7 @@ import { SECRET_KINDS, SYSTEM_STATES, findCredential, usdToMicros } from "@boss-
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, engagements, owners, projects, runs as runsTable, sessions, tickets, wakes } from "./db/schema.js";
+import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -365,6 +365,14 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/runner", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       return reply.code(201).send(await runners.register(id));
+    });
+
+    /** Whether the company's runner is registered and connected, and what it last reported. */
+    owner.get("/api/companies/:id/runner", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
+      if (!r) return { registered: false };
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt };
     });
 
     owner.get("/api/companies/:id/grants", async (req) => {
