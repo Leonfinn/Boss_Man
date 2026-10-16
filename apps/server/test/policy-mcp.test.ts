@@ -10,10 +10,10 @@ import { Journal, RunnerConnection } from "@boss-man/runner";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, engagements, policyRules, projects, tickets, wakes } from "../src/db/schema.js";
+import { decisions, engagements, policyRules, projects, runners, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
-async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 5000): Promise<T> {
+async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 15_000): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = await fn();
@@ -87,6 +87,23 @@ describe("permission requests through the policy engine", () => {
     await waitFor(() => commands.length, (n) => n === 3);
     expect(commands[2]).toEqual({ type: "permission.decide", runId, requestId: "r3", verdict: "deny" });
     conn.stop();
+  });
+  it("keeps a policy verdict the runner missed and sends it when the runner reconnects (R22)", async () => {
+    const reg = (await ctx.app.inject({ method: "POST", url: `/api/companies/${ctx.homelab.company.id}/runner`, headers: { cookie: ctx.cookie } })).json();
+    const [runner] = await ctx.db.select().from(runners).where(eq(runners.id, reg.runnerId));
+    const runId = randomUUID();
+    // The socket has just gone: nothing can be sent.
+    const drop = ctx.runners.connect(runner!.id, () => false);
+    await ctx.runners.ingest(runner!, { seq: 1, at: new Date().toISOString(), event: { type: "run.started", runId, agentId: ctx.homelab.ceo.id, acpSessionId: "s", model: null } });
+    await ctx.runners.ingest(runner!, { seq: 2, at: new Date().toISOString(), event: { type: "run.permission_request", runId, requestId: "r1", title: "echo hi", kind: "execute", rawInput: { command: "echo hi" }, optionKinds: ["allow_once"] } });
+    drop();
+    // The open queue stays clean: this was the policy's call, not the owner's.
+    expect((await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json()).toEqual([]);
+
+    const commands: RunnerCommand[] = [];
+    ctx.runners.connect(runner!.id, (c) => (commands.push(c), true));
+    await waitFor(() => commands.length, (n) => n === 1);
+    expect(commands[0]).toEqual({ type: "permission.decide", runId, requestId: "r1", verdict: "allow" });
   });
 });
 

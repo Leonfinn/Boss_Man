@@ -138,8 +138,28 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput };
       const { outcome, rule } = evaluatePermission(info, await rulesFor(runner.companyId));
       if (outcome === "allow" || outcome === "deny") {
-        send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome });
-        return { outcome, rule, decisionId: null };
+        if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
+        // The runner dropped off between sending the request and getting the verdict. The event
+        // won't be applied again when it's resent, so keep the verdict as an answered row that
+        // goes out when the runner reconnects, like an owner's answer would (R22).
+        const [row] = await db
+          .insert(decisions)
+          .values({
+            companyId: runner.companyId,
+            kind: "permission",
+            question: `Policy ${outcome === "allow" ? "allowed" : "denied"}: ${typeof (event.rawInput as { command?: unknown } | null)?.command === "string" ? (event.rawInput as { command: string }).command : (event.title ?? "a tool")}`,
+            options: [ALLOW, DENY],
+            recommendedOption: outcome === "allow" ? ALLOW : DENY,
+            status: "answered",
+            answer: outcome === "allow" ? ALLOW : DENY,
+            answeredAt: now(),
+            tier: "ceo",
+            dedupeKey: `permission:${event.requestId}`,
+            context: { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, rule, delivered: false },
+          })
+          .onConflictDoNothing()
+          .returning({ id: decisions.id });
+        return { outcome, rule, decisionId: row?.id ?? null };
       }
       const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, event.runId));
       const [agent] = run?.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, run.agentId)) : [];
