@@ -8,6 +8,34 @@
 # Then open http://<host>:3100 and create the owner account.
 #
 # Back up secrets/master.key: without it, stored secrets cannot be decrypted.
+#
+# Runners (one per company): create the company in the UI, then issue its runner token
+# (POST /api/companies/<id>/runner, shown once) and save it:
+#   printf '%s' '<token>' > secrets/runner-app-co.token
+#   sudo chown 1000:1000 secrets/runner-app-co.token && chmod 600 secrets/runner-app-co.token
+#   docker compose --profile runners up -d
+# For another company, copy the runner-app-co block under a new name, with its own token
+# file and volumes. A runner can also run on another machine: point BOSSMAN_URL at the
+# server (wss:// behind HTTPS). Runners only dial out, so they need no published ports.
+
+x-runner: &runner
+  build:
+    context: .
+    dockerfile: apps/runner/Dockerfile
+  restart: unless-stopped
+  profiles: ["runners"]
+  depends_on:
+    - server
+  environment: &runner-env
+    BOSSMAN_URL: ws://server:3100/api/runner/connect
+    BOSSMAN_RUNNER_TOKEN_FILE: /run/secrets/runner_token
+  # Agents run code: keep the container unprivileged and bounded. Never mount docker.sock;
+  # use a deploy target with a socket proxy instead (R14).
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: ${BOSSMAN_RUNNER_MEMORY:-4g}
+  pids_limit: 1024
+
 services:
   db:
     image: postgres:17-alpine
@@ -44,9 +72,22 @@ services:
       # Bound to localhost by default; set BOSSMAN_BIND=0.0.0.0 to reach it from the LAN.
       - "${BOSSMAN_BIND:-127.0.0.1}:3100:3100"
 
+  runner-app-co:
+    <<: *runner
+    secrets:
+      - source: runner_app_co_token
+        target: runner_token
+    volumes:
+      - app-co-workspaces:/home/node/workspaces
+      - app-co-runner-data:/home/node/runner-data
+
 secrets:
   master_key:
     file: ./secrets/master.key
+  runner_app_co_token:
+    file: ./secrets/runner-app-co.token
 
 volumes:
   db-data:
+  app-co-workspaces:
+  app-co-runner-data:
