@@ -91,4 +91,30 @@ describe("git workspaces (R38)", () => {
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
     await expect(ws.ensure({ projectId: ids.project, ticketId: ids.a, repoUrl: "/nonexistent/repo", baseRef: "main" })).rejects.toThrow();
   });
+
+  it("diffs a ticket against its base: commits, uncommitted and untracked work, without touching the agent's index", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "README.md"), "v1\nmore\n");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "Add a line");
+    writeFileSync(path.join(w.path, "src.ts"), "export const x = 1;\n");
+    writeFileSync(path.join(w.path, "README.md"), "v1\nmore\nand more\n");
+    writeFileSync(path.join(w.path, ".env"), "SECRET=1\n");
+    git(w.path, "add", "README.md");
+    const stagedBefore = git(w.path, "diff", "--cached", "--name-only");
+
+    const d = await ws.diff(spec);
+    expect(d.baseCommit).toBe(w.baseCommit);
+    expect(d.commits.map((c) => c.subject)).toEqual(["Add a line"]);
+    expect(d.files).toEqual(expect.arrayContaining([{ path: "README.md", added: 2, removed: 0 }, { path: "src.ts", added: 1, removed: 0 }]));
+    expect(d.files.map((f) => f.path)).not.toContain(".env");
+    expect(d.diff).toContain("+and more");
+    expect(d.truncated).toBe(false);
+    // The agent's own staging area is exactly as it was.
+    expect(git(w.path, "diff", "--cached", "--name-only")).toBe(stagedBefore);
+    expect((await ws.diff(spec, 50)).truncated).toBe(true);
+  });
 });
+

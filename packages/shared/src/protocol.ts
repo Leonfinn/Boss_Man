@@ -68,6 +68,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   }),
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
+  /** Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. */
+  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
   z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),
@@ -81,6 +83,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("event"), entry: JournalEntry }),
   z.object({ type: z.literal("ping") }),
   z.object({ type: z.literal("pong") }),
+  /** An answer to a request command. Not journalled: it can always be asked for again. */
+  z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
@@ -96,3 +100,15 @@ export const ServerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string() }),
 ]);
 export type ServerMessage = z.infer<typeof ServerMessage>;
+
+/** What a ticket changed against its base (R39). */
+export type WorkspaceDiff = {
+  baseCommit: string;
+  head: string;
+  /** Commits on the ticket's branch since the base, newest first. */
+  commits: Array<{ sha: string; subject: string }>;
+  /** Files changed, with line counts, including uncommitted and untracked work. */
+  files: Array<{ path: string; added: number; removed: number }>;
+  diff: string;
+  truncated: boolean;
+};

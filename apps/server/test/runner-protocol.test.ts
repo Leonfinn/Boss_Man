@@ -120,6 +120,28 @@ describe("runner protocol (R31)", () => {
     conn.stop();
   });
 
+  it("answers request commands with a direct reply, not a journalled event", async () => {
+    const journal = new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-runner-")), "j.jsonl"));
+    const conn: RunnerConnection = new RunnerConnection({
+      url: ctx.url,
+      token: ctx.reg.token,
+      journal,
+      runnerVersion: "test",
+      heartbeatMs: HEARTBEAT,
+      onCommand: (c) => {
+        if (c.type === "workspace.diff") conn.reply(c.requestId, c.ticketId === "00000000-0000-4000-8000-000000000001" ? { ok: true, data: { files: [] } } : { ok: false, error: "no such workspace" });
+      },
+    });
+    conn.start();
+    await waitFor(async () => ctx.built.runners.isConnected(ctx.reg.runnerId), Boolean);
+    const projectId = randomUUID();
+    const ok = await ctx.built.runners.request(ctx.reg.runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId: "00000000-0000-4000-8000-000000000001" }));
+    expect(ok).toEqual({ files: [] });
+    await expect(ctx.built.runners.request(ctx.reg.runnerId, (requestId) => ({ type: "workspace.diff", requestId, projectId, ticketId: randomUUID() }))).rejects.toThrow("no such workspace");
+    expect(journal.lastSeq).toBe(0);
+    conn.stop();
+  });
+
   it("reconnects after the server goes quiet for three heartbeats", async () => {
     const { conn } = runner();
     conn.start();
