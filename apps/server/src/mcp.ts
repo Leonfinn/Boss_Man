@@ -94,6 +94,15 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: 
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional() },
     },
     async ({ ticketId, state, outcome }) => {
+      // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
+      if (state === "done") {
+        const [t] = await db
+          .select({ repoUrl: projects.repoUrl })
+          .from(tickets)
+          .innerJoin(projects, eq(projects.id, tickets.projectId))
+          .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        if (t?.repoUrl && outcome !== "cancelled") return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
+      }
       const rows = await db
         .update(tickets)
         .set({ systemState: state, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: new Date() })

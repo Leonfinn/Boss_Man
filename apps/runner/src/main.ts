@@ -31,6 +31,11 @@ const sessions = new SessionManager({
   stateFile: path.join(dataDir, "active-runs.json"),
   workspaces: new Workspaces(env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces"),
   reply: (requestId, result) => connection.reply(requestId, result),
+  resolveCompanyEnv: async (purpose) => {
+    const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return ((await res.json()) as { env: Record<string, string> }).env;
+  },
   log,
 });
 

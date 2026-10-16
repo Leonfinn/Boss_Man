@@ -70,6 +70,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
   /** Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. */
   z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid }),
+  /** Runs the ticket's check in its worktree (R47). */
+  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
+  /** Merges the ticket's branch into a named target (R46). */
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
   z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),
@@ -112,3 +116,12 @@ export type WorkspaceDiff = {
   diff: string;
   truncated: boolean;
 };
+
+/** The outcome of a ticket's check (R47). */
+export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+
+/** The outcome of merging a ticket's branch (R46). */
+export type MergeResult =
+  | { status: "merged" | "already_merged"; commit: string }
+  | { status: "conflicts"; files: string[] }
+  | { status: "uncommitted"; files: string[] };

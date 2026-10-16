@@ -12,7 +12,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { WorkspaceDiff } from "@boss-man/shared";
+import type { MergeResult, VerifyResult, WorkspaceDiff } from "@boss-man/shared";
 
 const run = promisify(execFile);
 
@@ -187,6 +187,82 @@ export class Workspaces {
     } finally {
       rmSync(index, { force: true });
     }
+  }
+
+  /** Runs git and returns its exit code instead of throwing on a non-zero exit. */
+  private async gitCode(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+    try {
+      return { code: 0, stdout: (await this.git(args, opts)) ?? "", stderr: "" };
+    } catch (err) {
+      const e = err as { code?: number | string; stdout?: string; stderr?: string };
+      if (typeof e.code !== "number") throw err;
+      return { code: e.code, stdout: String(e.stdout ?? "").trim(), stderr: String(e.stderr ?? "").trim() };
+    }
+  }
+
+  /**
+   * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
+   * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
+   */
+  async verify(spec: Pick<WorkspaceSpec, "ticketId">, command: string, timeoutMs = 10 * 60_000): Promise<VerifyResult> {
+    const dir = this.ticketDir(spec.ticketId);
+    if (!existsSync(path.join(dir, ".git"))) throw new Error("That ticket has no workspace on this runner.");
+    const started = Date.now();
+    try {
+      const { stdout, stderr } = await run("sh", ["-c", command], {
+        cwd: dir,
+        timeout: timeoutMs,
+        maxBuffer: 32 * 1024 * 1024,
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1" } as NodeJS.ProcessEnv,
+      });
+      return { ok: true, exitCode: 0, timedOut: false, output: `${stdout}${stderr}`.slice(-8192), ms: Date.now() - started };
+    } catch (err) {
+      const e = err as { code?: number; killed?: boolean; signal?: string; stdout?: string; stderr?: string };
+      const timedOut = !!e.killed && e.signal === "SIGTERM";
+      return { ok: false, exitCode: typeof e.code === "number" ? e.code : null, timedOut, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(-8192), ms: Date.now() - started };
+    }
+  }
+
+  /**
+   * Merges the ticket's branch into a named target without any working tree (R46). The merge is
+   * tried with merge-tree (exit codes, never output text); a clean result becomes a merge
+   * commit pushed to the target. Nothing is cleaned or reset, so files outside the ticket's
+   * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
+   * merge is tried once more.
+   */
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}): Promise<MergeResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      const dir = this.ticketDir(spec.ticketId);
+      const branch = `refs/heads/${branchFor(spec.ticketId)}`;
+      if (existsSync(path.join(dir, ".git"))) {
+        const dirty = await this.git(["status", "--porcelain"], { cwd: dir });
+        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+      }
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+        const targetRef = `refs/remotes/origin/${target}`;
+        const targetSha = await this.git(["rev-parse", "--verify", `${targetRef}^{commit}`], { cwd: repo });
+        const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
+        const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
+        if (ancestor.code === 0) return { status: "already_merged", commit: targetSha };
+        const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", targetSha, branchSha], { cwd: repo });
+        if (tried.code === 1) {
+          const lines = tried.stdout.split("\n");
+          const files = lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean);
+          return { status: "conflicts", files };
+        }
+        if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
+        const tree = tried.stdout.split("\n")[0]!;
+        const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
+        const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
+        const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
+        if (pushed.code === 0) return { status: "merged", commit };
+        if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
+      }
+      throw new Error("unreachable");
+    });
   }
 
   /** For tests and the run view: the saved patch, if any. */

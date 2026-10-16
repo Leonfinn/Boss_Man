@@ -408,6 +408,7 @@ export async function buildApp(opts: AppOptions) {
             .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
             .nullable(),
           defaultBranch: z.string().trim().min(1).max(200),
+          verifyCommand: z.string().trim().min(1).max(1000).nullable(),
         })
         .partial()
         .parse(req.body);

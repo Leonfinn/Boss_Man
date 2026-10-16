@@ -110,8 +110,10 @@ export const projects = pgTable("projects", {
   name: text("name").notNull(),
   /** The project's git repo (R38). When set, each ticket works in its own worktree and branch. */
   repoUrl: text("repo_url"),
-  /** The branch new tickets start from. */
+  /** The branch new tickets start from, and that approved tickets merge into (R46). */
   defaultBranch: text("default_branch").notNull().default("main"),
+  /** A check that must pass in a ticket's worktree before it can be merged and done (R47). */
+  verifyCommand: text("verify_command"),
   createdAt: createdAt(),
 });
 
@@ -178,6 +180,8 @@ export const tickets = pgTable(
     /** The ticket's git branch and the commit it started from, reported by the runner (R38). */
     branch: text("branch"),
     baseCommit: text("base_commit"),
+    /** The merge commit on the target branch once the ticket's branch is merged (R46). */
+    mergeCommit: text("merge_commit"),
     customFields: jsonb("custom_fields").notNull().default({}),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),

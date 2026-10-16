@@ -130,6 +130,16 @@ describe("Boss Man MCP server", () => {
     await c.close();
   });
 
+  it("won't let an agent mark a repo ticket done; it goes through review and merge (R46)", async () => {
+    const [p] = await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app", repoUrl: "https://github.com/Leonfinn/customer-app.git" }).returning();
+    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.appCo.company.id, projectId: p!.id, title: "Add rate limiting", systemState: "in_progress" }).returning();
+    const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "done" } }))).toMatch(/move the ticket to "review" instead/);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "review" } }))).toMatch(/now review/);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "done", outcome: "cancelled" } }))).toMatch(/now done/);
+    await c.close();
+  });
+
   it("raise_decision blocks a ticket until the owner answers", async () => {
     const [p] = await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" }).returning();
     const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.appCo.company.id, projectId: p!.id, title: "Pick DNS provider", systemState: "in_progress" }).returning();

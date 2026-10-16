@@ -31,6 +31,8 @@ export type SessionManagerOptions = {
   stateFile?: string;
   /** Git worktrees per ticket (R38). Without it, runs use the cwd they're given. */
   workspaces?: Workspaces;
+  /** The company's granted secrets outside a run, e.g. a GIT_TOKEN for pushing a merge. */
+  resolveCompanyEnv?: (purpose: "merge") => Promise<Record<string, string>>;
   /** Answers request commands such as workspace.diff. */
   reply?: (requestId: string, result: { ok: true; data: unknown } | { ok: false; error: string }) => void;
   log?: (msg: string) => void;
@@ -149,6 +151,26 @@ export class SessionManager {
         this.opts.workspaces.diff({ projectId: command.projectId, ticketId: command.ticketId }).then(
           (data) => reply(command.requestId, { ok: true, data }),
           (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) }),
+        );
+        return;
+      }
+      case "workspace.verify":
+      case "workspace.merge": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        const work =
+          command.type === "workspace.verify"
+            ? ws.verify({ ticketId: command.ticketId }, command.command)
+            : (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets) =>
+                ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets),
+              );
+        work.then(
+          (data) => reply(command.requestId, { ok: true, data }),
+          (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
         );
         return;
       }
