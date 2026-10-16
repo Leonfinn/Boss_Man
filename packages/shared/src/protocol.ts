@@ -104,7 +104,17 @@ export type RunnerCommand = z.infer<typeof RunnerCommand>;
 
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("hello"), protocol: z.number().int(), runnerVersion: z.string(), imageVersion: z.string().nullable() }),
+  /**
+   * pending: permission requests this runner is still waiting on. A verdict can be lost if the
+   * socket drops just after the server sends it, so the server answers these again.
+   */
+  z.object({
+    type: z.literal("hello"),
+    protocol: z.number().int(),
+    runnerVersion: z.string(),
+    imageVersion: z.string().nullable(),
+    pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
+  }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
   z.object({ type: z.literal("ping") }),
   z.object({ type: z.literal("pong") }),

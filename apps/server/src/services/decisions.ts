@@ -1,7 +1,7 @@
 // Decisions (R19–R22, R32): permission requests the policy engine escalates, questions
 // agents raise, engagement offers, stale blockers and stalled runs. Answering one resumes
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
-import { and, asc, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
@@ -15,7 +15,7 @@ import {
   type RunnerEvent,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runs, ticketDependencies, tickets } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -286,6 +286,35 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       }
       return sent;
+    },
+
+    /**
+     * Answers again the permission requests a reconnecting runner is still waiting on. A verdict
+     * can be lost if the socket drops just after it is sent; the runner would then wait until
+     * its timeout. Answered decisions are re-sent; requests the policy decided are decided again
+     * from the stored request (the policy is deterministic). Open decisions keep waiting, and
+     * requests not stored yet are decided when the runner replays them.
+     */
+    async resume(runner: { id: string; companyId: string }, pending: Array<{ runId: string; requestId: string }>) {
+      let resent = 0;
+      for (const p of pending.slice(0, 500)) {
+        const [d] = await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${p.requestId}`));
+        if (d) {
+          const ctx = d.context as Extract<DecisionContext, { type: "permission" }>;
+          if (d.status !== "answered" || ctx.runnerId !== runner.id || ctx.runId !== p.runId) continue;
+          if (send(runner.id, { type: "permission.decide", runId: p.runId, requestId: p.requestId, verdict: d.answer === ALLOW || d.answer === APPROVE_PLAN ? "allow" : "deny" })) resent++;
+          continue;
+        }
+        const [ev] = await db
+          .select({ payload: runnerEvents.payload })
+          .from(runnerEvents)
+          .where(and(eq(runnerEvents.runnerId, runner.id), eq(runnerEvents.type, "run.permission_request"), sql`${runnerEvents.payload}->>'requestId' = ${p.requestId}`, sql`${runnerEvents.payload}->>'runId' = ${p.runId}`))
+          .limit(1);
+        if (!ev) continue;
+        const r = await this.onPermissionRequest(runner, ev.payload as PermissionEvent);
+        if (r && (r.outcome === "allow" || r.outcome === "deny")) resent++;
+      }
+      return resent;
     },
 
     /** Moves a blocked ticket to ready once nothing blocks it, and wakes its assignee. */

@@ -14,6 +14,8 @@ export type ConnectionOptions = {
   imageVersion?: string | null;
   heartbeatMs?: number;
   log?: (msg: string) => void;
+  /** Permission requests still waiting for a verdict, re-asked on every (re)connect. */
+  pendingPermissions?: () => Array<{ runId: string; requestId: string }>;
 };
 
 export class RunnerConnection {
@@ -73,7 +75,8 @@ export class RunnerConnection {
 
     ws.on("open", () => {
       this.attempt = 0;
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null });
+      const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(pending.length ? { pending } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

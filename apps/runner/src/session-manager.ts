@@ -121,6 +121,11 @@ export class SessionManager {
     renameSync(`${file}.tmp`, file);
   }
 
+  /** Permission requests still waiting for a verdict, for the server to answer again after a reconnect. */
+  pendingPermissions(): Array<{ runId: string; requestId: string }> {
+    return [...this.runs.entries()].flatMap(([runId, state]) => [...state.pendingPermissions.keys()].map((requestId) => ({ runId, requestId })));
+  }
+
   get activeRuns() {
     return this.runs.size;
   }
