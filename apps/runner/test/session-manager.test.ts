@@ -28,7 +28,7 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
+function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
   const events: RunnerEvent[] = [];
   const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
@@ -64,6 +64,7 @@ function harness(model: string | null, opts: { home?: string; cwd?: string; resu
     mcpToken: "bm_sess_test",
     ...(opts.resumeSessionId ? { resumeSessionId: opts.resumeSessionId } : {}),
     ...(opts.freshPrompt ? { freshPrompt: opts.freshPrompt } : {}),
+    ...(opts.boardToolsOnly ? { boardToolsOnly: true } : {}),
     ...(opts.workspace ? { workspace: opts.workspace } : {}),
   });
   return { events, ended, runId, cwd, home, manager };
@@ -139,6 +140,16 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
     const message = h.events.find((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "agent_message");
     expect((message as { update: { text: string } }).update.text).toContain("SPIKE_DONE");
     expect(h.manager.activeRuns).toBe(0);
+  }, 60_000);
+
+  it("offers only the Boss Man MCP tools when a run is limited to board tools (owner chat)", async () => {
+    stubLog.length = 0;
+    const h = harness(null, { boardToolsOnly: true });
+    await h.ended;
+    const offered = new Set(stubLog.flatMap((l) => l.toolNames ?? []));
+    expect([...offered].some((n) => n.startsWith("mcp__bossman__"))).toBe(true);
+    for (const builtIn of ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch"]) expect(offered.has(builtIn)).toBe(false);
+    expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ error: null });
   }, 60_000);
 
   it("pins an unlisted model at launch (spike S2 finding)", async () => {

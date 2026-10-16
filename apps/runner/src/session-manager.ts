@@ -389,19 +389,22 @@ export class SessionManager {
       }
 
       const mcpServers = [{ type: "http" as const, name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
+      // Board tools only (owner chat): Claude's built-in tools are switched off through the
+      // adapter's session options, so only the Boss Man MCP tools remain.
+      const sessionMeta = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { _meta: { claudeCode: { options: { tools: [] } } } } : {};
       // Recovery (R42): reopen the interrupted session if the agent can, else start fresh.
       // A crash before Claude Code flushes its transcript leaves nothing to load (spike S4).
       const openSession = async (): Promise<{ sessionId: string; configOptions?: unknown[] | null; resumed: boolean }> => {
         if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
           try {
-            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers });
+            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...sessionMeta });
             emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
             return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null, resumed: true };
           } catch (err) {
             this.opts.log?.(`couldn't reopen session ${cmd.resumeSessionId}: ${String((err as Error)?.message ?? err)}; starting fresh`);
           }
         }
-        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers });
+        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers, ...sessionMeta });
         if (cmd.resumeSessionId) emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "fresh" } });
         return { ...(fresh as { sessionId: string; configOptions?: unknown[] | null }), resumed: false };
       };

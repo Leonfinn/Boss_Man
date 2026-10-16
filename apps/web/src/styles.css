@@ -261,3 +261,22 @@ code { font-family: var(--mono); font-size: 0.92em; }
 /* ---------- CEO chapters ---------- */
 .chapter-text { margin: 8px 0 0; padding: 12px; max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--sans); font-size: 13.5px; background: var(--ground); border-radius: 8px; }
 details > summary { cursor: pointer; font-size: 14px; }
+
+/* ---------- Owner chat ---------- */
+.chat { display: flex; flex-direction: column; gap: 12px; padding: 0; overflow: hidden; }
+.chat-log { display: flex; flex-direction: column; gap: 10px; padding: 18px 20px; max-height: 60vh; min-height: 240px; overflow-y: auto; }
+.chat-msg { max-width: min(640px, 90%); display: flex; flex-direction: column; gap: 3px; }
+.chat-msg p { padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
+.chat-msg small { font-size: 12px; color: var(--muted); padding: 0 4px; }
+.chat-msg.owner { align-self: flex-end; align-items: flex-end; }
+.chat-msg.owner p { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.chat-msg.owner a { color: #fff; }
+.chat-msg.assistant p { background: var(--ground); border-bottom-left-radius: 4px; }
+.chat-msg.system p { background: var(--amber-soft); color: var(--amber-ink); }
+.chat-state { font-size: 14px; }
+.chat-form { display: flex; gap: 10px; align-items: flex-end; padding: 0 20px 18px; }
+.chat-form textarea { flex: 1; min-height: 64px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font: inherit; resize: vertical; background: var(--card); color: var(--ink); }
+@media (max-width: 640px) {
+  .chat-log { padding: 14px; }
+  .chat-form { padding: 0 14px 14px; }
+}

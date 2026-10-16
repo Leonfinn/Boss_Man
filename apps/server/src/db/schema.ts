@@ -358,6 +358,8 @@ export const runs = pgTable("runs", {
   ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
   engagementId: uuid("engagement_id").references(() => engagements.id, { onDelete: "set null" }),
   acpSessionId: text("acp_session_id"),
+  /** "chat" for an owner chat run: board tools only, no workspace (v1.1). */
+  purpose: text("purpose"),
   /** The CEO chapter this run belongs to, if any. */
   chapterId: uuid("chapter_id").references((): AnyPgColumn => ceoChapters.id, { onDelete: "set null" }),
   /** How full the session's context was when last reported, in tokens. */
@@ -630,4 +632,21 @@ export const ceoChapters = pgTable(
     uniqueIndex("ceo_chapters_agent_number").on(t.agentId, t.number),
     uniqueIndex("ceo_chapters_one_open").on(t.agentId).where(sql`${t.endedAt} is null`),
   ],
+);
+
+export const chatRole = pgEnum("chat_role", ["owner", "assistant", "system"]);
+
+/** The owner chat (v1.1): plain language in, tickets and links on the board out. */
+export const ownerChatMessages = pgTable(
+  "owner_chat_messages",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    role: chatRole("role").notNull(),
+    text: text("text").notNull(),
+    /** The run that answered (assistant) or was asked (owner). */
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt)],
 );

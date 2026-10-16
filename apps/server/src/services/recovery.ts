@@ -5,6 +5,7 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { runnerEvents, runs } from "../db/schema.js";
+import { CHAT_REASON } from "./chat.js";
 
 type WakeHook = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null; resumeRunId?: string | null }) => Promise<unknown>;
 
@@ -37,6 +38,8 @@ export function recoveryService(db: Db) {
     async onInterrupted(runId: string) {
       const [run] = await db.select().from(runs).where(eq(runs.id, runId));
       if (!run?.agentId || !wake) return null;
+      // An interrupted owner chat run is simply asked again; it only ever touched the board.
+      if (run.purpose === "chat") return wake({ agentId: run.agentId, reason: CHAT_REASON, note: "", priority: 4, causedByRunId: runId });
       const steps = await finishedSteps(runId);
       const note = [
         "Your previous run was interrupted when the runner restarted, and this run picks it up.",

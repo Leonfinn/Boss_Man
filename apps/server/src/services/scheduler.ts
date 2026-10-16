@@ -7,6 +7,7 @@ import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { planningGuidance, UNTRUSTED_NOTE } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
+import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
@@ -54,6 +55,8 @@ export function schedulerService(
     /** Binds a deploy to its run before launch, so the run's first secrets fetch includes the target. */
     deploys?: { bindRun(deployId: string, runId: string): Promise<unknown>; unbindRun(deployId: string): Promise<unknown> };
     /** CEO continuity: a CEO's runs continue its current chapter's session. */
+    /** The owner chat: its runs' folder and prompt. */
+    chat?: { cwd(companyId: string): string; prompt(companyId: string): Promise<string>; claim(companyId: string, runId: string): Promise<unknown> };
     chapters?: { forLaunch(agent: typeof agents.$inferSelect, runId: string, wake: string): Promise<ChapterLaunch>; onLaunchFailed(runId: string): Promise<unknown> };
     workspaceRoot?: string;
     limits?: Partial<Limits>;
@@ -117,10 +120,13 @@ export function schedulerService(
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(eq(tickets.id, w.ticketId))
       : [];
-    const wakePrompt = await prompt(w, agent, company.name);
+    // The owner chat runs with board tools only, in its own folder, outside the CEO's chapters.
+    const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
+    const wakePrompt = chat ? await chat.prompt(w.companyId) : await prompt(w, agent, company.name);
     // A CEO's run belongs to its current chapter (CEO continuity).
-    const chapter = agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, model: agent.model, startedAt: now() });
+    const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, model: agent.model, startedAt: now() });
+    if (chat) await chat.claim(w.companyId, runId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
@@ -132,7 +138,8 @@ export function schedulerService(
       agentKind: agent.agentKind,
       model: agent.model,
       fundingSourceId: agent.fundingSourceId,
-      cwd: path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
+      cwd: chat ? chat.cwd(w.companyId) : path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
+      ...(chat ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
       // A plan-first ticket starts in plan mode until its plan is approved (R40).
       ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
@@ -252,13 +259,16 @@ export function schedulerService(
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
 
-      const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId }).from(runs).where(isNull(runs.endedAt));
+      const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
       let total = active.length;
       const byCompany = new Map<string, number>();
       const byAgent = new Map<string, number>();
+      // Owner chat runs don't hold up the CEO's own work, or the other way round: one each.
+      const chatting = new Set<string>();
       for (const r of active) {
         byCompany.set(r.companyId, (byCompany.get(r.companyId) ?? 0) + 1);
-        if (r.agentId) byAgent.set(r.agentId, (byAgent.get(r.agentId) ?? 0) + 1);
+        if (r.purpose === "chat") chatting.add(r.companyId);
+        else if (r.agentId) byAgent.set(r.agentId, (byAgent.get(r.agentId) ?? 0) + 1);
       }
 
       // Budget admission fails closed: if budgets can't be read, nothing launches.
@@ -285,7 +295,8 @@ export function schedulerService(
           await wait("company paused");
           continue;
         }
-        if (total >= limits.instance || (byCompany.get(w.companyId) ?? 0) >= limits.company || (byAgent.get(w.agentId) ?? 0) >= limits.agent) {
+        const isChat = w.reason === CHAT_REASON;
+        if (total >= limits.instance || (byCompany.get(w.companyId) ?? 0) >= limits.company || (isChat ? chatting.has(w.companyId) : (byAgent.get(w.agentId) ?? 0) >= limits.agent)) {
           await wait("at a concurrency limit");
           continue;
         }
@@ -366,7 +377,8 @@ export function schedulerService(
         result.launched++;
         total++;
         byCompany.set(w.companyId, (byCompany.get(w.companyId) ?? 0) + 1);
-        byAgent.set(w.agentId, (byAgent.get(w.agentId) ?? 0) + 1);
+        if (isChat) chatting.add(w.companyId);
+        else byAgent.set(w.agentId, (byAgent.get(w.agentId) ?? 0) + 1);
       }
       return result;
     },
