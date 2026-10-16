@@ -3,6 +3,7 @@ import { art } from "../brand";
 
 const NAV = [
   { id: "decisions", label: "Decisions" },
+  { id: "notifications", label: "Notifications" },
   { id: "board", label: "Board" },
   { id: "runs", label: "Runs" },
   { id: "engagements", label: "Engagements" },
@@ -16,6 +17,7 @@ export function Sidebar(props: {
   active: string;
   companies: Company[];
   decisions: Decision[];
+  unread: number;
   notifications: NotificationPermission | "unsupported";
   onEnableNotifications: () => void;
   onLogout: () => void;
@@ -33,6 +35,7 @@ export function Sidebar(props: {
             <a className="nav" href={`#/${n.id}`} aria-current={props.active === n.id || (props.active === "tickets" && n.id === "board") ? "page" : undefined}>
               <span>{n.label}</span>
               {n.id === "decisions" && props.decisions.length > 0 && <span className="count" aria-label={`${props.decisions.length} waiting`}>{props.decisions.length}</span>}
+              {n.id === "notifications" && props.unread > 0 && <span className="count" aria-label={`${props.unread} unread`}>{props.unread}</span>}
             </a>
           </li>
         ))}
@@ -58,7 +61,7 @@ export function Sidebar(props: {
       <div className="foot">
         {props.notifications === "default" && (
           <button type="button" onClick={props.onEnableNotifications}>
-            Notify me about new decisions
+            Turn on browser notifications
           </button>
         )}
         {props.notifications === "denied" && <small style={{ color: "var(--side-muted)" }}>Notifications are blocked in this browser.</small>}

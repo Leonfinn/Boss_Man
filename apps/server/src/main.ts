@@ -7,7 +7,7 @@ const env = process.env;
 const master = loadMasterKey(env);
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
-const { app, scheduler, sweeps } = await buildApp({
+const { app, scheduler, sweeps, notes } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -22,12 +22,15 @@ const { app, scheduler, sweeps } = await buildApp({
 
 // Scheduling passes; run ends and new wakes also prompt one.
 const tick = setInterval(() => void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed")), Number(env.BOSSMAN_TICK_MS ?? 5000));
+// New decisions reach the owner's notifications (R44).
+const notify = setInterval(() => void notes.syncDecisions().catch((err) => app.log.error({ err }, "notification sync failed")), Number(env.BOSSMAN_NOTIFY_MS ?? 5000));
 // Stale-blocker and stalled-run sweeps.
 const sweep = setInterval(() => void sweeps.run().catch((err) => app.log.error({ err }, "sweep failed")), Number(env.BOSSMAN_SWEEP_MS ?? 60_000));
 
 const shutdown = async () => {
   clearInterval(tick);
   clearInterval(sweep);
+  clearInterval(notify);
   await app.close();
   await close();
   process.exit(0);

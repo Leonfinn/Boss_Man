@@ -561,3 +561,32 @@ export const failureSignatures = pgTable(
   (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
 );
 
+
+// ---------- Notifications (R44) ----------
+
+export const notifyLevel = pgEnum("notify_level", ["note", "flag", "page", "ask"]);
+
+/** What the owner is told, at what level, and where the evidence is. */
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: id(),
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The level asked for, and the level it was delivered at after quiet hours and caps. */
+    requested: notifyLevel("requested").notNull(),
+    level: notifyLevel("level").notNull(),
+    demotedBy: text("demoted_by"),
+    title: text("title").notNull(),
+    body: text("body"),
+    /** Where the evidence is, as a link in the app, e.g. #/runs/<id>. */
+    link: text("link").notNull(),
+    /** A decision this tells the owner about; one notification per decision. */
+    decisionId: uuid("decision_id").unique().references(() => decisions.id, { onDelete: "cascade" }),
+    pushedAt: timestamp("pushed_at", { withTimezone: true }),
+    pushError: text("push_error"),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("notifications_agent_time").on(t.agentId, t.createdAt), index("notifications_time").on(t.createdAt)],
+);

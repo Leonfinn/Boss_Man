@@ -239,3 +239,21 @@ sudo scripts/update-runner.sh --rollback
 ```sh
 sudo docker compose exec -T db pg_dump -U bossman bossman | gzip | sudo tee /mnt/<pool>/apps/boss-man/bossman-$(date +%F).sql.gz > /dev/null
 ```
+
+## 10. Phone notifications (optional)
+
+Boss Man can push pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44). Boss Man only makes outbound requests to it, so nothing new is exposed at the router.
+
+What you need, from ntfy's own docs:
+- **A ntfy server** your phone can reach, for example on your tailnet ([install](https://docs.ntfy.sh/install/)). Lock it down with `auth-default-access: "deny-all"` ([access control](https://docs.ntfy.sh/config/#access-control)).
+- **A user and an access token** for Boss Man, made on the ntfy server with `ntfy user add` and `ntfy token add` ([access tokens](https://docs.ntfy.sh/config/#access-tokens)). Give that user write access to one topic, for example `bossman`, with `ntfy access`.
+- **The ntfy app** on your phone, subscribed to that topic on your server. On iPhone, instant delivery from a self-hosted server also needs `upstream-base-url: "https://ntfy.sh"` in the server's config, which forwards a wake-up (not the message) through ntfy.sh ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)).
+
+Then, in Boss Man, open **Notifications** and fill in **How you're told**:
+- **ntfy server**, **Topic** and **Access token**. The token is stored encrypted, like other credentials, and never shown again.
+- **Boss Man's address on your phone**, so tapping a notification opens its evidence. This needs to be an address your phone can reach, such as a Tailscale Serve HTTPS name.
+- **Quiet hours**, if you want them, and how many notifications each agent may send per hour.
+
+Choose **Send a test to my phone** to check it. If it fails, the message says what ntfy answered.
+
+ntfy's docs site wasn't reachable when this was written, so these links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs). Setting up ntfy itself on TrueNAS isn't covered here.

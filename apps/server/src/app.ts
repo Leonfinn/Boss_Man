@@ -28,6 +28,7 @@ import { runnerSocketRoutes } from "./routes/runner-socket.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
+import { NotifySettings, notificationsService } from "./services/notifications.js";
 
 export type AppOptions = {
   db: Db;
@@ -52,6 +53,8 @@ export type AppOptions = {
   loginLimits?: LoginLimits;
   /** Default disk cap and how long done tickets keep their worktrees (R54). */
   diskLimits?: Partial<DiskLimits>;
+  /** Outbound HTTP, e.g. phone pushes; tests replace it. */
+  fetch?: typeof fetch;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
   now?: () => Date;
 };
@@ -110,6 +113,7 @@ export async function buildApp(opts: AppOptions) {
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
   const rules = policyRulesService(db);
+  const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now);
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
@@ -186,7 +190,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -369,6 +373,47 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
       return secretsSvc.accessLog(id, limit);
+    });
+
+    // Notifications (R44): the feed, settings and a test push.
+    owner.get("/api/notifications", async (req) => {
+      const q = z.object({ before: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
+      return { items: await notes.list(q), unread: await notes.unread() };
+    });
+    owner.post("/api/notifications/read", async (req) => {
+      const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
+      await notes.markRead(b.all ? "all" : (b.ids ?? []));
+      return { unread: await notes.unread() };
+    });
+    owner.get("/api/notification-settings", async () => {
+      const s = await notes.getSettings();
+      return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null };
+    });
+    owner.put("/api/notification-settings", async (req) => {
+      const b = NotifySettings.omit({ ntfy: true })
+        .extend({
+          ntfy: z.object({ url: z.string().url(), topic: z.string(), token: z.string().trim().min(1).max(500).nullable().optional() }).nullable(),
+        })
+        .parse(req.body);
+      const current = await notes.getSettings();
+      let tokenSecretId = current.ntfy?.tokenSecretId ?? null;
+      if (b.ntfy?.token === null) tokenSecretId = null;
+      else if (b.ntfy?.token) {
+        // The token goes into the encrypted secrets store, like every other credential.
+        tokenSecretId = tokenSecretId
+          ? ((await secretsSvc.rotate(tokenSecretId, b.ntfy.token, { acceptUnusualFormat: true })) ? tokenSecretId : null)
+          : (await secretsSvc.create({ name: "ntfy access token", kind: "generic", value: b.ntfy.token })).secret.id;
+      }
+      const saved = await notes.setSettings({ ...b, ntfy: b.ntfy ? { url: b.ntfy.url, topic: b.ntfy.topic, tokenSecretId } : null });
+      return { ...saved, ntfy: saved.ntfy ? { url: saved.ntfy.url, topic: saved.ntfy.topic, hasToken: !!saved.ntfy.tokenSecretId } : null };
+    });
+    owner.post("/api/notification-settings/test", async (_req, reply) => {
+      try {
+        await notes.test();
+        return { ok: true };
+      } catch (err) {
+        return reply.code(502).send({ error: "push_failed", message: `The test push didn't go through: ${(err as Error).message}` });
+      }
     });
 
     // Decision rules (R19): what happens when an agent asks to use a tool.
@@ -803,5 +848,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes };
 }

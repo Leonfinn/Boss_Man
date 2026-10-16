@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, ApiError, type ActiveRun, type Company, type Decision } from "./api";
+import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
@@ -15,34 +15,37 @@ import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
 import { Funding } from "./pages/Funding";
+import { Notifications } from "./pages/Notifications";
 
 type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
 
 const notifySupported = () => typeof window !== "undefined" && "Notification" in window;
 
 /**
- * Tells the owner about decisions that arrive while no Boss Man tab is visible (R44). The
- * first load only records what's already waiting, so opening the app never sets off a burst.
+ * Shows flags, pages and asks from the notifications feed as browser notifications while no
+ * Boss Man tab is visible (R44). The first load only records what's already there, so opening
+ * the app never sets off a burst.
  */
-function useDecisionNotifications(decisions: Decision[] | null) {
+function useFeedNotifications(feed: NoticeFeed | null) {
   const seen = useRef<Set<string> | null>(null);
   useEffect(() => {
-    if (!decisions) return;
+    if (!feed) return;
     if (seen.current === null) {
-      seen.current = new Set(decisions.map((d) => d.id));
+      seen.current = new Set(feed.items.map((n) => n.id));
       return;
     }
-    const fresh = decisions.filter((d) => !seen.current!.has(d.id));
-    for (const d of fresh) seen.current.add(d.id);
-    if (!fresh.length || document.visibilityState === "visible" || !notifySupported() || Notification.permission !== "granted") return;
-    const top = fresh[0]!;
-    const n = new Notification(fresh.length === 1 ? `${top.companyName} needs a decision` : `${fresh.length} new decisions`, { body: top.question, tag: "boss-man-decisions" });
+    const fresh = feed.items.filter((n) => !seen.current!.has(n.id));
+    for (const n of fresh) seen.current.add(n.id);
+    const loud = fresh.filter((n) => n.level !== "note" && !n.readAt);
+    if (!loud.length || document.visibilityState === "visible" || !notifySupported() || Notification.permission !== "granted") return;
+    const top = loud[0]!;
+    const n = new Notification(loud.length === 1 ? top.title : `${loud.length} new notifications`, { body: loud.length === 1 ? (top.body ?? "") : top.title, tag: "boss-man" });
     n.onclick = () => {
       window.focus();
-      window.location.hash = "#/decisions";
+      window.location.hash = loud.length === 1 ? top.link : "#/notifications";
       n.close();
     };
-  }, [decisions]);
+  }, [feed]);
 }
 
 function Signed({ onLogout }: { onLogout: () => void }) {
@@ -52,7 +55,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(notifySupported() ? Notification.permission : "unsupported");
-  useDecisionNotifications(decisions.data);
+  const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
+  useFeedNotifications(feed.data);
   // Moving between screens refreshes the company list, so names and agents are never stale.
   const reloadCompanies = companies.reload;
   useEffect(() => reloadCompanies(), [page, reloadCompanies]);
@@ -70,6 +74,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         active={page}
         companies={list}
         decisions={decisions.data ?? []}
+        unread={feed.data?.unread ?? 0}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
@@ -89,6 +94,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Ticket key={route[1]} id={route[1]} />
         ) : page === "rules" ? (
           <Rules companies={list} companyId={route[1]} go={go} />
+        ) : page === "notifications" ? (
+          <Notifications feed={feed.data} onChanged={feed.reload} />
         ) : page === "secrets" ? (
           <Secrets />
         ) : page === "settings" ? (
