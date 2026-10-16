@@ -14,7 +14,7 @@ import {
   type RunnerEvent,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runs, ticketDependencies, tickets } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -27,13 +27,17 @@ export type DecisionContext =
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
-  | { type: "ticket_cap"; ticketId: string };
+  | { type: "ticket_cap"; ticketId: string }
+  | { type: "budget_limit"; policyId: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
 export const DROP = "Drop dependency";
 export const KEEP_WAITING = "Keep waiting";
 export const CANCEL_RUN = "Cancel run";
+export const RAISE_BUDGET = "Raise it by half";
+export const HARD_STOP = "Make it a hard stop";
+export const LEAVE_BUDGET = "Leave it";
 
 export class AnswerError extends Error {}
 
@@ -371,6 +375,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (answer === "Stop work on it") await loopHooks?.stopTicket(ctx.ticketId);
         else if (ctx.type === "review_loop") await loopHooks?.sendBack(ctx.ticketId, ctx.message, ctx.reviewer);
         else await loopHooks?.raiseCap(ctx.ticketId);
+      } else if (ctx.type === "budget_limit") {
+        const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
+        if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));
+        if (p && answer === HARD_STOP) await db.update(budgetPolicies).set({ onLimit: "pause" }).where(eq(budgetPolicies.id, p.id));
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {
