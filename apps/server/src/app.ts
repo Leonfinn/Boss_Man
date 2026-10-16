@@ -3,7 +3,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import { count, eq, gt, and } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { SECRET_KINDS, usdToMicros } from "@boss-man/shared";
+import { SECRET_KINDS, SYSTEM_STATES, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -11,6 +11,8 @@ import { agents, companies, owners, sessions } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
 import { decisionsService } from "./services/decisions.js";
+import { workService, WorkError } from "./services/work.js";
+import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -24,6 +26,10 @@ export type AppOptions = {
   logger?: boolean;
   /** Runner heartbeat interval; tests shorten it. */
   heartbeatMs?: number;
+  /** Launch-safety limits (R30); defaults in DEFAULT_LIMITS. */
+  limits?: Partial<Limits>;
+  /** Where runners put each ticket's workspace. */
+  workspaceRoot?: string;
 };
 
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
@@ -53,11 +59,28 @@ export async function buildApp(opts: AppOptions) {
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command));
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
-  await mcpRoutes(app, db, decisionsSvc);
+  const scheduler = schedulerService(db, {
+    runners,
+    funding,
+    limits: opts.limits,
+    workspaceRoot: opts.workspaceRoot,
+    // Loop and runaway alerts land in the owner's decision queue.
+    alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
+  });
+  decisionsSvc.setWakeHook((w) => scheduler.wake(w));
+  runners.onEvent((_runner, event) => {
+    if (event.type === "run.ended") void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed"));
+  });
+  await mcpRoutes(app, db, decisionsSvc, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  const work = workService(db, {
+    onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
+    onDone: (t) => scheduler.onTicketDone(t.id),
+  });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof SecretRejected) return reply.code(422).send({ error: "secret_rejected", problems: err.problems });
+    if (err instanceof WorkError) return reply.code(err.status).send({ error: "rejected", message: err.message });
     const code = pgCode(err);
     if (code === "23505") return reply.code(409).send({ error: "already_exists" });
     if (code === "23503") return reply.code(422).send({ error: "unknown_reference" });
@@ -295,6 +318,110 @@ export async function buildApp(opts: AppOptions) {
 
     owner.get("/api/budgets", async () => funding.budgetStatuses());
 
+    // Work: projects, boards, tickets, dependencies, objectives (R16–R18, R25).
+    const State = z.enum(SYSTEM_STATES);
+    const Column = z.object({ name: z.string().trim().min(1).max(60), systemState: State, wipLimit: z.number().int().positive().nullable().optional() });
+    const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
+    const TicketFields = z.object({
+      title: z.string().trim().min(1).max(200),
+      body: z.string().max(20_000).nullable(),
+      columnId: Uuid,
+      state: State,
+      outcome: z.enum(["completed", "cancelled"]),
+      assigneeAgentId: Uuid.nullable(),
+      assignedToOwner: z.boolean(),
+      milestoneId: Uuid.nullable(),
+      keyResultId: Uuid.nullable(),
+      dueDate: DateStr.nullable(),
+      customFields: z.record(z.string(), z.unknown()),
+      overLimit: z.boolean(),
+    });
+
+    owner.post("/api/companies/:id/projects", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);
+      return reply.code(201).send(await work.createProject(id, body.name, body.columns));
+    });
+
+    owner.put("/api/projects/:id/columns", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return work.setColumns(id, z.array(Column).parse(req.body));
+    });
+
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
+
+    owner.post("/api/projects/:id/tickets", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = TicketFields.partial().required({ title: true }).parse(req.body);
+      return reply.code(201).send(await work.createTicket(id, body));
+    });
+
+    owner.patch("/api/tickets/:id", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return work.updateTicket(id, TicketFields.partial().parse(req.body));
+    });
+
+    owner.post("/api/tickets/:id/dependencies", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ ticketId: Uuid.optional(), engagementId: Uuid.optional() }).parse(req.body);
+      return reply.code(201).send(await work.addDependency(id, body));
+    });
+
+    owner.post("/api/companies/:id/objectives", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5).optional(), projectId: Uuid.optional() }).parse(req.body);
+      return reply.code(201).send(await work.createObjective(id, body));
+    });
+
+    owner.post("/api/objectives/:id/key-results", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ title: z.string().trim().min(1).max(200), target: z.number().optional(), current: z.number().optional(), unit: z.string().max(20).optional(), method: z.enum(["manual", "agent", "check"]).optional() }).parse(req.body);
+      return reply.code(201).send(await work.addKeyResult(id, body));
+    });
+
+    owner.post("/api/objectives/:id/milestones", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.optional() }).parse(req.body);
+      return reply.code(201).send(await work.addMilestone(id, body));
+    });
+
+    owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
+
+    // Agents: hire, and change model or funding source.
+    owner.post("/api/companies/:id/agents", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ name: z.string().trim().min(1).max(80), role: z.enum(["manager", "worker"]).default("worker"), agentKind: z.string().min(1).default("claude"), model: z.string().optional(), fundingSourceId: Uuid.optional(), reportsTo: Uuid.optional() }).parse(req.body);
+      const [a] = await db.insert(agents).values({ companyId: id, ...b }).returning();
+      return reply.code(201).send(a);
+    });
+
+    owner.patch("/api/agents/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ name: z.string().trim().min(1).max(80), model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1) }).partial().parse(req.body);
+      const [a] = await db.update(agents).set(b).where(eq(agents.id, id)).returning();
+      return a ?? reply.code(404).send({ error: "not_found" });
+    });
+
+    // Scheduling and kill switches (R30).
+    owner.post("/api/agents/:id/wake", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ ticketId: Uuid.optional(), note: z.string().max(5000).optional(), priority: z.number().int().min(1).max(5).optional() }).parse(req.body ?? {});
+      return reply.code(201).send(await scheduler.wake({ agentId: id, reason: "woken by owner", ...b }));
+    });
+    owner.get("/api/scheduler/queue", async () => scheduler.queue());
+    owner.post("/api/scheduler/tick", async () => scheduler.tick());
+    owner.post("/api/kill-switch", async (req) => {
+      const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
+      await scheduler.setGlobalPause(paused);
+      return { paused };
+    });
+    owner.post("/api/companies/:id/pause", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const { paused } = z.object({ paused: z.boolean() }).parse(req.body);
+      await scheduler.setCompanyPause(id, paused);
+      return { paused };
+    });
+
     // Decisions (ranking arrives in Phase 4; for now oldest first).
     owner.get("/api/decisions", async () => decisionsSvc.listOpen());
 
@@ -310,5 +437,5 @@ export async function buildApp(opts: AppOptions) {
     });
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work };
 }

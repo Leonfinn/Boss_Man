@@ -7,7 +7,7 @@ const env = process.env;
 const master = loadMasterKey(env);
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
-const { app } = await buildApp({
+const { app, scheduler } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -15,7 +15,11 @@ const { app } = await buildApp({
   logger: true,
 });
 
+// Scheduling passes; run ends and new wakes also prompt one.
+const tick = setInterval(() => void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed")), Number(env.BOSSMAN_TICK_MS ?? 5000));
+
 const shutdown = async () => {
+  clearInterval(tick);
   await app.close();
   await close();
   process.exit(0);

@@ -26,7 +26,9 @@ const STATES = ["backlog", "ready", "in_progress", "blocked", "review", "done"] 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], isError: true });
 
-function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, scope: Scope) {
+export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
+
+function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -64,7 +66,10 @@ function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, sco
         .set({ systemState: state, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: new Date() })
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)))
         .returning({ id: tickets.id });
-      return rows.length ? text(`Ticket ${ticketId} is now ${state}.`) : fail("No ticket with that ID in your company.");
+      if (!rows.length) return fail("No ticket with that ID in your company.");
+      // Work that waited on this ticket can start; the wake carries this run's chain depth.
+      if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
+      return text(`Ticket ${ticketId} is now ${state}.`);
     },
   );
 
@@ -166,7 +171,7 @@ function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, sco
   return server;
 }
 
-export async function mcpRoutes(app: FastifyInstance, db: Db, decisions: ReturnType<typeof decisionsService>) {
+export async function mcpRoutes(app: FastifyInstance, db: Db, decisions: ReturnType<typeof decisionsService>, hooks: McpHooks = {}) {
   const handler = async (req: import("fastify").FastifyRequest, reply: import("fastify").FastifyReply) => {
     const header = req.headers.authorization;
     const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
@@ -179,7 +184,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, decisions: ReturnT
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 
     // Stateless: a fresh server and transport per request.
-    const server = buildServer(db, decisions, scope);
+    const server = buildServer(db, decisions, scope, hooks);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {
