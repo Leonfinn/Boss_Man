@@ -58,6 +58,11 @@ describe("review (R39)", () => {
     const c = (ctx = await setup());
     expect((await c.req("GET", `/api/tickets/${c.ticket.id}/diff`)).json()).toEqual(DIFF);
     expect(c.sent.at(-1)).toMatchObject({ type: "workspace.diff", projectId: c.project.id, ticketId: c.ticket.id });
+    expect(c.sent.at(-1)).not.toHaveProperty("range");
+    // The last turn's changes come from the runner's checkpoints (R39).
+    expect((await c.req("GET", `/api/tickets/${c.ticket.id}/diff?range=last_turn`)).statusCode).toBe(200);
+    expect(c.sent.at(-1)).toMatchObject({ type: "workspace.diff", ticketId: c.ticket.id, range: "last_turn" });
+    expect((await c.req("GET", `/api/tickets/${c.ticket.id}/diff?range=yesterday`)).statusCode).toBe(400);
   });
 
   it("says so when the runner is offline", async () => {

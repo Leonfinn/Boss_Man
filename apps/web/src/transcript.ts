@@ -66,6 +66,8 @@ export function describe(item: TranscriptItem): { tone: "text" | "tool" | "note"
           return { tone: "tool", label: u.title ?? "Tool", body: u.status ?? undefined };
         case "resumed":
           return { tone: "note", label: u.mode === "load" ? "Resumed the saved session after a restart" : "Started a fresh session after a restart" };
+        case "checkpoint":
+          return { tone: "note", label: `Checkpoint ${String(u.turn ?? "")}: ${Number(u.files ?? 0)} file${Number(u.files) === 1 ? "" : "s"} changed this turn` };
         case "message_delivered":
           return { tone: "note", label: "Message delivered", body: u.text ?? "" };
         default:

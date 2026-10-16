@@ -183,12 +183,16 @@ describe("runs in a git workspace (R38)", () => {
     g("commit", "-qm", "init");
     const workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
     const ticketId = randomUUID();
-    const h = harness(null, { workspaces, workspace: { projectId: randomUUID(), ticketId, repoUrl: repo, baseRef: "main" } });
+    const projectId = randomUUID();
+    const h = harness(null, { workspaces, workspace: { projectId, ticketId, repoUrl: repo, baseRef: "main" } });
     await h.ended;
     expect(h.events.find((e) => e.type === "run.workspace")).toMatchObject({ ticketId, branch: `bossman/${ticketId}`, created: true });
     // The stub model's first step writes spike.txt in the agent's cwd: the worktree.
     expect(existsSync(path.join(workspaces.ticketDir(ticketId), "spike.txt"))).toBe(true);
     expect(existsSync(path.join(h.cwd, "spike.txt"))).toBe(false);
+    // The turn's changes were checkpointed (R39), leaving the branch alone.
+    expect(h.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "checkpoint", turn: 1, files: 1 } }));
+    expect((await workspaces.lastTurnDiff({ projectId, ticketId })).files.map((f) => f.path)).toEqual(["spike.txt"]);
   }, 90_000);
 
   it("ends the run with a clear error when the repo can't be cloned", async () => {

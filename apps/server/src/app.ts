@@ -845,7 +845,11 @@ export async function buildApp(opts: AppOptions) {
       throw err;
     };
     const ReviewComment = z.object({ path: z.string().min(1).max(500), line: z.number().int().positive(), body: z.string().trim().min(1).max(5000), code: z.string().max(2000).optional() });
-    owner.get("/api/tickets/:id/diff", async (req, reply) => review.diff(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
+    owner.get("/api/tickets/:id/diff", async (req, reply) => {
+      // range=last_turn: what the agent's last turn that changed anything did (R39).
+      const { range } = z.object({ range: z.enum(["base", "last_turn"]).optional() }).parse(req.query);
+      return review.diff(IdParam.parse(req.params).id, undefined, range).catch(reviewErrors(reply));
+    });
     owner.post("/api/tickets/:id/review", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z

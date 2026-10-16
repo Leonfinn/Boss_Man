@@ -65,13 +65,13 @@ export function reviewService(
     },
 
     /** The ticket's changes against its base, from the runner that holds its worktree. */
-    async diff(ticketId: string, companyId?: string): Promise<WorkspaceDiff> {
+    async diff(ticketId: string, companyId?: string, range: "base" | "last_turn" = "base"): Promise<WorkspaceDiff> {
       const { t, repoUrl } = await ticketWithRepo(ticketId, companyId);
       if (!repoUrl) throw new ReviewError(422, "That ticket's project has no git repo, so there's no diff to review.");
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
       if (!runner) throw new ReviewError(409, "The company has no runner.");
       try {
-        return await deps.runners.request<WorkspaceDiff>(runner.id, (requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }));
+        return await deps.runners.request<WorkspaceDiff>(runner.id, (requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, ...(range === "last_turn" ? { range } : {}) }));
       } catch (err) {
         throw new ReviewError(409, (err as Error).message);
       }
