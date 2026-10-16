@@ -2,11 +2,12 @@ import { randomBytes } from "node:crypto";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import type { LiveValidator } from "../src/services/secrets.js";
+import type { PortalLimits } from "../src/portal.js";
 
-export async function makeApp(opts: { liveValidator?: LiveValidator } = {}) {
+export async function makeApp(opts: { liveValidator?: LiveValidator; portalLimits?: Partial<PortalLimits> } = {}) {
   const { db, close } = await openPglite();
   const master = { version: 1, key: randomBytes(32) };
-  const built = await buildApp({ db, master, secureCookies: false, liveValidator: opts.liveValidator });
+  const built = await buildApp({ db, master, secureCookies: false, liveValidator: opts.liveValidator, portalLimits: opts.portalLimits });
   return { ...built, db, master, close: async () => (await built.app.close(), await close()) };
 }
 

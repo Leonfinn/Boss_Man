@@ -1,6 +1,7 @@
 import { loadMasterKey } from "./crypto.js";
 import { openPglite, openPostgres } from "./db/client.js";
 import { buildApp } from "./app.js";
+import { buildPortalApp } from "./portal.js";
 import { providerLiveValidator } from "./services/secrets.js";
 
 const env = process.env;
@@ -42,3 +43,9 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 await app.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.PORT ?? 3100) });
+
+// The feedback portal on its own port, serving nothing else, so it can be shared without the owner's side.
+if (env.BOSSMAN_PORTAL_PORT) {
+  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1", logger: true });
+  await portal.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.BOSSMAN_PORTAL_PORT) });
+}

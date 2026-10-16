@@ -24,6 +24,7 @@ import { workService, WorkError } from "./services/work.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
+import { portalRoutes, type PortalLimits } from "./portal.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -59,6 +60,8 @@ export type AppOptions = {
   diskLimits?: Partial<DiskLimits>;
   /** Outbound HTTP, e.g. phone pushes; tests replace it. */
   fetch?: typeof fetch;
+  /** Rate limits on the public feedback portal; tests lower them. */
+  portalLimits?: Partial<PortalLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
   now?: () => Date;
 };
@@ -227,6 +230,8 @@ export async function buildApp(opts: AppOptions) {
     },
   });
   await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  // The feedback portal's public API, on this listener too, so the owner can try it here.
+  await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -743,6 +748,12 @@ export async function buildApp(opts: AppOptions) {
     owner.patch("/api/feature-areas/:id", async (req) => feedback.updateArea(IdParam.parse(req.params).id, z.object({ name: Text(80), position: z.number().int().min(0) }).partial().parse(req.body)));
     owner.delete("/api/feature-areas/:id", async (req, reply) => (await feedback.removeArea(IdParam.parse(req.params).id), reply.code(204).send()));
 
+    owner.patch("/api/companies/:id/portal", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable() }).partial().parse(req.body);
+      return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}) });
+    });
+    owner.post("/api/companies/:id/portal/rotate", async (req) => feedback.rotatePortal(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/features", async (req) => feedback.scored(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/features", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

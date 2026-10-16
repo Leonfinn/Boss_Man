@@ -340,3 +340,10 @@ blockquote.selected { background: #fff6d6; border-left-color: #e2b13c; display: 
   .inbox:not(.has-note) .inbox-empty { display: none; }
   .back-btn { display: inline-flex; }
 }
+
+/* ---------- Feedback portal (public page) ---------- */
+.portal { max-width: 880px; margin: 0 auto; padding: 32px 16px 48px; display: flex; flex-direction: column; gap: 20px; }
+.portal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.portal-card { display: flex; flex-direction: column; gap: 10px; }
+.portal-card h3 { font-size: 17px; font-weight: 600; }
+a.btn { display: inline-flex; align-items: center; text-decoration: none; }
