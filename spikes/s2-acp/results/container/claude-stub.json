@@ -1,0 +1,853 @@
+{
+  "agent": "claude",
+  "mode": "stub",
+  "sessionsRequested": 3,
+  "startedAt": "2026-10-16T12:42:19.707Z",
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "@agentclientprotocol/claude-agent-acp",
+      "title": "Claude Agent",
+      "version": "0.91.0"
+    },
+    "authMethods": [],
+    "mcpCapabilities": {
+      "http": true,
+      "sse": true
+    },
+    "sessionCapabilities": [
+      "additionalDirectories",
+      "close",
+      "delete",
+      "fork",
+      "list",
+      "resume"
+    ]
+  },
+  "totalMs": 9629,
+  "sessions": [
+    {
+      "index": 0,
+      "token": "bm_sess_e179eedc-0614-4369-8e61-6f2beea4c32d",
+      "cwd": "/tmp/bm-s2-claude-TmykQy/ws-0",
+      "configOptions": [
+        {
+          "id": "mode",
+          "name": "Mode",
+          "category": "mode",
+          "values": [
+            "default",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "bypassPermissions"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "values": [
+            "default",
+            "opus",
+            "fable",
+            "sonnet",
+            "haiku"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "effort",
+          "name": "Effort",
+          "category": "thought_level",
+          "values": [
+            "default",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "fast",
+          "name": "Fast mode",
+          "category": "model_config",
+          "values": [
+            "on",
+            "off"
+          ],
+          "current": "off"
+        }
+      ],
+      "toolCalls": [
+        {
+          "title": "Terminal",
+          "kind": "execute",
+          "status": "pending"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "mcp__bossman__create_ticket",
+          "kind": "other",
+          "status": "pending"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "Terminal",
+          "kind": "execute",
+          "status": "pending"
+        },
+        {
+          "status": "failed"
+        }
+      ],
+      "usageUpdates": [
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "cost": {
+            "amount": 0.00528,
+            "currency": "USD"
+          },
+          "_meta": {
+            "_claude/origin": {
+              "kind": "human"
+            },
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        }
+      ],
+      "otherUpdates": {
+        "available_commands_update": 2,
+        "agent_message_chunk": 1
+      },
+      "markerFile": true,
+      "sessionId": "2c79b8c4-4179-4b22-af6a-605bb5e85c5e",
+      "freeTextModel": {
+        "tried": "claude-future-model-x",
+        "ok": false,
+        "error": "Internal error"
+      },
+      "agentText": "SPIKE_DONE",
+      "stopReason": "end_turn",
+      "ms": 1586
+    },
+    {
+      "index": 1,
+      "token": "bm_sess_80d9e3f9-0c9c-4b3f-b5d2-42c03b4d026a",
+      "cwd": "/tmp/bm-s2-claude-TmykQy/ws-1",
+      "configOptions": [
+        {
+          "id": "mode",
+          "name": "Mode",
+          "category": "mode",
+          "values": [
+            "default",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "bypassPermissions"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "values": [
+            "default",
+            "opus",
+            "fable",
+            "sonnet",
+            "haiku"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "effort",
+          "name": "Effort",
+          "category": "thought_level",
+          "values": [
+            "default",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "fast",
+          "name": "Fast mode",
+          "category": "model_config",
+          "values": [
+            "on",
+            "off"
+          ],
+          "current": "off"
+        }
+      ],
+      "toolCalls": [
+        {
+          "title": "Terminal",
+          "kind": "execute",
+          "status": "pending"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "mcp__bossman__create_ticket",
+          "kind": "other",
+          "status": "pending"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "Terminal",
+          "kind": "execute",
+          "status": "pending"
+        },
+        {
+          "status": "failed"
+        }
+      ],
+      "usageUpdates": [
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "cost": {
+            "amount": 0.00528,
+            "currency": "USD"
+          },
+          "_meta": {
+            "_claude/origin": {
+              "kind": "human"
+            },
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        }
+      ],
+      "otherUpdates": {
+        "available_commands_update": 2,
+        "agent_message_chunk": 1,
+        "session_info_update": 1
+      },
+      "markerFile": true,
+      "sessionId": "56ba7469-d563-4a29-87f0-8b2df827de91",
+      "agentText": "SPIKE_DONE",
+      "stopReason": "end_turn",
+      "ms": 1478
+    },
+    {
+      "index": 2,
+      "token": "bm_sess_73e2462b-5635-4fa4-bab2-b09970b330c3",
+      "cwd": "/tmp/bm-s2-claude-TmykQy/ws-2",
+      "configOptions": [
+        {
+          "id": "mode",
+          "name": "Mode",
+          "category": "mode",
+          "values": [
+            "default",
+            "acceptEdits",
+            "plan",
+            "auto",
+            "bypassPermissions"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "values": [
+            "default",
+            "opus",
+            "fable",
+            "sonnet",
+            "haiku"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "effort",
+          "name": "Effort",
+          "category": "thought_level",
+          "values": [
+            "default",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "fast",
+          "name": "Fast mode",
+          "category": "model_config",
+          "values": [
+            "on",
+            "off"
+          ],
+          "current": "off"
+        }
+      ],
+      "toolCalls": [
+        {
+          "title": "Terminal",
+          "kind": "execute",
+          "status": "pending"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "mcp__bossman__create_ticket",
+          "kind": "other",
+          "status": "pending"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "Terminal",
+          "kind": "execute",
+          "status": "pending"
+        },
+        {
+          "status": "failed"
+        }
+      ],
+      "usageUpdates": [
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 121,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "_meta": {
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        },
+        {
+          "used": 162,
+          "size": 1000000,
+          "cost": {
+            "amount": 0.00528,
+            "currency": "USD"
+          },
+          "_meta": {
+            "_claude/origin": {
+              "kind": "human"
+            },
+            "_claude/model": "claude-opus-5-5"
+          },
+          "sessionUpdate": "usage_update"
+        }
+      ],
+      "otherUpdates": {
+        "available_commands_update": 2,
+        "agent_message_chunk": 1
+      },
+      "markerFile": true,
+      "sessionId": "afca7bb3-3056-4ee1-a024-911a935ecc50",
+      "agentText": "SPIKE_DONE",
+      "stopReason": "end_turn",
+      "ms": 1627
+    }
+  ],
+  "permissionDecisions": [
+    {
+      "sessionId": "2c79b8c4-4179-4b22-af6a-605bb5e85c5e",
+      "title": "echo spike > spike.txt",
+      "kind": "execute",
+      "rawInput": {
+        "command": "echo spike > spike.txt",
+        "description": "Write a marker file"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "workspace-tools"
+    },
+    {
+      "sessionId": "56ba7469-d563-4a29-87f0-8b2df827de91",
+      "title": "echo spike > spike.txt",
+      "kind": "execute",
+      "rawInput": {
+        "command": "echo spike > spike.txt",
+        "description": "Write a marker file"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "workspace-tools"
+    },
+    {
+      "sessionId": "56ba7469-d563-4a29-87f0-8b2df827de91",
+      "title": "mcp__bossman__create_ticket",
+      "kind": "other",
+      "rawInput": {
+        "title": "Spike S2 ticket",
+        "body": "Created through ACP MCP passthrough"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "bossman-mcp-tools"
+    },
+    {
+      "sessionId": "afca7bb3-3056-4ee1-a024-911a935ecc50",
+      "title": "echo spike > spike.txt",
+      "kind": "execute",
+      "rawInput": {
+        "command": "echo spike > spike.txt",
+        "description": "Write a marker file"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "workspace-tools"
+    },
+    {
+      "sessionId": "2c79b8c4-4179-4b22-af6a-605bb5e85c5e",
+      "title": "mcp__bossman__create_ticket",
+      "kind": "other",
+      "rawInput": {
+        "title": "Spike S2 ticket",
+        "body": "Created through ACP MCP passthrough"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "bossman-mcp-tools"
+    },
+    {
+      "sessionId": "56ba7469-d563-4a29-87f0-8b2df827de91",
+      "title": "rm -rf /srv/precious",
+      "kind": "execute",
+      "rawInput": {
+        "command": "rm -rf /srv/precious",
+        "description": "Delete production data"
+      },
+      "optionKinds": [
+        "allow_once",
+        "reject_once"
+      ],
+      "verdict": "deny",
+      "rule": "destructive-command"
+    },
+    {
+      "sessionId": "2c79b8c4-4179-4b22-af6a-605bb5e85c5e",
+      "title": "rm -rf /srv/precious",
+      "kind": "execute",
+      "rawInput": {
+        "command": "rm -rf /srv/precious",
+        "description": "Delete production data"
+      },
+      "optionKinds": [
+        "allow_once",
+        "reject_once"
+      ],
+      "verdict": "deny",
+      "rule": "destructive-command"
+    },
+    {
+      "sessionId": "afca7bb3-3056-4ee1-a024-911a935ecc50",
+      "title": "mcp__bossman__create_ticket",
+      "kind": "other",
+      "rawInput": {
+        "title": "Spike S2 ticket",
+        "body": "Created through ACP MCP passthrough"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "bossman-mcp-tools"
+    },
+    {
+      "sessionId": "afca7bb3-3056-4ee1-a024-911a935ecc50",
+      "title": "rm -rf /srv/precious",
+      "kind": "execute",
+      "rawInput": {
+        "command": "rm -rf /srv/precious",
+        "description": "Delete production data"
+      },
+      "optionKinds": [
+        "allow_once",
+        "reject_once"
+      ],
+      "verdict": "deny",
+      "rule": "destructive-command"
+    }
+  ],
+  "mcpCalls": [
+    {
+      "tool": "create_ticket",
+      "token": "bm_sess_80d9e3f9-0c9c-4b3f-b5d2-42c03b4d026a",
+      "args": {
+        "title": "Spike S2 ticket",
+        "body": "Created through ACP MCP passthrough"
+      }
+    },
+    {
+      "tool": "create_ticket",
+      "token": "bm_sess_e179eedc-0614-4369-8e61-6f2beea4c32d",
+      "args": {
+        "title": "Spike S2 ticket",
+        "body": "Created through ACP MCP passthrough"
+      }
+    },
+    {
+      "tool": "create_ticket",
+      "token": "bm_sess_73e2462b-5635-4fa4-bab2-b09970b330c3",
+      "args": {
+        "title": "Spike S2 ticket",
+        "body": "Created through ACP MCP passthrough"
+      }
+    }
+  ],
+  "stubRequests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "bash-allowed",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "bash-allowed",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "bash-allowed",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "mcp-create-ticket",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "mcp-create-ticket",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "bash-denied",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "bash-denied",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "final",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "mcp-create-ticket",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "side-query",
+      "hasTools": false,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "final",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "bash-denied",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "final",
+      "hasTools": true,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "stream": true,
+      "step": "side-query",
+      "hasTools": false,
+      "model": "claude-opus-5-5",
+      "userAgent": "claude-cli/2.1.301 (external, sdk-ts, agent-sdk/0.3.300)"
+    }
+  ],
+  "agentStderrTail": "[session/create] sessionId=56ba7469-d563-4a29-87f0-8b2df827de91 phase=modes durationMs=0 totalMs=1726\n[session/create] sessionId=56ba7469-d563-4a29-87f0-8b2df827de91 phase=agents durationMs=0 totalMs=1726\n[session/create] sessionId=56ba7469-d563-4a29-87f0-8b2df827de91 phase=register durationMs=0 totalMs=1726\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=validate-cwd durationMs=1 totalMs=1\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=settings durationMs=3 totalMs=4\n[session/query] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 resume=none apiType=native baseUrl=native\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=prepare-query durationMs=9 totalMs=13\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=sdk-initialize durationMs=1180 totalMs=1193\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=models durationMs=0 totalMs=1193\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=modes durationMs=0 totalMs=1193\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=agents durationMs=0 totalMs=1193\n[session/create] sessionId=afca7bb3-3056-4ee1-a024-911a935ecc50 phase=register durationMs=0 totalMs=1193\n[authStatus] discarding a probe that predates the latest auth change\n[authStatus] discarding a probe that predates the latest auth change\n"
+}

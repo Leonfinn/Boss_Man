@@ -51,6 +51,10 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 - **R6.** Claude runs as the **official, unmodified Claude Code** shipped in the runner image. The `claude-agent-acp` adapter drives it, pointed at that binary through `CLAUDE_CODE_EXECUTABLE`.
 - **R7.** Codex runs through `codex-acp`. Other ACP agents (Gemini CLI, OpenCode and so on) can be added through configuration.
 - **R8.** Model lists come from each agent's ACP `configOptions` (category `model`). A **free-text model override** is always available. Nothing is hard-coded.
+  - *Spike S2 found:* both adapters reject unlisted models over ACP. The override is therefore applied when the agent starts:
+    - **Claude:** `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`.
+    - **Codex:** `CODEX_CONFIG.model`.
+  - Both worked in the spike.
 - **R9.** Runner images are rebuilt on a schedule (weekly by default) and on demand, to pick up new Claude Code and Codex releases.
 - **R10.** Claude credentials, in order of preference:
   1. A `claude setup-token` one-year token. It is stored in the secrets store and injected as `CLAUDE_CODE_OAUTH_TOKEN`.

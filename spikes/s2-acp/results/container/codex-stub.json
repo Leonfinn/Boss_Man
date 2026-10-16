@@ -1,0 +1,519 @@
+{
+  "agent": "codex",
+  "mode": "stub",
+  "sessionsRequested": 3,
+  "startedAt": "2026-10-16T12:43:31.308Z",
+  "initialize": {
+    "protocolVersion": 1,
+    "agentInfo": {
+      "name": "@agentclientprotocol/codex-acp",
+      "title": "Codex",
+      "version": "2.2.2"
+    },
+    "authMethods": [
+      {
+        "id": "api-key",
+        "name": "API Key"
+      },
+      {
+        "id": "chat-gpt",
+        "name": "ChatGPT"
+      }
+    ],
+    "mcpCapabilities": {
+      "acp": false,
+      "http": true,
+      "sse": false
+    },
+    "sessionCapabilities": [
+      "resume",
+      "list",
+      "close",
+      "delete",
+      "fork",
+      "additionalDirectories",
+      "subagents"
+    ]
+  },
+  "authenticatedWith": "api-key",
+  "totalMs": 865,
+  "sessions": [
+    {
+      "index": 0,
+      "token": "bm_sess_3c18a0b6-894b-4f3b-9f19-2595ded21fa4",
+      "cwd": "/tmp/bm-s2-codex-Drn9or/ws-0",
+      "configOptions": [
+        {
+          "id": "mode",
+          "name": "Mode",
+          "category": "mode",
+          "values": [
+            "read-only",
+            "workspace-write",
+            "agent",
+            "agent-full-access"
+          ],
+          "current": "workspace-write"
+        },
+        {
+          "id": "collaboration_mode",
+          "name": "Collaboration mode",
+          "category": "collaboration_mode",
+          "values": [
+            "default",
+            "plan"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "values": [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5"
+          ],
+          "current": "gpt-6.1-sol"
+        },
+        {
+          "id": "reasoning_effort",
+          "name": "Reasoning effort",
+          "category": "thought_level",
+          "values": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "current": "low"
+        },
+        {
+          "id": "fast-mode",
+          "name": "Fast mode",
+          "category": "model_config",
+          "values": [
+            "off",
+            "on"
+          ],
+          "current": "off"
+        }
+      ],
+      "toolCalls": [
+        {
+          "title": "echo spike > spike.txt",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "mcp.bossman.create_ticket",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "completed",
+          "rawOutput": "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Created ticket BM-3\"}],\"structuredContent\":null,\"_meta\":null},\"error\":null}"
+        },
+        {
+          "title": "rm -rf /srv/precious",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "failed"
+        }
+      ],
+      "usageUpdates": [
+        {
+          "used": 162,
+          "size": 258400,
+          "sessionUpdate": "usage_update"
+        }
+      ],
+      "otherUpdates": {
+        "available_commands_update": 1,
+        "session_info_update": 6
+      },
+      "markerFile": true,
+      "sessionId": "01a144bd-3000-7a61-89c4-776b928d52cb",
+      "freeTextModel": {
+        "tried": "gpt-future-model-x",
+        "ok": false,
+        "error": "Invalid params"
+      },
+      "stopReason": "cancelled",
+      "ms": 311
+    },
+    {
+      "index": 1,
+      "token": "bm_sess_011b4e2c-a2e0-4425-b630-076beaabce76",
+      "cwd": "/tmp/bm-s2-codex-Drn9or/ws-1",
+      "configOptions": [
+        {
+          "id": "mode",
+          "name": "Mode",
+          "category": "mode",
+          "values": [
+            "read-only",
+            "workspace-write",
+            "agent",
+            "agent-full-access"
+          ],
+          "current": "workspace-write"
+        },
+        {
+          "id": "collaboration_mode",
+          "name": "Collaboration mode",
+          "category": "collaboration_mode",
+          "values": [
+            "default",
+            "plan"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "values": [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5"
+          ],
+          "current": "gpt-6.1-sol"
+        },
+        {
+          "id": "reasoning_effort",
+          "name": "Reasoning effort",
+          "category": "thought_level",
+          "values": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "current": "low"
+        },
+        {
+          "id": "fast-mode",
+          "name": "Fast mode",
+          "category": "model_config",
+          "values": [
+            "off",
+            "on"
+          ],
+          "current": "off"
+        }
+      ],
+      "toolCalls": [
+        {
+          "title": "echo spike > spike.txt",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "mcp.bossman.create_ticket",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "completed",
+          "rawOutput": "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Created ticket BM-2\"}],\"structuredContent\":null,\"_meta\":null},\"error\":null}"
+        },
+        {
+          "title": "rm -rf /srv/precious",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "failed"
+        }
+      ],
+      "usageUpdates": [
+        {
+          "used": 162,
+          "size": 258400,
+          "sessionUpdate": "usage_update"
+        }
+      ],
+      "otherUpdates": {
+        "available_commands_update": 1,
+        "session_info_update": 6
+      },
+      "markerFile": true,
+      "sessionId": "01a144bd-3063-7d30-8b27-5852cd718903",
+      "stopReason": "cancelled",
+      "ms": 308
+    },
+    {
+      "index": 2,
+      "token": "bm_sess_6c7218bb-2a61-448b-9baa-74a31a0449c3",
+      "cwd": "/tmp/bm-s2-codex-Drn9or/ws-2",
+      "configOptions": [
+        {
+          "id": "mode",
+          "name": "Mode",
+          "category": "mode",
+          "values": [
+            "read-only",
+            "workspace-write",
+            "agent",
+            "agent-full-access"
+          ],
+          "current": "workspace-write"
+        },
+        {
+          "id": "collaboration_mode",
+          "name": "Collaboration mode",
+          "category": "collaboration_mode",
+          "values": [
+            "default",
+            "plan"
+          ],
+          "current": "default"
+        },
+        {
+          "id": "model",
+          "name": "Model",
+          "category": "model",
+          "values": [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5"
+          ],
+          "current": "gpt-6.1-sol"
+        },
+        {
+          "id": "reasoning_effort",
+          "name": "Reasoning effort",
+          "category": "thought_level",
+          "values": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "current": "low"
+        },
+        {
+          "id": "fast-mode",
+          "name": "Fast mode",
+          "category": "model_config",
+          "values": [
+            "off",
+            "on"
+          ],
+          "current": "off"
+        }
+      ],
+      "toolCalls": [
+        {
+          "title": "echo spike > spike.txt",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "completed"
+        },
+        {
+          "title": "mcp.bossman.create_ticket",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "completed",
+          "rawOutput": "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Created ticket BM-1\"}],\"structuredContent\":null,\"_meta\":null},\"error\":null}"
+        },
+        {
+          "title": "rm -rf /srv/precious",
+          "kind": "execute",
+          "status": "in_progress"
+        },
+        {
+          "status": "failed"
+        }
+      ],
+      "usageUpdates": [
+        {
+          "used": 162,
+          "size": 258400,
+          "sessionUpdate": "usage_update"
+        }
+      ],
+      "otherUpdates": {
+        "available_commands_update": 1,
+        "session_info_update": 6
+      },
+      "markerFile": true,
+      "sessionId": "01a144bd-3080-7110-a252-5b4881eadccf",
+      "stopReason": "cancelled",
+      "ms": 303
+    }
+  ],
+  "permissionDecisions": [
+    {
+      "sessionId": "01a144bd-3080-7110-a252-5b4881eadccf",
+      "kind": "execute",
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "workspace-tools"
+    },
+    {
+      "sessionId": "01a144bd-3000-7a61-89c4-776b928d52cb",
+      "kind": "execute",
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "workspace-tools"
+    },
+    {
+      "sessionId": "01a144bd-3063-7d30-8b27-5852cd718903",
+      "kind": "execute",
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "allow",
+      "rule": "workspace-tools"
+    },
+    {
+      "sessionId": "01a144bd-3080-7110-a252-5b4881eadccf",
+      "title": "Run command",
+      "kind": "execute",
+      "rawInput": {
+        "command": "rm -rf /srv/precious",
+        "cwd": "/tmp/bm-s2-codex-Drn9or/ws-2"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "deny",
+      "rule": "destructive-command"
+    },
+    {
+      "sessionId": "01a144bd-3000-7a61-89c4-776b928d52cb",
+      "title": "Run command",
+      "kind": "execute",
+      "rawInput": {
+        "command": "rm -rf /srv/precious",
+        "cwd": "/tmp/bm-s2-codex-Drn9or/ws-0"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "deny",
+      "rule": "destructive-command"
+    },
+    {
+      "sessionId": "01a144bd-3063-7d30-8b27-5852cd718903",
+      "title": "Run command",
+      "kind": "execute",
+      "rawInput": {
+        "command": "rm -rf /srv/precious",
+        "cwd": "/tmp/bm-s2-codex-Drn9or/ws-1"
+      },
+      "optionKinds": [
+        "allow_once",
+        "allow_always",
+        "reject_once"
+      ],
+      "verdict": "deny",
+      "rule": "destructive-command"
+    }
+  ],
+  "mcpCalls": [
+    {
+      "tool": "create_ticket",
+      "token": "bm_sess_6c7218bb-2a61-448b-9baa-74a31a0449c3",
+      "args": {
+        "title": "Spike S2 ticket",
+        "body": "via codex"
+      }
+    },
+    {
+      "tool": "create_ticket",
+      "token": "bm_sess_011b4e2c-a2e0-4425-b630-076beaabce76",
+      "args": {
+        "title": "Spike S2 ticket",
+        "body": "via codex"
+      }
+    },
+    {
+      "tool": "create_ticket",
+      "token": "bm_sess_3c18a0b6-894b-4f3b-9f19-2595ded21fa4",
+      "args": {
+        "title": "Spike S2 ticket",
+        "body": "via codex"
+      }
+    }
+  ],
+  "stubRequests": [
+    {
+      "method": "POST",
+      "path": "/v1/responses",
+      "stream": true,
+      "model": "gpt-6.1-sol",
+      "step": "codex-exec-script",
+      "toolOutput": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/responses",
+      "stream": true,
+      "model": "gpt-6.1-sol",
+      "step": "codex-exec-script",
+      "toolOutput": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/responses",
+      "stream": true,
+      "model": "gpt-6.1-sol",
+      "step": "codex-exec-script",
+      "toolOutput": []
+    }
+  ],
+  "agentStderrTail": ""
+}

@@ -7,8 +7,13 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 | Spike | Question | Pass condition | If it fails |
 |---|---|---|---|
 | **S1** Claude quota (S) | Is `rate_limit_event` (the 5-hour and 7-day `utilization` figures) sent when Claude Code authenticates with a `claude setup-token` token? | The SDK or ACP stream reports window percentages on a Max plan account | The quota display shows estimates and moves to v1.1. We do not depend on the undocumented `anthropic-ratelimit-unified-*` headers |
-| **S2** ACP in a container (M) | Can a headless runner start several concurrent `claude-agent-acp` and `codex-acp` sessions, list models through `configOptions`, answer `session/request_permission` by policy, and pass Boss Man's MCP server through `mcpServers`? | 3 or more concurrent sessions per agent kind, model lists filled, permissions answered automatically, MCP tools called | Fall back to driving the Claude Agent SDK and `codex app-server` directly behind a common interface |
+| **S2** ACP in a container (M). **Stub run passed 2026-10-16; real-model run outstanding** ([results](../spikes/s2-acp/README.md)) | Can a headless runner start several concurrent `claude-agent-acp` and `codex-acp` sessions, list models through `configOptions`, answer `session/request_permission` by policy, and pass Boss Man's MCP server through `mcpServers`? | 3 or more concurrent sessions per agent kind, model lists filled, permissions answered automatically, MCP tools called | Fall back to driving the Claude Agent SDK and `codex app-server` directly behind a common interface |
 | **S3** Credit tracking (S) | With a Console organisation and admin key, does `cost_report` show the spend made with the API key, and how quickly? | Spend appears within a few minutes, matching runs | Estimate from run `total_cost_usd` and label it as an estimate |
+
+### Follow-ups from S2
+- Write a minimal seccomp profile that allows user namespaces, for Codex's sandbox in runner containers.
+- Propose a `codex-acp` mode upstream with full access but approvals routed to the user. With it, the container could be the sandbox.
+- Run S2 against real models with the owner's credentials.
 
 ## v1 build phases
 

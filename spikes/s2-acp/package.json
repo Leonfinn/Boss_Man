@@ -1,0 +1,22 @@
+{
+  "name": "@boss-man/spike-s2-acp",
+  "private": true,
+  "type": "module",
+  "description": "Spike S2: drive Claude Code and Codex over ACP headlessly, with policy-answered permissions and Boss Man MCP passthrough",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "spike": "tsx src/harness.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.91.0",
+    "@agentclientprotocol/codex-acp": "2.2.2",
+    "@agentclientprotocol/sdk": "1.9.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}
