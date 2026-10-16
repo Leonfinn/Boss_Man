@@ -8,7 +8,7 @@ import { and, eq, gt, ne, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { RISK_TIERS } from "@boss-man/shared";
+import { planFirstByDefault, RISK_TIERS } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
@@ -18,6 +18,7 @@ import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
+import type { chaptersService } from "./services/chapters.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -40,9 +41,10 @@ type Services = {
   runs: ReturnType<typeof runsService>;
   review: ReturnType<typeof reviewService>;
   notes: ReturnType<typeof notificationsService>;
+  chapters: ReturnType<typeof chaptersService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -55,7 +57,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. Set planFirst for work that should be planned and approved before anything changes.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
@@ -97,7 +99,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? false })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false) })
         .returning({ id: tickets.id });
       return text(`Created ticket ${t!.id} in ${p.name}.`);
     },
@@ -341,6 +343,22 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const n = await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: input.level, title: input.title, body: input.body ?? null, link });
       if (!n) return fail("Couldn't record that notification.");
       return text(n.level === input.level ? `Sent as a ${n.level}.` : `Sent as a ${n.level} instead of a ${input.level} (${n.demotedBy}).`);
+    },
+  );
+
+  server.registerTool(
+    "handoff",
+    {
+      description:
+        "CEO only. Write the handoff for your next chapter, which starts with a fresh conversation: what you're in the middle of, what you've promised and to whom, pending decisions and your recommendations, risks you're watching, and anything not yet in your notes. Calling it again replaces the previous handoff.",
+      inputSchema: { summary: z.string().min(1).max(20_000) },
+    },
+    async ({ summary }) => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo" || !scope.agentId) return fail("Only your company's CEO writes chapter handoffs.");
+      const c = await chapters.writeHandoff(scope.agentId, summary);
+      if (!c) return fail("You have no open chapter to hand off from.");
+      return text(`Handoff saved for chapter ${c.number + 1}.`);
     },
   );
 

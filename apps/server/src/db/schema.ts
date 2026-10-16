@@ -358,6 +358,11 @@ export const runs = pgTable("runs", {
   ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
   engagementId: uuid("engagement_id").references(() => engagements.id, { onDelete: "set null" }),
   acpSessionId: text("acp_session_id"),
+  /** The CEO chapter this run belongs to, if any. */
+  chapterId: uuid("chapter_id").references((): AnyPgColumn => ceoChapters.id, { onDelete: "set null" }),
+  /** How full the session's context was when last reported, in tokens. */
+  contextUsed: integer("context_used"),
+  contextSize: integer("context_size"),
   model: text("model"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
@@ -589,4 +594,40 @@ export const notifications = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("notifications_agent_time").on(t.agentId, t.createdAt), index("notifications_time").on(t.createdAt)],
+);
+
+/**
+ * CEO continuity (v1.1). A CEO works in chapters: one long agent session with a directive
+ * frozen at the start, so prompt caching holds. A chapter closes at 70% context, after 7
+ * days, or when the owner asks; the CEO writes a handoff that opens the next one.
+ */
+export const ceoChapters = pgTable(
+  "ceo_chapters",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    number: integer("number").notNull(),
+    /** Frozen for the chapter: identity, mission, objectives and how to work. */
+    directive: text("directive").notNull(),
+    /** The previous chapter's handoff, given at the start of this one. */
+    handoffIn: text("handoff_in"),
+    acpSessionId: text("acp_session_id"),
+    contextUsed: integer("context_used"),
+    contextSize: integer("context_size"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    /** The owner asked for a new chapter; it closes at the CEO's next run. */
+    rollRequestedAt: timestamp("roll_requested_at", { withTimezone: true }),
+    /** Set while the closing run writes its handoff. */
+    closingRunId: uuid("closing_run_id"),
+    endReason: text("end_reason"),
+    /** For the next chapter: written by the CEO, or put together by Boss Man if it didn't. */
+    handoff: text("handoff"),
+    handoffBy: text("handoff_by"),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("ceo_chapters_agent_number").on(t.agentId, t.number),
+    uniqueIndex("ceo_chapters_one_open").on(t.agentId).where(sql`${t.endedAt} is null`),
+  ],
 );

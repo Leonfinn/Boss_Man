@@ -106,7 +106,7 @@ Started 16 Oct 2026, alongside the v1 install. Built in this order, each as its 
 2. Plan-first tickets (R40) and risk tiers (R48), with the CEO's own decision tool and a ticket page for reviewing. **In review.**
 3. The notification ladder with quiet hours (R44): a notifications feed, agents' `notify_owner` tool, per-agent hourly caps, and phone push through the owner's own ntfy server. **In review.**
 4. Roadmap and plan views: objectives and milestones on a shared timeline with a status from their tickets, a dependency graph that names what's holding work up, and milestones and dependencies editable from a ticket's page. **In review.**
-5. CEO continuity and graded planning, then last-turn diffs (R39) and the owner chat.
+5. CEO continuity and graded planning: chapters that continue one session with a frozen directive, close at 70% context, after 7 days or on request with a handoff, and keep notes and a journal in files; planning asked for in proportion to risk, with high and critical tickets planned first by default. **In review.** Then last-turn diffs (R39) and the owner chat.
 
 The full list:
 - Plan-first tickets (R40) and last-turn diffs from checkpoints (R39).

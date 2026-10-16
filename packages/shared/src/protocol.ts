@@ -12,7 +12,10 @@ export const HEARTBEAT_MS = 15_000;
 const Uuid = z.string().uuid();
 
 export const RunnerEvent = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("run.started"), runId: Uuid, agentId: Uuid.nullable(), acpSessionId: z.string(), model: z.string().nullable() }),
+  /** resumed: the run reopened the session it was asked to (resumeSessionId), rather than starting fresh. */
+  z.object({ type: z.literal("run.started"), runId: Uuid, agentId: Uuid.nullable(), acpSessionId: z.string(), model: z.string().nullable(), resumed: z.boolean().optional() }),
+  /** How full the session's context is, in tokens (from ACP usage_update). */
+  z.object({ type: z.literal("run.context"), runId: Uuid, used: z.number().int().nonnegative(), size: z.number().int().positive() }),
   z.object({ type: z.literal("run.update"), runId: Uuid, update: z.unknown() }),
   /** Where the run is working (R38): the ticket's branch and the commit it started from. */
   z.object({ type: z.literal("run.workspace"), runId: Uuid, ticketId: Uuid, branch: z.string(), baseCommit: z.string(), created: z.boolean(), restoredPatch: z.boolean() }),
@@ -75,6 +78,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     mcpToken: z.string(),
     /** Recovery (R42): try to reopen this ACP session; start a fresh one if it can't be loaded. */
     resumeSessionId: z.string().optional(),
+    /** The prompt to send instead if resumeSessionId can't be reopened, so a fresh session still gets its full context. */
+    freshPrompt: z.string().optional(),
     /** Start in plan mode (R40): the agent plans and asks for approval before changing anything. */
     mode: z.enum(["plan"]).optional(),
     /** Git workspace (R38): the run works in the ticket's worktree instead of cwd. */

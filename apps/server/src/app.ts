@@ -22,6 +22,7 @@ import { ReviewError, reviewService } from "./services/review.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
+import { chaptersService } from "./services/chapters.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
@@ -119,8 +120,10 @@ export async function buildApp(opts: AppOptions) {
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now);
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const deploysSvc = deploysService(db, { now: opts.now });
+  const chapters = chaptersService(db, { now: opts.now });
   const scheduler = schedulerService(db, {
     runners,
+    chapters,
     funding,
     deploys: deploysSvc,
     limits: opts.limits,
@@ -143,6 +146,10 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   runners.onEvent((runner, event) => {
+    // CEO continuity: a chapter follows its runs' sessions and context use.
+    if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err }, "chapter update failed"));
+    if (event.type === "run.context") void chapters.onContext(event.runId, event.used, event.size).catch((err) => app.log.error({ err }, "chapter update failed"));
+    if (event.type === "run.ended") void chapters.onRunEnded(event.runId).catch((err) => app.log.error({ err }, "chapter close failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
@@ -191,7 +198,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -673,6 +680,13 @@ export async function buildApp(opts: AppOptions) {
 
     owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
 
+    // CEO continuity: the CEO's chapters, and asking for a new one.
+    owner.get("/api/companies/:id/chapters", async (req) => chapters.list(IdParam.parse(req.params).id));
+    owner.post("/api/companies/:id/chapters/roll", async (req, reply) => {
+      const c = await chapters.requestRoll(IdParam.parse(req.params).id);
+      return c ? { number: c.number, rollRequestedAt: c.rollRequestedAt } : reply.code(409).send({ error: "no_chapter", message: "The CEO hasn't started a chapter yet. One starts at its next run." });
+    });
+
     // Roadmap and plan views (v1.1).
     const planning = planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) });
     owner.get("/api/roadmap", async (req) => {
@@ -878,5 +892,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters };
 }

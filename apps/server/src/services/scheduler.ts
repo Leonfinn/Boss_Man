@@ -5,7 +5,8 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import { UNTRUSTED_NOTE } from "@boss-man/shared";
+import { planningGuidance, UNTRUSTED_NOTE } from "@boss-man/shared";
+import type { ChapterLaunch } from "./chapters.js";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
@@ -52,6 +53,8 @@ export function schedulerService(
     alert: Alert;
     /** Binds a deploy to its run before launch, so the run's first secrets fetch includes the target. */
     deploys?: { bindRun(deployId: string, runId: string): Promise<unknown>; unbindRun(deployId: string): Promise<unknown> };
+    /** CEO continuity: a CEO's runs continue its current chapter's session. */
+    chapters?: { forLaunch(agent: typeof agents.$inferSelect, runId: string, wake: string): Promise<ChapterLaunch>; onLaunchFailed(runId: string): Promise<unknown> };
     workspaceRoot?: string;
     limits?: Partial<Limits>;
     now?: () => Date;
@@ -76,6 +79,7 @@ export function schedulerService(
         if (t.t.body) lines.push("", t.t.body);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
+        lines.push("", planningGuidance(t.t.risk));
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", t.t.plan);
       }
@@ -113,7 +117,10 @@ export function schedulerService(
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(eq(tickets.id, w.ticketId))
       : [];
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, model: agent.model, startedAt: now() });
+    const wakePrompt = await prompt(w, agent, company.name);
+    // A CEO's run belongs to its current chapter (CEO continuity).
+    const chapter = agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, model: agent.model, startedAt: now() });
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
@@ -130,12 +137,14 @@ export function schedulerService(
       // A plan-first ticket starts in plan mode until its plan is approved (R40).
       ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && w.ticketId ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
-      prompt: await prompt(w, agent, company.name),
+      prompt: chapter?.prompt ?? wakePrompt,
       mcpToken,
-      ...(previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
+      ...(chapter?.resumeSessionId ? { resumeSessionId: chapter.resumeSessionId } : !chapter && previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
+      ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
     });
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);
+      if (chapter) await deps.chapters?.onLaunchFailed(runId);
       await db.delete(runs).where(eq(runs.id, runId));
       await db.update(wakes).set({ runId: null }).where(eq(wakes.id, w.id));
       return { ok: false, reason: "runner offline" };
