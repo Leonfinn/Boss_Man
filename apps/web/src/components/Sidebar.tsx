@@ -4,6 +4,8 @@ import { art } from "../brand";
 const NAV = [
   { id: "decisions", label: "Decisions" },
   { id: "board", label: "Board" },
+  { id: "runs", label: "Runs" },
+  { id: "engagements", label: "Engagements" },
   { id: "funding", label: "Funding" },
 ];
 

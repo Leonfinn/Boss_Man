@@ -1,9 +1,9 @@
 // Steering and stopping agents (R37). The owner, or a CEO for its own company, can send a
 // message into a running agent's session or stop it. A message for a run that has already
 // ended wakes the agent again on the same ticket with the message instead.
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, runners, runs, tickets } from "../db/schema.js";
+import { agents, costEvents, runnerEvents, runners, runs, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export class RunError extends Error {
@@ -30,6 +30,57 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
   return {
     setWakeHook(hook: WakeHook) {
       wake = hook;
+    },
+
+    /** Runs that have finished, newest first, with what they cost. */
+    async recent(limit = 50, companyId?: string) {
+      const rows = await db
+        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome })
+        .from(runs)
+        .leftJoin(agents, eq(agents.id, runs.agentId))
+        .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+        .where(companyId ? and(isNotNull(runs.endedAt), eq(runs.companyId, companyId)) : isNotNull(runs.endedAt))
+        .orderBy(desc(runs.endedAt))
+        .limit(limit);
+      const costs = rows.length
+        ? await db
+            .select({ runId: costEvents.runId, micros: sql<string>`sum(${costEvents.costMicros})` })
+            .from(costEvents)
+            .where(inArray(costEvents.runId, rows.map((r) => r.id)))
+            .groupBy(costEvents.runId)
+        : [];
+      const byRun = new Map(costs.map((c) => [c.runId, Number(c.micros)]));
+      return rows.map((r) => ({ ...r, costMicros: byRun.get(r.id) ?? 0 }));
+    },
+
+    /**
+     * A run's transcript after a given event, oldest first, at most `limit` items (R43). The
+     * browser pages through it with `after`, so a long run is never sent whole.
+     */
+    async transcript(runId: string, opts: { after?: number; limit?: number } = {}) {
+      const { run } = await load(runId);
+      const [agent] = run.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, run.agentId)) : [];
+      const [ticket] = run.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, run.ticketId)) : [];
+      const limit = Math.min(Math.max(opts.limit ?? 500, 1), 1000);
+      const rows = await db
+        .select({ id: runnerEvents.id, seq: runnerEvents.seq, type: runnerEvents.type, payload: runnerEvents.payload, at: runnerEvents.occurredAt })
+        .from(runnerEvents)
+        .where(
+          and(
+            sql`(${runnerEvents.payload}->>'runId') = ${runId}`,
+            inArray(runnerEvents.type, ["run.started", "run.update", "run.workspace", "run.permission_request", "run.ended"]),
+            opts.after != null ? gt(runnerEvents.seq, opts.after) : undefined,
+          ),
+        )
+        .orderBy(asc(runnerEvents.seq))
+        .limit(limit);
+      const [spent] = await db.select({ micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` }).from(costEvents).where(eq(costEvents.runId, runId));
+      return {
+        run: { id: run.id, companyId: run.companyId, agent: agent?.name ?? null, ticketId: run.ticketId, ticket: ticket?.title ?? null, model: run.model, startedAt: run.startedAt, endedAt: run.endedAt, outcome: run.outcome, costMicros: Number(spent?.micros ?? 0) },
+        items: rows.map((r) => ({ seq: r.seq, type: r.type, at: r.at, event: r.payload })),
+        next: rows.at(-1)?.seq ?? opts.after ?? 0,
+        more: rows.length === limit,
+      };
     },
 
     /** Runs still going, newest first, with agent and ticket names. */

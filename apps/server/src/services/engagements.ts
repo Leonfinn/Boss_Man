@@ -2,10 +2,10 @@
 // channel between them. Request → (counter) → agree → owner approval if the provider
 // requires it → work on the provider's own tickets → deliver → sign-off or revision.
 // The requester sees the status and the thread, never the provider's tickets.
-import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { findCredential, untrusted, UNTRUSTED_NOTE, usdToMicros } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, projects, ticketDependencies } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, engagementMessages, engagements, projects, ticketDependencies } from "../db/schema.js";
 
 export class EngagementError extends Error {
   constructor(
@@ -295,6 +295,16 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
         deliverables: e.deliverables ? mark(e.deliverables, e.requesterCompanyId) : null,
         acceptanceCriteria: e.acceptanceCriteria,
         budgetCapUsd: e.budgetCapMicros != null ? e.budgetCapMicros / 1e6 : null,
+        // What the requester has been charged so far (R26).
+        spentUsd:
+          Number(
+            (
+              await db
+                .select({ micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+                .from(costEvents)
+                .where(and(eq(costEvents.engagementId, e.id), isNotNull(costEvents.chargedCompanyId)))
+            )[0]?.micros ?? 0,
+          ) / 1e6,
         counterTerms: e.counterTerms && theirs === e.providerCompanyId ? untrusted(theirName!, JSON.stringify(e.counterTerms)) : e.counterTerms,
         delivery: e.delivery && theirs === e.providerCompanyId ? untrusted(theirName!, JSON.stringify(e.delivery)) : e.delivery,
         thread: thread.map((m) => ({ ...m, body: mark(m.body, m.fromCompanyId) })),
