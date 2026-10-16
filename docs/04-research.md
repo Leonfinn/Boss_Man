@@ -196,3 +196,64 @@ The review was read from a shallow clone at `abd4912` plus issues up to 14 Oct 2
 - Its single-repo, single-user assumptions.
 - Kanban removed its MCP server in favour of a CLI plus a skill (`.plan/docs/kanban-mcp-removal-handoff.md`). This supports R36's "signed per-run CLI later", but Boss Man keeps MCP for now.
 
+## H. Nimbalyst review (2026-10-16)
+
+[Nimbalyst](https://github.com/nimbalyst/nimbalyst) is an Electron desktop workspace around Claude Code and Codex, with iOS and Android companions. It drives agents through the Claude Agent SDK and Codex SDK directly, not ACP.
+- **Licence and maturity:** MIT, v0.81.7, about 1.9k stars.
+- **Extensions:** `.nimext` zips carry editors, MCP tools, panels, slash commands and agent workflows. Permissions are opt-in, but its own docs say there's no sandbox once native code is granted, and checksum verification is skipped when no checksum is given.
+- **Access:** the website was blocked during the review, so this is read from the repo at `39aaf39`.
+
+### What we adopted
+- **Notification ladder** (`packages/extensions/crew/src/backend/crewPolicy.ts`): levels, per-agent caps, quiet hours that demote rather than drop, and evidence links. Added to R44.
+- **Long-lived agent continuity** (`crewChapters.ts`, `crewDirective.ts`): chapters that roll at 70% context or after 7 days with a handoff summary, and a directive frozen per chapter. Planned for CEOs in v1.1.
+- **Approve and make this a rule** (`docs/AGENT_PERMISSIONS.md`). Added to R22.
+- **Spawn reservation in a serialised lane** (`metaAgentSessionQueries.ts`). This prompted a check of our scheduler, which found a real race: concurrent passes could launch the same wake more than once. It's fixed in #14.
+- **Packs:** a later item, done better than Nimbalyst. Packs run inside the company's runner, and checksums and signatures are mandatory.
+- **Internal keys stay internal:** engagement threads never expose internal ticket keys (`TRACKER_SCHEMA_SHARING.md`).
+- **Instance-wide cap:** a spend cap above all budgets.
+
+### What we skip
+- The Electron UI and its document editors.
+- Cloud sync and team features (multi-user is a v1 non-goal).
+- Storing state as files.
+- Native-code extensions without a sandbox.
+
+## I. Aperant review (2026-10-16)
+
+[Aperant](https://github.com/AndyMik90/Aperant), formerly Auto-Claude, is an Electron app. A pipeline of agents writes a spec, plans, codes and runs QA in a git worktree, then merges the result. It also has a kanban, roadmap, ideation and GitHub/GitLab/Linear import.
+- **How it drives agents:** with its own Vercel AI SDK agent loop, not ACP.
+- **Licence:** **AGPL-3.0, so ideas only.**
+- **Maturity:** 2.x is in maintenance mode, and a 3.0 rebuild is in progress in a separate repo.
+- **README versus source:** some README claims are ahead of the source. For example, its "dynamic allowlist" became a static denylist.
+
+### What we adopted
+- **A real merge step:** `merge-tree` in a throwaway worktree, exit codes, an explicit target, a resolver agent, and a conflict preview. This became R46. It comes from its merge bugs:
+  - #1477: `git clean` on the main checkout;
+  - #1343: an AI merge given a placeholder instead of the diff;
+  - #1089: stdout parsing instead of exit codes;
+  - #1202: merging into whatever branch was checked out.
+- **Verification per task:** `verification {type, run}` in its plan schema. This became R47.
+- **Complexity-rated tasks** (`complexity_assessor.md`). These became risk tiers (R48) and graded planning depth.
+- **QA loop limits and recurrence detection** (`qa-loop.ts`). This became R49, with tighter limits than Aperant's 50 rounds.
+- **Circular-fix detection by error hash** (`recovery-manager.ts`). This became R50.
+- **Tolerant tool arguments.** Added to R11.
+- **Account fallback by usage thresholds** (`profile-scorer.ts`). Added to R27, using the owner's own funding sources only.
+- **A canary gate:** #1864, where a new SDK message type broke Max users' tasks. This became R52.
+- **Gaps it exposed:**
+  - a per-ticket cost ceiling (R53);
+  - untrusted-content labelling (R51);
+  - workspace clean-up and disk caps (R54).
+- **Later:**
+  - a lessons store with a trust gate (`memory/observer/trust-gate.ts`);
+  - ideation and roadmap generation into draft tickets;
+  - issue triage;
+  - evidence-checked review (`pr_finding_validator.md`);
+  - file-overlap-aware scheduling.
+
+### What we skip
+- Its own agent loop and provider registry.
+- The semantic AST merge engine. We use git.
+- Embeddings and graph memory, and sentinel files for state.
+- Promoting queue items in the browser, which R43 rules out.
+- Bash allow and deny lists. The container plus the policy engine does this better.
+

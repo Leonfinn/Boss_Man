@@ -181,7 +181,48 @@ These come from cline/kanban (Apache-2.0) and its issue tracker; see [04-researc
   - Long run transcripts are virtualised.
   - All autonomy (wake-ups, auto-advance, sweeps) runs on the server, never in the browser.
 - **R44. Owner notifications.** When something enters the decision queue, the owner gets a browser or PWA notification, unless a Boss Man tab is already visible.
+  - **Levels** (from Nimbalyst): note (feed only), flag (notification), page (notification and phone push) and ask (needs an answer).
+  - **Caps:** each agent has a cap on how often it can notify.
+  - **Quiet hours** demote a notification to a lower level rather than drop it.
+  - **Evidence:** every notification links to its evidence.
+  - **Phone push** uses Web Push (Boss Man only sends outbound requests) or a self-hosted ntfy reached over Tailscale. Boss Man is never exposed at the router.
 - **R45. Web hardening.** WebSocket upgrades check `Origin` and `Host`. Login has a rate limit and a lockout after repeated failures.
+
+### From the Nimbalyst and Aperant reviews (2026-10-16)
+
+See [04-research.md](04-research.md#h-nimbalyst-review-2026-10-16) sections H and I.
+
+- **R46. Merging a ticket's branch.**
+  - The merge is tried in a throwaway worktree with `git merge-tree`, against a target branch named explicitly.
+  - Success is judged by exit codes, never by output text.
+  - A conflict goes to a resolver agent working in the ticket's own worktree, and the result has to pass the ticket's checks.
+  - The review shows any predicted conflicts beforehand.
+  - A merge closes the ticket.
+  - Boss Man never runs `git clean` or `reset --hard` outside a ticket's worktree. Aperant #1477 deleted users' untracked files that way.
+- **R47. Verification before done.** A ticket can carry a verify command, such as `pnpm test`. It must pass in the worktree before the ticket can move to done. This extends R41 and the key-result `check` method.
+- **R48. Risk tiers.** Each ticket is rated trivial, low, medium, high or critical. The rating sets:
+  - who reviews it (the CEO, or the owner for high and critical);
+  - how deep the checks go;
+  - whether it runs in staging first.
+
+  Docs-only tickets skip QA.
+- **R49. Bounded review loops.**
+  - Review-and-fix rounds are counted.
+  - A finding that is rejected three times, or three errors in a row, becomes a decision row instead of another round.
+  - The reviewer is a different agent or model from the coder.
+- **R50. Looping runs.** A run that keeps hitting the same error (the same error signature three times in two hours) is flagged as a circular fix. Its next attempt must take a different approach. This catches busy-but-stuck runs, which R32's silence check misses.
+- **R51. Untrusted content.**
+  - Text from another company's engagement thread, from web fetches and from tool output is labelled untrusted in the agent's prompt.
+  - It can't change policy or decision tiers.
+- **R52. Image canary.** A rebuilt runner image passes the S2 smoke run before it replaces the current image, and the previous image is kept for rollback. Aperant #1864 broke users' tasks when its agent SDK added a new message type. Boss Man's runner already ignores ACP update types it doesn't know.
+- **R53. Instance-wide spend cap.** A cap across all companies sits above the per-company, project and agent budgets (R28). Each ticket also has a cumulative cost ceiling across all its runs, because review and retry loops multiply runs.
+- **R54. Workspace clean-up.** Worktrees of tickets done more than N days ago are removed, with their branches kept. Each company has a disk cap, and orphaned worktrees are pruned on runner start.
+
+**Additions to existing requirements:**
+- **R11:** MCP tools accept common synonyms (done, finished, complete) and return precise validation errors, so an agent can retry.
+- **R22:** a permission row offers "approve and make this a rule".
+- **R24:** threads never expose one company's internal ticket keys or IDs to the other.
+- **R27:** when a subscription's 5-hour window is full, work can fall back to API credit, within budget. This only uses the owner's own accounts.
 
 - **R13b (later). Credential leases.** Git and deploy credentials can be handed out as short-lived, scoped leases that are revoked when the run ends, on top of grants.
 
@@ -191,5 +232,6 @@ These come from cline/kanban (Apache-2.0) and its issue tracker; see [04-researc
 |---|---|
 | **v1** | Launch safety (R30), the runner journal (R31), stalled-run rows (R32), provider-error holds (R33) and cost-accounting hygiene (R34). Companies, projects and tickets. The mapped kanban. Claude Code and Codex agents over ACP. CEO onboarding. The decision queue with stale blockers and the default rules. Minimal engagements. Objectives and key results. The API-credit budget. The data model for secrets and grants. Deploy targets. |
 | **v1** (added 2026-10-16) | Steering and stopping runs (R37), git workspaces (R38), review with diffs and comments (R39), failed runs never done (R41), resume after a crash (R42), a UI that can't stall agents (R43), owner notifications (R44) and web hardening (R45). |
-| **v1.1** | Roadmap and plan views. Configurable CEO decision rules. The secrets management screen. Plan-first tickets (R40). Last-turn diffs from checkpoints (R39). An owner chat that turns plain language into tickets and links, with board tools only. |
-| **Later** | A Paperclip importer, using Paperclip's company export. More ACP agents. A review before any public release, covering Anthropic policy, Claude Code redistribution and multiple users. |
+| **v1** (added 2026-10-16, second batch) | Merging (R46), verification before done (R47), bounded review loops (R49), looping runs (R50), untrusted-content labels (R51), image canary (R52), instance and ticket spend caps (R53) and workspace clean-up (R54). |
+| **v1.1** | Risk tiers (R48). A notification ladder with quiet hours (R44). CEO continuity: notes and a journal in files, with chapters that roll at 70% context or after 7 days, each with a handoff summary, and the directive frozen per chapter so prompt caching holds. Planning depth graded by ticket complexity. Roadmap and plan views. Configurable CEO decision rules. The secrets management screen. Plan-first tickets (R40). Last-turn diffs from checkpoints (R39). An owner chat that turns plain language into tickets and links, with board tools only. |
+| **Later** | Per-company packs: declarative bundles of skills, commands and MCP tools. They are off by default, run inside the company's runner, and are distributed with mandatory checksums and signatures. Until then, MCP tool names stay namespaced. A lessons store, where lessons the owner approves feed later runs, with a trust gate on anything learned from the web. Ideation into draft tickets. Issue triage. Evidence-checked review. File-overlap-aware scheduling. A Paperclip importer, using Paperclip's company export. More ACP agents. A review before any public release, covering Anthropic policy, Claude Code redistribution and multiple users. |
