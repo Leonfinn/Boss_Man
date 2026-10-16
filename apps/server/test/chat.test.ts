@@ -83,7 +83,9 @@ describe("owner chat", () => {
 
     // Its MCP server has board tools only.
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["board", "create_ticket", "link_tickets", "set_milestone"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["board", "create_ticket", "features", "link_tickets", "log_feedback", "set_milestone"]);
+    expect(textOf(await client.callTool({ name: "log_feedback", arguments: { text: "Acme wants SSO.", from: "Acme" } }))).toMatch(/^Filed in the feedback inbox: #\/feedback\//);
+    expect((await c.feedback.notes(c.company.id))[0]).toMatchObject({ source: "chat", customer: "Acme", text: "Acme wants SSO." });
     const board = JSON.parse(textOf(await client.callTool({ name: "board", arguments: {} })));
     expect(board.objectives[0].milestones[0]).toMatchObject({ id: c.ms.id, title: "Beta" });
     const auth = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Refactor auth", risk: "medium" } }));

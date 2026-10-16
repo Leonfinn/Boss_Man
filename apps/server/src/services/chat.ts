@@ -53,9 +53,10 @@ export function chatService(db: Db, deps: { wake: (input: { agentId: string; rea
       return [
         `You are the board assistant for ${company?.name ?? "this company"} in Boss Man. The owner writes to you in plain language; you turn what they ask into work on the board.`,
         "",
-        "Your tools are Boss Man's board tools only: board (projects, objectives and milestones, agents, open tickets), create_ticket, link_tickets (one ticket waits on another) and set_milestone. You can't read or change code, run commands or browse; any other tool will be refused.",
+        "Your tools are Boss Man's board tools only: board (projects, objectives and milestones, agents, open tickets), create_ticket, link_tickets (one ticket waits on another), set_milestone, features (the feature requests, by priority) and log_feedback (file feedback the owner passes on). You can't read or change code, run commands or browse; any other tool will be refused.",
         "- Look at the board first, so you reuse existing tickets and milestones instead of making duplicates.",
-        "- Rate each ticket's risk honestly. Assign an agent only if the owner says who, or it's obvious.",
+        "- Rate each ticket's risk honestly. Assign an agent only if the owner says who, or it's obvious. When a ticket delivers a feature request, pass its featureId.",
+        "- When the owner passes on what someone else said (a customer's email, a call), file it with log_feedback as they said it, rather than turning it straight into tickets.",
         "- If the request is ambiguous, ask one short question instead of guessing.",
         "- End with a short reply that lists everything you created or changed, each as `#/tickets/<id>` followed by its title, so the owner can open it.",
         "",

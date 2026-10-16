@@ -8,10 +8,10 @@ import { and, asc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { planFirstByDefault, RISK_TIERS } from "@boss-man/shared";
+import { IMPORTANCE, planFirstByDefault, RISK_TIERS, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets } from "./db/schema.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -20,6 +20,7 @@ import { ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { WorkError, type workService } from "./services/work.js";
+import { FeedbackError, type feedbackService } from "./services/feedback.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -44,9 +45,10 @@ type Services = {
   notes: ReturnType<typeof notificationsService>;
   chapters: ReturnType<typeof chaptersService>;
   work: ReturnType<typeof workService>;
+  feedback: ReturnType<typeof feedbackService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -59,7 +61,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for, and featureId when it delivers a feature request. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
@@ -67,9 +69,14 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         engagementId: z.string().uuid().optional(),
         risk: z.enum(RISK_TIERS).optional(),
         planFirst: z.boolean().optional(),
+        featureId: z.string().uuid().optional(),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst }) => {
+    async ({ title, body, project, engagementId, risk, planFirst, featureId }) => {
+      if (featureId) {
+        const [f] = await db.select({ id: features.id }).from(features).where(and(eq(features.id, featureId), eq(features.companyId, scope.companyId)));
+        if (!f) return fail("No feature with that id in your company.");
+      }
       const p = await resolveProject(project);
       if (!p) {
         const names = (await db.select({ name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId))).map((r) => r.name);
@@ -101,7 +108,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId: featureId ?? null })
         .returning({ id: tickets.id });
       return text(`Created ticket ${t!.id} in ${p.name}.`);
     },
@@ -349,6 +356,85 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   );
 
   server.registerTool(
+    "feedback",
+    {
+      description:
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description), mark (noteId, state processed|archived).",
+      inputSchema: {
+        action: z.enum(["inbox", "features", "log", "link", "create_feature", "mark"]),
+        noteId: z.string().uuid().optional(),
+        featureId: z.string().uuid().optional(),
+        importance: z.enum(IMPORTANCE).optional(),
+        highlight: z.string().max(2000).optional(),
+        title: z.string().min(1).max(200).optional(),
+        description: z.string().max(10_000).optional(),
+        text: z.string().min(1).max(20_000).optional(),
+        from: z.string().min(1).max(200).optional(),
+        fromOutside: z.boolean().optional(),
+        state: z.enum(["processed", "archived"]).optional(),
+      },
+    },
+    async (input) => {
+      try {
+        if (input.action === "inbox") {
+          const rows = await feedback.untriaged(scope.companyId, 20);
+          if (!rows.length) return text("No unprocessed feedback.");
+          return text(
+            rows
+              .map(({ note: n, customer }) => {
+                const head = `Note ${n.id} from ${customer ?? "someone anonymous"} via ${n.source}, ${n.createdAt.toISOString().slice(0, 10)}${n.title ? `: ${n.title}` : ""}`;
+                return `${head}\n${n.untrusted ? untrusted(`feedback via ${n.source}`, n.text) : n.text}`;
+              })
+              .join("\n\n"),
+          );
+        }
+        if (input.action === "features") {
+          const all = await feedback.scored(scope.companyId);
+          const list = all.features
+            .filter((f) => f.status !== "declined")
+            .sort((a, b) => b.priority - a.priority)
+            .slice(0, 60)
+            .map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, demand: f.demand, people: f.customerCount, priority: f.priority, tickets: f.tickets }));
+          return text(JSON.stringify(list));
+        }
+        if (input.action === "log") {
+          if (!input.text) return fail("Give the feedback as text.");
+          const n = await feedback.createNote(scope.companyId, {
+            text: input.text,
+            title: input.title ?? null,
+            source: "agent",
+            customer: input.from ? { name: input.from } : null,
+            untrusted: input.fromOutside ?? false,
+            createdByAgentId: scope.agentId,
+          });
+          return text(`Logged as note ${n.id}.`);
+        }
+        const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        if (me?.role !== "ceo") return fail("Only your company's CEO triages feedback. You can log it and read it.");
+        const by = (await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId!)))[0]?.name ?? "the CEO";
+        if (input.action === "link") {
+          if (!input.noteId || !input.featureId) return fail("Give noteId and featureId.");
+          await feedback.link(input.noteId, { featureId: input.featureId, importance: input.importance ?? "important", highlight: input.highlight ?? null, createdBy: by }, scope.companyId);
+          return text("Linked.");
+        }
+        if (input.action === "create_feature") {
+          if (!input.title) return fail("Give the feature a title.");
+          const existing = (await feedback.scored(scope.companyId)).features.find((f) => f.title.toLowerCase() === input.title!.toLowerCase());
+          if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; link to it.`);
+          const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, createdByAgentId: scope.agentId });
+          return text(`Created feature ${f.id}.`);
+        }
+        if (!input.noteId || !input.state) return fail("Give noteId and state.");
+        await feedback.updateNote(input.noteId, { state: input.state }, scope.companyId);
+        return text(`Marked ${input.state}.`);
+      } catch (err) {
+        if (err instanceof FeedbackError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
     "handoff",
     {
       description:
@@ -479,7 +565,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work }: Services, scope: Scope) {
+function buildChatServer(db: Db, { work, feedback }: Services, scope: Scope) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
   const workFail = (err: unknown) => {
@@ -519,6 +605,7 @@ function buildChatServer(db: Db, { work }: Services, scope: Scope) {
         milestoneId: z.string().uuid().optional(),
         assignee: z.string().optional(),
         waitsOn: z.array(z.string().uuid()).max(20).optional(),
+        featureId: z.string().uuid().optional(),
       },
     },
     async (input) => {
@@ -533,12 +620,33 @@ function buildChatServer(db: Db, { work }: Services, scope: Scope) {
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
       try {
-        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId });
+        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id });
         return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
       } catch (err) {
         return workFail(err);
       }
+    },
+  );
+
+  server.registerTool(
+    "log_feedback",
+    {
+      description: "File feedback the owner passes on (a customer's email, a call, their own idea) in the company's feedback inbox, as they said it. Give who it's from if the owner said.",
+      inputSchema: { text: z.string().min(1).max(20_000), from: z.string().min(1).max(200).optional(), title: z.string().min(1).max(200).optional() },
+    },
+    async ({ text: body, from, title }) => {
+      const n = await feedback.createNote(scope.companyId, { text: body, title: title ?? null, source: "chat", customer: from ? { name: from } : null });
+      return text(`Filed in the feedback inbox: #/feedback/${scope.companyId}/${n.id}`);
+    },
+  );
+
+  server.registerTool(
+    "features",
+    { description: "The company's feature requests, highest priority first: id, title, status, demand and priority. Pass featureId to create_ticket to deliver one.", inputSchema: {} },
+    async () => {
+      const all = await feedback.scored(scope.companyId);
+      return text(JSON.stringify(all.features.filter((f) => f.status !== "declined").sort((a, b) => b.priority - a.priority).slice(0, 60).map((f) => ({ id: f.id, title: f.title, status: f.status, demand: f.demand, priority: f.priority, link: `#/features/${scope.companyId}/${f.id}` }))));
     },
   );
 

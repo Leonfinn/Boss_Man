@@ -3,7 +3,7 @@
 // matters to that person. Features are scored on demand (from their insights) and on the
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { and, asc, count, desc, eq, ilike, inArray, lt, or, sql } from "drizzle-orm";
-import { demandScore, priorityScore, suggestFeatures, type FeatureStatus, type Importance, type NoteSource } from "@boss-man/shared";
+import { demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
 
@@ -42,7 +42,10 @@ export type NoteInput = {
   portalVoter?: string | null;
 };
 
-export function feedbackService(db: Db, deps: { now?: () => Date; onNote?: (note: typeof feedbackNotes.$inferSelect) => unknown } = {}) {
+export function feedbackService(
+  db: Db,
+  deps: { now?: () => Date; onNote?: (note: typeof feedbackNotes.$inferSelect) => unknown; onReleased?: (feature: typeof features.$inferSelect) => unknown } = {},
+) {
   const now = deps.now ?? (() => new Date());
 
   async function own<T extends { companyId: string }>(rows: Promise<T[]>, companyId: string | undefined, what: string): Promise<T> {
@@ -363,6 +366,63 @@ export function feedbackService(db: Db, deps: { now?: () => Date; onNote?: (note
     async unlink(insightId: string) {
       const [i] = await db.delete(insights).where(eq(insights.id, insightId)).returning();
       if (!i) throw new FeedbackError(404, "No such insight.");
+    },
+
+    /**
+     * Moves features along with their tickets: in progress once one is being worked on or
+     * reviewed, released once every ticket is done and at least one was completed.
+     */
+    async syncStatuses(companyId?: string) {
+      const rows = await db
+        .select({
+          feature: features,
+          open: sql<number>`count(*) filter (where ${tickets.systemState} <> 'done')`.mapWith(Number),
+          active: sql<number>`count(*) filter (where ${tickets.systemState} in ('in_progress', 'review'))`.mapWith(Number),
+          completed: sql<number>`count(*) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
+        })
+        .from(features)
+        .innerJoin(tickets, eq(tickets.featureId, features.id))
+        .where(and(inArray(features.status, ["idea", "considering", "planned", "in_progress"]), companyId ? eq(features.companyId, companyId) : undefined))
+        .groupBy(features.id);
+      const changed: Array<{ id: string; status: FeatureStatus }> = [];
+      for (const r of rows) {
+        const f = r.feature;
+        const next: FeatureStatus | null = r.open === 0 && r.completed > 0 ? "released" : r.active > 0 && f.status !== "in_progress" ? "in_progress" : null;
+        if (!next || next === f.status) continue;
+        const [u] = await db
+          .update(features)
+          .set({ status: next, updatedAt: now(), ...(next === "released" ? { releasedAt: now() } : {}) })
+          .where(and(eq(features.id, f.id), eq(features.status, f.status)))
+          .returning();
+        if (!u) continue;
+        changed.push({ id: f.id, status: next });
+        if (next === "released") await deps.onReleased?.(u);
+      }
+      return changed;
+    },
+
+    /** A ticket's description from a feature: what it is and what people asked for, strongest first. */
+    async brief(featureId: string) {
+      const f = await feature(featureId);
+      const evidence = await db
+        .select({ importance: insights.importance, highlight: insights.highlight, text: feedbackNotes.text, untrusted: feedbackNotes.untrusted, customer: feedbackCustomers.name, segment: feedbackCustomers.segment })
+        .from(insights)
+        .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
+        .leftJoin(feedbackCustomers, eq(feedbackCustomers.id, feedbackNotes.customerId))
+        .where(eq(insights.featureId, featureId));
+      evidence.sort((a, b) => IMPORTANCE_POINTS[b.importance as Importance] - IMPORTANCE_POINTS[a.importance as Importance]);
+      const lines = [`Delivers the feature "${f.title}".`];
+      if (f.description) lines.push("", f.description);
+      if (evidence.length) {
+        lines.push("", `What people asked for (${evidence.length}):`);
+        for (const e of evidence.slice(0, 10)) {
+          const who = e.customer ? `${e.customer}${e.segment ? `, ${e.segment}` : ""}` : "Anonymous";
+          const said = (e.highlight ?? e.text).slice(0, 600);
+          lines.push(`- ${IMPORTANCE_LABEL[e.importance as Importance]} for ${who}: ${e.untrusted ? untrusted("feedback from outside", said) : `"${said}"`}`);
+        }
+        if (evidence.length > 10) lines.push(`- and ${evidence.length - 10} more on the feature's page.`);
+      }
+      return { feature: f, body: lines.join("\n").slice(0, 20_000) };
     },
 
     /** Unprocessed notes, oldest first, for whoever triages them. */

@@ -7,7 +7,7 @@ const env = process.env;
 const master = loadMasterKey(env);
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
-const { app, scheduler, sweeps, notes } = await buildApp({
+const { app, scheduler, sweeps, notes, feedback } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -24,12 +24,15 @@ const { app, scheduler, sweeps, notes } = await buildApp({
 const tick = setInterval(() => void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed")), Number(env.BOSSMAN_TICK_MS ?? 5000));
 // New decisions reach the owner's notifications (R44).
 const notify = setInterval(() => void notes.syncDecisions().catch((err) => app.log.error({ err }, "notification sync failed")), Number(env.BOSSMAN_NOTIFY_MS ?? 5000));
+// Features follow the tickets that deliver them.
+const featureSync = setInterval(() => void feedback.syncStatuses().catch((err) => app.log.error({ err }, "feature status sync failed")), Number(env.BOSSMAN_FEATURE_SYNC_MS ?? 30_000));
 // Stale-blocker and stalled-run sweeps.
 const sweep = setInterval(() => void sweeps.run().catch((err) => app.log.error({ err }, "sweep failed")), Number(env.BOSSMAN_SWEEP_MS ?? 60_000));
 
 const shutdown = async () => {
   clearInterval(tick);
   clearInterval(sweep);
+  clearInterval(featureSync);
   clearInterval(notify);
   await app.close();
   await close();
