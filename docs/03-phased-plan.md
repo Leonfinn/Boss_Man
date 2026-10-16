@@ -16,7 +16,7 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 | Runs: steering, recovery, workspaces | Merged: steering messages (#11), resume after a crash (#12, #13), one scheduler pass at a time (#14), a git worktree per ticket (#15). |
 | Review, merge, loop guards | In review: diffs and line comments (#17), verify then merge (#18), review-loop, circular-failure and spend caps (#19). |
 | Safety | In review: untrusted-content labels (R51), the image canary with promote and rollback (R52), workspace clean-up and disk caps (R54). |
-| Web UI | In review: login and first-run setup, the decision queue, the board, funding, runs with a live transcript, steering and stop, and engagements with their terms, spend and thread, built from the canvas designs with the owner's artwork. Transcripts are paged and virtualised and keep at most 5,000 events in the page (R43). Browser notifications from the notifications feed while no tab is visible (R44), and a login lockout and strict content security policy (R45). Still to do: WebSocket `Origin` checks once the browser uses WebSockets, and the v1.1 roadmap and plan views. |
+| Web UI | In review: login and first-run setup, the decision queue, the board, funding, runs with a live transcript, steering and stop, and engagements with their terms, spend and thread, built from the canvas designs with the owner's artwork. Transcripts are paged and virtualised and keep at most 5,000 events in the page (R43). Browser notifications from the notifications feed while no tab is visible (R44), and a login lockout and strict content security policy (R45). Still to do: WebSocket `Origin` checks once the browser uses WebSockets, and the rest of v1.1. |
 | Production runner image | Merged (#9): Claude Code from npm, a non-root user, volumes for workspaces, the journal and Claude's transcripts, and a healthcheck. CI builds it and runs the canary in it with networking off. |
 
 ## Phase 0: spikes (settle the unknowns before building on them)
@@ -105,7 +105,7 @@ Started 16 Oct 2026, alongside the v1 install. Built in this order, each as its 
 1. Owner controls: configurable decision rules (R19) and the secrets screen. **In review.**
 2. Plan-first tickets (R40) and risk tiers (R48), with the CEO's own decision tool and a ticket page for reviewing. **In review.**
 3. The notification ladder with quiet hours (R44): a notifications feed, agents' `notify_owner` tool, per-agent hourly caps, and phone push through the owner's own ntfy server. **In review.**
-4. Roadmap and plan views.
+4. Roadmap and plan views: objectives and milestones on a shared timeline with a status from their tickets, a dependency graph that names what's holding work up, and milestones and dependencies editable from a ticket's page. **In review.**
 5. CEO continuity and graded planning, then last-turn diffs (R39) and the owner chat.
 
 The full list:

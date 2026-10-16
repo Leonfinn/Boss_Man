@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, findCredential, usdToMicros } from "@boss-man/shared";
+import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -21,6 +21,7 @@ import { recoveryService } from "./services/recovery.js";
 import { ReviewError, reviewService } from "./services/review.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
+import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
@@ -671,6 +672,35 @@ export async function buildApp(opts: AppOptions) {
     });
 
     owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
+
+    // Roadmap and plan views (v1.1).
+    const planning = planningService(db, { release: (ticketId) => decisionsSvc.release(ticketId) });
+    owner.get("/api/roadmap", async (req) => {
+      const q = z.object({ today: DateStr.optional(), closed: z.enum(["1"]).optional() }).parse(req.query);
+      return planning.roadmap(q.today ?? dateIn(opts.now?.() ?? new Date(), "UTC"), { includeClosed: !!q.closed });
+    });
+    owner.patch("/api/objectives/:id", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5), status: z.enum(OBJECTIVE_STATUSES) }).partial().parse(req.body);
+      return planning.updateObjective(id, b);
+    });
+    owner.get("/api/milestones/:id/tickets", async (req) => planning.milestoneTickets(IdParam.parse(req.params).id));
+    owner.patch("/api/milestones/:id", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid }).partial().parse(req.body);
+      return planning.updateMilestone(id, b);
+    });
+    owner.delete("/api/milestones/:id", async (req, reply) => {
+      await planning.deleteMilestone(IdParam.parse(req.params).id);
+      return reply.code(204).send();
+    });
+    owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
+    owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
+    owner.delete("/api/dependencies/:id", async (req, reply) => {
+      await planning.removeDependency(IdParam.parse(req.params).id);
+      return reply.code(204).send();
+    });
 
     // Agents: hire, and change model or funding source.
     owner.post("/api/companies/:id/agents", async (req, reply) => {
