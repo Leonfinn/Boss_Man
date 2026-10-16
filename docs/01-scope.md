@@ -117,7 +117,7 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 ### Cost and quota
 
 - **R27.** **Funding sources.** Agents and projects are assigned to a funding source.
-  - **API credit:** $200 a month, reset on the billing date. It is tracked through the Anthropic Admin API `cost_report`. This needs a Console organisation and an admin key.
+  - **API credit:** $200 a month, reset on the billing date. In v1 it is tracked from **Boss Man's own run records**, the per-run `cost` and `total_cost_usd` figures, which are list-price amounts and API-key usage is billed at list price. The owner's Console account is an individual account, and the Admin API (`cost_report`) is unavailable for those; spike S3 confirmed this on 2026-10-16. Optional later: set up a Console organisation and an admin key so spend made outside Boss Man is included too.
   - **Subscription quota:** the Claude 5-hour and 7-day windows, and the Codex primary and secondary windows.
   - **Pay-as-you-go API key**, optional.
 - **R28.** **Budgets.** A budget is set per company, per project or per agent, against a funding source. Its window is the billing cycle, a calendar month, a rolling period or lifetime. Thresholds can be soft or hard. A hard stop pauses the scope.

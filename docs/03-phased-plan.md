@@ -8,7 +8,7 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 |---|---|---|---|
 | **S1** Claude quota (S). **Largely answered by S2:** under a setup-token, ACP `usage_update._meta["_claude/rateLimit"]` carries the 5-hour and 7-day utilisation, reset times and overage state | Is `rate_limit_event` (the 5-hour and 7-day `utilization` figures) sent when Claude Code authenticates with a `claude setup-token` token? | The SDK or ACP stream reports window percentages on a Max plan account | The quota display shows estimates and moves to v1.1. We do not depend on the undocumented `anthropic-ratelimit-unified-*` headers |
 | **S2** ACP in a container (M). **Claude passed against the real model and Codex passed with a stub, 2026-10-16** ([results](../spikes/s2-acp/README.md)) | Can a headless runner start several concurrent `claude-agent-acp` and `codex-acp` sessions, list models through `configOptions`, answer `session/request_permission` by policy, and pass Boss Man's MCP server through `mcpServers`? | 3 or more concurrent sessions per agent kind, model lists filled, permissions answered automatically, MCP tools called | Fall back to driving the Claude Agent SDK and `codex app-server` directly behind a common interface |
-| **S3** Credit tracking (S) | With a Console organisation and admin key, does `cost_report` show the spend made with the API key, and how quickly? | Spend appears within a few minutes, matching runs | Estimate from run `total_cost_usd` and label it as an estimate |
+| **S3** Credit tracking (S). **Answered 2026-10-16: not available on an individual account.** A workspace API key gets `authentication_error: The Admin API requires an Admin API key or an organization-scoped API key`, and the Admin keys page returns 404. v1 uses the fallback | With a Console organisation and admin key, does `cost_report` show the spend made with the API key, and how quickly? | Spend appears within a few minutes, matching runs | Estimate from run `total_cost_usd` and label it as an estimate |
 
 ### Follow-ups from S2
 - Write a minimal seccomp profile that allows user namespaces, for Codex's sandbox in runner containers.
@@ -48,7 +48,7 @@ Each phase ends with a working build that has tests. The phases deal with the ri
    - Deploy targets (socket proxy, SSH, git) with granted credentials.
 6. **Budgets (M)**
    - Funding sources and budget policies (billing-cycle, monthly and lifetime windows; soft and hard limits).
-   - The Admin API cost-report poller.
+   - API-credit spend from Boss Man's own run records (the Admin API cost-report poller is optional, for later).
    - Pausing a scope when its hard limit is reached.
 
 **v1 is done when Boss Man can build itself.** At that point:

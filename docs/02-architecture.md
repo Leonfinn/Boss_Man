@@ -32,7 +32,7 @@ flowchart LR
     ACP1 & ACP2 & ACP3 -->|"MCP tools"| MCP
     RBG -->|"deploy target<br/>(socket proxy / SSH / GitOps)"| DT["Homelab services"]
   end
-  LED -->|"Admin API cost_report"| ANT["Anthropic Console"]
+  LED -.->|"optional later: Admin API cost_report"| ANT["Anthropic Console"]
 ```
 
 ### Server (`boss-man`)
@@ -41,7 +41,7 @@ flowchart LR
 - **Scheduler:**
   - wakes agents on a schedule or when an event arrives (a ticket is assigned, a blocker is resolved, a decision is answered);
   - runs the stale-blocker sweep;
-  - polls the Admin API cost report.
+  - optionally polls the Admin API cost report (later, once a Console organisation exists).
 - **Policy engine:** evaluates the rules for the decision tiers and answers ACP permission requests.
 - **MCP server:** the only way agents reach Boss Man (Streamable HTTP). Each agent session gets a token that is limited to its own company and agent.
 
@@ -143,7 +143,8 @@ stateDiagram-v2
 
 ## Budgets and quota
 - **API credit:**
-  - **Spend:** the Admin API `GET /v1/organizations/cost_report` is polled hourly. Remaining credit is estimated as the monthly grant minus spend since the billing-cycle anchor. Anthropic documents no balance endpoint.
+  - **Spend (v1):** the sum of each run's reported cost (ACP `usage_update.cost`, or `total_cost_usd`) for agents on the API-key funding source, since the billing-cycle anchor. Remaining credit is the monthly grant minus that sum. Anthropic documents no balance endpoint, and the Admin API is unavailable for individual accounts (spike S3). The UI says spend outside Boss Man isn't included, and links to the Console Cost page.
+  - **Spend (optional later):** with a Console organisation and an admin key, poll `GET /v1/organizations/cost_report` hourly and reconcile it against Boss Man's own records.
   - **Before data arrives:** run-level `total_cost_usd` estimates cover the gap until the report catches up.
 - **Claude quota:**
   - **If spike S1 succeeds:** `rate_limit_event` data gives the 5-hour and 7-day used percentages and reset times.
