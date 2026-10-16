@@ -5,3 +5,4 @@ docs
 .git
 data
 secrets
+**/dist

@@ -13,6 +13,7 @@ const { app, scheduler, sweeps } = await buildApp({
   liveValidator: providerLiveValidator,
   secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1",
   logger: true,
+  webDir: env.BOSSMAN_WEB_DIR,
   sweepLimits: {
     ...(env.BOSSMAN_STALE_BLOCKER_HOURS ? { staleAfterMs: Number(env.BOSSMAN_STALE_BLOCKER_HOURS) * 3_600_000 } : {}),
     ...(env.BOSSMAN_STALL_MINUTES ? { stallAfterMs: Number(env.BOSSMAN_STALL_MINUTES) * 60_000 } : {}),

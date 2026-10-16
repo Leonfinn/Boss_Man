@@ -9,7 +9,9 @@
   "scripts": {
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
+    "build": "pnpm --filter @boss-man/web build",
     "dev": "pnpm --filter @boss-man/server dev",
+    "dev:web": "pnpm --filter @boss-man/web dev",
     "db:generate": "pnpm --filter @boss-man/server db:generate"
   },
   "devDependencies": {
