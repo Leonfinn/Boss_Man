@@ -6,8 +6,9 @@
 # the same native binary as the standalone installer
 # (https://code.claude.com/docs/en/setup#install-with-npm). The Claude ACP adapter is
 # pointed at it with CLAUDE_CODE_EXECUTABLE (R6). Codex comes with the codex-acp adapter.
-# Updates inside the container are off: new versions arrive by rebuilding (R9), e.g. weekly:
-#   docker compose build --pull --build-arg CLAUDE_CODE_VERSION=latest runner
+# Updates inside the container are off: new versions arrive by rebuilding (R9), e.g. weekly,
+# with scripts/update-runner.sh, which promotes a build only once its canary passes (R52):
+#   docker run --rm --network none boss-man-runner:candidate node_modules/.bin/tsx src/canary-main.ts
 #
 # Licence note: Claude Code is "© Anthropic PBC. All rights reserved." Build this image
 # yourself; don't publish images that contain it.

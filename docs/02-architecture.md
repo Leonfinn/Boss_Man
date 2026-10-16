@@ -54,7 +54,7 @@ flowchart LR
 - **Connection:** the daemon **dials out** to the server over WebSocket using a per-runner token. A runner can therefore run on a different host from the server without any inbound ports.
 - **Work:** it starts and manages ACP sessions over JSON-RPC on stdio, one session per agent task. It streams events back to the server: messages, tool calls, `usage_update`, permission requests, and `rate_limit_event` if spike S1 shows it is available.
 - **Workspace:** each company has its own volumes. Secrets are injected at runtime from that company's grants and never written into the image.
-- **Rebuilds:** the image is rebuilt weekly and on demand, to pick up new releases (R9).
+- **Rebuilds:** the image is rebuilt weekly and on demand, to pick up new releases (R9). `scripts/update-runner.sh` builds a candidate and runs a canary in it with networking off: a real Claude Code session against a stand-in model, including one permission-checked tool call. Only a passing build replaces `boss-man-runner:current`; the one before is kept as `:previous` for `--rollback` (R52).
 - **Spike S2 settled these details** (see `spikes/s2-acp/README.md`):
   - **Installing Claude Code:** use Anthropic's npm package `@anthropic-ai/claude-code`, which installs the same native binary as the standalone installer. Set `CLAUDE_CODE_EXECUTABLE` so the adapter uses it rather than its own bundled copy. Set `DISABLE_UPDATES=1`.
   - **Codex approvals:** Codex must start in `INITIAL_AGENT_MODE=workspace-write`. Its default `agent` mode sends approvals to Codex's own AI reviewer instead of Boss Man.
