@@ -7,6 +7,7 @@ const NAV = [
   { id: "runs", label: "Runs" },
   { id: "engagements", label: "Engagements" },
   { id: "funding", label: "Funding" },
+  { id: "settings", label: "Settings" },
 ];
 
 export function Sidebar(props: {

@@ -68,4 +68,20 @@ describe("the web UI (R45)", () => {
     const list = (await app.inject({ method: "GET", url: `/api/companies/${company.id}/projects`, headers: { cookie } })).json();
     expect(list.map((p: { name: string }) => p.name)).toEqual(["Customer app", "Website"]);
   });
+
+  it("says whether a company's runner is registered and connected", async () => {
+    const built = await setup();
+    const { app } = built;
+    const s = await app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+    const { company } = (await app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "App Co" } })).json();
+    const status = () => app.inject({ method: "GET", url: `/api/companies/${company.id}/runner`, headers: { cookie } }).then((r) => r.json());
+    expect(await status()).toEqual({ registered: false });
+    const reg = (await app.inject({ method: "POST", url: `/api/companies/${company.id}/runner`, headers: { cookie } })).json();
+    expect(await status()).toMatchObject({ registered: true, runnerId: reg.runnerId, connected: false });
+    built.runners.connect(reg.runnerId, () => true);
+    expect(await status()).toMatchObject({ connected: true });
+    // The token itself is never shown again.
+    expect(JSON.stringify(await status())).not.toContain(reg.token);
+  });
 });

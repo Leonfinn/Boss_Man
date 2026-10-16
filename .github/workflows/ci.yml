@@ -53,3 +53,9 @@ jobs:
         run: |
           mkdir -p secrets && touch secrets/master.key secrets/runner-app-co.token
           POSTGRES_PASSWORD=ci docker compose --profile runners config -q
+      - name: TrueNAS override merges cleanly (docs/06-install-truenas.md)
+        run: |
+          POSTGRES_PASSWORD=ci BOSSMAN_DATA=/mnt/tank/apps/boss-man/data docker compose -f docker-compose.yml -f deploy/truenas.yml --profile runners config > merged.yml
+          grep -q "/mnt/tank/apps/boss-man/data/postgres:/var/lib/postgresql/data\|source: /mnt/tank/apps/boss-man/data/postgres" merged.yml
+          grep -q "source: /mnt/tank/apps/boss-man/data/app-co/workspaces" merged.yml
+          test "$(grep -c 'target: /home/node/workspaces' merged.yml)" = 1

@@ -33,7 +33,7 @@ In a second terminal, start the web UI. It opens on http://localhost:5173 and se
 pnpm dev:web
 ```
 
-Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite) under `apps/server/data/`. For a real install, use `docker compose up -d`: the server image includes the built UI on port 3100, and the runners are added with `--profile runners`.
+Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite) under `apps/server/data/`. For a real install, use `docker compose up -d`: the server image includes the built UI on port 3100, and the runners are added with `--profile runners`. On TrueNAS SCALE, follow [docs/06-install-truenas.md](docs/06-install-truenas.md).
 
 ## Documents
 
@@ -43,7 +43,8 @@ Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite
 | [docs/02-architecture.md](docs/02-architecture.md) | Components, the runner model, the data model, the decision queue, engagements, budgets and secrets |
 | [docs/03-phased-plan.md](docs/03-phased-plan.md) | Spikes first, then the build phases to v1, and the plan for Boss Man to build itself |
 | [docs/04-research.md](docs/04-research.md) | Findings with sources: the Paperclip code, Claude authentication and policy, ACP, and quota tracking |
-| [docs/05-decision-log.md](docs/05-decision-log.md) | Every scoping decision (Q1–Q29) and its answer |
+| [docs/05-decision-log.md](docs/05-decision-log.md) | Every scoping decision and its answer |
+| [docs/06-install-truenas.md](docs/06-install-truenas.md) | Installing on TrueNAS SCALE: datasets, building the images on the NAS, credentials, updates and backups |
 
 ## The idea in one paragraph
 

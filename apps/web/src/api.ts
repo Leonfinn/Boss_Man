@@ -24,15 +24,19 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   }
   const text = await res.text();
   const data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
-  if (!res.ok) throw new ApiError(res.status, String(data.message ?? data.error ?? `HTTP ${res.status}`));
+  if (!res.ok) {
+    // A rejected secret lists what's wrong with it; other errors carry a message.
+    const problems = Array.isArray(data.problems) ? (data.problems as string[]).join(" ") : null;
+    throw new ApiError(res.status, problems ?? String(data.message ?? data.error ?? `HTTP ${res.status}`));
+  }
   return data as T;
 }
 
 // ---------- Shapes the screens use ----------
 
-export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null };
+export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[] };
-export type Project = { id: string; companyId: string; name: string; repoUrl: string | null; defaultBranch: string };
+export type Project = { id: string; companyId: string; name: string; repoUrl: string | null; defaultBranch: string; verifyCommand: string | null };
 
 export type Decision = {
   id: string;
