@@ -92,7 +92,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={route[1]} go={go} />
         ) : page === "roadmap" ? (
-          <Roadmap companies={list} />
+          <Roadmap companies={list} tab={route[1]} go={go} />
         ) : page === "plan" ? (
           <Plan companies={list} companyId={route[1]} go={go} />
         ) : page === "funding" ? (

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, today, type Company, type MilestoneStatus, type RoadmapCompany, type RoadmapMilestone, type RoadmapObjective } from "../api";
+import { api, today, type Company, type Horizon, type MilestoneStatus, type RoadmapCompany, type RoadmapMilestone, type RoadmapObjective } from "../api";
 import { usePoll } from "../hooks";
 
 export const STATUS: Record<MilestoneStatus, { label: string; tone: string; colour: string }> = {
@@ -149,7 +149,7 @@ function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () 
   );
 }
 
-function AddMilestone({ objectiveId, onAdded }: { objectiveId: string; onAdded: () => void }) {
+function AddMilestone({ objectiveId, onAdded, horizon }: { objectiveId: string; onAdded: () => void; horizon?: Horizon }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [date, setDate] = useState("");
@@ -162,7 +162,7 @@ function AddMilestone({ objectiveId, onAdded }: { objectiveId: string; onAdded: 
     );
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    void api(`/api/objectives/${objectiveId}/milestones`, { method: "POST", body: { title: title.trim(), ...(date ? { targetDate: date } : {}) } }).then(
+    void api(`/api/objectives/${objectiveId}/milestones`, { method: "POST", body: { title: title.trim(), ...(date ? { targetDate: date } : {}), ...(horizon ? { horizon } : {}) } }).then(
       () => (setTitle(""), setDate(""), setOpen(false), onAdded()),
       (err: Error) => setError(err.message),
     );
@@ -320,39 +320,158 @@ function AddObjective({ companies, onAdded }: { companies: Company[]; onAdded: (
   );
 }
 
-export function Roadmap({ companies }: { companies: Company[] }) {
-  const [closed, setClosed] = useState(false);
-  const now = today();
-  const data = usePoll((signal) => api<RoadmapCompany[]>(`/api/roadmap?today=${now}${closed ? "&closed=1" : ""}`, { signal }), 60_000, `roadmap-${closed}`);
-  const list = data.data ?? [];
-  const win = windowOf(list, now);
+const TABS = [
+  { id: "now", label: "Now", help: "Being worked on, late, or due within 30 days." },
+  { id: "next", label: "Next", help: "Due within the next 90 days." },
+  { id: "later", label: "Later", help: "Further out, or not scheduled yet." },
+  { id: "timeline", label: "Timeline", help: "Every milestone by its target date." },
+] as const;
+type Tab = (typeof TABS)[number]["id"];
+const HORIZON_LABEL: Record<Horizon, string> = { now: "Now", next: "Next", later: "Later" };
+
+/** One milestone on a Now / Next / Later tab. */
+function MilestoneCard({ m, selected, onSelect, onChanged }: { m: RoadmapMilestone; selected: boolean; onSelect: () => void; onChanged: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const pin = (value: string) =>
+    void api(`/api/milestones/${m.id}`, { method: "PATCH", body: { horizon: value === "auto" ? null : value } }).then(onChanged, (err: Error) => setError(err.message));
+  const pct = m.total ? m.done / m.total : 0;
+  return (
+    <li className="rm-card" style={{ ["--c" as string]: STATUS[m.status].colour }}>
+      <button type="button" className="rm-card-title" aria-expanded={selected} onClick={onSelect}>
+        <span className="rm-dot" aria-hidden="true" />
+        <b>{m.title}</b>
+      </button>
+      <div className="rm-card-meta">
+        <span className={`tag ${STATUS[m.status].tone}`}>{STATUS[m.status].label}</span>
+        <span className="muted">{m.targetDate ? short(m.targetDate) : "No date"}</span>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span className="bar" style={{ flex: 1 }} aria-label={`${m.done} of ${m.total} tickets done`}>
+          <span style={{ width: `${pct * 100}%` }} />
+        </span>
+        <span className="mono muted" style={{ fontSize: 12 }}>
+          {m.total ? `${m.done}/${m.total}` : "no tickets"}
+        </span>
+      </div>
+      {(m.active > 0 || m.blocked > 0) && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          {[m.active ? `${m.active} in progress` : "", m.blocked ? `${m.blocked} blocked` : ""].filter(Boolean).join(", ")}
+        </p>
+      )}
+      <label className="rm-pin">
+        <span className="visually-hidden">Where "{m.title}" sits</span>
+        <select value={m.pinned ?? "auto"} onChange={(e) => pin(e.target.value)}>
+          <option value="auto">Auto ({HORIZON_LABEL[m.horizon]})</option>
+          <option value="now">Pinned to Now</option>
+          <option value="next">Pinned to Next</option>
+          <option value="later">Pinned to Later</option>
+        </select>
+      </label>
+      {error && <p className="error">{error}</p>}
+    </li>
+  );
+}
+
+function HorizonView({ list, tab, showDone, onChanged }: { list: RoadmapCompany[]; tab: Horizon; showDone: boolean; onChanged: () => void }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const inTab = (m: RoadmapMilestone) => m.horizon === tab && (showDone || m.status !== "done");
+  const companies = list
+    .map((c) => ({ ...c, objectives: c.objectives.map((o) => ({ ...o, shown: o.milestones.filter(inTab) })).filter((o) => o.shown.length || (tab === "later" && o.milestones.length === 0)) }))
+    .filter((c) => c.objectives.length);
+  if (!companies.length) return <p className="muted">Nothing in {HORIZON_LABEL[tab]} right now.</p>;
   return (
     <>
-      <header className="page-head">
-        <div>
-          <h1>Roadmap</h1>
-          <p className="sub">Each company's objectives, with their milestones by target date. Status comes from each milestone's tickets.</p>
-        </div>
-        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
-          <input type="checkbox" checked={closed} onChange={(e) => setClosed(e.target.checked)} />
-          Show done and dropped objectives
-        </label>
-      </header>
-      <p className="muted" style={{ fontSize: 13 }}>
-        At risk means due within two weeks with blocked tickets or less than half done. Late means the date has passed with work left.
-      </p>
-      {data.error && <p className="error">{data.error.message}</p>}
-      {list.map((c) => (
-        <section key={c.id} className="card rm-company" aria-labelledby={`rm-${c.id}`}>
-          <h2 id={`rm-${c.id}`}>
+      {companies.map((c) => (
+        <section key={c.id} className="card rm-company" aria-labelledby={`rmh-${c.id}`}>
+          <h2 id={`rmh-${c.id}`}>
             {c.name}{" "}
             <a href={`#/plan/${c.id}`} style={{ fontSize: 14, fontWeight: 400 }}>
               See the plan
             </a>
           </h2>
-          {c.objectives.length ? c.objectives.map((o) => <Objective key={o.id} o={o} win={win} now={now} onChanged={data.reload} />) : <p className="muted">No objectives yet.</p>}
+          {c.objectives.map((o) => {
+            const sel = o.shown.find((m) => m.id === selected);
+            return (
+              <article key={o.id} className="rm-obj" aria-labelledby={`rmh-o-${o.id}`}>
+                <div className="rm-head">
+                  <h3 id={`rmh-o-${o.id}`}>
+                    <span className="tag">P{o.priority}</span> {o.title}
+                  </h3>
+                  <AddMilestone objectiveId={o.id} onAdded={onChanged} horizon={tab} />
+                </div>
+                {o.shown.length ? (
+                  <ul className="rm-cards">
+                    {o.shown.map((m) => (
+                      <MilestoneCard key={m.id} m={m} selected={selected === m.id} onSelect={() => setSelected(selected === m.id ? null : m.id)} onChanged={onChanged} />
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted" style={{ fontSize: 14 }}>
+                    No milestones yet.
+                  </p>
+                )}
+                {sel && <MilestoneDetail key={sel.id} m={sel} onChanged={onChanged} />}
+              </article>
+            );
+          })}
         </section>
       ))}
+    </>
+  );
+}
+
+export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]; tab: string | undefined; go: (to: string) => void }) {
+  const tab: Tab = (TABS.find((t) => t.id === tabParam)?.id ?? "now") as Tab;
+  const [closed, setClosed] = useState(false);
+  const now = today();
+  const data = usePoll((signal) => api<RoadmapCompany[]>(`/api/roadmap?today=${now}${closed ? "&closed=1" : ""}`, { signal }), 60_000, `roadmap-${closed}`);
+  const list = data.data ?? [];
+  const win = windowOf(list, now);
+  const count = (h: Horizon) => list.reduce((n, c) => n + c.objectives.reduce((k, o) => k + o.milestones.filter((m) => m.horizon === h && (closed || m.status !== "done")).length, 0), 0);
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <h1>Roadmap</h1>
+          <p className="sub">Each company's objectives and milestones: what's happening now, what's next, and what's later.</p>
+        </div>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
+          <input type="checkbox" checked={closed} onChange={(e) => setClosed(e.target.checked)} />
+          Show done work
+        </label>
+      </header>
+      <div className="tabs" role="tablist" aria-label="Roadmap views">
+        {TABS.map((t) => (
+          <button key={t.id} type="button" role="tab" id={`rm-tab-${t.id}`} aria-selected={tab === t.id} aria-controls="rm-panel" onClick={() => go(`roadmap/${t.id}`)}>
+            {t.label}
+            {t.id !== "timeline" && data.data && <span className="tab-count">{count(t.id)}</span>}
+          </button>
+        ))}
+      </div>
+      <div id="rm-panel" role="tabpanel" aria-labelledby={`rm-tab-${tab}`} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <p className="muted" style={{ fontSize: 13 }}>
+          {TABS.find((t) => t.id === tab)!.help}{" "}
+          {tab === "timeline"
+            ? "At risk means due within two weeks with blocked tickets or less than half done. Late means the date has passed with work left."
+            : "Milestones are placed automatically; pin one to move it."}
+        </p>
+        {data.error && <p className="error">{data.error.message}</p>}
+        {tab === "timeline" ? (
+          list.map((c) => (
+            <section key={c.id} className="card rm-company" aria-labelledby={`rm-${c.id}`}>
+              <h2 id={`rm-${c.id}`}>
+                {c.name}{" "}
+                <a href={`#/plan/${c.id}`} style={{ fontSize: 14, fontWeight: 400 }}>
+                  See the plan
+                </a>
+              </h2>
+              {c.objectives.length ? c.objectives.map((o) => <Objective key={o.id} o={o} win={win} now={now} onChanged={data.reload} />) : <p className="muted">No objectives yet.</p>}
+            </section>
+          ))
+        ) : (
+          data.data && <HorizonView list={list} tab={tab} showDone={closed} onChanged={data.reload} />
+        )}
+      </div>
       {companies.length > 0 ? <AddObjective companies={companies} onAdded={data.reload} /> : <p>Create a company on the Board first.</p>}
     </>
   );

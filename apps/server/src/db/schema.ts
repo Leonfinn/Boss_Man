@@ -162,11 +162,15 @@ export const keyResults = pgTable("key_results", {
   checkSpec: jsonb("check_spec"),
 });
 
+export const roadmapHorizon = pgEnum("roadmap_horizon", ["now", "next", "later"]);
+
 export const milestones = pgTable("milestones", {
   id: id(),
   objectiveId: uuid("objective_id").notNull().references(() => objectives.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
   targetDate: date("target_date"),
+  /** Pinned to Now, Next or Later on the roadmap; null places it from its date and work. */
+  horizon: roadmapHorizon("horizon"),
 });
 
 export const riskTier = pgEnum("risk_tier", ["trivial", "low", "medium", "high", "critical"]);

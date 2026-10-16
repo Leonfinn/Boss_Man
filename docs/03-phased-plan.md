@@ -105,7 +105,7 @@ Started 16 Oct 2026, alongside the v1 install. Built in this order, each as its 
 1. Owner controls: configurable decision rules (R19) and the secrets screen. **In review.**
 2. Plan-first tickets (R40) and risk tiers (R48), with the CEO's own decision tool and a ticket page for reviewing. **In review.**
 3. The notification ladder with quiet hours (R44): a notifications feed, agents' `notify_owner` tool, per-agent hourly caps, and phone push through the owner's own ntfy server. **In review.**
-4. Roadmap and plan views: objectives and milestones on a shared timeline with a status from their tickets, a dependency graph that names what's holding work up, and milestones and dependencies editable from a ticket's page. **In review.**
+4. Roadmap and plan views: Now / Next / Later tabs (milestones placed by their work and dates, or pinned by the owner), objectives and milestones on a shared timeline with a status from their tickets, a dependency graph that names what's holding work up, and milestones and dependencies editable from a ticket's page. **In review.**
 5. CEO continuity and graded planning: chapters that continue one session with a frozen directive, close at 70% context, after 7 days or on request with a handoff, and keep notes and a journal in files; planning asked for in proportion to risk, with high and critical tickets planned first by default. **In review.** Last-turn diffs (R39): a checkpoint commit under `refs/bossman/checkpoints/<ticket>/` before each run and after each turn, and a "last turn" view on the ticket page. **In review.** The owner chat: plain language in, tickets, milestones and links out, from a run with Claude's built-in tools switched off and only board tools on its MCP server. **In review.**
 
 The full list:

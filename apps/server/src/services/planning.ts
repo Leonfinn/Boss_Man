@@ -2,7 +2,7 @@
 // on a timeline; the plan is a company's tickets and what they wait on, as a graph with blocked
 // chains and their causes worked out on the server, so the browser only draws.
 import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
-import { layoutPlan, milestoneStatus, type MilestoneStatus } from "@boss-man/shared";
+import { layoutPlan, milestoneHorizon, milestoneStatus, type Horizon, type MilestoneStatus } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagements, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
 import { WorkError } from "./work.js";
@@ -52,6 +52,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
               total: sql<number>`count(*) filter (where ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
               done: sql<number>`count(*) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
               blocked: sql<number>`count(*) filter (where ${tickets.systemState} = 'blocked')`.mapWith(Number),
+              active: sql<number>`count(*) filter (where ${tickets.systemState} in ('in_progress', 'review'))`.mapWith(Number),
             })
             .from(tickets)
             .where(inArray(tickets.milestoneId, msIds))
@@ -74,9 +75,18 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
               milestones: ms
                 .filter((m) => m.objectiveId === o.id)
                 .map((m) => {
-                  const n = byMs.get(m.id) ?? { total: 0, done: 0, blocked: 0 };
+                  const n = byMs.get(m.id) ?? { total: 0, done: 0, blocked: 0, active: 0 };
                   const counts = { total: n.total, done: n.done, blocked: n.blocked };
-                  return { id: m.id, title: m.title, targetDate: m.targetDate, ...counts, status: milestoneStatus(counts, m.targetDate, today) as MilestoneStatus };
+                  return {
+                    id: m.id,
+                    title: m.title,
+                    targetDate: m.targetDate,
+                    ...counts,
+                    active: n.active,
+                    status: milestoneStatus(counts, m.targetDate, today) as MilestoneStatus,
+                    pinned: m.horizon,
+                    horizon: milestoneHorizon({ ...counts, active: n.active, targetDate: m.targetDate, horizon: m.horizon }, today),
+                  };
                 }),
             })),
         }));
@@ -98,7 +108,7 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
       return o;
     },
 
-    async updateMilestone(id: string, patch: { title?: string; targetDate?: string | null; objectiveId?: string }) {
+    async updateMilestone(id: string, patch: { title?: string; targetDate?: string | null; objectiveId?: string; horizon?: Horizon | null }) {
       const [m] = await db.select({ objectiveId: milestones.objectiveId }).from(milestones).where(eq(milestones.id, id));
       if (!m) throw new WorkError(404, "No such milestone.");
       if (patch.objectiveId && (await companyOfObjective(patch.objectiveId)) !== (await companyOfObjective(m.objectiveId))) throw new WorkError(422, "A milestone can only move to an objective of the same company.");

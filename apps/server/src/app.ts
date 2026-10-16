@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, usdToMicros } from "@boss-man/shared";
+import { HORIZONS, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -683,7 +683,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/objectives/:id/milestones", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const body = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.optional() }).parse(req.body);
+      const body = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.optional(), horizon: z.enum(HORIZONS).optional() }).parse(req.body);
       return reply.code(201).send(await work.addMilestone(id, body));
     });
 
@@ -723,7 +723,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/milestones/:id/tickets", async (req) => planning.milestoneTickets(IdParam.parse(req.params).id));
     owner.patch("/api/milestones/:id", async (req) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid }).partial().parse(req.body);
+      const b = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.nullable(), objectiveId: Uuid, horizon: z.enum(HORIZONS).nullable() }).partial().parse(req.body);
       return planning.updateMilestone(id, b);
     });
     owner.delete("/api/milestones/:id", async (req, reply) => {

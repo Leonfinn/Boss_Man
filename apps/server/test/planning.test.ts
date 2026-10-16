@@ -43,6 +43,20 @@ describe("roadmap", () => {
       ["Later", "no_work", 0, 0],
     ]);
 
+    // Now / Next / Later: from work and dates, unless pinned.
+    expect(o.milestones.map((m: { title: string; horizon: string; pinned: string | null }) => [m.title, m.horizon, m.pinned])).toEqual([
+      ["Alpha", "now", null],
+      ["Beta", "now", null],
+      ["Later", "later", null],
+    ]);
+    expect((await c.req("PATCH", `/api/milestones/${later.id}`, { horizon: "next" })).json().horizon).toBe("next");
+    const soon = (await c.req("POST", `/api/objectives/${obj.id}/milestones`, { title: "Polish", horizon: "next" })).json();
+    expect(soon.horizon).toBe("next");
+    const pinned = (await c.req("GET", "/api/roadmap?today=2026-10-16")).json()[0].objectives[0].milestones;
+    expect(pinned.filter((m: { horizon: string }) => m.horizon === "next").map((m: { title: string }) => m.title).sort()).toEqual(["Later", "Polish"]);
+    expect((await c.req("PATCH", `/api/milestones/${later.id}`, { horizon: "soon" })).statusCode).toBe(400);
+    await c.req("DELETE", `/api/milestones/${soon.id}`);
+
     expect((await c.req("PATCH", `/api/milestones/${beta.id}`, { targetDate: "2026-12-01" })).json().targetDate).toBe("2026-12-01");
     expect((await c.req("GET", `/api/milestones/${alpha.id}/tickets`)).json().map((x: { title: string }) => x.title)).toEqual(["Sign-in", "Payments"]);
 

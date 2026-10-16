@@ -280,3 +280,21 @@ details > summary { cursor: pointer; font-size: 14px; }
   .chat-log { padding: 14px; }
   .chat-form { padding: 0 14px 14px; }
 }
+
+/* ---------- Tabs ---------- */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line-strong); overflow-x: auto; }
+.tabs button { display: flex; gap: 8px; align-items: center; min-height: 44px; padding: 8px 16px; border: 0; border-bottom: 3px solid transparent; margin-bottom: -1px; background: none; color: var(--muted); font-size: 15px; font-weight: 500; white-space: nowrap; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.tabs .tab-count { font-family: var(--mono); font-size: 12px; min-width: 22px; padding: 1px 6px; border-radius: 999px; background: var(--grey-soft); color: var(--muted); text-align: center; }
+.tabs button[aria-selected="true"] .tab-count { background: var(--accent-soft); color: var(--accent-dark); }
+
+/* ---------- Roadmap cards (Now / Next / Later) ---------- */
+.rm-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.rm-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-left: 4px solid var(--c); border-radius: 8px; background: var(--card); }
+.rm-card-title { display: flex; gap: 8px; align-items: flex-start; padding: 0; border: 0; background: none; color: var(--ink); text-align: left; font-size: 15px; }
+.rm-card-title[aria-expanded="true"] b { text-decoration: underline; }
+.rm-card-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+.rm-pin select { width: 100%; min-height: 36px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--card); color: var(--ink); font-size: 13px; }
+@media (max-width: 640px) {
+  .tabs button { padding: 8px 10px; font-size: 14px; gap: 6px; }
+}
