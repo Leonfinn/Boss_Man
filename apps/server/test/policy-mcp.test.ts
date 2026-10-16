@@ -1,0 +1,167 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { randomBytes, randomUUID } from "node:crypto";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Journal, RunnerConnection } from "@boss-man/runner";
+import type { RunnerCommand } from "@boss-man/shared";
+import { buildApp } from "../src/app.js";
+import { openPglite } from "../src/db/client.js";
+import { decisions, engagements, policyRules, projects, tickets } from "../src/db/schema.js";
+import { issueRunToken } from "../src/mcp.js";
+
+async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, ms = 5000): Promise<T> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await fn();
+    if (ok(v)) return v;
+    if (Date.now() > end) throw new Error(`timed out; last ${JSON.stringify(v)}`);
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+let ctx: Awaited<ReturnType<typeof setup>>;
+
+async function setup() {
+  const { db, close } = await openPglite();
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, heartbeatMs: 200 });
+  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
+  const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
+  const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
+  const mk = async (name: string) => (await built.app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name } })).json() as { company: { id: string }; ceo: { id: string } };
+  const appCo = await mk("App Co");
+  const homelab = await mk("Homelab Co");
+  return { ...built, db, close, base, cookie, appCo, homelab };
+}
+
+beforeEach(async () => {
+  ctx = await setup();
+});
+afterEach(async () => {
+  await ctx.app.close();
+  await ctx.close();
+});
+
+describe("permission requests through the policy engine", () => {
+  it("auto-answers routine requests and queues destructive ones for the owner", async () => {
+    const reg = (await ctx.app.inject({ method: "POST", url: `/api/companies/${ctx.homelab.company.id}/runner`, headers: { cookie: ctx.cookie } })).json();
+    await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "Homelab may restart containers", trigger: "permission", condition: { commandPattern: "^docker\\s+restart\\b" }, outcome: "allow" });
+
+    const commands: RunnerCommand[] = [];
+    const conn = new RunnerConnection({
+      url: `ws://${ctx.base}/api/runner/connect`,
+      token: reg.token,
+      journal: new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-")), "j.jsonl")),
+      runnerVersion: "test",
+      heartbeatMs: 200,
+      onCommand: (c) => commands.push(c),
+    });
+    conn.start();
+    await waitFor(() => conn.isLive, Boolean);
+
+    const runId = randomUUID();
+    conn.emit({ type: "run.started", runId, agentId: ctx.homelab.ceo.id, acpSessionId: "s", model: null });
+    const ask = (requestId: string, command: string) =>
+      conn.emit({ type: "run.permission_request", runId, requestId, title: command, kind: "execute", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] });
+
+    ask("r1", "echo hello");
+    ask("r2", "docker restart web");
+    ask("r3", "rm -rf /mnt/tank/apps");
+    await waitFor(() => commands.length, (n) => n === 2);
+    expect(commands).toEqual([
+      { type: "permission.decide", runId, requestId: "r1", verdict: "allow" },
+      { type: "permission.decide", runId, requestId: "r2", verdict: "allow" },
+    ]);
+
+    const open = await waitFor(async () => (await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json() as Array<{ id: string; question: string; recommendedOption: string; tier: string }>, (d) => d.length === 1);
+    expect(open[0]).toMatchObject({ question: "CEO wants to run: rm -rf /mnt/tank/apps", recommendedOption: "Deny", tier: "owner" });
+
+    const bad = await ctx.app.inject({ method: "POST", url: `/api/decisions/${open[0]!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Maybe" } });
+    expect(bad.statusCode).toBe(422);
+    const ans = await ctx.app.inject({ method: "POST", url: `/api/decisions/${open[0]!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Deny" } });
+    expect(ans.json()).toMatchObject({ delivered: true });
+    await waitFor(() => commands.length, (n) => n === 3);
+    expect(commands[2]).toEqual({ type: "permission.decide", runId, requestId: "r3", verdict: "deny" });
+    conn.stop();
+  });
+});
+
+describe("Boss Man MCP server", () => {
+  async function client(companyId: string, agentId: string) {
+    const token = await issueRunToken(ctx.db, { companyId, agentId, runId: randomUUID() });
+    const c = new Client({ name: "test", version: "0" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://${ctx.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    return c;
+  }
+  const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
+
+  it("refuses requests without a valid run token", async () => {
+    const res = await fetch(`http://${ctx.base}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer nope" }, body: "{}" });
+    expect(res.status).toBe(401);
+  });
+
+  it("exposes a small, described tool set", async () => {
+    const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
+    const { tools } = await c.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["create_ticket", "list_my_work", "raise_decision", "report_key_result", "request_engagement", "set_ticket_state"]);
+    expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
+    await c.close();
+  });
+
+  it("creates tickets in the agent's own company only", async () => {
+    const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
+    const none = await c.callTool({ name: "create_ticket", arguments: { title: "Set up CI" } });
+    expect(none.isError).toBe(true);
+    await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" });
+    const ok = await c.callTool({ name: "create_ticket", arguments: { title: "Set up CI" } });
+    expect(textOf(ok)).toMatch(/Created ticket .* in Customer app/);
+
+    // A Homelab Co ticket is invisible to App Co's agent.
+    const [hp] = await ctx.db.insert(projects).values({ companyId: ctx.homelab.company.id, name: "Ops" }).returning();
+    const [ht] = await ctx.db.insert(tickets).values({ companyId: ctx.homelab.company.id, projectId: hp!.id, title: "Patch TrueNAS" }).returning();
+    const cross = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ht!.id, state: "done" } });
+    expect(cross.isError).toBe(true);
+    const [still] = await ctx.db.select().from(tickets).where(eq(tickets.id, ht!.id));
+    expect(still!.systemState).toBe("backlog");
+    await c.close();
+  });
+
+  it("raise_decision blocks a ticket until the owner answers", async () => {
+    const [p] = await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" }).returning();
+    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.appCo.company.id, projectId: p!.id, title: "Pick DNS provider", systemState: "in_progress" }).returning();
+    const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
+    const noRec = await c.callTool({ name: "raise_decision", arguments: { question: "Which DNS?", options: ["Cloudflare", "deSEC"], recommended: "Route 53" } });
+    expect(noRec.isError).toBe(true);
+    await c.callTool({ name: "raise_decision", arguments: { question: "Which DNS provider?", options: ["Cloudflare", "deSEC"], recommended: "deSEC", blocksTicketId: t!.id } });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t!.id)))[0]!.systemState).toBe("blocked");
+
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
+    expect(d).toMatchObject({ recommendedOption: "deSEC", raisedByAgentId: ctx.appCo.ceo.id });
+    await ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "deSEC" } });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t!.id)))[0]!.systemState).toBe("ready");
+    await c.close();
+  });
+
+  it("request_engagement offers work to the other company, which can accept", async () => {
+    await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" });
+    const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
+    const self = await c.callTool({ name: "request_engagement", arguments: { providerCompany: "App Co", title: "x", scope: "x", acceptanceCriteria: ["x"] } });
+    expect(self.isError).toBe(true);
+    const ok = await c.callTool({
+      name: "request_engagement",
+      arguments: { providerCompany: "Homelab Co", title: "Deploy v1.4", scope: "Deploy release v1.4 behind the proxy", acceptanceCriteria: ["Health check 200 for 10 min"], budgetCapUsd: 25 },
+    });
+    expect(textOf(ok)).toMatch(/sent to Homelab Co/);
+    const [eng] = await ctx.db.select().from(engagements);
+    expect(eng).toMatchObject({ status: "requested", budgetCapMicros: 25_000_000, providerCompanyId: ctx.homelab.company.id });
+    const [offer] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "engagement"));
+    expect(offer).toMatchObject({ companyId: ctx.homelab.company.id, question: "App Co asks: Deploy v1.4" });
+    await ctx.app.inject({ method: "POST", url: `/api/decisions/${offer!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Accept" } });
+    expect((await ctx.db.select().from(engagements))[0]!.status).toBe("accepted");
+    await c.close();
+  });
+});

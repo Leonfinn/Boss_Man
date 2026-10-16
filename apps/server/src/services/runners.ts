@@ -10,7 +10,10 @@ import type { fundingService } from "./funding.js";
 type Runner = typeof runners.$inferSelect;
 export type CommandSender = (command: RunnerCommand) => boolean;
 
+export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type: "run.permission_request" }>) => Promise<unknown>;
+
 export function runnersService(db: Db, funding: ReturnType<typeof fundingService>) {
+  let onPermission: PermissionHook | null = null;
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
 
@@ -48,8 +51,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       case "run.quota":
         await funding.recordQuotaFromAdapter(event.fundingSourceId, event);
         return;
+      case "run.permission_request":
+        await onPermission?.(runner, event);
+        return;
       default:
-        // run.update, run.permission_request and runner.log are stored; later phases act on them.
+        // run.update and runner.log are stored; later phases act on them.
         return;
     }
   }
@@ -108,5 +114,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     },
 
     isConnected: (runnerId: string) => connected.has(runnerId),
+
+    setPermissionHook(hook: PermissionHook) {
+      onPermission = hook;
+    },
   };
 }

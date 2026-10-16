@@ -189,6 +189,8 @@ export const decisions = pgTable("decisions", {
   answer: text("answer"),
   /** Collapses repeats, e.g. one stale-blocker row per blocker. */
   dedupeKey: text("dedupe_key").unique(),
+  /** What answering it resumes, e.g. { runnerId, runId, requestId } for a permission. */
+  context: jsonb("context").notNull().default({}),
   createdAt: createdAt(),
   answeredAt: timestamp("answered_at", { withTimezone: true }),
 });
@@ -247,6 +249,16 @@ export const ticketDependencies = pgTable(
 );
 
 // ---------- Runs, funding and cost ----------
+
+/** Per-run bearer tokens for the Boss Man MCP server; scoped to one company and agent. */
+export const runTokens = pgTable("run_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  runId: uuid("run_id").notNull(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: createdAt(),
+});
 
 export const runs = pgTable("runs", {
   id: id(),

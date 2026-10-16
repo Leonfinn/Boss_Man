@@ -15,6 +15,13 @@
       "when": 1792163730397,
       "tag": "0001_runner_events",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792164451763,
+      "tag": "0002_policy_and_mcp",
+      "breakpoints": true
     }
   ]
 }

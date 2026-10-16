@@ -10,6 +10,8 @@ import type { Db } from "./db/client.js";
 import { agents, companies, owners, sessions } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
+import { decisionsService } from "./services/decisions.js";
+import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
 
@@ -49,6 +51,9 @@ export async function buildApp(opts: AppOptions) {
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
+  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command));
+  runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
+  await mcpRoutes(app, db, decisionsSvc);
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
@@ -289,7 +294,21 @@ export async function buildApp(opts: AppOptions) {
     });
 
     owner.get("/api/budgets", async () => funding.budgetStatuses());
+
+    // Decisions (ranking arrives in Phase 4; for now oldest first).
+    owner.get("/api/decisions", async () => decisionsSvc.listOpen());
+
+    owner.post("/api/decisions/:id/answer", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { answer } = z.object({ answer: z.string().min(1) }).parse(req.body);
+      try {
+        const result = await decisionsSvc.answer(id, answer);
+        return result ?? reply.code(404).send({ error: "not_open" });
+      } catch (err) {
+        return reply.code(422).send({ error: "invalid_answer", message: (err as Error).message });
+      }
+    });
   });
 
-  return { app, secrets: secretsSvc, funding, runners };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc };
 }
