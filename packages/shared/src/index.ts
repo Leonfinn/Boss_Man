@@ -4,3 +4,4 @@ export * from "./secrets.js";
 export * from "./protocol.js";
 export * from "./policy.js";
 export * from "./board.js";
+export * from "./rank.js";

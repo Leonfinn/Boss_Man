@@ -173,7 +173,7 @@ export const tickets = pgTable(
 
 // ---------- Decisions and engagements ----------
 
-export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "engagement", "budget"]);
+export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget"]);
 export const decisionTier = pgEnum("decision_tier", ["ceo", "owner"]);
 export const decisionStatus = pgEnum("decision_status", ["open", "answered", "withdrawn"]);
 
@@ -310,6 +310,8 @@ export const runs = pgTable("runs", {
   model: text("model"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
+  /** When the runner last reported anything for this run; a long silence is a stall (R32). */
+  lastEventAt: timestamp("last_event_at", { withTimezone: true }),
   outcome: text("outcome"),
 });
 
