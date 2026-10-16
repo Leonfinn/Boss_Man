@@ -32,7 +32,14 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     model: z.string().nullable(),
   }),
   z.object({ type: z.literal("run.quota"), fundingSourceId: Uuid, claudeMeta: z.unknown().optional(), codexRateLimits: z.unknown().optional() }),
-  z.object({ type: z.literal("run.ended"), runId: Uuid, stopReason: z.string().nullable(), error: z.string().nullable() }),
+  z.object({
+    type: z.literal("run.ended"),
+    runId: Uuid,
+    stopReason: z.string().nullable(),
+    error: z.string().nullable(),
+    /** The runner restarted while this run was going (R42); the server starts a recovery run. */
+    interrupted: z.boolean().optional(),
+  }),
   z.object({ type: z.literal("runner.log"), level: z.enum(["info", "warn", "error"]), message: z.string() }),
 ]);
 export type RunnerEvent = z.infer<typeof RunnerEvent>;
@@ -52,6 +59,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     prompt: z.string(),
     /** Per-session MCP bearer token for the Boss Man MCP server. */
     mcpToken: z.string(),
+    /** Recovery (R42): try to reopen this ACP session; start a fresh one if it can't be loaded. */
+    resumeSessionId: z.string().optional(),
   }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */

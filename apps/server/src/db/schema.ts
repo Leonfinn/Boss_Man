@@ -167,6 +167,8 @@ export const tickets = pgTable(
     /** Set on the provider's tickets that do work for an engagement; their runs are charged back (R26). */
     engagementId: uuid("engagement_id").references((): AnyPgColumn => engagements.id, { onDelete: "set null" }),
     assigneeAgentId: uuid("assignee_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The agent that created it through MCP, so a repeated call after a resume returns the same ticket. */
+    createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     assignedToOwner: boolean("assigned_to_owner").notNull().default(false),
     dueDate: date("due_date"),
     customFields: jsonb("custom_fields").notNull().default({}),
@@ -293,6 +295,8 @@ export const wakes = pgTable(
     statusReason: text("status_reason"),
     notBefore: timestamp("not_before", { withTimezone: true }),
     runId: uuid("run_id"),
+    /** Recovery (R42): the interrupted run this wake picks up from. */
+    resumeRunId: uuid("resume_run_id"),
     /** Set when this wake carries out an approved deploy; that run alone gets the target's secrets. */
     deployId: uuid("deploy_id").references((): AnyPgColumn => deploys.id, { onDelete: "set null" }),
     createdAt: createdAt(),
