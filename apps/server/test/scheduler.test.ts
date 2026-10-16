@@ -173,4 +173,16 @@ describe("scheduler", () => {
     ctx = await setup();
     await expect(ctx.scheduler.wake({ agentId: randomUUID(), reason: "x" })).rejects.toThrow();
   });
+
+  it("concurrent passes can't launch the same wake twice or overshoot a limit", async () => {
+    ctx = await setup({ agent: 1, company: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
+    await ctx.req("POST", `/api/agents/${worker.id}/wake`, {});
+    const results = await Promise.all([ctx.scheduler.tick(), ctx.scheduler.tick(), ctx.scheduler.tick()]);
+    expect(results.reduce((n, r) => n + r.launched, 0)).toBe(1);
+    expect(ctx.commands).toHaveLength(1);
+    const launched = (await ctx.db.select().from(wakes)).filter((w) => w.status === "launched");
+    expect(launched).toHaveLength(1);
+  });
 });

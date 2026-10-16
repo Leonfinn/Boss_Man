@@ -56,6 +56,7 @@ export function schedulerService(
   },
 ) {
   const limits = { ...DEFAULT_LIMITS, ...deps.limits };
+  let lane: Promise<unknown> = Promise.resolve();
   const now = deps.now ?? (() => new Date());
   const workspaceRoot = deps.workspaceRoot ?? "/home/node/workspaces";
 
@@ -83,7 +84,7 @@ export function schedulerService(
     return lines.join("\n");
   }
 
-  async function launch(w: typeof wakes.$inferSelect): Promise<{ ok: true } | { ok: false; reason: string }> {
+  async function launch(w: typeof wakes.$inferSelect): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
     const [runner] = await db.select().from(runners).where(eq(runners.companyId, w.companyId));
@@ -91,6 +92,13 @@ export function schedulerService(
     if (!runner || !deps.runners.isConnected(runner.id)) return { ok: false, reason: "runner offline" };
 
     const runId = randomUUID();
+    // Claim the wake before any side effect, so it can never start two runs.
+    const claimed = await db
+      .update(wakes)
+      .set({ runId })
+      .where(and(eq(wakes.id, w.id), isNull(wakes.runId), inArray(wakes.status, ["queued", "deferred"])))
+      .returning({ id: wakes.id });
+    if (!claimed.length) return { ok: false, claimed: true };
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
     const [ticket] = w.ticketId ? await db.select({ engagementId: tickets.engagementId }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, model: agent.model, startedAt: now() });
@@ -113,6 +121,7 @@ export function schedulerService(
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);
       await db.delete(runs).where(eq(runs.id, runId));
+      await db.update(wakes).set({ runId: null }).where(eq(wakes.id, w.id));
       return { ok: false, reason: "runner offline" };
     }
     await db.update(wakes).set({ status: "launched", runId, launchedAt: now(), statusReason: null }).where(eq(wakes.id, w.id));
@@ -169,8 +178,17 @@ export function schedulerService(
       return row!;
     },
 
-    /** One scheduling pass. Safe to call often; returns what it did. */
-    async tick() {
+    /**
+     * One scheduling pass. Safe to call often: passes run one at a time, so two triggers
+     * (the timer, a run ending, the API) can't both pass the same concurrency check.
+     */
+    tick() {
+      const pass = lane.then(() => this.tickOnce());
+      lane = pass.catch(() => undefined);
+      return pass;
+    },
+
+    async tickOnce() {
       const result = { launched: 0, deferred: 0, waiting: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
 
@@ -250,6 +268,8 @@ export function schedulerService(
 
         const launched = await launch(w);
         if (!launched.ok) {
+          // Another pass already took it; leave its state alone.
+          if ("claimed" in launched) continue;
           await wait(launched.reason);
           continue;
         }
