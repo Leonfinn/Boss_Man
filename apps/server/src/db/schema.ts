@@ -50,6 +50,8 @@ export const companies = pgTable("companies", {
   paused: boolean("paused").notNull().default(false),
   /** An engagement this company agrees to provide waits for the owner's approval (R23). */
   ownerApprovesEngagements: boolean("owner_approves_engagements").notNull().default(true),
+  /** Workspace disk cap (R54); null means the instance default. */
+  diskCapBytes: bigint("disk_cap_bytes", { mode: "number" }),
   createdAt: createdAt(),
 });
 
@@ -82,6 +84,9 @@ export const runners = pgTable("runners", {
   tokenHash: text("token_hash").notNull(),
   imageVersion: text("image_version"),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
+  diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
+  diskCheckedAt: timestamp("disk_checked_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 

@@ -9,10 +9,11 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { MergeResult, VerifyResult, WorkspaceDiff } from "@boss-man/shared";
+import type { DiskReport, MergeResult, VerifyResult, WorkspaceDiff } from "@boss-man/shared";
 
 const run = promisify(execFile);
 
@@ -35,6 +36,24 @@ export function gitAuthEnv(secrets: Record<string, string | undefined>): Record<
 }
 
 export const branchFor = (ticketId: string) => `bossman/${ticketId}`;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Bytes on disk under a path, without following symlinks. */
+export async function diskUsage(target: string): Promise<number> {
+  let total = 0;
+  const walk = async (p: string): Promise<void> => {
+    const st = await lstat(p).catch(() => null);
+    if (!st) return;
+    // Allocated blocks where the platform reports them, so sparse files aren't overcounted.
+    total += typeof st.blocks === "number" ? st.blocks * 512 : st.size;
+    if (!st.isDirectory()) return;
+    const names = await readdir(p).catch(() => [] as string[]);
+    for (const n of names) await walk(path.join(p, n));
+  };
+  await walk(target);
+  return total;
+}
 
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
@@ -263,6 +282,54 @@ export class Workspaces {
       }
       throw new Error("unreachable");
     });
+  }
+
+  /**
+   * Clean-up and disk accounting (R54), run at start-up and hourly. Each repo's worktree
+   * list is pruned of entries whose folder has gone, ticket folders git no longer knows
+   * about are removed (only once they're 10 minutes old, so a worktree being created isn't
+   * caught), and stray temp files go. Worktrees git does know about are left alone: the
+   * server decides which tickets are finished and releases those, keeping their branches.
+   */
+  async housekeeping(now = Date.now()): Promise<DiskReport> {
+    const removed: string[] = [];
+    const reposDir = path.join(this.root, "repos");
+    const ticketsDir = path.join(this.root, "tickets");
+    const list = (dir: string) => (existsSync(dir) ? readdirSync(dir) : []);
+
+    for (const name of list(reposDir).filter((n) => n.endsWith(".git"))) {
+      const projectId = name.slice(0, -4);
+      await this.withRepoLock(projectId, () => this.git(["worktree", "prune"], { cwd: this.repoDir(projectId) })).catch(() => undefined);
+    }
+
+    const tickets: DiskReport["tickets"] = [];
+    for (const ticketId of list(ticketsDir)) {
+      const dir = path.join(ticketsDir, ticketId);
+      const gitFile = path.join(dir, ".git");
+      // A worktree's .git is a file naming its admin folder inside the bare repo.
+      const pointer = existsSync(gitFile) ? readFileSync(gitFile, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim() : undefined;
+      const projectId = pointer?.match(/repos\/([^/]+)\.git\/worktrees\//)?.[1] ?? null;
+      if (!pointer || !existsSync(pointer) || !projectId) {
+        const age = now - (statSync(dir, { throwIfNoEntry: false })?.mtimeMs ?? now);
+        if (age > 10 * 60_000) {
+          rmSync(dir, { recursive: true, force: true });
+          removed.push(ticketId);
+        }
+        continue;
+      }
+      if (UUID.test(ticketId) && UUID.test(projectId)) tickets.push({ ticketId, projectId, bytes: await diskUsage(dir) });
+    }
+
+    const tmp = path.join(this.root, "tmp");
+    for (const f of list(tmp)) {
+      const p = path.join(tmp, f);
+      if (now - (statSync(p, { throwIfNoEntry: false })?.mtimeMs ?? now) > 3_600_000) rmSync(p, { recursive: true, force: true });
+    }
+
+    const repos = await Promise.all(list(reposDir).filter((n) => n.endsWith(".git")).map(async (n) => ({ projectId: n.slice(0, -4), bytes: await diskUsage(path.join(reposDir, n)) })));
+    const patchesBytes = await diskUsage(path.join(this.root, "patches"));
+    const usedBytes = tickets.reduce((a, t) => a + t.bytes, 0) + repos.reduce((a, r) => a + r.bytes, 0) + patchesBytes;
+    return { usedBytes, tickets, repos, removed };
   }
 
   /** For tests and the run view: the saved patch, if any. */

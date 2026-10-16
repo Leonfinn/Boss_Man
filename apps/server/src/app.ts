@@ -23,6 +23,7 @@ import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
+import { diskService, type DiskLimits } from "./services/disk.js";
 
 export type AppOptions = {
   db: Db;
@@ -41,6 +42,8 @@ export type AppOptions = {
   sweepLimits?: Partial<SweepLimits>;
   /** Review-loop and circular-failure limits (R49, R50). */
   loopLimits?: Partial<LoopLimits>;
+  /** Default disk cap and how long done tickets keep their worktrees (R54). */
+  diskLimits?: Partial<DiskLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
   now?: () => Date;
 };
@@ -97,7 +100,12 @@ export async function buildApp(opts: AppOptions) {
   // A runner that comes back gets any permission verdicts it missed (R22).
   runners.onConnect((runnerId) => decisionsSvc.redeliver(runnerId));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
-  runners.onEvent((_runner, event) => {
+  const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
+  runners.onEvent((runner, event) => {
+    if (event.type === "runner.disk") {
+      const { type: _type, ...report } = event;
+      void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
+    }
     if (event.type === "run.ended") {
       // A deploy whose run ended without a report is failed, which also ends its secrets.
       // An interrupted run gets a recovery run (R42).
@@ -244,8 +252,10 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean() }).partial().parse(req.body);
-      const [c] = await db.update(companies).set(b).where(eq(companies.id, id)).returning();
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), diskCapGb: z.number().positive().max(100_000).nullable() }).partial().parse(req.body);
+      const { diskCapGb, ...rest } = b;
+      const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
+      const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
       return c ?? reply.code(404).send({ error: "not_found" });
     });
 
@@ -662,5 +672,5 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk };
 }

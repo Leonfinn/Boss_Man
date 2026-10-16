@@ -43,8 +43,18 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     interrupted: z.boolean().optional(),
   }),
   z.object({ type: z.literal("runner.log"), level: z.enum(["info", "warn", "error"]), message: z.string() }),
+  // Disk use of the runner's workspaces after its clean-up pass (R54).
+  z.object({
+    type: z.literal("runner.disk"),
+    usedBytes: z.number().nonnegative(),
+    tickets: z.array(z.object({ ticketId: Uuid, projectId: Uuid, bytes: z.number().nonnegative() })),
+    repos: z.array(z.object({ projectId: z.string(), bytes: z.number().nonnegative() })),
+    /** Ticket folders git no longer knew about, removed in this pass. */
+    removed: z.array(z.string()),
+  }),
 ]);
 export type RunnerEvent = z.infer<typeof RunnerEvent>;
+export type DiskReport = Omit<Extract<RunnerEvent, { type: "runner.disk" }>, "type">;
 
 export const JournalEntry = z.object({ seq: z.number().int().positive(), at: z.string(), event: RunnerEvent });
 export type JournalEntry = z.infer<typeof JournalEntry>;
