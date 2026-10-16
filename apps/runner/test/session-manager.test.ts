@@ -28,7 +28,7 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
+function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
   const events: RunnerEvent[] = [];
   const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
@@ -63,6 +63,7 @@ function harness(model: string | null, opts: { home?: string; cwd?: string; resu
     prompt: "Run the spike scenario.",
     mcpToken: "bm_sess_test",
     ...(opts.resumeSessionId ? { resumeSessionId: opts.resumeSessionId } : {}),
+    ...(opts.freshPrompt ? { freshPrompt: opts.freshPrompt } : {}),
     ...(opts.workspace ? { workspace: opts.workspace } : {}),
   });
   return { events, ended, runId, cwd, home, manager };
@@ -153,14 +154,21 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
     await first.ended;
     const sessionId = (first.events.find((e) => e.type === "run.started") as { acpSessionId: string }).acpSessionId;
 
-    const resumed = harness(null, { home: first.home, cwd: first.cwd, resumeSessionId: sessionId });
+    // How full the context is, for CEO chapters.
+    expect(first.events).toContainEqual(expect.objectContaining({ type: "run.context", used: expect.any(Number), size: expect.any(Number) }));
+
+    const resumed = harness(null, { home: first.home, cwd: first.cwd, resumeSessionId: sessionId, freshPrompt: "FRESH-ONLY" });
     await resumed.ended;
     expect(resumed.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "resumed", mode: "load" } }));
-    expect(resumed.events.find((e) => e.type === "run.started")).toMatchObject({ acpSessionId: sessionId });
+    expect(resumed.events.find((e) => e.type === "run.started")).toMatchObject({ acpSessionId: sessionId, resumed: true });
 
-    const lost = harness(null, { home: first.home, cwd: first.cwd, resumeSessionId: "00000000-0000-4000-8000-00000000dead" });
+    stubLog.length = 0;
+    const lost = harness(null, { home: first.home, cwd: first.cwd, resumeSessionId: "00000000-0000-4000-8000-00000000dead", freshPrompt: "FRESH-ONLY: the chapter's opening" });
     await lost.ended;
     expect(lost.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "resumed", mode: "fresh" } }));
+    expect(lost.events.find((e) => e.type === "run.started")).toMatchObject({ resumed: false });
+    // A session that couldn't be reopened gets the fresh prompt instead.
+    expect(stubLog.find((l) => l.hasTools)?.firstUserText).toContain("FRESH-ONLY: the chapter's opening");
     expect(lost.events.find((e) => e.type === "run.ended")).toMatchObject({ error: null });
   }, 120_000);
 });

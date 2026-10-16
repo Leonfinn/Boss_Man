@@ -217,6 +217,7 @@ export class SessionManager {
   private async start(cmd: StartCommand) {
     const { emit } = this.opts;
     let lastCostMicros = 0;
+    let lastContextUsed = -Infinity;
     let lastQuota = "";
     let messageText = "";
 
@@ -322,6 +323,11 @@ export class SessionManager {
           return;
         }
         case "usage_update": {
+          // Context fill, for CEO chapters: reported when it moves by 1% of the window or more.
+          if (typeof u.used === "number" && typeof u.size === "number" && u.size > 0 && Math.abs(u.used - lastContextUsed) >= u.size / 100) {
+            lastContextUsed = u.used;
+            emit({ type: "run.context", runId: cmd.runId, used: Math.round(u.used), size: Math.round(u.size) });
+          }
           if (!cmd.fundingSourceId) return;
           const cost = parseAcpUsageCost(u);
           if (cost) {
@@ -416,9 +422,11 @@ export class SessionManager {
         const opt = (session.configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { currentValue?: string } | undefined;
         model = opt?.currentValue ?? null;
       }
-      emit({ type: "run.started", runId: cmd.runId, agentId: cmd.agentId, acpSessionId: session.sessionId, model });
+      emit({ type: "run.started", runId: cmd.runId, agentId: cmd.agentId, acpSessionId: session.sessionId, model, resumed: session.resumed });
 
-      let result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: cmd.prompt }] });
+      // A session that couldn't be reopened gets the full prompt, so it doesn't miss what the old one knew.
+      const first = !session.resumed && cmd.resumeSessionId && cmd.freshPrompt ? cmd.freshPrompt : cmd.prompt;
+      let result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: first }] });
       // Messages that arrived during the turn continue the same session (R37).
       while (state.queued.length && this.runs.has(cmd.runId)) {
         const text = state.queued.splice(0).join("\n\n");

@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, inArray } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, engagements, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
@@ -161,7 +161,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           dueDate: input.dueDate ?? null,
           customFields: input.customFields ?? {},
           risk: input.risk ?? null,
-          planFirst: input.planFirst ?? false,
+          // Graded planning: high and critical work is planned first unless the creator says otherwise.
+          planFirst: input.planFirst ?? (input.risk ? planFirstByDefault(input.risk) : false),
         })
         .returning();
       if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);

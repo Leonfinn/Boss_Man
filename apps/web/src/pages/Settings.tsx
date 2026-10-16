@@ -383,6 +383,110 @@ function Projects({ company }: { company: Company }) {
   );
 }
 
+type Chapter = {
+  id: string;
+  number: number;
+  startedAt: string;
+  endedAt: string | null;
+  endReason: string | null;
+  contextUsed: number | null;
+  contextSize: number | null;
+  rollRequestedAt: string | null;
+  closing: boolean;
+  directive: string;
+  handoffIn: string | null;
+  handoff: string | null;
+  handoffBy: string | null;
+  runs: number;
+};
+
+const ENDED: Record<string, string> = { context: "when its context was 70% full", age: "after 7 days", owner: "when you asked", closed: "early" };
+
+/** CEO continuity: the CEO's current chapter, and the handoffs between chapters. */
+function Chapters({ company }: { company: Company }) {
+  const list = usePoll((signal) => api<Chapter[]>(`/api/companies/${company.id}/chapters`, { signal }), 30_000, `ch-${company.id}`);
+  const act = useAction();
+  const chapters = list.data ?? [];
+  const current = chapters.find((c) => !c.endedAt);
+  const past = chapters.filter((c) => c.endedAt);
+  const pct = current?.contextUsed != null && current.contextSize ? current.contextUsed / current.contextSize : null;
+  const days = current ? Math.floor((Date.now() - new Date(current.startedAt).getTime()) / 86_400_000) : 0;
+  return (
+    <Section id="chapters-h" title="CEO chapters">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The CEO works in chapters: one continuing conversation that starts from the mission and objectives as they were then. A chapter closes when its context is 70% full, after 7 days, or when you ask, and the CEO writes a handoff for the next one. Start a new chapter after changing the mission or objectives so the CEO picks them up.
+      </p>
+      {current ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <p>
+            <strong>Chapter {current.number}</strong>, started {when(current.startedAt)} ({days === 0 ? "today" : `${days} day${days === 1 ? "" : "s"} ago`}), {current.runs} run{current.runs === 1 ? "" : "s"}.{" "}
+            {current.closing ? <span className="tag amber">Writing its handoff</span> : current.rollRequestedAt ? <span className="tag amber">Closes at the next run</span> : null}
+          </p>
+          {pct !== null && (
+            <div style={{ display: "flex", gap: 10, alignItems: "center", maxWidth: 420 }}>
+              <span className={`bar ${pct >= 0.7 ? "warn" : ""}`} style={{ flex: 1 }} aria-label={`Context ${Math.round(pct * 100)}% full`}>
+                <span style={{ width: `${Math.min(100, pct * 100)}%` }} />
+              </span>
+              <span className="mono muted" style={{ fontSize: 13 }}>
+                {Math.round(pct * 100)}% context
+              </span>
+            </div>
+          )}
+          <details>
+            <summary>Its directive</summary>
+            <pre className="chapter-text">{current.directive}</pre>
+          </details>
+          {current.handoffIn && (
+            <details>
+              <summary>The handoff it started from</summary>
+              <pre className="chapter-text">{current.handoffIn}</pre>
+            </details>
+          )}
+          {!current.rollRequestedAt && !current.closing && (
+            <button
+              type="button"
+              className="btn"
+              style={{ alignSelf: "flex-start" }}
+              disabled={act.busy}
+              onClick={() =>
+                window.confirm("Close this chapter? At its next run the CEO writes a handoff, and the run after that starts a new chapter with the current mission and objectives.") &&
+                void act.run(async () => {
+                  await api(`/api/companies/${company.id}/chapters/roll`, { method: "POST" });
+                  list.reload();
+                  return "The chapter closes at the CEO's next run.";
+                })
+              }
+            >
+              Start a new chapter
+            </button>
+          )}
+        </div>
+      ) : (
+        list.data && <p>No chapter yet. The first starts the next time the CEO is woken.</p>
+      )}
+      {past.length > 0 && (
+        <div>
+          <p className="label">Earlier chapters</p>
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+            {past.map((c) => (
+              <li key={c.id}>
+                <details>
+                  <summary>
+                    Chapter {c.number}: {when(c.startedAt)} to {when(c.endedAt)}, {c.runs} run{c.runs === 1 ? "" : "s"}, ended {ENDED[c.endReason ?? "closed"] ?? c.endReason}
+                    {c.handoffBy === "boss_man" ? " (handoff by Boss Man)" : ""}
+                  </summary>
+                  <pre className="chapter-text">{c.handoff ?? "No handoff."}</pre>
+                </details>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {act.view}
+    </Section>
+  );
+}
+
 export function Settings({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   return (
@@ -412,6 +516,7 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           <Runner company={company} />
           <Credentials company={company} />
           <Funding company={company} onChanged={onChanged} />
+          <Chapters company={company} />
           <Projects company={company} />
         </div>
       )}
