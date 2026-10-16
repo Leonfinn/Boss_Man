@@ -133,3 +133,22 @@ describe("runner protocol (R31)", () => {
     conn.stop();
   });
 });
+
+describe("runner env endpoint", () => {
+  it("returns the company's granted secrets to its runner only, and logs the access", async () => {
+    const setupCookie = await ctx.app.inject({ method: "POST", url: "/api/login", payload: { username: "leon", password: "correct horse battery" } });
+    const cookie = `bm_session=${setupCookie.cookies.find((c) => c.name === "bm_session")!.value}`;
+    const secret = (await ctx.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "token", kind: "claude_oauth_token", value: "sk-ant-oat01-abcdefghijklmnop" } })).json().secret.id;
+    await ctx.app.inject({ method: "POST", url: `/api/secrets/${secret}/grants`, headers: { cookie }, payload: { companyId: ctx.companyId, envName: "CLAUDE_CODE_OAUTH_TOKEN" } });
+
+    const runId = randomUUID();
+    const ok = await ctx.app.inject({ method: "GET", url: `/api/runner/env?runId=${runId}`, headers: { authorization: `Bearer ${ctx.reg.token}` } });
+    expect(ok.json()).toEqual({ env: { CLAUDE_CODE_OAUTH_TOKEN: "sk-ant-oat01-abcdefghijklmnop" } });
+    expect(ok.headers["cache-control"]).toBe("no-store");
+    const denied = await ctx.app.inject({ method: "GET", url: "/api/runner/env", headers: { authorization: "Bearer wrong" } });
+    expect(denied.statusCode).toBe(401);
+    const { secretAccessLog } = await import("../src/db/schema.js");
+    const logRows = await ctx.db.select().from(secretAccessLog);
+    expect(logRows).toEqual([expect.objectContaining({ companyId: ctx.companyId, runId, purpose: "run" })]);
+  });
+});

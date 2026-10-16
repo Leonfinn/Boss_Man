@@ -1,29 +1,42 @@
-// Runner daemon entry point. Phase 2a: connects and keeps its journal flowing; the ACP
-// session manager that acts on commands arrives in Phase 2b.
+// Runner daemon: one per company. Dials out to the Boss Man server, runs agents over ACP
+// on its commands, and journals every event until the server has it (R31).
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
+import { SessionManager } from "./session-manager.js";
 
 const env = process.env;
-const url = env.BOSSMAN_URL ?? "ws://boss-man-server:3100/api/runner/connect";
+const wsUrl = env.BOSSMAN_URL ?? "ws://server:3100/api/runner/connect";
+const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/api\/runner\/connect$/, "");
 const token = env.BOSSMAN_RUNNER_TOKEN;
 if (!token) throw new Error("Set BOSSMAN_RUNNER_TOKEN (issued by POST /api/companies/:id/runner).");
 
 const dataDir = env.BOSSMAN_RUNNER_DATA ?? "/home/node/runner-data";
 mkdirSync(dataDir, { recursive: true });
 const journal = new Journal(path.join(dataDir, "journal.jsonl"));
+const log = (m: string) => console.log(`[runner] ${m}`);
 
-const connection = new RunnerConnection({
-  url,
+let connection: RunnerConnection;
+const sessions = new SessionManager({
+  mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
+  emit: (event) => connection.emit(event),
+  resolveEnv: async (runId) => {
+    const res = await fetch(`${httpBase}/api/runner/env?runId=${encodeURIComponent(runId)}`, { headers: { authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return ((await res.json()) as { env: Record<string, string> }).env;
+  },
+  log,
+});
+
+connection = new RunnerConnection({
+  url: wsUrl,
   token,
   journal,
   runnerVersion: "0.0.0",
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
-  log: (m) => console.log(`[runner] ${m}`),
-  onCommand: (command) => {
-    console.log(`[runner] command ${command.type} received; the session manager arrives in Phase 2b`);
-  },
+  log,
+  onCommand: (command) => sessions.handle(command),
 });
 
 connection.start();

@@ -3,11 +3,28 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { HEARTBEAT_MS, PROTOCOL_VERSION, RunnerMessage, type ServerMessage } from "@boss-man/shared";
 import type { runnersService } from "../services/runners.js";
+import type { secretsService } from "../services/secrets.js";
 
 type Runners = ReturnType<typeof runnersService>;
 
-export async function runnerSocketRoutes(app: FastifyInstance, runners: Runners, opts: { heartbeatMs?: number } = {}) {
+export async function runnerSocketRoutes(
+  app: FastifyInstance,
+  runners: Runners,
+  secrets: ReturnType<typeof secretsService>,
+  opts: { heartbeatMs?: number } = {},
+) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
+
+  /** A run's environment: the company's granted secrets. Each fetch is written to the access log. */
+  app.get("/api/runner/env", async (req, reply) => {
+    const header = req.headers.authorization;
+    const runner = await runners.authenticate(header?.startsWith("Bearer ") ? header.slice(7) : undefined);
+    if (!runner) return reply.code(401).send({ error: "unknown_runner" });
+    const runId = (req.query as { runId?: string }).runId;
+    const validRunId = runId && /^[0-9a-f-]{36}$/i.test(runId) ? runId : undefined;
+    reply.header("cache-control", "no-store");
+    return { env: await secrets.resolveCompanyEnv(runner.companyId, "run", validRunId) };
+  });
 
   app.get(
     "/api/runner/connect",
