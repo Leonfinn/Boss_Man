@@ -1,0 +1,7 @@
+**/node_modules
+**/results
+spikes
+docs
+.git
+data
+secrets

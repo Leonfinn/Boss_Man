@@ -1,0 +1,195 @@
+// Boss Man's MCP server: the one way agents act on Boss Man (R11). Every call carries a
+// per-run bearer token that pins it to one company and agent, so an agent can only see and
+// change its own company's work. The tool set is kept small (R36); descriptions say when
+// to use each tool so Claude Code's tool search finds them.
+import { randomBytes } from "node:crypto";
+import type { FastifyInstance } from "fastify";
+import { and, eq, gt, ne } from "drizzle-orm";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { z } from "zod";
+import { usdToMicros } from "@boss-man/shared";
+import { hashToken } from "./auth.js";
+import type { Db } from "./db/client.js";
+import { companies, engagements, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
+import type { decisionsService } from "./services/decisions.js";
+
+type Scope = { companyId: string; agentId: string | null; runId: string };
+
+export async function issueRunToken(db: Db, scope: Scope, ttlHours = 12): Promise<string> {
+  const token = `bm_run_${randomBytes(32).toString("base64url")}`;
+  await db.insert(runTokens).values({ tokenHash: hashToken(token), runId: scope.runId, companyId: scope.companyId, agentId: scope.agentId, expiresAt: new Date(Date.now() + ttlHours * 3_600_000) });
+  return token;
+}
+
+const STATES = ["backlog", "ready", "in_progress", "blocked", "review", "done"] as const;
+const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], isError: true });
+
+function buildServer(db: Db, decisions: ReturnType<typeof decisionsService>, scope: Scope) {
+  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+
+  async function resolveProject(project?: string) {
+    const rows = await db.select().from(projects).where(eq(projects.companyId, scope.companyId));
+    if (project) return rows.find((p) => p.id === project || p.name.toLowerCase() === project.toLowerCase()) ?? null;
+    return rows.length === 1 ? rows[0]! : null;
+  }
+
+  server.registerTool(
+    "create_ticket",
+    {
+      description: "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one.",
+      inputSchema: { title: z.string().min(1).max(200), body: z.string().max(10_000).optional(), project: z.string().optional() },
+    },
+    async ({ title, body, project }) => {
+      const p = await resolveProject(project);
+      if (!p) {
+        const names = (await db.select({ name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId))).map((r) => r.name);
+        return fail(names.length ? `Name the project: one of ${names.join(", ")}.` : "Your company has no projects yet; ask your CEO to create one.");
+      }
+      const [t] = await db.insert(tickets).values({ companyId: scope.companyId, projectId: p.id, title, body }).returning({ id: tickets.id });
+      return text(`Created ticket ${t!.id} in ${p.name}.`);
+    },
+  );
+
+  server.registerTool(
+    "set_ticket_state",
+    {
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket.",
+      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional() },
+    },
+    async ({ ticketId, state, outcome }) => {
+      const rows = await db
+        .update(tickets)
+        .set({ systemState: state, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: new Date() })
+        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)))
+        .returning({ id: tickets.id });
+      return rows.length ? text(`Ticket ${ticketId} is now ${state}.`) : fail("No ticket with that ID in your company.");
+    },
+  );
+
+  server.registerTool(
+    "raise_decision",
+    {
+      description: "Ask the owner to decide something you shouldn't decide alone. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits.",
+      inputSchema: {
+        question: z.string().min(1).max(1000),
+        options: z.array(z.string().min(1).max(200)).min(2).max(6),
+        recommended: z.string(),
+        blocksTicketId: z.string().uuid().optional(),
+      },
+    },
+    async ({ question, options, recommended, blocksTicketId }) => {
+      if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      if (blocksTicketId) {
+        const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
+        if (!t) return fail("No ticket with that ID in your company.");
+      }
+      const d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId });
+      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
+    },
+  );
+
+  server.registerTool(
+    "report_key_result",
+    {
+      description: "Report the current value of one of your company's key results, e.g. after measuring progress.",
+      inputSchema: { keyResultId: z.string().uuid(), value: z.number() },
+    },
+    async ({ keyResultId, value }) => {
+      const [kr] = await db
+        .select({ id: keyResults.id })
+        .from(keyResults)
+        .innerJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+        .where(and(eq(keyResults.id, keyResultId), eq(objectives.companyId, scope.companyId)));
+      if (!kr) return fail("No key result with that ID in your company.");
+      await db.update(keyResults).set({ current: value }).where(eq(keyResults.id, keyResultId));
+      return text(`Key result ${keyResultId} is now ${value}.`);
+    },
+  );
+
+  server.registerTool(
+    "request_engagement",
+    {
+      description: "Ask another company to do work for yours, e.g. ask the homelab company to deploy a release. Say what is in scope and how you'll know it's done. The other company accepts or declines; you'll be woken when it does.",
+      inputSchema: {
+        providerCompany: z.string().min(1),
+        title: z.string().min(1).max(200),
+        scope: z.string().min(1).max(5000),
+        deliverables: z.string().max(2000).optional(),
+        acceptanceCriteria: z.array(z.string().min(1)).min(1).max(10),
+        budgetCapUsd: z.number().positive().optional(),
+        project: z.string().optional(),
+      },
+    },
+    async (input) => {
+      const [provider] = await db
+        .select()
+        .from(companies)
+        .where(and(eq(companies.name, input.providerCompany), ne(companies.id, scope.companyId)));
+      if (!provider) {
+        const names = (await db.select({ name: companies.name }).from(companies).where(ne(companies.id, scope.companyId))).map((c) => c.name);
+        return fail(`No other company called "${input.providerCompany}". Companies: ${names.join(", ") || "none"}.`);
+      }
+      const project = input.project ? await resolveProject(input.project) : await resolveProject();
+      const [eng] = await db
+        .insert(engagements)
+        .values({
+          requesterCompanyId: scope.companyId,
+          requesterProjectId: project?.id ?? null,
+          providerCompanyId: provider.id,
+          title: input.title,
+          scope: input.scope,
+          deliverables: input.deliverables,
+          acceptanceCriteria: input.acceptanceCriteria,
+          budgetCapMicros: input.budgetCapUsd != null ? usdToMicros(input.budgetCapUsd) : null,
+        })
+        .returning({ id: engagements.id });
+      await decisions.offerEngagement(eng!.id);
+      return text(`Engagement ${eng!.id} sent to ${provider.name}.`);
+    },
+  );
+
+  server.registerTool(
+    "list_my_work",
+    { description: "List the open tickets assigned to you.", inputSchema: {} },
+    async () => {
+      if (!scope.agentId) return text("[]");
+      const rows = await db
+        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, due: tickets.dueDate })
+        .from(tickets)
+        .where(and(eq(tickets.assigneeAgentId, scope.agentId), ne(tickets.systemState, "done")));
+      return text(JSON.stringify(rows));
+    },
+  );
+
+  return server;
+}
+
+export async function mcpRoutes(app: FastifyInstance, db: Db, decisions: ReturnType<typeof decisionsService>) {
+  const handler = async (req: import("fastify").FastifyRequest, reply: import("fastify").FastifyReply) => {
+    const header = req.headers.authorization;
+    const token = header?.startsWith("Bearer ") ? header.slice(7) : undefined;
+    const [scope] = token
+      ? await db
+          .select({ companyId: runTokens.companyId, agentId: runTokens.agentId, runId: runTokens.runId })
+          .from(runTokens)
+          .where(and(eq(runTokens.tokenHash, hashToken(token)), gt(runTokens.expiresAt, new Date())))
+      : [];
+    if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
+
+    // Stateless: a fresh server and transport per request.
+    const server = buildServer(db, decisions, scope);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    reply.hijack();
+    reply.raw.on("close", () => {
+      void transport.close();
+      void server.close();
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req.raw, reply.raw, req.body);
+  };
+  app.post("/mcp", handler);
+  app.get("/mcp", handler);
+  app.delete("/mcp", handler);
+}
