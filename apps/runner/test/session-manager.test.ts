@@ -53,7 +53,40 @@ function harness(model: string | null) {
   return { events, ended, runId, cwd, manager };
 }
 
+const sessionStarted = (events: RunnerEvent[]) =>
+  new Promise<void>((resolve) => {
+    const t = setInterval(() => {
+      if (events.some((e) => e.type === "run.started")) {
+        clearInterval(t);
+        resolve();
+      }
+    }, 20);
+  });
+
 describe("SessionManager with Claude Code over ACP (stub model)", () => {
+  it("delivers a steering message as a second turn in the same session (R37)", async () => {
+    const h = harness(null);
+    // Send the message as soon as the session exists; it waits for the current turn.
+    await sessionStarted(h.events);
+    h.manager.handle({ type: "run.message", runId: h.runId, text: "Message from the owner: also add a README.", interrupt: false });
+    await h.ended;
+    const delivered = h.events.find((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "message_delivered");
+    expect((delivered as { update: { text: string } }).update.text).toContain("also add a README");
+    expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "end_turn", error: null });
+    // Two turns reached the model's final step: the original and the steered one.
+    expect(stubLog.filter((l) => l.step === "final").length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  it("a stop drops queued messages instead of starting another turn", async () => {
+    const h = harness(null);
+    await sessionStarted(h.events);
+    h.manager.handle({ type: "run.message", runId: h.runId, text: "Message from the owner: keep going", interrupt: false });
+    h.manager.handle({ type: "run.cancel", runId: h.runId });
+    await h.ended;
+    expect(h.events.some((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "message_delivered")).toBe(false);
+    expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "cancelled" });
+  }, 60_000);
+
   it("runs a turn end to end: permissions via the server, MCP passthrough, cost deltas", async () => {
     const h = harness(null);
     await h.ended;
