@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { costEvents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { budgetPolicies, costEvents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -130,5 +130,34 @@ describe("spend caps (R53)", () => {
     await c.scheduler.wake({ agentId: c.worker.id, ticketId: c.ticket.id, reason: "assigned" });
     expect(await c.scheduler.tick()).toMatchObject({ launched: 0, deferred: 1 });
     expect((await c.db.select().from(wakes).where(and(eq(wakes.ticketId, c.ticket.id), eq(wakes.status, "deferred"))))[0]!.statusReason).toBe("budget limit reached");
+  });
+
+  it("a soft budget asks the owner once and lets work carry on; the answer raises it or makes it a hard stop", async () => {
+    const c = (ctx = await setup());
+    const fs = (await c.req("POST", "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json();
+    await c.db.insert(costEvents).values({ fundingSourceId: fs.id, companyId: c.company.id, costMicros: 2_000_000 });
+    const policy = (await c.req("POST", "/api/budget-policies", { scopeKind: "company", scopeId: c.company.id, windowKind: "lifetime", limitUsd: 1.5, onLimit: "ask" })).json();
+
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: c.ticket.id, reason: "assigned" });
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "check in" });
+    await c.scheduler.tick();
+    const asks = await c.db.select().from(decisions).where(eq(decisions.kind, "budget"));
+    expect(asks).toHaveLength(1);
+    expect(asks[0]!.question).toBe("App Co has used $2.00 of a $1.50 budget in total. Work carries on, because this limit only asks. Raise it by half, make it a hard stop, or leave it as it is?");
+
+    await c.req("POST", `/api/decisions/${asks[0]!.id}/answer`, { answer: "Raise it by half" });
+    expect((await c.db.select().from(budgetPolicies).where(eq(budgetPolicies.id, policy.id)))[0]!.limitMicros).toBe(2_250_000);
+
+    // Past the new limit it asks again, and a hard stop then pauses the company's work.
+    await c.db.insert(costEvents).values({ fundingSourceId: fs.id, companyId: c.company.id, costMicros: 1_000_000 });
+    await c.db.update(runs).set({ endedAt: new Date() });
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "again" });
+    await c.scheduler.tick();
+    const [again] = await c.db.select().from(decisions).where(and(eq(decisions.kind, "budget"), eq(decisions.status, "open")));
+    await c.req("POST", `/api/decisions/${again!.id}/answer`, { answer: "Make it a hard stop" });
+    await c.db.update(runs).set({ endedAt: new Date() });
+    await c.scheduler.wake({ agentId: c.ceo.id, reason: "once more" });
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0, deferred: 1 });
   });
 });

@@ -9,6 +9,7 @@ import { UNTRUSTED_NOTE } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
+import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 
@@ -138,6 +139,33 @@ export function schedulerService(
     return { ok: true };
   }
 
+  /** The decision for a soft budget limit that has been passed (R28). */
+  async function askAboutBudget(b: Awaited<ReturnType<ReturnType<typeof fundingService>["budgetStatuses"]>>[number], companyId: string) {
+    const { policy, status } = b;
+    const named =
+      policy.scopeKind === "instance"
+        ? "All companies together have"
+        : policy.scopeKind === "company"
+          ? `${(await db.select({ n: companies.name }).from(companies).where(eq(companies.id, policy.scopeId)))[0]?.n ?? "A company"} has`
+          : policy.scopeKind === "project"
+            ? `The project "${(await db.select({ n: projects.name }).from(projects).where(eq(projects.id, policy.scopeId)))[0]?.n ?? "?"}" has`
+            : `The agent ${(await db.select({ n: agents.name }).from(agents).where(eq(agents.id, policy.scopeId)))[0]?.n ?? "?"} has`;
+    const window = { billing_cycle: "this billing cycle", calendar_month: "this month", rolling_days: `the last ${policy.rollingDays ?? "?"} days`, lifetime: "in total" }[policy.windowKind] ?? policy.windowKind;
+    const usd = (m: number) => `$${(m / 1e6).toFixed(2)}`;
+    await db
+      .insert(decisions)
+      .values({
+        companyId,
+        kind: "budget",
+        question: `${named} used ${usd(status.usedMicros)} of a ${usd(status.limitMicros)} budget ${window}. Work carries on, because this limit only asks. Raise it by half, make it a hard stop, or leave it as it is?`,
+        options: [RAISE_BUDGET, HARD_STOP, LEAVE_BUDGET],
+        recommendedOption: RAISE_BUDGET,
+        dedupeKey: `budget-ask:${policy.id}:${status.bounds.start?.toISOString() ?? "all"}:${policy.limitMicros}`,
+        context: { type: "budget_limit", policyId: policy.id },
+      })
+      .onConflictDoNothing();
+  }
+
   return {
     limits,
 
@@ -257,18 +285,18 @@ export function schedulerService(
               .where(eq(tickets.id, w.ticketId))
           : [];
         // Instance, company, project and agent budgets all apply (R28, R53).
-        const stopped = budgets.find(
-          (b) =>
-            b.status.action === "pause" &&
-            (b.policy.scopeKind === "instance" ||
-              (b.policy.scopeKind === "company" && b.policy.scopeId === w.companyId) ||
-              (b.policy.scopeKind === "project" && b.policy.scopeId === wt?.projectId) ||
-              (b.policy.scopeKind === "agent" && b.policy.scopeId === w.agentId)),
-        );
+        const inScope = (b: (typeof budgets)[number]) =>
+          b.policy.scopeKind === "instance" ||
+          (b.policy.scopeKind === "company" && b.policy.scopeId === w.companyId) ||
+          (b.policy.scopeKind === "project" && b.policy.scopeId === wt?.projectId) ||
+          (b.policy.scopeKind === "agent" && b.policy.scopeId === w.agentId);
+        const stopped = budgets.find((b) => b.status.action === "pause" && inScope(b));
         if (stopped) {
           await defer("budget limit reached", stopped.status.bounds.end ?? null);
           continue;
         }
+        // A soft limit asks the owner once per window and limit; the work carries on meanwhile.
+        for (const b of budgets.filter((b) => b.status.action === "ask" && inScope(b))) await askAboutBudget(b, w.companyId);
 
         // A ticket's spend across all its runs has a ceiling, because review and retry loops multiply runs (R53).
         const ticketCap = wt?.cap ?? wt?.projectCap;
