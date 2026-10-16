@@ -153,3 +153,46 @@ Sources: [spec repo](https://github.com/agentclientprotocol/agent-client-protoco
 
 ### Reuse or build
 Keep building. Kandev targets one developer's coding tasks, isolated per task, and its code is AGPL. Its specs are still a useful free source of failure modes. It is moving quickly towards similar features, so Boss Man's v1 should stay tight.
+
+## G. Cline kanban review (2026-10-16)
+
+[cline/kanban](https://github.com/cline/kanban) is a local, single-user kanban for coding agents (`npx kanban`). It is Apache-2.0 and was at v0.1.70, a "research preview", with about 1.4k stars.
+- **Isolation:** each card gets its own git worktree and terminal, and runs one of Claude Code, Codex, Gemini, OpenCode, Droid, Kiro or Cline's own agent.
+- **Review:** you review diffs in the browser and send line comments back.
+- **Chaining:** linked cards start in chains.
+- **How it drives agents:** PTY processes and hooks, not ACP. Little of its code fits Boss Man, but its product ideas and its issue tracker do.
+
+The review was read from a shallow clone at `abd4912` plus issues up to 14 Oct 2026.
+
+### What we adopted (now R37–R45, plus an R22 addition)
+- **Review:**
+  - Diff review with line comments formatted as `path:line`, the code, then `> comment` (`web-ui/src/components/detail-panels/diff-viewer-panel.tsx`).
+  - Per-turn checkpoint commits under a private ref, built with a temporary index and `commit-tree`, so the user's index and branch are untouched (`src/workspace/turn-checkpoints.ts`).
+  - Both became R39.
+- **Worktree lifecycle** (`src/workspace/task-worktree.ts`), which became R38:
+  - detached worktrees at a pinned base;
+  - a creation lock in the git common directory;
+  - never recreating a worktree when the base moves (their comments say doing so once destroyed work);
+  - saving a patch before clean-up and re-applying it on resume.
+- **Plan mode first:** Claude's `ExitPlanMode` arrives as an ACP permission request (`.plan/docs/planning-column-research.md`). This became R40.
+- **Agent-driven commits and PRs:** these are prompts to the agent from editable templates (`web-ui/src/git-actions/build-task-git-action-prompt.ts`). This became part of R39.
+- **Notifications:** sent when a card is ready, and suppressed while a tab is visible (`use-review-ready-notifications.ts`). This became R44.
+- **WebSocket checks and lockout:** origin and host checks on the WebSocket, plus a passcode lockout (CHANGELOG 0.1.66, `src/security/passcode-manager.ts`). This became R45.
+
+### Failure modes from their issues
+- **#614, #494:** automation that runs in browser hooks stops when the tab closes. Boss Man keeps all autonomy on the server (R43).
+- **#632:** a crash mid-tool-call leaves a session that can't resume. This became R42 and spike S4.
+- **#524:** failed tasks land in Done. This became R41.
+- **#542, #610, #665:** a slow viewer freezes the agent's terminal. **#515, #577, #648, #629:** the UI doesn't scale. Both became R43.
+- **#619:** gitignored files, including `.env`, are symlinked into worktrees. This became the allowlist in R38.
+- **#586, #644:** approval dialogs fail silently. This became the R22 addition.
+
+### What we skip
+- PTY screen scraping and per-agent hooks. ACP is cleaner.
+- Bypass and auto-approve modes as a general policy. The policy engine decides.
+- Detecting "done" by counting changed files. An explicit tool call decides instead.
+- Board state in a JSON file.
+- Cline-account features.
+- Its single-repo, single-user assumptions.
+- Kanban removed its MCP server in favour of a CLI plus a skill (`.plan/docs/kanban-mcp-removal-handoff.md`). This supports R36's "signed per-run CLI later", but Boss Man keeps MCP for now.
+
