@@ -8,6 +8,8 @@ const NAV = [
   { id: "board", label: "Board" },
   { id: "roadmap", label: "Roadmap" },
   { id: "plan", label: "Plan" },
+  { id: "features", label: "Features" },
+  { id: "feedback", label: "Feedback" },
   { id: "runs", label: "Runs" },
   { id: "engagements", label: "Engagements" },
   { id: "funding", label: "Funding" },
@@ -21,6 +23,7 @@ export function Sidebar(props: {
   companies: Company[];
   decisions: Decision[];
   unread: number;
+  feedback: number;
   notifications: NotificationPermission | "unsupported";
   onEnableNotifications: () => void;
   onLogout: () => void;
@@ -38,6 +41,7 @@ export function Sidebar(props: {
             <a className="nav" href={`#/${n.id}`} aria-current={props.active === n.id || (props.active === "tickets" && n.id === "board") ? "page" : undefined}>
               <span>{n.label}</span>
               {n.id === "decisions" && props.decisions.length > 0 && <span className="count" aria-label={`${props.decisions.length} waiting`}>{props.decisions.length}</span>}
+              {n.id === "feedback" && props.feedback > 0 && <span className="count" aria-label={`${props.feedback} to process`}>{props.feedback}</span>}
               {n.id === "notifications" && props.unread > 0 && <span className="count" aria-label={`${props.unread} unread`}>{props.unread}</span>}
             </a>
           </li>

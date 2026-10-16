@@ -1,0 +1,398 @@
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
+import { usePoll } from "../hooks";
+import { when } from "./Runs";
+import { STATUS_TONE } from "./Features";
+
+type State = "unprocessed" | "processed" | "archived";
+const TABS: Array<{ id: State; label: string }> = [
+  { id: "unprocessed", label: "Unprocessed" },
+  { id: "processed", label: "Processed" },
+  { id: "archived", label: "Archived" },
+];
+const SOURCE: Record<string, string> = { owner: "You", chat: "Chat", agent: "An agent", portal: "Portal", email: "Email", import: "Import" };
+
+function AddNote({ companyId, onAdded }: { companyId: string; onAdded: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ text: "", title: "", name: "", email: "", segment: "", source: "owner" });
+  const [error, setError] = useState<string | null>(null);
+  const customers = usePoll((signal) => (open ? api<Array<{ id: string; name: string }>>(`/api/companies/${companyId}/feedback-customers`, { signal }) : Promise.resolve([])), 60_000, `cust-${companyId}-${open}`);
+  if (!open)
+    return (
+      <button type="button" className="btn primary" onClick={() => setOpen(true)}>
+        Add feedback
+      </button>
+    );
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    void api<{ id: string }>(`/api/companies/${companyId}/feedback`, {
+      method: "POST",
+      body: {
+        text: form.text.trim(),
+        ...(form.title.trim() ? { title: form.title.trim() } : {}),
+        source: form.source,
+        ...(form.name.trim() ? { customer: { name: form.name.trim(), ...(form.email.trim() ? { email: form.email.trim() } : {}), ...(form.segment.trim() ? { segment: form.segment.trim() } : {}) } } : {}),
+      },
+    }).then(
+      (n) => (setForm({ text: "", title: "", name: "", email: "", segment: "", source: "owner" }), setOpen(false), setError(null), onAdded(n.id)),
+      (err: Error) => setError(err.message),
+    );
+  };
+  return (
+    <form className="card" onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Add feedback">
+      <div className="field">
+        <label htmlFor="fb-text">Feedback, as they said it</label>
+        <textarea id="fb-text" rows={5} required maxLength={20_000} autoFocus value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} placeholder="Paste an email, a message or your notes from a call." />
+      </div>
+      <div className="form-grid">
+        <div className="field">
+          <label htmlFor="fb-title">Title (optional)</label>
+          <input id="fb-title" maxLength={200} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="fb-name">From (optional)</label>
+          <input id="fb-name" list="fb-customers" maxLength={200} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="A person or a company" />
+          <datalist id="fb-customers">
+            {(customers.data ?? []).map((c) => (
+              <option key={c.id} value={c.name} />
+            ))}
+          </datalist>
+        </div>
+        <div className="field">
+          <label htmlFor="fb-email">Their email (optional)</label>
+          <input id="fb-email" type="email" maxLength={320} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="fb-segment">Segment (optional)</label>
+          <input id="fb-segment" maxLength={100} value={form.segment} onChange={(e) => setForm({ ...form, segment: e.target.value })} placeholder="e.g. Enterprise, Trial, Internal" />
+        </div>
+        <div className="field">
+          <label htmlFor="fb-source">Came in by</label>
+          <select id="fb-source" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })}>
+            <option value="owner">You</option>
+            <option value="email">Email</option>
+            <option value="import">Import</option>
+          </select>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="btn primary" type="submit">
+          Add to the inbox
+        </button>
+        <button className="btn" type="button" onClick={() => setOpen(false)}>
+          Cancel
+        </button>
+      </div>
+      {error && <p className="error">{error}</p>}
+    </form>
+  );
+}
+
+function ImportancePicker({ value, onChange, name }: { value: Importance; onChange: (v: Importance) => void; name: string }) {
+  return (
+    <div role="radiogroup" aria-label="How much it matters to them" className="chips">
+      {IMPORTANCES.map((i) => (
+        <label key={i} className={`chip ${value === i ? "on" : ""}`}>
+          <input type="radio" className="visually-hidden" name={name} checked={value === i} onChange={() => onChange(i)} />
+          {IMPORTANCE_LABEL[i]}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** Pick (or create) a feature and link the selected passage to it. */
+function LinkPanel({ companyId, noteId, highlight, features, onLinked, onClearHighlight }: { companyId: string; noteId: string; highlight: string; features: Feature[]; onLinked: () => void; onClearHighlight: () => void }) {
+  const [q, setQ] = useState("");
+  const [importance, setImportance] = useState<Importance>("important");
+  const [error, setError] = useState<string | null>(null);
+  const matches = q.trim() ? features.filter((f) => f.title.toLowerCase().includes(q.trim().toLowerCase())).slice(0, 8) : [];
+  const link = async (featureId: string) => {
+    try {
+      await api(`/api/feedback/${noteId}/insights`, { method: "POST", body: { featureId, importance, ...(highlight ? { highlight } : {}) } });
+      setQ("");
+      setError(null);
+      onClearHighlight();
+      onLinked();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  const create = async () => {
+    try {
+      const f = await api<Feature>(`/api/companies/${companyId}/features`, { method: "POST", body: { title: q.trim() } });
+      await link(f.id);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  return (
+    <div className="link-panel">
+      <p className="label">Link {highlight ? "the selected passage" : "this note"} to a feature</p>
+      {highlight ? (
+        <blockquote className="selected">
+          {highlight}{" "}
+          <button type="button" className="btn small" onClick={onClearHighlight}>
+            Use the whole note
+          </button>
+        </blockquote>
+      ) : (
+        <p className="muted" style={{ fontSize: 13 }}>
+          Tip: select a passage in the note first to link just that part.
+        </p>
+      )}
+      <ImportancePicker value={importance} onChange={setImportance} name={`imp-${noteId}`} />
+      <div className="field">
+        <label htmlFor={`link-q-${noteId}`}>Feature</label>
+        <input id={`link-q-${noteId}`} value={q} maxLength={200} onChange={(e) => setQ(e.target.value)} placeholder="Search features, or type a new one" autoComplete="off" />
+      </div>
+      {q.trim() && (
+        <ul className="pick-list">
+          {matches.map((f) => (
+            <li key={f.id}>
+              <button type="button" onClick={() => void link(f.id)}>
+                <span>{f.title}</span>
+                <span className={`tag ${STATUS_TONE[f.status]}`}>{FEATURE_STATUS_LABEL[f.status]}</span>
+              </button>
+            </li>
+          ))}
+          {!features.some((f) => f.title.toLowerCase() === q.trim().toLowerCase()) && (
+            <li>
+              <button type="button" onClick={() => void create()}>
+                <span>
+                  Create <b>{q.trim()}</b> and link it
+                </span>
+              </button>
+            </li>
+          )}
+        </ul>
+      )}
+      {error && <p className="error">{error}</p>}
+    </div>
+  );
+}
+
+function NotePane({ id, companyId, features, onChanged, onClose }: { id: string; companyId: string; features: Feature[]; onChanged: () => void; onClose: () => void }) {
+  const data = usePoll((signal) => api<NoteDetail>(`/api/feedback/${id}`, { signal }), 60_000, `note-${id}`);
+  const [highlight, setHighlight] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const textRef = useRef<HTMLDivElement>(null);
+  useEffect(() => setHighlight(""), [id]);
+  // Remember a selection made inside the note's text.
+  useEffect(() => {
+    const on = () => {
+      const sel = window.getSelection();
+      const el = textRef.current;
+      if (!sel || !el || sel.isCollapsed || !sel.anchorNode || !el.contains(sel.anchorNode) || !el.contains(sel.focusNode)) return;
+      const text = sel.toString().trim();
+      if (text) setHighlight(text.slice(0, 2000));
+    };
+    document.addEventListener("selectionchange", on);
+    return () => document.removeEventListener("selectionchange", on);
+  }, []);
+  const reload = () => (data.reload(), onChanged());
+  const act = (p: Promise<unknown>) => void p.then(() => (setError(null), reload()), (err: Error) => setError(err.message));
+  if (data.error) return <p className="error">{data.error.status === 404 ? "There's no such note." : data.error.message}</p>;
+  const d = data.data;
+  if (!d) return null;
+  const n = d.note;
+  return (
+    <article className="card note-pane" aria-labelledby="note-h">
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h2 id="note-h" style={{ fontSize: 17, fontWeight: 600 }}>
+            {n.title ?? (d.customer ? `From ${d.customer.name}` : "Feedback")}
+          </h2>
+          <p className="muted" style={{ fontSize: 13, display: "flex", gap: "2px 10px", flexWrap: "wrap" }}>
+            {d.customer && (
+              <span>
+                {d.customer.name}
+                {d.customer.segment ? ` · ${d.customer.segment}` : ""}
+                {d.customer.email ? ` · ${d.customer.email}` : ""}
+              </span>
+            )}
+            <span>{SOURCE[n.source] ?? n.source}</span>
+            <span>{when(n.createdAt)}</span>
+            {n.untrusted && <span className="tag">from outside</span>}
+          </p>
+        </div>
+        <button type="button" className="btn small back-btn" onClick={onClose}>
+          Back to the list
+        </button>
+      </div>
+      <div ref={textRef} className="note-text">
+        {n.text}
+      </div>
+      {d.insights.length > 0 && (
+        <div>
+          <p className="label">Linked to</p>
+          <ul className="insight-list">
+            {d.insights.map((i) => (
+              <li key={i.id}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <a href={`#/features/${companyId}/${i.feature.id}`}>{i.feature.title}</a>
+                  <select
+                    className="mini"
+                    aria-label={`How much ${i.feature.title} matters to them`}
+                    value={i.importance}
+                    onChange={(e) => act(api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: i.feature.id, importance: e.target.value, highlight: i.highlight } }))}
+                  >
+                    {IMPORTANCES.map((x) => (
+                      <option key={x} value={x}>
+                        {IMPORTANCE_LABEL[x]}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className="btn small" style={{ marginLeft: "auto" }} onClick={() => act(api(`/api/insights/${i.id}`, { method: "DELETE" }))}>
+                    Unlink
+                  </button>
+                </div>
+                {i.highlight && <blockquote>{i.highlight}</blockquote>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {d.suggestions.length > 0 && (
+        <div>
+          <p className="label">May be about</p>
+          <div className="chips">
+            {d.suggestions.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className="chip"
+                title={`Shares: ${s.shared.join(", ")}`}
+                onClick={() => act(api(`/api/feedback/${id}/insights`, { method: "POST", body: { featureId: s.id, importance: "important", ...(highlight ? { highlight } : {}) } }).then(() => setHighlight("")))}
+              >
+                Link to {s.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      <LinkPanel companyId={companyId} noteId={id} highlight={highlight} features={features} onLinked={reload} onClearHighlight={() => setHighlight("")} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {n.state === "unprocessed" ? (
+          <button type="button" className="btn primary" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "processed" } }))}>
+            Done: mark processed
+          </button>
+        ) : (
+          <button type="button" className="btn" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "unprocessed" } }))}>
+            Back to unprocessed
+          </button>
+        )}
+        {n.state !== "archived" && (
+          <button type="button" className="btn" onClick={() => act(api(`/api/feedback/${id}`, { method: "PATCH", body: { state: "archived" } }))}>
+            Archive
+          </button>
+        )}
+        <button type="button" className="btn" onClick={() => window.confirm("Delete this feedback and its links?") && void api(`/api/feedback/${id}`, { method: "DELETE" }).then(() => (onChanged(), onClose()), (err: Error) => setError(err.message))}>
+          Delete
+        </button>
+      </div>
+      {error && <p className="error">{error}</p>}
+    </article>
+  );
+}
+
+export function Feedback({ companies, companyId, noteId, go }: { companies: Company[]; companyId: string | undefined; noteId: string | undefined; go: (to: string) => void }) {
+  const company = companies.find((c) => c.id === companyId) ?? companies[0];
+  const [tab, setTab] = useState<State>("unprocessed");
+  const [q, setQ] = useState("");
+  const [search, setSearch] = useState("");
+  const list = usePoll(
+    (signal) => (company ? api<NoteSummary[]>(`/api/companies/${company.id}/feedback?state=${tab}${search ? `&q=${encodeURIComponent(search)}` : ""}`, { signal }) : Promise.resolve([])),
+    30_000,
+    `fb-${company?.id}-${tab}-${search}`,
+  );
+  const counts = usePoll((signal) => api<Record<string, number>>("/api/feedback/unprocessed", { signal }), 30_000, "fb-counts");
+  const features = usePoll((signal) => (company ? api<ScoredFeatures>(`/api/companies/${company.id}/features`, { signal }) : Promise.resolve(null)), 60_000, `fb-features-${company?.id}`);
+  const open = (id: string | null) => go(id ? `feedback/${company!.id}/${id}` : `feedback/${company!.id}`);
+  const changed = () => (list.reload(), counts.reload(), features.reload());
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <h1>Feedback</h1>
+          <p className="sub">What people tell each company. Link the passages that ask for something to features, and how much it matters to them.</p>
+        </div>
+        {companies.length > 1 && (
+          <div className="field">
+            <label htmlFor="fb-company">Company</label>
+            <select id="fb-company" value={company?.id} onChange={(e) => go(`feedback/${e.target.value}`)}>
+              {companies.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </header>
+      {!company ? (
+        <p>Create a company on the Board first.</p>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <AddNote companyId={company.id} onAdded={(id) => (changed(), setTab("unprocessed"), open(id))} />
+            <a href={`#/features/${company.id}`}>Features and priorities</a>
+          </div>
+          <div className={`inbox ${noteId ? "has-note" : ""}`}>
+            <section className="inbox-list" aria-label="Feedback">
+              <div className="tabs" role="tablist" aria-label="Feedback by state">
+                {TABS.map((t) => (
+                  <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+                    {t.label}
+                    {t.id === "unprocessed" && counts.data?.[company.id] ? <span className="tab-count">{counts.data[company.id]}</span> : null}
+                  </button>
+                ))}
+              </div>
+              <form
+                role="search"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setSearch(q.trim());
+                }}
+                style={{ display: "flex", gap: 8 }}
+              >
+                <label htmlFor="fb-search" className="visually-hidden">
+                  Search feedback
+                </label>
+                <input id="fb-search" className="search" type="search" placeholder="Search text or who it's from" value={q} onChange={(e) => setQ(e.target.value)} />
+                <button className="btn small" type="submit">
+                  Search
+                </button>
+              </form>
+              {list.data && !list.data.length && <p className="muted">{search ? "Nothing matches." : tab === "unprocessed" ? "Nothing waiting. Add feedback above." : "Nothing here."}</p>}
+              <ul className="note-list">
+                {(list.data ?? []).map((n) => (
+                  <li key={n.id}>
+                    <button type="button" aria-current={n.id === noteId ? "true" : undefined} onClick={() => open(n.id)}>
+                      <span className="note-head">
+                        <b>{n.title ?? n.customer ?? "Anonymous"}</b>
+                        <small className="muted">{when(n.createdAt)}</small>
+                      </span>
+                      <span className="note-snippet">{n.text.slice(0, 160)}</span>
+                      <span className="note-meta">
+                        {n.title && n.customer && <span>{n.customer}</span>}
+                        <span>{SOURCE[n.source] ?? n.source}</span>
+                        {n.insightCount > 0 && <span className="tag blue">{n.insightCount} linked</span>}
+                        {n.untrusted && <span className="tag">from outside</span>}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+            {noteId ? (
+              <NotePane key={noteId} id={noteId} companyId={company.id} features={features.data?.features ?? []} onChanged={changed} onClose={() => open(null)} />
+            ) : (
+              <p className="muted inbox-empty">Pick a note to read it and link it to features.</p>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}

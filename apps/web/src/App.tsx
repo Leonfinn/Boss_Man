@@ -18,6 +18,8 @@ import { Funding } from "./pages/Funding";
 import { Notifications } from "./pages/Notifications";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
+import { Features } from "./pages/Features";
+import { Feedback } from "./pages/Feedback";
 import { Roadmap } from "./pages/Roadmap";
 
 type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
@@ -59,10 +61,13 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(notifySupported() ? Notification.permission : "unsupported");
   const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
+  const unprocessed = usePoll((signal) => api<Record<string, number>>("/api/feedback/unprocessed", { signal }), 30_000, "unprocessed");
   useFeedNotifications(feed.data);
   // Moving between screens refreshes the company list, so names and agents are never stale.
   const reloadCompanies = companies.reload;
   useEffect(() => reloadCompanies(), [page, reloadCompanies]);
+  const reloadUnprocessed = unprocessed.reload;
+  useEffect(() => reloadUnprocessed(), [route.join("/"), reloadUnprocessed]);
 
   const lost = [companies.error, decisions.error].find((e) => e && e.status === 0);
   const expired = [companies.error, decisions.error].some((e) => e?.status === 401);
@@ -78,6 +83,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         companies={list}
         decisions={decisions.data ?? []}
         unread={feed.data?.unread ?? 0}
+        feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
         notifications={permission}
         onEnableNotifications={() => void Notification.requestPermission().then(setPermission)}
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
@@ -91,6 +97,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Board companies={list} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={route[1]} go={go} />
+        ) : page === "features" ? (
+          <Features companies={list} companyId={route[1]} featureId={route[2]} go={go} />
+        ) : page === "feedback" ? (
+          <Feedback companies={list} companyId={route[1]} noteId={route[2]} go={go} />
         ) : page === "roadmap" ? (
           <Roadmap companies={list} tab={route[1]} go={go} />
         ) : page === "plan" ? (

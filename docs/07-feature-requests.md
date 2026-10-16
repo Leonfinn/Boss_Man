@@ -34,6 +34,6 @@ Checked on 16 Oct 2026 against Productboard's help centre and public portals:
 ## Status
 
 1. Server: notes, insights, features, areas, criteria, customers and scoring. **In review.**
-2. Web: the feedback inbox, the features list with prioritisation, and the feature page.
+2. Web: the feedback inbox (select a passage, pick or create a feature, set importance), the features list with inline prioritisation, and the feature page. **In review.**
 3. Agents and tickets.
 4. The portal.

@@ -182,3 +182,55 @@ export type TicketLinks = {
 
 /** Today's date in the browser's time zone, YYYY-MM-DD. */
 export const today = () => new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+
+// ---------- Feature requests ----------
+export type Importance = "nice_to_have" | "important" | "critical";
+export const IMPORTANCES: Importance[] = ["nice_to_have", "important", "critical"];
+export const IMPORTANCE_LABEL: Record<Importance, string> = { nice_to_have: "Nice to have", important: "Important", critical: "Critical" };
+export type FeatureStatus = "idea" | "considering" | "planned" | "in_progress" | "released" | "declined";
+export const FEATURE_STATUSES: FeatureStatus[] = ["idea", "considering", "planned", "in_progress", "released", "declined"];
+export const FEATURE_STATUS_LABEL: Record<FeatureStatus, string> = { idea: "Idea", considering: "Considering", planned: "Planned", in_progress: "In progress", released: "Released", declined: "Declined" };
+export type Driver = { id: string; companyId: string; name: string; weight: number; position: number };
+export type FeatureArea = { id: string; companyId: string; name: string; position: number };
+export type Feature = {
+  id: string;
+  companyId: string;
+  areaId: string | null;
+  parentId: string | null;
+  title: string;
+  description: string | null;
+  status: FeatureStatus;
+  effort: number | null;
+  driverScores: Record<string, number | null>;
+  milestoneId: string | null;
+  portalVisible: boolean;
+  createdAt: string;
+  updatedAt: string;
+  releasedAt: string | null;
+  demand: number;
+  insightCount: number;
+  customerCount: number;
+  value: number;
+  demandPart: number;
+  priority: number;
+  tickets: { total: number; done: number };
+};
+export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
+export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; drivers: Driver[]; areas: FeatureArea[] };
+export type NoteSummary = { id: string; companyId: string; title: string | null; text: string; source: string; state: "unprocessed" | "processed" | "archived"; untrusted: boolean; createdAt: string; customer: string | null; insightCount: number };
+export type Insight = { id: string; noteId: string; featureId: string; importance: Importance; highlight: string | null; createdBy: string; createdAt: string };
+export type NoteDetail = {
+  note: Omit<NoteSummary, "customer" | "insightCount"> & { customerId: string | null; processedAt: string | null };
+  customer: { id: string; name: string; email: string | null; segment: string | null } | null;
+  insights: Array<Insight & { feature: { id: string; title: string; status: FeatureStatus } }>;
+  suggestions: Array<{ id: string; title: string; status: FeatureStatus; score: number; shared: string[] }>;
+};
+export type FeatureDetail = {
+  feature: Feature;
+  drivers: Driver[];
+  settings: { demandWeight: number };
+  maxDemand: number;
+  subfeatures: Feature[];
+  insights: Array<Insight & { fromSubfeature: boolean; note: { id: string; title: string | null; text: string; source: string; untrusted: boolean; createdAt: string }; customer: { id: string; name: string; segment: string | null } | null }>;
+  tickets: Array<{ id: string; title: string; state: string; outcome: string | null }>;
+};
