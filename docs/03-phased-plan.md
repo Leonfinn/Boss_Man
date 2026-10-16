@@ -85,6 +85,18 @@ These sit between the budget work and the self-hosting milestone:
 4. **Review (M):** a diff against the base, line comments to the agent, and commit and PR prompt templates (R39). Last-turn checkpoints follow in v1.1.
 5. **Web UI (L):** built to R43–R45 from the start, using the screens on the design canvas and the artwork in `assets/brand/`.
 
+## Added after the Nimbalyst and Aperant reviews (2026-10-16)
+1. **Merge (M):** merge-tree preview, a resolver agent, and merge closing the ticket (R46). Verify commands before done (R47).
+2. **Loop guards (S):**
+   - review rounds (R49);
+   - circular-fix detection (R50);
+   - a per-ticket cost ceiling and an instance-wide cap (R53).
+3. **Safety (S):**
+   - untrusted-content labels (R51);
+   - an image canary before a rebuilt runner image is used (R52);
+   - workspace clean-up and disk caps (R54).
+4. **v1.1:** risk tiers (R48), the notification ladder (R44), CEO chapters, and graded planning.
+
 ## v1.1
 - Plan-first tickets (R40) and last-turn diffs from checkpoints (R39).
 - An owner chat that turns plain language into tickets and links, with board tools only.
