@@ -177,6 +177,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       });
     },
 
+    /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */
+    async redeliver(runnerId: string) {
+      const answered = await db.select().from(decisions).where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered")));
+      let sent = 0;
+      for (const d of answered) {
+        const ctx = d.context as Extract<DecisionContext, { type: "permission" }> & { delivered?: boolean | "run_ended" };
+        if (ctx.delivered !== false || ctx.runnerId !== runnerId) continue;
+        const [run] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, ctx.runId));
+        const ok = !run?.endedAt && send(runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: d.answer === ALLOW ? "allow" : "deny" });
+        // Delivered, or the run is gone and there's nothing left to deliver to.
+        if (ok || run?.endedAt || !run) {
+          await db.update(decisions).set({ context: { ...ctx, delivered: ok ? true : "run_ended" } }).where(eq(decisions.id, d.id));
+          if (ok) sent++;
+        }
+      }
+      return sent;
+    },
+
     /** Moves a blocked ticket to ready once nothing blocks it, and wakes its assignee. */
     release: (ticketId: string) => releaseIfFree(ticketId),
 
@@ -313,6 +331,22 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       let delivered: boolean | null = null;
       if (ctx.type === "permission") {
         delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: answer === ALLOW ? "allow" : "deny" });
+        if (!delivered) {
+          // Never fail silently (R22): flag it, and re-send when the runner reconnects.
+          await db.update(decisions).set({ context: { ...ctx, delivered: false } }).where(eq(decisions.id, id));
+          await db
+            .insert(decisions)
+            .values({
+              companyId: d.companyId,
+              kind: "question",
+              question: `Your answer "${answer}" to "${d.question}" couldn't reach the company's runner, which is offline. It will be sent when the runner reconnects. If the agent waits more than 10 minutes, the request is refused.`,
+              options: ["Got it"],
+              recommendedOption: "Got it",
+              dedupeKey: `undelivered:${id}`,
+              context: { type: "question" },
+            })
+            .onConflictDoNothing();
+        }
         // The agent resumes now, so the wait for the owner doesn't count as a stall.
         await db.update(runs).set({ lastEventAt: now() }).where(eq(runs.id, ctx.runId));
       } else if (ctx.type === "engagement") {

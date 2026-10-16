@@ -46,6 +46,8 @@ type RunState = {
   sessionId: string | null;
   cancel: () => void;
   pendingPermissions: Map<string, (verdict: "allow" | "deny") => void>;
+  /** Owner or CEO messages waiting to be sent as the next prompt (R37). */
+  queued: string[];
 };
 
 export class SessionManager {
@@ -62,12 +64,27 @@ export class SessionManager {
       case "run.start":
         void this.start(command);
         return;
-      case "run.cancel":
-        this.runs.get(command.runId)?.cancel();
+      case "run.cancel": {
+        const run = this.runs.get(command.runId);
+        if (!run) return;
+        // A stop means stop: queued messages don't start another turn.
+        run.queued.length = 0;
+        run.cancel();
         return;
+      }
       case "permission.decide":
         this.runs.get(command.runId)?.pendingPermissions.get(command.requestId)?.(command.verdict);
         return;
+      case "run.message": {
+        const run = this.runs.get(command.runId);
+        if (!run) {
+          this.opts.emit({ type: "runner.log", level: "warn", message: `A message for run ${command.runId} arrived after it ended.` });
+          return;
+        }
+        run.queued.push(command.text);
+        if (command.interrupt) run.cancel();
+        return;
+      }
     }
   }
 
@@ -117,7 +134,7 @@ export class SessionManager {
       stderr = (stderr + String(d)).slice(-4000);
     });
 
-    const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map() };
+    const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
     this.runs.set(cmd.runId, state);
 
     const onPermission = (req: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
@@ -236,7 +253,13 @@ export class SessionManager {
       }
       emit({ type: "run.started", runId: cmd.runId, agentId: cmd.agentId, acpSessionId: session.sessionId, model });
 
-      const result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: cmd.prompt }] });
+      let result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: cmd.prompt }] });
+      // Messages that arrived during the turn continue the same session (R37).
+      while (state.queued.length && this.runs.has(cmd.runId)) {
+        const text = state.queued.splice(0).join("\n\n");
+        emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 2000) } });
+        result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] });
+      }
       finish(result.stopReason, null);
     } catch (err) {
       finish(null, String((err as Error)?.message ?? err));

@@ -10,10 +10,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { companies, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
+import { agents, companies, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
 import type { decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
+import { RunError, type runsService } from "./services/runs.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -29,9 +30,9 @@ const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], is
 
 export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
 
-type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService> };
+type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService>; runs: ReturnType<typeof runsService> };
 
-function buildServer(db: Db, { decisions, engagements, deploys }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -228,6 +229,39 @@ function buildServer(db: Db, { decisions, engagements, deploys }: Services, scop
         return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.`);
       } catch (err) {
         if (err instanceof DeployError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "runs",
+    {
+      description:
+        "For CEOs: see your company's running agents and steer them. action: list; message (runId, message; add interrupt to stop the current turn first; an ended run is woken again with the message); stop (runId).",
+      inputSchema: {
+        action: z.enum(["list", "message", "stop"]),
+        runId: z.string().uuid().optional(),
+        message: z.string().max(20_000).optional(),
+        interrupt: z.boolean().optional(),
+      },
+    },
+    async (input) => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO can steer runs.");
+      try {
+        if (input.action === "list") return text(JSON.stringify(await runs.active(scope.companyId)));
+        if (!input.runId) return fail("Give the runId.");
+        if (input.runId === scope.runId) return fail("That's your own run.");
+        if (input.action === "stop") {
+          await runs.cancel(input.runId, scope.companyId);
+          return text(`Stopping run ${input.runId}.`);
+        }
+        if (!input.message) return fail("Give the message.");
+        const r = await runs.message(input.runId, { text: input.message, interrupt: input.interrupt, from: `${me.name} (your CEO)`, companyId: scope.companyId, causedByRunId: scope.runId });
+        return text(r.delivered === "woken" ? "That run had ended; the agent is woken again with your message." : `Message ${r.delivered}.`);
+      } catch (err) {
+        if (err instanceof RunError) return fail(err.message);
         throw err;
       }
     },

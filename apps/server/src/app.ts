@@ -14,6 +14,7 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { DeployError, deploysService } from "./services/deploys.js";
+import { RunError, runsService } from "./services/runs.js";
 import { workService, WorkError } from "./services/work.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -82,6 +83,10 @@ export async function buildApp(opts: AppOptions) {
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
+  const runsSvc = runsService(db, { runners });
+  runsSvc.setWakeHook((w) => scheduler.wake(w));
+  // A runner that comes back gets any permission verdicts it missed (R22).
+  runners.onConnect((runnerId) => decisionsSvc.redeliver(runnerId));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   runners.onEvent((_runner, event) => {
     if (event.type === "run.ended") {
@@ -93,7 +98,7 @@ export async function buildApp(opts: AppOptions) {
     }
   });
   const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   const work = workService(db, {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
@@ -549,9 +554,22 @@ export async function buildApp(opts: AppOptions) {
     owner.delete("/api/deploy-targets/:id", async (req, reply) => ((await deploysSvc.deleteTarget(IdParam.parse(req.params).id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" })));
     owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
 
+    // Steering and stopping running agents (R37).
+    const runErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof RunError) return reply.code(err.status).send({ error: "run", message: err.message });
+      throw err;
+    };
+    owner.get("/api/runs", async (req) => runsSvc.active(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
+    owner.post("/api/runs/:id/message", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ text: z.string().trim().min(1).max(20_000), interrupt: z.boolean().optional() }).parse(req.body);
+      return runsSvc.message(id, { ...b, from: "the owner" }).catch(runErrors(reply));
+    });
+    owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));
+
     // Stale-blocker and stalled-run sweeps (R21, R32); also run on a timer.
     owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc };
 }

@@ -15,6 +15,7 @@ export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type
 export function runnersService(db: Db, funding: ReturnType<typeof fundingService>) {
   let onPermission: PermissionHook | null = null;
   const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
+  const connectListeners: Array<(runnerId: string) => unknown> = [];
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
 
@@ -140,6 +141,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
     connect(runnerId: string, send: CommandSender) {
       connected.set(runnerId, send);
+      for (const l of connectListeners) void Promise.resolve(l(runnerId)).catch(() => {});
       return () => {
         if (connected.get(runnerId) === send) connected.delete(runnerId);
       };
@@ -153,6 +155,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
     setPermissionHook(hook: PermissionHook) {
       onPermission = hook;
+    },
+
+    /** Called whenever a runner (re)connects, e.g. to re-send verdicts it missed. */
+    onConnect(listener: (runnerId: string) => unknown) {
+      connectListeners.push(listener);
     },
 
     /** Called after each newly stored event's effects are applied. */
