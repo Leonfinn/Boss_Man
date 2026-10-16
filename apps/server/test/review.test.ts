@@ -144,5 +144,17 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect((await approve(c)).json()).toMatchObject({ outcome: "uncommitted" });
     expect((await c.db.select().from(wakes))[0]!.note).toMatch(/aren't committed: draft\.ts\. Commit your work/);
   });
+
+  it("tells the agent to change approach when the same check failure comes back a third time (R50)", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: false, exitCode: 1, timedOut: false, output: "FAIL src/limit.test.ts (12 ms)\n  expected 1000 got 100", ms: 12 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    for (let i = 0; i < 3; i++) {
+      await approve(c);
+      if (i < 2) await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
+    }
+    const notes = (await c.db.select().from(wakes)).map((w) => w.note ?? "");
+    expect(notes.filter((n) => n.includes("take a different approach"))).toHaveLength(1);
+    expect(notes.at(-1)).toContain("This is the 3rd time the same failure has come back.");
+  });
 });
 

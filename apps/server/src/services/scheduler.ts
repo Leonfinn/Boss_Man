@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, companies, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
@@ -247,14 +247,52 @@ export function schedulerService(
         }
 
         const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
+        const [wt] = w.ticketId
+          ? await db
+              .select({ projectId: tickets.projectId, title: tickets.title, cap: tickets.costCapMicros, projectCap: projects.ticketCostCapMicros })
+              .from(tickets)
+              .innerJoin(projects, eq(projects.id, tickets.projectId))
+              .where(eq(tickets.id, w.ticketId))
+          : [];
+        // Instance, company, project and agent budgets all apply (R28, R53).
         const stopped = budgets.find(
           (b) =>
             b.status.action === "pause" &&
-            ((b.policy.scopeKind === "company" && b.policy.scopeId === w.companyId) || (b.policy.scopeKind === "agent" && b.policy.scopeId === w.agentId)),
+            (b.policy.scopeKind === "instance" ||
+              (b.policy.scopeKind === "company" && b.policy.scopeId === w.companyId) ||
+              (b.policy.scopeKind === "project" && b.policy.scopeId === wt?.projectId) ||
+              (b.policy.scopeKind === "agent" && b.policy.scopeId === w.agentId)),
         );
         if (stopped) {
           await defer("budget limit reached", stopped.status.bounds.end ?? null);
           continue;
+        }
+
+        // A ticket's spend across all its runs has a ceiling, because review and retry loops multiply runs (R53).
+        const ticketCap = wt?.cap ?? wt?.projectCap;
+        if (w.ticketId && ticketCap != null) {
+          const [spent] = await db
+            .select({ total: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
+            .from(costEvents)
+            .innerJoin(runs, eq(runs.id, costEvents.runId))
+            .where(eq(runs.ticketId, w.ticketId));
+          const total = Number(spent?.total ?? 0);
+          if (total >= ticketCap) {
+            await db
+              .insert(decisions)
+              .values({
+                companyId: w.companyId,
+                kind: "budget",
+                question: `"${wt!.title}" has used $${(total / 1e6).toFixed(2)} of its $${(ticketCap / 1e6).toFixed(2)} cap across all its runs. Raise the cap by half, or stop work on it?`,
+                options: ["Raise the cap by half", "Stop work on it"],
+                recommendedOption: "Stop work on it",
+                dedupeKey: `ticket-cap:${w.ticketId}:${ticketCap}`,
+                context: { type: "ticket_cap", ticketId: w.ticketId },
+              })
+              .onConflictDoNothing();
+            await defer("ticket cost cap reached", new Date(t.getTime() + 5 * 60_000));
+            continue;
+          }
         }
 
         if (agent?.fundingSourceId && w.priority < limits.highPriority) {

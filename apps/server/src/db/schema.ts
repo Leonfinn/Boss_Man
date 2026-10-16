@@ -114,6 +114,8 @@ export const projects = pgTable("projects", {
   defaultBranch: text("default_branch").notNull().default("main"),
   /** A check that must pass in a ticket's worktree before it can be merged and done (R47). */
   verifyCommand: text("verify_command"),
+  /** Default spend ceiling per ticket across all its runs (R53). */
+  ticketCostCapMicros: micros("ticket_cost_cap_micros"),
   createdAt: createdAt(),
 });
 
@@ -182,6 +184,8 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** Spend ceiling across all of this ticket's runs (R53); falls back to the project's default. */
+    costCapMicros: micros("cost_cap_micros"),
     customFields: jsonb("custom_fields").notNull().default({}),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
@@ -403,7 +407,8 @@ export const quotaSamples = pgTable(
   (t) => [index("quota_samples_source_window_time").on(t.fundingSourceId, t.window, t.observedAt)],
 );
 
-export const budgetScope = pgEnum("budget_scope", ["company", "project", "agent"]);
+/** "instance" covers every company (R53); its scope_id is the nil UUID. */
+export const budgetScope = pgEnum("budget_scope", ["company", "project", "agent", "instance"]);
 export const budgetWindow = pgEnum("budget_window", ["lifetime", "calendar_month", "billing_cycle", "rolling_days"]);
 export const budgetOnLimit = pgEnum("budget_on_limit", ["ask", "pause"]);
 
@@ -507,3 +512,33 @@ export const policyRules = pgTable("policy_rules", {
   outcome: policyOutcome("outcome").notNull(),
   position: integer("position").notNull().default(0),
 });
+
+// ---------- Loop guards (R49, R50) ----------
+
+/** Every review verdict on a ticket, so repeated findings and endless rounds can be spotted. */
+export const ticketReviews = pgTable("ticket_reviews", {
+  id: id(),
+  ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+  reviewer: text("reviewer").notNull(),
+  verdict: text("verdict").notNull(),
+  comments: jsonb("comments").notNull().default([]),
+  /** One per comment: path plus normalised text, to recognise the same finding again. */
+  fingerprints: jsonb("fingerprints").notNull().default([]),
+  createdAt: createdAt(),
+});
+
+/** Normalised failures (run errors, failed checks), to spot an agent going round in circles. */
+export const failureSignatures = pgTable(
+  "failure_signatures",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    signature: text("signature").notNull(),
+    sample: text("sample").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
+);
+
