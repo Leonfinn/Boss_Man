@@ -209,6 +209,8 @@ export const tickets = pgTable(
     planFirst: boolean("plan_first").notNull().default(false),
     plan: text("plan"),
     planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
+    /** The feature request this ticket delivers, if any. */
+    featureId: uuid("feature_id").references((): AnyPgColumn => features.id, { onDelete: "set null" }),
     customFields: jsonb("custom_fields").notNull().default({}),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
@@ -653,4 +655,117 @@ export const ownerChatMessages = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt)],
+);
+
+// ---------- Feature requests ----------
+
+export const featureStatus = pgEnum("feature_status", ["idea", "considering", "planned", "in_progress", "released", "declined"]);
+export const importance = pgEnum("importance", ["nice_to_have", "important", "critical"]);
+export const noteSource = pgEnum("note_source", ["owner", "chat", "agent", "portal", "email", "import"]);
+export const noteState = pgEnum("note_state", ["unprocessed", "processed", "archived"]);
+
+/** Per company: how features are prioritised, whether the CEO triages feedback, and the portal. */
+export const feedbackSettings = pgTable("feedback_settings", {
+  companyId: uuid("company_id").primaryKey().references(() => companies.id, { onDelete: "cascade" }),
+  /** How much demand counts against the criteria, 0 to 10. */
+  demandWeight: integer("demand_weight").notNull().default(3),
+  ceoTriage: boolean("ceo_triage").notNull().default(false),
+  portalEnabled: boolean("portal_enabled").notNull().default(false),
+  /** The secret part of the portal's link. Rotating it ends the old link. */
+  portalToken: text("portal_token").unique(),
+  portalTitle: text("portal_title"),
+  portalIntro: text("portal_intro"),
+});
+
+/** A criterion features are scored on, 0 to 5, e.g. "Fits the mission". */
+export const featureDrivers = pgTable("feature_drivers", {
+  id: id(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  weight: integer("weight").notNull().default(1),
+  position: integer("position").notNull().default(0),
+});
+
+export const featureAreas = pgTable("feature_areas", {
+  id: id(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  position: integer("position").notNull().default(0),
+});
+
+export const features = pgTable(
+  "features",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    areaId: uuid("area_id").references(() => featureAreas.id, { onDelete: "set null" }),
+    /** A subfeature's parent. One level only. */
+    parentId: uuid("parent_id").references((): AnyPgColumn => features.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    description: text("description"),
+    status: featureStatus("status").notNull().default("idea"),
+    /** 1 (tiny) to 5 (huge); null until someone sizes it. */
+    effort: integer("effort"),
+    /** Driver id to score, 0 to 5. */
+    driverScores: jsonb("driver_scores").notNull().default({}),
+    milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
+    portalVisible: boolean("portal_visible").notNull().default(false),
+    createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+  },
+  (t) => [index("features_company").on(t.companyId, t.status)],
+);
+
+/** The people (or other companies) feedback comes from. */
+export const feedbackCustomers = pgTable(
+  "feedback_customers",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    email: text("email"),
+    segment: text("segment"),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("feedback_customers_name").on(t.companyId, sql`lower(${t.name})`)],
+);
+
+/** A piece of feedback, as it arrived. Passages of it are linked to features as insights. */
+export const feedbackNotes = pgTable(
+  "feedback_notes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    title: text("title"),
+    text: text("text").notNull(),
+    source: noteSource("source").notNull().default("owner"),
+    customerId: uuid("customer_id").references(() => feedbackCustomers.id, { onDelete: "set null" }),
+    state: noteState("state").notNull().default("unprocessed"),
+    /** From outside: the portal, or relayed by an agent. Agents see it marked as untrusted. */
+    untrusted: boolean("untrusted").notNull().default(false),
+    createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The portal visitor who sent it, so a repeat vote updates rather than adds. */
+    portalVoter: text("portal_voter"),
+    createdAt: createdAt(),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+  },
+  (t) => [index("feedback_notes_company_state").on(t.companyId, t.state, t.createdAt)],
+);
+
+/** A link from (a passage of) a note to a feature, with how much it matters to them. */
+export const insights = pgTable(
+  "insights",
+  {
+    id: id(),
+    noteId: uuid("note_id").notNull().references(() => feedbackNotes.id, { onDelete: "cascade" }),
+    featureId: uuid("feature_id").notNull().references(() => features.id, { onDelete: "cascade" }),
+    importance: importance("importance").notNull().default("important"),
+    highlight: text("highlight"),
+    /** "the owner", an agent's name, or "portal". */
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("insights_note_feature").on(t.noteId, t.featureId), index("insights_feature").on(t.featureId)],
 );

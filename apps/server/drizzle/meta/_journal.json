@@ -127,6 +127,13 @@
       "when": 1792183187057,
       "tag": "0017_milestone_horizon",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1792186150306,
+      "tag": "0018_feature_requests",
+      "breakpoints": true
     }
   ]
 }
