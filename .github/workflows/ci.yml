@@ -23,3 +23,27 @@ jobs:
           pnpm --filter @boss-man/server exec drizzle-kit generate --name ci-check
           git status --porcelain apps/server/drizzle
           test -z "$(git status --porcelain apps/server/drizzle)"
+
+  images:
+    # Builds both images so Dockerfile changes are proven before merge. Nothing is pushed:
+    # the runner image contains Claude Code, which must not be redistributed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the server image
+        run: docker build -f apps/server/Dockerfile -t boss-man-server:ci .
+      - name: Build the runner image
+        run: docker build -f apps/runner/Dockerfile --build-arg BOSSMAN_IMAGE_VERSION=ci -t boss-man-runner:ci .
+      - name: Runner image has Claude Code, git and the runner
+        run: |
+          docker run --rm --entrypoint claude boss-man-runner:ci --version
+          docker run --rm --entrypoint git boss-man-runner:ci --version
+          docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000 && test -n "$CLAUDE_CODE_EXECUTABLE"'
+      - name: Runner refuses to start without a token
+        run: |
+          if docker run --rm boss-man-runner:ci 2> err.txt; then echo "expected failure"; exit 1; fi
+          grep -q "BOSSMAN_RUNNER_TOKEN" err.txt
+      - name: Compose file is valid
+        run: |
+          mkdir -p secrets && touch secrets/master.key secrets/runner-app-co.token
+          POSTGRES_PASSWORD=ci docker compose --profile runners config -q
