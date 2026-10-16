@@ -85,7 +85,7 @@ These sit between the budget work and the self-hosting milestone:
 1. **Spike S4 (S):** does `session/load` on `claude-agent-acp` and `codex-acp` resume a session that crashed mid-tool-call? If it doesn't, restart with a summary (R42).
 2. **Steer and stop (S):** an owner and MCP path to `session/prompt` and `session/cancel`, and a visible "not delivered" state for permission verdicts (R37, R22).
 3. **Git workspaces (M):** worktrees on their own branches, from pinned bases, with patch save and restore and an allowlist for provisioning (R38).
-4. **Review (M):** a diff against the base, line comments to the agent, and commit and PR prompt templates (R39). Last-turn checkpoints follow in v1.1.
+4. **Review (M):** a diff against the base, line comments to the agent, and commit and PR prompt templates (R39). Last-turn checkpoints came in v1.1.
 5. **Web UI (L):** built to R43–R45 from the start, using the screens on the design canvas and the artwork in `assets/brand/`.
 
 ## Added after the Nimbalyst and Aperant reviews (2026-10-16)
@@ -106,7 +106,7 @@ Started 16 Oct 2026, alongside the v1 install. Built in this order, each as its 
 2. Plan-first tickets (R40) and risk tiers (R48), with the CEO's own decision tool and a ticket page for reviewing. **In review.**
 3. The notification ladder with quiet hours (R44): a notifications feed, agents' `notify_owner` tool, per-agent hourly caps, and phone push through the owner's own ntfy server. **In review.**
 4. Roadmap and plan views: objectives and milestones on a shared timeline with a status from their tickets, a dependency graph that names what's holding work up, and milestones and dependencies editable from a ticket's page. **In review.**
-5. CEO continuity and graded planning: chapters that continue one session with a frozen directive, close at 70% context, after 7 days or on request with a handoff, and keep notes and a journal in files; planning asked for in proportion to risk, with high and critical tickets planned first by default. **In review.** Then last-turn diffs (R39) and the owner chat.
+5. CEO continuity and graded planning: chapters that continue one session with a frozen directive, close at 70% context, after 7 days or on request with a handoff, and keep notes and a journal in files; planning asked for in proportion to risk, with high and critical tickets planned first by default. **In review.** Last-turn diffs (R39): a checkpoint commit under `refs/bossman/checkpoints/<ticket>/` before each run and after each turn, and a "last turn" view on the ticket page. **In review.** Then the owner chat.
 
 The full list:
 - Plan-first tickets (R40) and last-turn diffs from checkpoints (R39).

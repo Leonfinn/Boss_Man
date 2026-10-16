@@ -151,3 +151,52 @@ describe("workspace clean-up (R54)", () => {
     expect(git(ws.repoDir(ids.project), "branch", "--list", branchFor(ids.b))).toContain(ids.b);
   });
 });
+
+describe("turn checkpoints (R39)", () => {
+  it("records each turn under private refs without touching the agent's branch or index, and diffs the last turn", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    const head = git(w.path, "rev-parse", "HEAD");
+
+    // Before the run: nothing changed from HEAD, so nothing is recorded.
+    expect(await ws.checkpoint(spec, "before the run")).toBeNull();
+    await expect(ws.lastTurnDiff(spec)).rejects.toThrow("No turn has changed anything yet.");
+
+    // Turn 1: an edit and a new file, one of them staged by the agent.
+    writeFileSync(path.join(w.path, "README.md"), "turn one\n");
+    writeFileSync(path.join(w.path, "a.txt"), "a\n");
+    git(w.path, "add", "a.txt");
+    expect(await ws.checkpoint(spec, "after a turn")).toMatchObject({ turn: 1, files: 2 });
+    // Turn 2: another file; a turn that changes nothing records nothing.
+    writeFileSync(path.join(w.path, "b.txt"), "b\n");
+    writeFileSync(path.join(w.path, ".env"), "IGNORED=1\n");
+    expect(await ws.checkpoint(spec, "after a turn")).toMatchObject({ turn: 2, files: 1 });
+    expect(await ws.checkpoint(spec, "after a turn")).toBeNull();
+
+    const d = await ws.lastTurnDiff(spec);
+    expect(d.files).toEqual([{ path: "b.txt", added: 1, removed: 0 }]);
+    expect(d.turn).toMatchObject({ number: 2 });
+    expect(d.diff).not.toContain(".env");
+
+    // The agent's branch, index and files are as it left them.
+    expect(git(w.path, "rev-parse", "HEAD")).toBe(head);
+    expect(git(w.path, "diff", "--cached", "--name-only")).toBe("a.txt");
+    expect(git(w.path, "status", "--porcelain")).toContain("?? b.txt");
+    expect(git(ws.repoDir(ids.project), "for-each-ref", "--format=%(refname)", `refs/bossman/checkpoints/${ids.a}/`).split("\n")).toHaveLength(2);
+
+
+    // A change made between runs is caught by the next run's "before" checkpoint, not shown as a turn.
+    writeFileSync(path.join(w.path, "c.txt"), "by hand\n");
+    expect(await ws.checkpoint(spec, "before the run")).toMatchObject({ turn: 3 });
+    expect((await ws.lastTurnDiff(spec)).files.map((f) => f.path)).toEqual(["b.txt"]);
+    writeFileSync(path.join(w.path, "b.txt"), "b2\n");
+    expect(await ws.checkpoint(spec, "after a turn")).toMatchObject({ turn: 4, files: 1 });
+    expect((await ws.lastTurnDiff(spec)).files).toEqual([{ path: "b.txt", added: 1, removed: 1 }]);
+
+    // Released: the checkpoints go with the worktree.
+    await ws.release(spec);
+    expect(git(ws.repoDir(ids.project), "for-each-ref", `refs/bossman/checkpoints/${ids.a}/`)).toBe("");
+  });
+});

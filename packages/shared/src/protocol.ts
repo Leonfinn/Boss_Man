@@ -88,7 +88,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
   /** Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. */
-  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid }),
+  z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional() }),
   /** Runs the ticket's check in its worktree (R47). */
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
   /** Merges the ticket's branch into a named target (R46). */
@@ -134,6 +134,8 @@ export type WorkspaceDiff = {
   files: Array<{ path: string; added: number; removed: number }>;
   diff: string;
   truncated: boolean;
+  /** For a last-turn diff: which checkpoint it ends at, and when that was taken. */
+  turn?: { number: number; at: string };
 };
 
 /** The outcome of a ticket's check (R47). */

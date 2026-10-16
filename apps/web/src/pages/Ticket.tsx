@@ -14,7 +14,8 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <p className="muted" style={{ fontSize: 14 }}>
-        {diff.commits.length} commit{diff.commits.length === 1 ? "" : "s"} on top of <span className="mono">{diff.baseCommit.slice(0, 7)}</span>; {diff.files.length} file{diff.files.length === 1 ? "" : "s"} changed.
+        {diff.turn ? "" : <>{diff.commits.length} commit{diff.commits.length === 1 ? "" : "s"} on top of <span className="mono">{diff.baseCommit.slice(0, 7)}</span>; </>}
+        {diff.files.length} file{diff.files.length === 1 ? "" : "s"} changed.
       </p>
       {diff.files.length > 0 && (
         <ul className="mono" style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
@@ -54,10 +55,13 @@ export function Ticket({ id }: { id: string }) {
       setNote({ ok: false, text: (err as Error).message });
     }
   };
-  const loadDiff = async () => {
+  const [range, setRange] = useState<"base" | "last_turn">("base");
+  const loadDiff = async (which: "base" | "last_turn" = range) => {
     setDiffError(null);
+    setRange(which);
     try {
-      setDiff(await api<WorkspaceDiff>(`/api/tickets/${id}/diff`));
+      setDiff(null);
+      setDiff(await api<WorkspaceDiff>(`/api/tickets/${id}/diff${which === "last_turn" ? "?range=last_turn" : ""}`));
     } catch (err) {
       setDiffError(err instanceof ApiError && err.status === 409 ? `${err.message} The diff comes from the runner that holds the ticket's worktree.` : (err as Error).message);
     }
@@ -153,7 +157,16 @@ export function Ticket({ id }: { id: string }) {
           <h2 id="changes-h" style={{ fontSize: 17, fontWeight: 600 }}>
             Changes
           </h2>
-          {diff ? <DiffView diff={diff} /> : <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={() => void loadDiff()}>Show the changes</button>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
+            <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
+              {diff && range === "base" ? "Refresh all changes" : "All changes"}
+            </button>
+            <button type="button" className="btn" aria-pressed={!!diff && range === "last_turn"} onClick={() => void loadDiff("last_turn")}>
+              {diff && range === "last_turn" ? "Refresh the last turn" : "The last turn"}
+            </button>
+          </div>
+          {diff && range === "last_turn" && diff.turn && <p className="muted" style={{ fontSize: 14 }}>What the agent's last turn that changed anything did: checkpoint {diff.turn.number}, {when(diff.turn.at)}.</p>}
+          {diff && <DiffView diff={diff} />}
           {diffError && (
             <p className="error" role="alert">
               {diffError}

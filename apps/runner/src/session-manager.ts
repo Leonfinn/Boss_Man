@@ -156,7 +156,8 @@ export class SessionManager {
           reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
           return;
         }
-        this.opts.workspaces.diff({ projectId: command.projectId, ticketId: command.ticketId }).then(
+        const spec = { projectId: command.projectId, ticketId: command.ticketId };
+        (command.range === "last_turn" ? this.opts.workspaces.lastTurnDiff(spec) : this.opts.workspaces.diff(spec)).then(
           (data) => reply(command.requestId, { ok: true, data }),
           (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) }),
         );
@@ -426,12 +427,25 @@ export class SessionManager {
 
       // A session that couldn't be reopened gets the full prompt, so it doesn't miss what the old one knew.
       const first = !session.resumed && cmd.resumeSessionId && cmd.freshPrompt ? cmd.freshPrompt : cmd.prompt;
+      // Turn checkpoints (R39): the worktree before the run, then after each turn.
+      const checkpoint = async (label: string) => {
+        if (!cmd.workspace || !this.opts.workspaces) return;
+        try {
+          const c = await this.opts.workspaces.checkpoint(cmd.workspace, `${label} (run ${cmd.runId})`);
+          if (c && label !== "before the run") emit({ type: "run.update", runId: cmd.runId, update: { kind: "checkpoint", turn: c.turn, files: c.files } });
+        } catch (err) {
+          emit({ type: "runner.log", level: "warn", message: `Couldn't record a checkpoint for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err).slice(0, 300)}` });
+        }
+      };
+      await checkpoint("before the run");
       let result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: first }] });
+      await checkpoint("after a turn");
       // Messages that arrived during the turn continue the same session (R37).
       while (state.queued.length && this.runs.has(cmd.runId)) {
         const text = state.queued.splice(0).join("\n\n");
         emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 2000) } });
         result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] });
+        await checkpoint("after a turn");
       }
       finish(result.stopReason, null);
     } catch (err) {

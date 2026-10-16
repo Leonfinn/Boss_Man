@@ -171,6 +171,8 @@ export class Workspaces {
       }
       await this.git(["worktree", "remove", "--force", dir], { cwd: repo });
       await this.git(["worktree", "prune"], { cwd: repo });
+      // Turn checkpoints only matter while the ticket is being worked on.
+      for (const c of await this.checkpoints(spec.projectId, spec.ticketId)) await this.git(["update-ref", "-d", c.ref], { cwd: repo });
       return { savedPatch };
     });
   }
@@ -206,6 +208,76 @@ export class Workspaces {
     } finally {
       rmSync(index, { force: true });
     }
+  }
+
+  /** Private refs holding each ticket's turn checkpoints, oldest first. */
+  checkpointPrefix = (ticketId: string) => `refs/bossman/checkpoints/${ticketId}/`;
+
+  private async checkpoints(projectId: string, ticketId: string): Promise<Array<{ ref: string; n: number; commit: string; at: string; subject: string }>> {
+    const out = await this.git(["for-each-ref", "--format=%(refname)%09%(objectname)%09%(committerdate:iso-strict)%09%(subject)", this.checkpointPrefix(ticketId)], { cwd: this.repoDir(projectId) });
+    return out
+      ? out
+          .split("\n")
+          .map((l) => {
+            const [ref, commit, at, ...subject] = l.split("\t") as [string, string, string, ...string[]];
+            return { ref, n: Number(ref.slice(ref.lastIndexOf("/") + 1)), commit, at, subject: subject.join("\t") };
+          })
+          .sort((a, b) => a.n - b.n)
+      : [];
+  }
+
+  /**
+   * Records the worktree as it is now, tracked, uncommitted and untracked work alike (R39),
+   * as a commit under the ticket's private checkpoint refs. A throwaway index and commit-tree
+   * are used, so the agent's branch, index and working files are untouched. Nothing is
+   * recorded when nothing changed since the last checkpoint.
+   */
+  async checkpoint(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, label: string): Promise<{ turn: number; commit: string; files: number } | null> {
+    const dir = this.ticketDir(spec.ticketId);
+    if (!existsSync(path.join(dir, ".git"))) return null;
+    const index = path.join(this.root, "tmp", `${spec.ticketId}.checkpoint.index`);
+    mkdirSync(path.dirname(index), { recursive: true });
+    const env = { GIT_INDEX_FILE: index };
+    try {
+      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
+      await this.git(["add", "-A"], { cwd: dir, env });
+      const tree = await this.git(["write-tree"], { cwd: dir, env });
+      const list = await this.checkpoints(spec.projectId, spec.ticketId);
+      const last = list[list.length - 1];
+      const parent = last?.commit ?? (await this.git(["rev-parse", "HEAD"], { cwd: dir }));
+      if ((await this.git(["rev-parse", `${parent}^{tree}`], { cwd: dir })) === tree) return null;
+      const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
+      const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: dir, env: who });
+      const turn = (last?.n ?? 0) + 1;
+      await this.git(["update-ref", `${this.checkpointPrefix(spec.ticketId)}${String(turn).padStart(6, "0")}`, commit], { cwd: dir });
+      const files = await this.git(["diff", "--name-only", parent, commit], { cwd: dir });
+      return { turn, commit, files: files ? files.split("\n").length : 0 };
+    } finally {
+      rmSync(index, { force: true });
+    }
+  }
+
+  /**
+   * What the agent's last turn that changed anything did: that turn's checkpoint against the
+   * one before it (or the branch head it started from). Checkpoints taken before a run, which
+   * catch changes made outside a turn, are never shown as a turn.
+   */
+  async lastTurnDiff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
+    const list = await this.checkpoints(spec.projectId, spec.ticketId);
+    const to = list.filter((c) => c.subject.includes("after a turn")).pop();
+    if (!to) throw new Error("No turn has changed anything yet.");
+    const from = { commit: await this.git(["rev-parse", `${to.commit}^`], { cwd: this.repoDir(spec.projectId) }) };
+    const cwd = this.repoDir(spec.projectId);
+    const numstat = await this.git(["diff", "--numstat", from.commit, to.commit], { cwd });
+    const files = numstat
+      ? numstat.split("\n").map((l) => {
+          const [a, r, ...p] = l.split("\t");
+          return { path: p.join("\t"), added: a === "-" ? 0 : Number(a), removed: r === "-" ? 0 : Number(r) };
+        })
+      : [];
+    const full = await this.git(["diff", from.commit, to.commit], { cwd });
+    const truncated = Buffer.byteLength(full) > maxBytes;
+    return { baseCommit: from.commit, head: to.commit, commits: [], files, diff: truncated ? full.slice(0, maxBytes) : full, truncated, turn: { number: to.n, at: to.at } };
   }
 
   /** Runs git and returns its exit code instead of throwing on a non-zero exit. */
