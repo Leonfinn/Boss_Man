@@ -14,6 +14,8 @@ const Uuid = z.string().uuid();
 export const RunnerEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("run.started"), runId: Uuid, agentId: Uuid.nullable(), acpSessionId: z.string(), model: z.string().nullable() }),
   z.object({ type: z.literal("run.update"), runId: Uuid, update: z.unknown() }),
+  /** Where the run is working (R38): the ticket's branch and the commit it started from. */
+  z.object({ type: z.literal("run.workspace"), runId: Uuid, ticketId: Uuid, branch: z.string(), baseCommit: z.string(), created: z.boolean(), restoredPatch: z.boolean() }),
   z.object({
     type: z.literal("run.permission_request"),
     runId: Uuid,
@@ -61,7 +63,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     mcpToken: z.string(),
     /** Recovery (R42): try to reopen this ACP session; start a fresh one if it can't be loaded. */
     resumeSessionId: z.string().optional(),
+    /** Git workspace (R38): the run works in the ticket's worktree instead of cwd. */
+    workspace: z.object({ projectId: Uuid, ticketId: Uuid, repoUrl: z.string(), baseRef: z.string() }).optional(),
   }),
+  /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
+  z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
   z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),

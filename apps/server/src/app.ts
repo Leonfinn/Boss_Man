@@ -3,11 +3,11 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import { count, eq, gt, and } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { SECRET_KINDS, SYSTEM_STATES, usdToMicros } from "@boss-man/shared";
+import { SECRET_KINDS, SYSTEM_STATES, findCredential, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, engagements, owners, sessions } from "./db/schema.js";
+import { agents, companies, engagements, owners, projects, sessions } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -390,6 +390,26 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);
       return reply.code(201).send(await work.createProject(id, body.name, body.columns));
+    });
+
+    owner.patch("/api/projects/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z
+        .object({
+          name: z.string().trim().min(1).max(80),
+          repoUrl: z
+            .string()
+            .trim()
+            .max(500)
+            .refine((u) => /^(https:\/\/|ssh:\/\/|git@|file:\/\/|\/)/.test(u), "Give an https://, ssh://, git@ or local path address.")
+            .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
+            .nullable(),
+          defaultBranch: z.string().trim().min(1).max(200),
+        })
+        .partial()
+        .parse(req.body);
+      const [p] = await db.update(projects).set(b).where(eq(projects.id, id)).returning();
+      return p ?? reply.code(404).send({ error: "not_found" });
     });
 
     owner.put("/api/projects/:id/columns", async (req) => {

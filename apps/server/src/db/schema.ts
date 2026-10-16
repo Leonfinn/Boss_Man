@@ -108,6 +108,10 @@ export const projects = pgTable("projects", {
   id: id(),
   companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
+  /** The project's git repo (R38). When set, each ticket works in its own worktree and branch. */
+  repoUrl: text("repo_url"),
+  /** The branch new tickets start from. */
+  defaultBranch: text("default_branch").notNull().default("main"),
   createdAt: createdAt(),
 });
 
@@ -171,6 +175,9 @@ export const tickets = pgTable(
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     assignedToOwner: boolean("assigned_to_owner").notNull().default(false),
     dueDate: date("due_date"),
+    /** The ticket's git branch and the commit it started from, reported by the runner (R38). */
+    branch: text("branch"),
+    baseCommit: text("base_commit"),
     customFields: jsonb("custom_fields").notNull().default({}),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),

@@ -4,7 +4,7 @@ import { and, eq, isNotNull, max, sql } from "drizzle-orm";
 import type { JournalEntry, RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
-import { costEvents, decisions, engagements, runnerEvents, runners, runs } from "../db/schema.js";
+import { costEvents, decisions, engagements, runnerEvents, runners, runs, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 type Runner = typeof runners.$inferSelect;
@@ -85,6 +85,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         if (event.costMicrosDelta - charged > 0) await funding.recordCost({ ...base, costMicros: event.costMicrosDelta - charged });
         return;
       }
+      case "run.workspace":
+        await db.update(tickets).set({ branch: event.branch, baseCommit: event.baseCommit }).where(eq(tickets.id, event.ticketId));
+        return;
       case "run.quota":
         await funding.recordQuotaFromAdapter(event.fundingSourceId, event);
         return;

@@ -100,7 +100,13 @@ export function schedulerService(
       .returning({ id: wakes.id });
     if (!claimed.length) return { ok: false, claimed: true };
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
-    const [ticket] = w.ticketId ? await db.select({ engagementId: tickets.engagementId }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+    const [ticket] = w.ticketId
+      ? await db
+          .select({ engagementId: tickets.engagementId, projectId: tickets.projectId, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch })
+          .from(tickets)
+          .innerJoin(projects, eq(projects.id, tickets.projectId))
+          .where(eq(tickets.id, w.ticketId))
+      : [];
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, model: agent.model, startedAt: now() });
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
@@ -114,6 +120,8 @@ export function schedulerService(
       model: agent.model,
       fundingSourceId: agent.fundingSourceId,
       cwd: path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
+      // A ticket in a project with a repo works in its own worktree and branch (R38).
+      ...(ticket?.repoUrl && w.ticketId ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       prompt: await prompt(w, agent, company.name),
       mcpToken,
       ...(previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
@@ -293,11 +301,24 @@ export function schedulerService(
       return db.select().from(wakes).where(inArray(wakes.status, ["queued", "deferred"])).orderBy(desc(wakes.priority), asc(wakes.createdAt));
     },
 
+    /** Frees a finished ticket's worktree on its company's runner, keeping its branch (R38). */
+    async releaseWorkspace(ticketId: string) {
+      const [t] = await db
+        .select({ companyId: tickets.companyId, projectId: tickets.projectId, repoUrl: projects.repoUrl })
+        .from(tickets)
+        .innerJoin(projects, eq(projects.id, tickets.projectId))
+        .where(eq(tickets.id, ticketId));
+      if (!t?.repoUrl) return false;
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+      return runner ? deps.runners.send(runner.id, { type: "workspace.release", projectId: t.projectId, ticketId }) : false;
+    },
+
     /**
      * After a ticket is done: dependents whose blockers are all resolved move to ready,
      * and their assignees are woken. Wakes caused by an agent's run carry the chain depth.
      */
     async onTicketDone(ticketId: string, causedByRunId?: string | null) {
+      await this.releaseWorkspace(ticketId);
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
       for (const { id } of dependents) {
         const blockers = await db

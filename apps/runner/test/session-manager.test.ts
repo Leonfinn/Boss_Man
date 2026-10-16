@@ -1,5 +1,6 @@
 // Drives the real claude-agent-acp adapter (and its bundled Claude Code) against the
 // scripted stub model, so no credentials are used. Same scenario as spike S2.
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { SessionManager } from "../src/session-manager.js";
+import { Workspaces } from "../src/workspace.js";
 import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
 import { startMcpServer, type McpCall } from "./mcp-server.js";
 
@@ -26,13 +28,14 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string } = {}) {
+function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
   const events: RunnerEvent[] = [];
   const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
   let done!: () => void;
   const ended = new Promise<void>((r) => (done = r));
   const manager: SessionManager = new SessionManager({
+    workspaces: opts.workspaces,
     mcpUrl: mcp.url,
     baseEnv: { PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: path.join(home, ".claude"), NO_PROXY: "127.0.0.1,localhost" },
     // Stands in for the company's granted secrets.
@@ -60,6 +63,7 @@ function harness(model: string | null, opts: { home?: string; cwd?: string; resu
     prompt: "Run the spike scenario.",
     mcpToken: "bm_sess_test",
     ...(opts.resumeSessionId ? { resumeSessionId: opts.resumeSessionId } : {}),
+    ...(opts.workspace ? { workspace: opts.workspace } : {}),
   });
   return { events, ended, runId, cwd, home, manager };
 }
@@ -159,6 +163,32 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
     expect(lost.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "resumed", mode: "fresh" } }));
     expect(lost.events.find((e) => e.type === "run.ended")).toMatchObject({ error: null });
   }, 120_000);
+});
+
+describe("runs in a git workspace (R38)", () => {
+  it("prepares the ticket's worktree, reports its branch, and the agent works inside it", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
+    const g = (...args: string[]) => execFileSync("git", args, { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+    g("init", "-q", "-b", "main");
+    writeFileSync(path.join(repo, "README.md"), "app\n");
+    g("add", ".");
+    g("commit", "-qm", "init");
+    const workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const ticketId = randomUUID();
+    const h = harness(null, { workspaces, workspace: { projectId: randomUUID(), ticketId, repoUrl: repo, baseRef: "main" } });
+    await h.ended;
+    expect(h.events.find((e) => e.type === "run.workspace")).toMatchObject({ ticketId, branch: `bossman/${ticketId}`, created: true });
+    // The stub model's first step writes spike.txt in the agent's cwd: the worktree.
+    expect(existsSync(path.join(workspaces.ticketDir(ticketId), "spike.txt"))).toBe(true);
+    expect(existsSync(path.join(h.cwd, "spike.txt"))).toBe(false);
+  }, 90_000);
+
+  it("ends the run with a clear error when the repo can't be cloned", async () => {
+    const workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const h = harness(null, { workspaces, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "/nonexistent/repo", baseRef: "main" } });
+    await h.ended;
+    expect((h.events.find((e) => e.type === "run.ended") as { error: string }).error).toMatch(/^Couldn't prepare the git workspace/);
+  }, 30_000);
 });
 
 describe("interrupted runs (R42)", () => {
