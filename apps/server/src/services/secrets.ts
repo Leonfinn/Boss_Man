@@ -1,8 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import { checkSecretFormat, normaliseSecret, secretHint, type SecretKind } from "@boss-man/shared";
 import { decryptSecret, encryptSecret, type MasterKey } from "../crypto.js";
 import type { Db } from "../db/client.js";
-import { secretAccessLog, secretGrants, secrets } from "../db/schema.js";
+import { deploys, deployTargets, secretAccessLog, secretGrants, secrets } from "../db/schema.js";
 
 /** A live check against the provider, e.g. a cheap authenticated call. */
 export type LiveValidator = (kind: SecretKind, value: string) => Promise<{ ok: boolean; message: string } | null>;
@@ -72,8 +72,13 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       return rows.length > 0;
     },
 
-    async grant(secretId: string, companyId: string, envName: string) {
-      const [row] = await db.insert(secretGrants).values({ secretId, companyId, envName }).returning();
+    /** A grant tied to a deploy target is only handed to runs carrying out an approved deploy there. */
+    async grant(secretId: string, companyId: string, envName: string, deployTargetId?: string) {
+      if (deployTargetId) {
+        const [t] = await db.select({ id: deployTargets.id }).from(deployTargets).where(and(eq(deployTargets.id, deployTargetId), eq(deployTargets.companyId, companyId)));
+        if (!t) throw new Error("That deploy target isn't in this company.");
+      }
+      const [row] = await db.insert(secretGrants).values({ secretId, companyId, envName, deployTargetId: deployTargetId ?? null }).returning();
       return row!;
     },
 
@@ -84,7 +89,7 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
 
     async grantsForCompany(companyId: string) {
       return db
-        .select({ id: secretGrants.id, envName: secretGrants.envName, secretId: secrets.id, secretName: secrets.name, hint: secrets.hint })
+        .select({ id: secretGrants.id, envName: secretGrants.envName, deployTargetId: secretGrants.deployTargetId, secretId: secrets.id, secretName: secrets.name, hint: secrets.hint })
         .from(secretGrants)
         .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
         .where(eq(secretGrants.companyId, companyId))
@@ -92,26 +97,31 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
     },
 
     /**
-     * The environment a company's runner gets: every granted secret, decrypted.
+     * The environment a company's runner gets for a run: every company-wide grant, plus the
+     * grants of a deploy target when this run is carrying out an approved deploy to it (R14).
      * Each use is written to the access log.
      */
     async resolveCompanyEnv(companyId: string, purpose: string, runId?: string): Promise<Record<string, string>> {
+      const targets = runId
+        ? (await db.select({ id: deploys.targetId }).from(deploys).where(and(eq(deploys.runId, runId), eq(deploys.status, "running"), eq(deploys.companyId, companyId)))).map((d) => d.id)
+        : [];
       const rows = await db
         .select({
           grantId: secretGrants.id,
           envName: secretGrants.envName,
+          deployTargetId: secretGrants.deployTargetId,
           secretId: secrets.id,
           ciphertext: secrets.ciphertext,
           wrappedKey: secrets.wrappedKey,
         })
         .from(secretGrants)
         .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
-        .where(and(eq(secretGrants.companyId, companyId)));
+        .where(and(eq(secretGrants.companyId, companyId), targets.length ? or(isNull(secretGrants.deployTargetId), inArray(secretGrants.deployTargetId, targets)) : isNull(secretGrants.deployTargetId)));
       const env: Record<string, string> = {};
       for (const r of rows) env[r.envName] = decryptSecret(master, r);
       if (rows.length > 0) {
         await db.insert(secretAccessLog).values(
-          rows.map((r) => ({ grantId: r.grantId, secretId: r.secretId, companyId, runId: runId ?? null, purpose })),
+          rows.map((r) => ({ grantId: r.grantId, secretId: r.secretId, companyId, runId: runId ?? null, purpose: r.deployTargetId ? "deploy" : purpose })),
         );
       }
       return env;

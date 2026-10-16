@@ -13,6 +13,7 @@ import { runnersService } from "./services/runners.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
+import { DeployError, deploysService } from "./services/deploys.js";
 import { workService, WorkError } from "./services/work.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -65,9 +66,11 @@ export async function buildApp(opts: AppOptions) {
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now);
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
+  const deploysSvc = deploysService(db, { now: opts.now });
   const scheduler = schedulerService(db, {
     runners,
     funding,
+    deploys: deploysSvc,
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
@@ -78,11 +81,19 @@ export async function buildApp(opts: AppOptions) {
   const engagementsSvc = engagementsService(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now });
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
+  deploysSvc.setWakeHook((w) => scheduler.wake(w));
+  decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   runners.onEvent((_runner, event) => {
-    if (event.type === "run.ended") void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed"));
+    if (event.type === "run.ended") {
+      // A deploy whose run ended without a report is failed, which also ends its secrets.
+      void deploysSvc
+        .onRunEnded(event.runId)
+        .then(() => scheduler.tick())
+        .catch((err) => app.log.error({ err }, "run-ended handling failed"));
+    }
   });
   const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   const work = workService(db, {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
@@ -233,12 +244,22 @@ export async function buildApp(opts: AppOptions) {
       return (await secretsSvc.remove(id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
     });
 
-    const GrantInput = z.object({ companyId: Uuid, envName: z.string().regex(/^[A-Z_][A-Z0-9_]*$/, "Use an environment variable name like CLAUDE_CODE_OAUTH_TOKEN") });
+    const GrantInput = z.object({
+      companyId: Uuid,
+      envName: z.string().regex(/^[A-Z_][A-Z0-9_]*$/, "Use an environment variable name like CLAUDE_CODE_OAUTH_TOKEN"),
+      /** Only runs carrying out an approved deploy to this target get the secret. */
+      deployTargetId: Uuid.optional(),
+    });
 
     owner.post("/api/secrets/:id/grants", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const body = GrantInput.parse(req.body);
-      return reply.code(201).send(await secretsSvc.grant(id, body.companyId, body.envName));
+      try {
+        return reply.code(201).send(await secretsSvc.grant(id, body.companyId, body.envName, body.deployTargetId));
+      } catch (err) {
+        if ((err as Error).message.startsWith("That deploy target")) return reply.code(422).send({ error: "invalid_target", message: (err as Error).message });
+        throw err;
+      }
     });
 
     owner.delete("/api/grants/:id", async (req, reply) => {
@@ -502,9 +523,35 @@ export async function buildApp(opts: AppOptions) {
       return engagementsSvc.act(id, { companyId: as === "requester" ? e.requesterCompanyId : e.providerCompanyId, agentId: null }, action).catch(engagementErrors(reply));
     });
 
+    // Deploy targets and deploys (R14, R15).
+    const TargetInput = z.object({
+      name: z.string().trim().min(1).max(80),
+      kind: z.enum(["ssh", "docker", "git"]),
+      endpoint: z.string().trim().min(1).max(500),
+      isProduction: z.boolean().optional(),
+      requiresApproval: z.boolean().optional(),
+    });
+    const deployErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof DeployError) return reply.code(err.status).send({ error: "deploy", message: err.message });
+      throw err;
+    };
+    owner.get("/api/companies/:id/deploy-targets", async (req) => deploysSvc.listTargets(IdParam.parse(req.params).id));
+    owner.post("/api/companies/:id/deploy-targets", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return deploysSvc
+        .createTarget(id, TargetInput.parse(req.body))
+        .then((t) => reply.code(201).send(t))
+        .catch(deployErrors(reply));
+    });
+    owner.patch("/api/deploy-targets/:id", async (req, reply) =>
+      deploysSvc.updateTarget(IdParam.parse(req.params).id, TargetInput.partial().parse(req.body)).catch(deployErrors(reply)),
+    );
+    owner.delete("/api/deploy-targets/:id", async (req, reply) => ((await deploysSvc.deleteTarget(IdParam.parse(req.params).id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" })));
+    owner.get("/api/deploys", async (req) => deploysSvc.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId));
+
     // Stale-blocker and stalled-run sweeps (R21, R32); also run on a timer.
     owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc };
 }

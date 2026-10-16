@@ -14,7 +14,7 @@ import {
   type RunnerEvent,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runs, ticketDependencies, tickets } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -24,7 +24,8 @@ export type DecisionContext =
   | { type: "engagement"; engagementId: string }
   | { type: "question" }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
-  | { type: "stalled_run"; runnerId: string; runId: string };
+  | { type: "stalled_run"; runnerId: string; runId: string }
+  | { type: "deploy"; deployId: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -42,10 +43,12 @@ const DENY = "Deny";
 type WakeHook = (input: { agentId: string; reason: string; ticketId?: string | null; note?: string | null; priority?: number }) => Promise<unknown>;
 
 type EngagementHook = (engagementId: string, approved: boolean) => Promise<unknown>;
+type DeployHook = (deployId: string, approved: boolean) => Promise<unknown>;
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date()) {
   let wake: WakeHook | null = null;
   let onEngagement: EngagementHook | null = null;
+  let onDeploy: DeployHook | null = null;
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true) {
@@ -181,6 +184,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onEngagement = hook;
     },
 
+    setDeployHook(hook: DeployHook) {
+      onDeploy = hook;
+    },
+
     setWakeHook(hook: WakeHook) {
       wake = hook;
     },
@@ -241,6 +248,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return c.type === "permission" || c.type === "stalled_run" ? [c.runId] : [];
       });
       const runTickets = new Map(runIds.length ? (await db.select({ id: runs.id, ticketId: runs.ticketId }).from(runs).where(inArray(runs.id, runIds))).map((r) => [r.id, r.ticketId]) : []);
+      const deployIds = open.flatMap(({ d }) => ((d.context as DecisionContext).type === "deploy" ? [(d.context as { deployId: string }).deployId] : []));
+      const deployTickets = new Map(
+        deployIds.length ? (await db.select({ id: deploys.id, ticketId: deploys.ticketId }).from(deploys).where(inArray(deploys.id, deployIds))).map((r) => [r.id, r.ticketId]) : [],
+      );
       const direct = (d: typeof decisions.$inferSelect): string[] => {
         const c = d.context as DecisionContext;
         switch (c.type) {
@@ -251,6 +262,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           }
           case "stale_blocker":
             return [c.blockedTicketId];
+          case "deploy": {
+            const id = deployTickets.get(c.deployId);
+            return id ? [id] : [];
+          }
           case "engagement":
             return deps.filter((x) => x.blockerEngagementId === c.engagementId).map((x) => x.blockedTicketId);
           default:
@@ -302,6 +317,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.update(runs).set({ lastEventAt: now() }).where(eq(runs.id, ctx.runId));
       } else if (ctx.type === "engagement") {
         await onEngagement?.(ctx.engagementId, answer === "Approve");
+      } else if (ctx.type === "deploy") {
+        await onDeploy?.(ctx.deployId, answer === "Approve");
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {
