@@ -50,6 +50,21 @@ type RunState = {
   queued: string[];
 };
 
+/** Stops an adapter and everything it started; escalates to SIGKILL if the group lingers. */
+function killGroup(child: ChildProcess, graceMs = 5000) {
+  const pid = child.pid;
+  if (!pid) return;
+  const signal = (sig: NodeJS.Signals) => {
+    try {
+      process.kill(-pid, sig);
+      return true;
+    } catch {
+      return false; // the group is already gone
+    }
+  };
+  if (signal("SIGTERM")) setTimeout(() => signal("SIGKILL"), graceMs).unref();
+}
+
 export class SessionManager {
   private readonly runs = new Map<string, RunState>();
 
@@ -57,6 +72,16 @@ export class SessionManager {
 
   get activeRuns() {
     return this.runs.size;
+  }
+
+  /** Process group ids of active runs, one per adapter. */
+  processGroups(): number[] {
+    return [...this.runs.values()].flatMap((r) => (r.child.pid ? [r.child.pid] : []));
+  }
+
+  /** Ends every run's process group, e.g. when the runner shuts down. */
+  shutdown() {
+    for (const run of this.runs.values()) killGroup(run.child, 2000);
   }
 
   handle(command: RunnerCommand) {
@@ -128,7 +153,10 @@ export class SessionManager {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: String((err as Error)?.message ?? err) });
       return;
     }
-    const child = spawn(bin, [], { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
+    // Claude Code carries on headless with every permission denied (spike S4). Ending the run
+    // kills the whole group.
+    const child = spawn(bin, [], { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stderr = "";
     child.stderr?.on("data", (d) => {
       stderr = (stderr + String(d)).slice(-4000);
@@ -218,7 +246,7 @@ export class SessionManager {
       if (messageText) emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: messageText.slice(0, 20_000) } });
       emit({ type: "run.ended", runId: cmd.runId, stopReason, error });
       connection.close();
-      child.kill("SIGTERM");
+      killGroup(child);
     };
     child.on("exit", (code) => {
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim());

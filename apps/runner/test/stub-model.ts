@@ -5,7 +5,14 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 
-export type StubLogEntry = { method: string; path: string; stream?: boolean; step?: string; hasTools?: boolean; model?: string; userAgent?: string };
+export type StubLogEntry = { method: string; path: string; stream?: boolean; step?: string; hasTools?: boolean; model?: string; userAgent?: string; shape?: string };
+
+/** A compact view of a conversation, e.g. "user | assistant[tool_use] | user[tool_result,text]". */
+export function conversationShape(messages: any[]): string {
+  return messages
+    .map((m) => `${m.role}${Array.isArray(m.content) ? `[${m.content.map((c: any) => c.type).join(",")}]` : ""}`)
+    .join(" | ");
+}
 
 type Block =
   | { type: "text"; text: string }
@@ -89,6 +96,21 @@ function sendJson(res: http.ServerResponse, model: string, blocks: Block[]) {
   }));
 }
 
+/** The id of a tool_use that the following message doesn't answer, if any. */
+export function danglingToolUse(messages: any[]): string | null {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+    const ids = m.content.filter((c: any) => c.type === "tool_use").map((c: any) => c.id as string);
+    if (!ids.length) continue;
+    const next = messages[i + 1];
+    const answered = new Set(Array.isArray(next?.content) ? next.content.filter((c: any) => c.type === "tool_result").map((c: any) => c.tool_use_id) : []);
+    const missing = ids.find((id: string) => !answered.has(id));
+    if (missing) return missing;
+  }
+  return null;
+}
+
 export async function startStubAnthropic(log: StubLogEntry[]): Promise<{ url: string; close: () => Promise<void> }> {
   const server = http.createServer((req, res) => {
     let raw = "";
@@ -102,12 +124,21 @@ export async function startStubAnthropic(log: StubLogEntry[]): Promise<{ url: st
       }
       if (req.method === "POST" && path === "/v1/messages") {
         const body = JSON.parse(raw || "{}");
+        // Like the real API: every tool_use must be answered by a tool_result in the next message.
+        const dangling = danglingToolUse(body.messages ?? []);
+        if (dangling) {
+          log.push({ method: req.method, path, step: "rejected-dangling-tool-use", shape: conversationShape(body.messages ?? []) });
+          res.writeHead(400, { "content-type": "application/json" });
+          return res.end(
+            JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: `messages: \`tool_use\` ids were found without \`tool_result\` blocks immediately after: ${dangling}` } }),
+          );
+        }
         const hasTools = Array.isArray(body.tools) && body.tools.some((t: any) => t.name === "Bash");
         // Side queries (titles, summaries) carry no Bash tool: answer them plainly.
         const { step, blocks } = hasTools
           ? scriptedReply(body.messages ?? [])
           : { step: "side-query", blocks: [{ type: "text", text: "Spike" } as Block] };
-        log.push({ method: req.method, path, stream: !!body.stream, step, hasTools, model: body.model, userAgent: req.headers["user-agent"] ?? undefined });
+        log.push({ method: req.method, path, stream: !!body.stream, step, hasTools, model: body.model, userAgent: req.headers["user-agent"] ?? undefined, shape: conversationShape(body.messages ?? []) });
         return body.stream ? sendStream(res, body.model, blocks) : sendJson(res, body.model, blocks);
       }
       if (req.method === "POST" && path === "/v1/responses") {
