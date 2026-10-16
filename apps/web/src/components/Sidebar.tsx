@@ -5,6 +5,8 @@ const NAV = [
   { id: "decisions", label: "Decisions" },
   { id: "notifications", label: "Notifications" },
   { id: "board", label: "Board" },
+  { id: "roadmap", label: "Roadmap" },
+  { id: "plan", label: "Plan" },
   { id: "runs", label: "Runs" },
   { id: "engagements", label: "Engagements" },
   { id: "funding", label: "Funding" },

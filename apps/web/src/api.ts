@@ -74,7 +74,7 @@ export type Ticket = {
   plan: string | null;
   planApprovedAt: string | null;
 };
-export type TicketDetail = Ticket & { body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string };
+export type TicketDetail = Ticket & { milestoneId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean };
 export type Board = { project: Project; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 
@@ -146,3 +146,38 @@ export type NotifySettings = {
   pushLevels: NotifyLevel[];
   publicUrl: string | null;
 };
+
+export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
+export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; status: MilestoneStatus };
+export type RoadmapObjective = {
+  id: string;
+  title: string;
+  priority: number;
+  status: "active" | "done" | "dropped";
+  keyResults: Array<{ id: string; title: string; current: number | null; target: number | null; unit: string | null; progress: number | null }>;
+  milestones: RoadmapMilestone[];
+};
+export type RoadmapCompany = { id: string; name: string; objectives: RoadmapObjective[] };
+
+export type PlanNode = {
+  id: string;
+  kind: "ticket" | "engagement" | "decision";
+  title: string;
+  state: string;
+  open: boolean;
+  link: string;
+  assignee: string | null;
+  project: string | null;
+  layer: number;
+  blocked: boolean;
+  causes: string[];
+  holdingUp: number;
+};
+export type Plan = { nodes: PlanNode[]; edges: Array<{ id: string; from: string; to: string }>; columns: string[][] };
+export type TicketLinks = {
+  waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; link: string }>;
+  blocks: Array<{ dependencyId: string; id: string; title: string; state: string; link: string }>;
+};
+
+/** Today's date in the browser's time zone, YYYY-MM-DD. */
+export const today = () => new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());

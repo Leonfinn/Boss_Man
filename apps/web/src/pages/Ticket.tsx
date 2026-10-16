@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, ApiError, RISKS, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
+import { TicketLinks } from "../components/TicketLinks";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
@@ -124,6 +125,8 @@ export function Ticket({ id }: { id: string }) {
             : "The CEO reviews it and it merges once the project's check passes."}
         </p>
       </section>
+
+      <TicketLinks t={t} onChanged={ticket.reload} />
 
       {t.body && (
         <section className="card">
