@@ -23,7 +23,9 @@ export async function runnerSocketRoutes(
     const runId = (req.query as { runId?: string }).runId;
     const validRunId = runId && /^[0-9a-f-]{36}$/i.test(runId) ? runId : undefined;
     reply.header("cache-control", "no-store");
-    return { env: await secrets.resolveCompanyEnv(runner.companyId, "run", validRunId) };
+    // Outside a run, the only purpose a runner has for secrets is pushing a merge (R46).
+    const purpose = (req.query as { purpose?: string }).purpose === "merge" && !validRunId ? "merge" : "run";
+    return { env: await secrets.resolveCompanyEnv(runner.companyId, purpose, validRunId) };
   });
 
   app.get(

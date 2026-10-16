@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { DEFAULT_GIT_TEMPLATES, formatReviewComments, renderTemplate, type ReviewComment, type WorkspaceDiff } from "@boss-man/shared";
+import { DEFAULT_GIT_TEMPLATES, formatReviewComments, renderTemplate, type MergeResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { projects, runners, runs, settings, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
@@ -29,7 +29,7 @@ export function reviewService(
 
   async function ticketWithRepo(ticketId: string, companyId?: string) {
     const [row] = await db
-      .select({ t: tickets, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch })
+      .select({ t: tickets, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, verifyCommand: projects.verifyCommand })
       .from(tickets)
       .innerJoin(projects, eq(projects.id, tickets.projectId))
       .where(eq(tickets.id, ticketId));
@@ -88,10 +88,7 @@ export function reviewService(
       // The coder doesn't review its own work (R49).
       if (input.reviewerAgentId && t.assigneeAgentId === input.reviewerAgentId) throw new ReviewError(403, "You can't review a ticket assigned to you.");
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
-      if (input.verdict === "approved") {
-        await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
-        return { verdict: "approved" as const, delivered: null };
-      }
+      if (input.verdict === "approved") return { verdict: "approved" as const, ...(await this.land(ticketId, input.reviewer, input.causedByRunId)) };
       if (!input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
       let diffText = "";
       if (input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
@@ -99,6 +96,62 @@ export function reviewService(
       await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
       const delivered = await tellAgent({ ...t, systemState: "in_progress" }, text, "review", input.reviewer, input.causedByRunId);
       return { verdict: "changes_requested" as const, delivered, message: text };
+    },
+
+    /**
+     * What approval does (R46, R47). Without a repo the ticket is simply done. With one, the
+     * project's check runs in the worktree, then the branch is merged into the project's
+     * default branch, and the merge closes the ticket. A failed check, a conflict or
+     * uncommitted work sends the ticket back to the agent with what to do.
+     */
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null): Promise<{ outcome: "done" | "merged" | "verify_failed" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+      const { t, repoUrl, defaultBranch, verifyCommand } = await ticketWithRepo(ticketId);
+      if (!repoUrl) {
+        await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
+        return { outcome: "done", delivered: null };
+      }
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+      if (!runner) throw new ReviewError(409, "The company has no runner.");
+      const ask = async <T>(build: (requestId: string) => Parameters<typeof deps.runners.send>[1], timeoutMs: number) => {
+        try {
+          return await deps.runners.request<T>(runner.id, build, timeoutMs);
+        } catch (err) {
+          throw new ReviewError(409, (err as Error).message);
+        }
+      };
+      const sendBack = async (text: string, reason: string) => {
+        await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
+        return tellAgent({ ...t, systemState: "in_progress" }, text, reason, reviewer, causedByRunId);
+      };
+
+      if (verifyCommand) {
+        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command: verifyCommand }), 11 * 60_000);
+        if (!v.ok) {
+          const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
+          const delivered = await sendBack(`The review was approved, but the check \`${verifyCommand}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}`, "verify failed");
+          return { outcome: "verify_failed", delivered, detail: v };
+        }
+      }
+
+      const m = await ask<MergeResult>(
+        (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }),
+        2 * 60_000,
+      );
+      if (m.status === "uncommitted") {
+        const tpl = (await templates(t.companyId)).commit;
+        const delivered = await sendBack(`The review was approved, but these files aren't committed: ${m.files.join(", ")}. ${renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title })} Then move the ticket back to review.`, "commit");
+        return { outcome: "uncommitted", delivered, detail: m };
+      }
+      if (m.status === "conflicts") {
+        const delivered = await sendBack(
+          `The review was approved, but your branch conflicts with ${defaultBranch} in: ${m.files.join(", ")}. Merge origin/${defaultBranch} into your branch, resolve the conflicts keeping both sides' intent, run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.`,
+          "merge conflicts",
+        );
+        return { outcome: "conflicts", delivered, detail: m };
+      }
+      await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, ticketId));
+      await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
+      return { outcome: "merged", delivered: null, detail: m };
     },
 
     templates,

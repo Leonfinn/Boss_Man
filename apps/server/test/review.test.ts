@@ -22,7 +22,10 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-async function setup(opts: { online?: boolean } = {}) {
+type Answers = { verify?: unknown; merge?: unknown };
+
+async function setup(opts: { online?: boolean; answers?: Answers } = {}) {
+  const answers: Answers = { merge: { status: "merged", commit: "c".repeat(40) }, ...opts.answers };
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -39,13 +42,15 @@ async function setup(opts: { online?: boolean } = {}) {
     built.runners.connect(reg.runnerId, (c) => {
       sent.push(c);
       if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: DIFF }));
+      if (c.type === "workspace.verify") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.verify }));
+      if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
       return true;
     });
   }
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${ticket.id}` }).where(eq(tickets.id, ticket.id));
   await db.delete(wakes);
-  return { ...built, db, close, req, company, ceo, worker, project, ticket, sent };
+  return { ...built, db, close, req, company, ceo, worker, project, ticket, sent, answers };
 }
 
 describe("review (R39)", () => {
@@ -79,7 +84,7 @@ describe("review (R39)", () => {
     expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.worker.id, reason: "review", ticketId: c.ticket.id })]);
     await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
     expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).json()).toMatchObject({ verdict: "approved" });
-    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]).toMatchObject({ systemState: "done", outcome: "completed" });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]).toMatchObject({ systemState: "done", outcome: "completed", mergeCommit: "c".repeat(40) });
     expect(c.sent.at(-1)).toMatchObject({ type: "workspace.release", ticketId: c.ticket.id });
     expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(409);
   });
@@ -99,4 +104,45 @@ describe("review (R39)", () => {
     expect(commit.message).toBe(`Commit on bossman/${c.ticket.id} using Conventional Commits.`);
     expect((await c.req("GET", `/api/companies/${c.company.id}/git-templates`)).json().pr).toMatch(/^Push/);
   });
+
 });
+
+describe("landing an approved ticket (R46, R47)", () => {
+  const approve = (c: Awaited<ReturnType<typeof setup>>) => c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+  const state = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+
+  it("runs the project's check first, merges into the default branch, and the merge closes the ticket", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", defaultBranch: "develop" });
+    expect((await approve(c)).json()).toMatchObject({ verdict: "approved", outcome: "merged" });
+    const kinds = c.sent.map((x) => x.type);
+    expect(kinds.indexOf("workspace.verify")).toBeLessThan(kinds.indexOf("workspace.merge"));
+    expect(c.sent.find((x) => x.type === "workspace.verify")).toMatchObject({ command: "pnpm test" });
+    expect(c.sent.find((x) => x.type === "workspace.merge")).toMatchObject({ target: "develop", message: `Merge "Add rate limiting" (${c.ticket.id})` });
+    expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
+  });
+
+  it("sends a failed check back to the agent with its output, without merging", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: false, exitCode: 1, timedOut: false, output: "FAIL src/limit.test.ts\n  expected 1000 got 100", ms: 900 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    expect((await approve(c)).json()).toMatchObject({ outcome: "verify_failed" });
+    expect(c.sent.some((x) => x.type === "workspace.merge")).toBe(false);
+    expect(await state(c)).toMatchObject({ systemState: "in_progress", mergeCommit: null });
+    const [w] = await c.db.select().from(wakes);
+    expect(w).toMatchObject({ reason: "verify failed", agentId: c.worker.id });
+    expect(w!.note).toContain("`pnpm test` exited with code 1");
+    expect(w!.note).toContain("expected 1000 got 100");
+  });
+
+  it("asks the agent to resolve conflicts, or to commit first", async () => {
+    const c = (ctx = await setup({ answers: { merge: { status: "conflicts", files: ["src/limit.ts"] } } }));
+    expect((await approve(c)).json()).toMatchObject({ outcome: "conflicts" });
+    expect((await c.db.select().from(wakes))[0]!.note).toMatch(/conflicts with main in: src\/limit\.ts\. Merge origin\/main into your branch/);
+    await c.db.delete(wakes);
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
+    c.answers.merge = { status: "uncommitted", files: ["draft.ts"] };
+    expect((await approve(c)).json()).toMatchObject({ outcome: "uncommitted" });
+    expect((await c.db.select().from(wakes))[0]!.note).toMatch(/aren't committed: draft\.ts\. Commit your work/);
+  });
+});
+
