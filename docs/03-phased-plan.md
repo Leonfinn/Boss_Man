@@ -77,7 +77,17 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 
 Until then, development continues in Claude Code, with Paperclip still in use for existing work.
 
+## Added after the Cline kanban review (2026-10-16)
+These sit between the budget work and the self-hosting milestone:
+1. **Spike S4 (S):** does `session/load` on `claude-agent-acp` and `codex-acp` resume a session that crashed mid-tool-call? If it doesn't, restart with a summary (R42).
+2. **Steer and stop (S):** an owner and MCP path to `session/prompt` and `session/cancel`, and a visible "not delivered" state for permission verdicts (R37, R22).
+3. **Git workspaces (M):** worktrees on their own branches, from pinned bases, with patch save and restore and an allowlist for provisioning (R38).
+4. **Review (M):** a diff against the base, line comments to the agent, and commit and PR prompt templates (R39). Last-turn checkpoints follow in v1.1.
+5. **Web UI (L):** built to R43–R45 from the start, using the screens on the design canvas and the artwork in `assets/brand/`.
+
 ## v1.1
+- Plan-first tickets (R40) and last-turn diffs from checkpoints (R39).
+- An owner chat that turns plain language into tickets and links, with board tools only.
 - Roadmap view: a milestone timeline grouped by objective and company.
 - Plan view: a dependency graph with blocked chains highlighted.
 - Configurable CEO decision rules.
