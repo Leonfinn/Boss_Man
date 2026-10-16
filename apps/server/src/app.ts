@@ -3,7 +3,7 @@ import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
 import { count, eq, gt, and } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { SECRET_KINDS, usdToMicros } from "@boss-man/shared";
+import { SECRET_KINDS, SYSTEM_STATES, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -11,6 +11,7 @@ import { agents, companies, owners, sessions } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
 import { decisionsService } from "./services/decisions.js";
+import { workService, WorkError } from "./services/work.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -54,10 +55,12 @@ export async function buildApp(opts: AppOptions) {
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command));
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   await mcpRoutes(app, db, decisionsSvc);
+  const work = workService(db);
 
   app.setErrorHandler((err, _req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
     if (err instanceof SecretRejected) return reply.code(422).send({ error: "secret_rejected", problems: err.problems });
+    if (err instanceof WorkError) return reply.code(err.status).send({ error: "rejected", message: err.message });
     const code = pgCode(err);
     if (code === "23505") return reply.code(409).send({ error: "already_exists" });
     if (code === "23503") return reply.code(422).send({ error: "unknown_reference" });
@@ -294,6 +297,75 @@ export async function buildApp(opts: AppOptions) {
     });
 
     owner.get("/api/budgets", async () => funding.budgetStatuses());
+
+    // Work: projects, boards, tickets, dependencies, objectives (R16–R18, R25).
+    const State = z.enum(SYSTEM_STATES);
+    const Column = z.object({ name: z.string().trim().min(1).max(60), systemState: State, wipLimit: z.number().int().positive().nullable().optional() });
+    const DateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
+    const TicketFields = z.object({
+      title: z.string().trim().min(1).max(200),
+      body: z.string().max(20_000).nullable(),
+      columnId: Uuid,
+      state: State,
+      outcome: z.enum(["completed", "cancelled"]),
+      assigneeAgentId: Uuid.nullable(),
+      assignedToOwner: z.boolean(),
+      milestoneId: Uuid.nullable(),
+      keyResultId: Uuid.nullable(),
+      dueDate: DateStr.nullable(),
+      customFields: z.record(z.string(), z.unknown()),
+      overLimit: z.boolean(),
+    });
+
+    owner.post("/api/companies/:id/projects", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);
+      return reply.code(201).send(await work.createProject(id, body.name, body.columns));
+    });
+
+    owner.put("/api/projects/:id/columns", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return work.setColumns(id, z.array(Column).parse(req.body));
+    });
+
+    owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));
+
+    owner.post("/api/projects/:id/tickets", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = TicketFields.partial().required({ title: true }).parse(req.body);
+      return reply.code(201).send(await work.createTicket(id, body));
+    });
+
+    owner.patch("/api/tickets/:id", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return work.updateTicket(id, TicketFields.partial().parse(req.body));
+    });
+
+    owner.post("/api/tickets/:id/dependencies", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ ticketId: Uuid.optional(), engagementId: Uuid.optional() }).parse(req.body);
+      return reply.code(201).send(await work.addDependency(id, body));
+    });
+
+    owner.post("/api/companies/:id/objectives", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5).optional(), projectId: Uuid.optional() }).parse(req.body);
+      return reply.code(201).send(await work.createObjective(id, body));
+    });
+
+    owner.post("/api/objectives/:id/key-results", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ title: z.string().trim().min(1).max(200), target: z.number().optional(), current: z.number().optional(), unit: z.string().max(20).optional(), method: z.enum(["manual", "agent", "check"]).optional() }).parse(req.body);
+      return reply.code(201).send(await work.addKeyResult(id, body));
+    });
+
+    owner.post("/api/objectives/:id/milestones", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const body = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.optional() }).parse(req.body);
+      return reply.code(201).send(await work.addMilestone(id, body));
+    });
+
+    owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));
 
     // Decisions (ranking arrives in Phase 4; for now oldest first).
     owner.get("/api/decisions", async () => decisionsSvc.listOpen());
