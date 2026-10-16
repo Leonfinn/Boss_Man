@@ -33,3 +33,4 @@ This is the record of the scoping decisions, made in a grilling session on 2026-
 | Q27 | Licence | Apache-2.0. |
 | Q28 | Where the work lives | A new private repo plus a readable page. *Name: **Boss Man**, for now.* |
 | Q29 | How it is built | In phases with Claude Code, starting with the spikes. Keep Paperclip until v1 can build itself. |
+| Q30 | Ideas from cline/kanban | Adopt its git-worktree, diff-review, steering, notification and web-hardening ideas as R37–R45. Plan-first tickets and the owner chat go to v1.1. Its code is Apache-2.0, but its PTY-based design doesn't fit ACP, so we take ideas rather than code. |

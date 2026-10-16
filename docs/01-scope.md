@@ -100,7 +100,7 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
     - the due date;
     - controls to answer it in place.
 - **R21.** **Stale blockers** appear in the same queue. A stale blocker is one with no activity for longer than a threshold, which defaults to 24 hours. This includes blockers assigned to the owner. The queue offers three actions: chase it, reassign it, or drop the dependency.
-- **R22.** ACP permission requests (`session/request_permission`) go through the rules engine. They are answered automatically within policy, and otherwise become decision-queue rows.
+- **R22.** ACP permission requests (`session/request_permission`) go through the rules engine. They are answered automatically within policy, and otherwise become decision-queue rows. A verdict that can't reach the runner never fails silently: the queue row shows it wasn't delivered, and the run is flagged.
 
 ### Engagements (between companies)
 
@@ -155,6 +155,34 @@ These requirements come from failure modes the Kandev project ran into and wrote
   - The UI shows how many tokens the tool definitions cost.
   - Writes an agent seldom needs may move to a signed per-run CLI later.
   - Long-running tools never block. They re-wake the agent instead, or, if they must block, send progress at least every 20 seconds (Claude Code aborts a silent HTTP MCP call after 300 seconds, according to Kandev's notes).
+
+### Working with agents' code (added after the Cline kanban review, 2026-10-16)
+
+These come from cline/kanban (Apache-2.0) and its issue tracker; see [04-research.md](04-research.md#g-cline-kanban-review-2026-10-16).
+
+- **R37. Steer and stop a running agent.** The owner can send a message into a running agent's session (ACP `session/prompt`) or stop it (`session/cancel`), from the run view and from a stalled-run row. A CEO can do the same for its own company's runs through MCP.
+- **R38. Git workspaces.** Each ticket that touches a repo gets its own git worktree on its own branch, created from a pinned base commit.
+  - Creation is serialised per repo.
+  - A worktree is never recreated because the base moved.
+  - Before a worktree is cleaned up, its uncommitted changes (tracked and untracked) are saved as a patch and re-applied on resume.
+  - Provisioning copies an allowlist of files only. It never copies or links ignored files such as `.env`; secrets arrive only through grants.
+  - Engagement deliverables that are code are git refs from these branches.
+- **R39. Review has something to review.**
+  - The `review` state carries a diff against the ticket's base.
+  - Each agent turn records a checkpoint commit under a private ref (`refs/bossman/checkpoints/<ticket>/<turn>`), so "what changed in the last turn" is visible. The checkpoint leaves the working branch and index untouched.
+  - Line comments go back to the agent as one message, in the form `path:line`, then the code, then the comment.
+  - The CEO reviews by default; the owner reviews when the rules say so, for example for production.
+  - Commit and PR steps are prompts to the agent, using templates the owner can edit.
+- **R40. Plan-first tickets.** A ticket can start in plan mode. The agent's request to leave plan mode (an ACP permission request) becomes a decision-queue row showing the plan. Approving it moves the session to edit mode.
+- **R41. A failed run never looks done.** A run that fails leaves its ticket where it was and says so on the card. Only an explicit `set_ticket_state` or an owner action moves a ticket to done, and done always records completed or cancelled.
+- **R42. Resume after a crash.** A run interrupted mid-tool-call must resume cleanly, or restart with a summary of what it had done. A saved session can't be left with a tool call that has no result. Spike S4 checks whether the ACP adapters' `session/load` tolerates that.
+- **R43. The UI can't slow agents down.**
+  - Browser streams are separate from the runner journal, use bounded buffers, and batch their frames.
+  - Long run transcripts are virtualised.
+  - All autonomy (wake-ups, auto-advance, sweeps) runs on the server, never in the browser.
+- **R44. Owner notifications.** When something enters the decision queue, the owner gets a browser or PWA notification, unless a Boss Man tab is already visible.
+- **R45. Web hardening.** WebSocket upgrades check `Origin` and `Host`. Login has a rate limit and a lockout after repeated failures.
+
 - **R13b (later). Credential leases.** Git and deploy credentials can be handed out as short-lived, scoped leases that are revoked when the run ends, on top of grants.
 
 ## Scope by release
@@ -162,5 +190,6 @@ These requirements come from failure modes the Kandev project ran into and wrote
 | Release | Contents |
 |---|---|
 | **v1** | Launch safety (R30), the runner journal (R31), stalled-run rows (R32), provider-error holds (R33) and cost-accounting hygiene (R34). Companies, projects and tickets. The mapped kanban. Claude Code and Codex agents over ACP. CEO onboarding. The decision queue with stale blockers and the default rules. Minimal engagements. Objectives and key results. The API-credit budget. The data model for secrets and grants. Deploy targets. |
-| **v1.1** | Roadmap and plan views. Configurable CEO decision rules. The quota display, if spike S1 succeeds. The secrets management screen. |
+| **v1** (added 2026-10-16) | Steering and stopping runs (R37), git workspaces (R38), review with diffs and comments (R39), failed runs never done (R41), resume after a crash (R42), a UI that can't stall agents (R43), owner notifications (R44) and web hardening (R45). |
+| **v1.1** | Roadmap and plan views. Configurable CEO decision rules. The secrets management screen. Plan-first tickets (R40). Last-turn diffs from checkpoints (R39). An owner chat that turns plain language into tickets and links, with board tools only. |
 | **Later** | A Paperclip importer, using Paperclip's company export. More ACP agents. A review before any public release, covering Anthropic policy, Claude Code redistribution and multiple users. |
