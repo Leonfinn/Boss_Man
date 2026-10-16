@@ -51,6 +51,10 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 - **R6.** Claude runs as the **official, unmodified Claude Code** shipped in the runner image. The `claude-agent-acp` adapter drives it, pointed at that binary through `CLAUDE_CODE_EXECUTABLE`.
 - **R7.** Codex runs through `codex-acp`. Other ACP agents (Gemini CLI, OpenCode and so on) can be added through configuration.
 - **R8.** Model lists come from each agent's ACP `configOptions` (category `model`). A **free-text model override** is always available. Nothing is hard-coded.
+  - *Spike S2 found:* both adapters reject unlisted models over ACP. The override is therefore applied when the agent starts:
+    - **Claude:** `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`.
+    - **Codex:** `CODEX_CONFIG.model`.
+  - Both worked in the spike.
 - **R9.** Runner images are rebuilt on a schedule (weekly by default) and on demand, to pick up new Claude Code and Codex releases.
 - **R10.** Claude credentials, in order of preference:
   1. A `claude setup-token` one-year token. It is stored in the secrets store and injected as `CLAUDE_CODE_OAUTH_TOKEN`.
@@ -63,6 +67,7 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 ### Companies, security and secrets
 
 - **R12.** Each company has its **own runner container**, its own workspace volumes and its own secrets.
+- **R13a.** When a token is saved, Boss Man strips whitespace and checks it with a cheap test call. Spike S2's first real run failed with HTTP 401 because a pasted setup-token held a stray whitespace character.
 - **R13.** A **master secrets store** is owned by the owner. Companies receive **grants**, which are references to a secret rather than copies. Every use is logged. Rotating a secret updates every grant.
 - **R14.** **Deploy targets** are named connections: an SSH host, a Docker endpoint or a git repo. Each has granted credentials and rules. The docs recommend a Docker socket proxy, GitOps or a restricted SSH user, never the raw `docker.sock`.
 - **R15.** Any action that touches production goes through the decision tiers. Production deploys go to the owner by default.
@@ -112,7 +117,7 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 ### Cost and quota
 
 - **R27.** **Funding sources.** Agents and projects are assigned to a funding source.
-  - **API credit:** $200 a month, reset on the billing date. It is tracked through the Anthropic Admin API `cost_report`. This needs a Console organisation and an admin key.
+  - **API credit:** $200 a month, reset on the billing date. In v1 it is tracked from **Boss Man's own run records**, the per-run `cost` and `total_cost_usd` figures, which are list-price amounts and API-key usage is billed at list price. The owner's Console account is an individual account, and the Admin API (`cost_report`) is unavailable for those; spike S3 confirmed this on 2026-10-16. Optional later: set up a Console organisation and an admin key so spend made outside Boss Man is included too.
   - **Subscription quota:** the Claude 5-hour and 7-day windows, and the Codex primary and secondary windows.
   - **Pay-as-you-go API key**, optional.
 - **R28.** **Budgets.** A budget is set per company, per project or per agent, against a funding source. Its window is the billing cycle, a calendar month, a rolling period or lifetime. Thresholds can be soft or hard. A hard stop pauses the scope.

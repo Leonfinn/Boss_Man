@@ -25,7 +25,7 @@ This is the record of the scoping decisions, made in a grilling session on 2026-
 | Q19 | Server OS | TrueNAS SCALE (Debian 12, kernel 6.12.15). *The homelab team deploys Docker containers directly onto TrueNAS datasets. **The product must run on any suitable Docker setup.*** |
 | Q20 | Agent connection | ACP v1 for every agent, with model lists from `configOptions`. Permissions go through the policy engine. v2 waits until it is stable. |
 | Q21 | Quota tracking | Spike S1 first. Codex quota comes from its app-server. API credit is tracked through the Admin API. If S1 fails, quota moves to v1.1. |
-| Q22 | Admin API | The owner sets up a Console organisation and a read-only admin key. |
+| Q22 | Admin API | ~~The owner sets up a Console organisation and a read-only admin key.~~ **Revised 2026-10-16:** the owner's Console account is an individual account, and the Admin API is unavailable for those. v1 tracks API-credit spend from Boss Man's own run records. Setting up an organisation is optional later; whether that affects the Max-linked credit is unconfirmed. |
 | Q23 (revised) | Claude in the runner | *The container ships the official Claude Code, and Boss Man connects to it.* The `claude-agent-acp` adapter drives that binary through `CLAUDE_CODE_EXECUTABLE`. The default sign-in is a setup-token. Anthropic's own login inside the runner is the alternative. Boss Man never runs its own Claude login. |
 | Q24 | Separate "plain Claude Code" mode | Not needed. The revised Q23 covers it. |
 | Q25 | Secrets store | Secrets are owned by the owner and granted to companies by reference. Use is audited and rotation happens once. The data model is in v1; the management screen is in v1.1. |

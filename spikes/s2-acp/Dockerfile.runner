@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.7
+# Boss Man runner image (spike S2).
+#
+# Installs the official, unmodified Claude Code from Anthropic's npm package, which
+# "installs the same native binary as the standalone installer"
+# (https://code.claude.com/docs/en/setup#install-with-npm), plus the ACP adapters.
+# The Claude adapter is pointed at that binary via CLAUDE_CODE_EXECUTABLE (R6).
+# Updates inside the container are disabled: new versions arrive by rebuilding (R9).
+#
+# Optional build secret "extra_ca": a CA bundle for networks with a TLS-inspecting proxy.
+FROM node:22-bookworm-slim
+
+ARG CLAUDE_CODE_VERSION=latest
+# The base image's unprivileged "node" user (uid 1000) runs everything.
+USER node
+ENV HOME=/home/node \
+    NPM_CONFIG_PREFIX=/home/node/.npm-global \
+    PATH=/home/node/.npm-global/bin:$PATH
+
+RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
+    if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
+ && npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && claude --version
+ENV CLAUDE_CODE_EXECUTABLE=/home/node/.npm-global/bin/claude \
+    DISABLE_UPDATES=1 \
+    DISABLE_AUTOUPDATER=1
+
+WORKDIR /home/node/runner
+COPY --chown=node package.json package-lock.json tsconfig.json ./
+RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
+    if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
+ && npm ci --no-audit --no-fund
+COPY --chown=node src ./src
+
+ENTRYPOINT ["npx", "tsx", "src/harness.ts"]
+CMD ["--agent", "claude", "--sessions", "3"]
