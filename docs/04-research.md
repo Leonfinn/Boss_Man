@@ -116,3 +116,40 @@ Sources: [spec repo](https://github.com/agentclientprotocol/agent-client-protoco
 | OpenAI Symphony | Tied to Linear tickets, and described as a preview |
 | Forking Paperclip | Too costly to keep in sync at its pace of change, and its core rules conflict with points 1, 2 and 6 |
 | Paperclip plugins | Possible for points 4, 5, 7 and 8, but impossible for budget enforcement and for real workflows |
+
+## F. Kandev review (2026-10-16)
+
+[kdlbs/kandev](https://github.com/kdlbs/kandev) was read at commit `b0b7ece` (v0.97.0). Only files were read; nothing was run. It is licensed AGPL-3.0, so **we take ideas only and copy no code**. Its "Office" layer (budgets, inbox, roles) is feature-flagged off in production, and most of its specs are drafts.
+
+### What it confirms
+- **Agents:** it connects to the same ACP adapters (`@agentclientprotocol/claude-agent-acp`, `codex-acp`). It pins older versions than we do (0.81.2 and 1.13.1).
+- **Claude login:** on remote machines it uses a `claude setup-token` token in `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Model choice:** model lists come from the adapters. Free-text model IDs are passed through unchanged and fail if the adapter doesn't recognise them. Our approach of pinning the model at launch goes further.
+- **Ticket state:** agents must call a tool to say they've finished. Treating "the turn ended" as "done" caused false advances (ADR 0015). That supports our design for R11 and `set_ticket_state`.
+- **Unanswered questions:** they measured an agent question left unanswered for 8 days and 20 hours, which supports G4 and G5.
+
+### What we adopted (now requirements R30–R36 and R13b)
+- Launch-loop guards.
+- A runner event journal with acknowledgements and heartbeats.
+- Stalled-run notices.
+- Classifying provider errors and holding runs on quota.
+- Cost-delta handling and budget hygiene.
+- A backup before upgrades.
+- A small MCP tool set and non-blocking tools.
+- Credential leases.
+- The syscall list for the Codex user-namespace profile.
+
+### What Boss Man does that Kandev doesn't
+- A scored decision queue that requires a recommended answer.
+- A policy engine for permission requests (Kandev has one auto-approve switch).
+- Engagements between companies with accept, counter, sign-off and charge-back. Kandev's cross-workspace handoff is one-way.
+- A runner and secrets per company.
+- Objectives, key results and milestones.
+- Funding sources with billing-cycle anchors.
+- Quota read from ACP, where Kandev polls undocumented provider endpoints and rewrites the host's credential files.
+- An audit log of secret use.
+- An MCP token for each session.
+- Escalation of stale blockers assigned to the owner.
+
+### Reuse or build
+Keep building. Kandev targets one developer's coding tasks, isolated per task, and its code is AGPL. Its specs are still a useful free source of failure modes. It is moving quickly towards similar features, so Boss Man's v1 should stay tight.

@@ -1,0 +1,52 @@
+# Boss Man: server + Postgres. Runs on any Docker host.
+#
+# First run:
+#   mkdir -p secrets && openssl rand -base64 32 > secrets/master.key
+#   sudo chown 1000:1000 secrets/master.key && chmod 600 secrets/master.key   # the server runs as uid 1000
+#   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)" > .env
+#   docker compose up -d
+# Then open http://<host>:3100 and create the owner account.
+#
+# Back up secrets/master.key: without it, stored secrets cannot be decrypted.
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bossman
+      POSTGRES_USER: bossman
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bossman -d bossman"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://bossman:${POSTGRES_PASSWORD}@db:5432/bossman
+      BOSSMAN_MASTER_KEY_FILE: /run/secrets/master_key
+      # Session cookies are Secure by default and need HTTPS (e.g. Tailscale Serve or a
+      # reverse proxy). Set to 1 only for plain-HTTP access on a trusted LAN.
+      BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
+    secrets:
+      - master_key
+    ports:
+      # Bound to localhost by default; set BOSSMAN_BIND=0.0.0.0 to reach it from the LAN.
+      - "${BOSSMAN_BIND:-127.0.0.1}:3100:3100"
+
+secrets:
+  master_key:
+    file: ./secrets/master.key
+
+volumes:
+  db-data:

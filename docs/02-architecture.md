@@ -59,7 +59,12 @@ flowchart LR
   - **Installing Claude Code:** use Anthropic's npm package `@anthropic-ai/claude-code`, which installs the same native binary as the standalone installer. Set `CLAUDE_CODE_EXECUTABLE` so the adapter uses it rather than its own bundled copy. Set `DISABLE_UPDATES=1`.
   - **Codex approvals:** Codex must start in `INITIAL_AGENT_MODE=workspace-write`. Its default `agent` mode sends approvals to Codex's own AI reviewer instead of Boss Man.
   - **Codex sandbox:** Codex's bubblewrap sandbox needs user namespaces. Runner containers need a custom seccomp profile that allows them. This is verified with `seccomp=unconfined`, but a narrower profile is to be written.
-  - **Denials:** Codex ends the turn when a permission is denied, while Claude continues. The decision flow re-wakes Codex agents with the answer. Because of the Claude Code licence, the public repo **publishes the Dockerfile, not prebuilt images containing Claude Code** (see the risks in 03).
+  - **Denials:** Codex ends the turn when a permission is denied, while Claude continues. The decision flow re-wakes Codex agents with the answer.
+  - **The narrower Codex profile.** Kandev's notes give a starting point; we haven't verified it ourselves.
+    - Start from Docker's default seccomp profile and add `clone`, `clone3`, `mount`, `mount_setattr`, `move_mount`, `open_tree`, `pivot_root`, `setns`, `umount`, `umount2` and `unshare`. `pivot_root` is easy to miss.
+    - Run with no added capabilities.
+    - On hosts with Ubuntu 24.04's AppArmor user-namespace restriction, AppArmor blocks bwrap separately. TrueNAS (Debian 12) may not have that restriction.
+- **Event delivery (R31).** Each event from the runner has a sequence number. The runner keeps a journal until the server acknowledges each event, and replays from the last acknowledged one after a reconnect. Both sides send heartbeats. Because of the Claude Code licence, the public repo **publishes the Dockerfile, not prebuilt images containing Claude Code** (see the risks in 03).
 
 ### Claude credentials (R10)
 - **Default:** a `claude setup-token` one-year token, kept in the secrets store and injected as `CLAUDE_CODE_OAUTH_TOKEN`. Shared interactive logins race when they refresh (anthropics/claude-code#73576, #88583), so the setup-token is the default for any runner with agents running in parallel.
