@@ -34,3 +34,6 @@ This is the record of the scoping decisions, made in a grilling session on 2026-
 | Q28 | Where the work lives | A new private repo plus a readable page. *Name: **Boss Man**, for now.* |
 | Q29 | How it is built | In phases with Claude Code, starting with the spikes. Keep Paperclip until v1 can build itself. |
 | Q30 | Ideas from cline/kanban | Adopt its git-worktree, diff-review, steering, notification and web-hardening ideas as R37–R45. Plan-first tickets and the owner chat go to v1.1. Its code is Apache-2.0, but its PTY-based design doesn't fit ACP, so we take ideas rather than code. |
+| Q31 | Ideas from Nimbalyst | Adopt the notification ladder, "approve and make this a rule", the spawn-reservation lesson (which found and fixed a scheduler race), private ticket keys in engagements and an instance-wide cap. CEO chapters go to v1.1; packs come later, sandboxed in the runner and signed. Its licence is MIT but its stack differs, so we take ideas only. |
+| Q32 | Ideas from Aperant | Adopt a real merge step (R46), verify before done (R47), risk tiers (R48), bounded review loops (R49), circular-fix detection (R50), untrusted-content labels (R51), an image canary (R52), spend ceilings (R53) and workspace clean-up (R54). It is AGPL-3.0, so ideas only, with no code or prompt text copied. |
+
