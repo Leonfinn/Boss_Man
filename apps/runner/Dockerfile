@@ -31,7 +31,10 @@ RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
  && npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
+# Claude Code keeps its session transcripts here; it's a volume so a recovery run can reopen
+# an interrupted session after the container is recreated (R42).
 ENV CLAUDE_CODE_EXECUTABLE=/home/node/.npm-global/bin/claude \
+    CLAUDE_CONFIG_DIR=/home/node/.claude \
     DISABLE_UPDATES=1 \
     DISABLE_AUTOUPDATER=1
 
@@ -47,8 +50,8 @@ COPY --chown=node apps/runner/src apps/runner/src
 
 # Workspaces (one directory per ticket) and the event journal live on volumes, so a
 # restart replays unacknowledged events and keeps work in progress (R31).
-RUN mkdir -p /home/node/workspaces /home/node/runner-data
-VOLUME ["/home/node/workspaces", "/home/node/runner-data"]
+RUN mkdir -p /home/node/workspaces /home/node/runner-data /home/node/.claude
+VOLUME ["/home/node/workspaces", "/home/node/runner-data", "/home/node/.claude"]
 
 WORKDIR /home/node/app/apps/runner
 ARG BOSSMAN_IMAGE_VERSION=dev

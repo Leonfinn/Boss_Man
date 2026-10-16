@@ -33,7 +33,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           .onConflictDoUpdate({ target: runs.id, set: { acpSessionId: event.acpSessionId, model: event.model, lastEventAt: at } });
         return;
       case "run.ended":
-        await db.update(runs).set({ endedAt: at, outcome: event.error ? `error: ${event.error}` : event.stopReason }).where(eq(runs.id, event.runId));
+        await db
+          .update(runs)
+          .set({ endedAt: at, outcome: event.interrupted ? "interrupted" : event.error ? `error: ${event.error}` : event.stopReason })
+          .where(eq(runs.id, event.runId));
         return;
       case "run.cost": {
         if (event.costMicrosDelta === 0) return;

@@ -4,13 +4,13 @@
 // to use each tool so Claude Code's tool search finds them.
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, eq, gt, ne } from "drizzle-orm";
+import { and, eq, gt, ne, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
 import type { decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -62,7 +62,26 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs }: Services
           throw err;
         }
       }
-      const [t] = await db.insert(tickets).values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null }).returning({ id: tickets.id });
+      // Safe to repeat (R42): a resumed run that calls this again gets the same open ticket back.
+      if (scope.agentId) {
+        const [same] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(
+            and(
+              eq(tickets.projectId, p.id),
+              eq(tickets.createdByAgentId, scope.agentId),
+              sql`lower(${tickets.title}) = lower(${title})`,
+              ne(tickets.systemState, "done"),
+              gt(tickets.createdAt, new Date(Date.now() - 24 * 3_600_000)),
+            ),
+          );
+        if (same) return text(`Ticket ${same.id} already exists in ${p.name}; no new ticket was created.`);
+      }
+      const [t] = await db
+        .insert(tickets)
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId })
+        .returning({ id: tickets.id });
       return text(`Created ticket ${t!.id} in ${p.name}.`);
     },
   );
@@ -102,6 +121,14 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs }: Services
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
+      }
+      // Safe to repeat (R42): the same open question from the same agent isn't raised twice.
+      if (scope.agentId) {
+        const [same] = await db
+          .select({ id: decisionsTable.id })
+          .from(decisionsTable)
+          .where(and(eq(decisionsTable.raisedByAgentId, scope.agentId), eq(decisionsTable.status, "open"), eq(decisionsTable.question, question)));
+        if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
       const d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId });
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);

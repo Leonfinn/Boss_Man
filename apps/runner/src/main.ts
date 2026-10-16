@@ -27,6 +27,7 @@ const sessions = new SessionManager({
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return ((await res.json()) as { env: Record<string, string> }).env;
   },
+  stateFile: path.join(dataDir, "active-runs.json"),
   log,
 });
 
@@ -40,6 +41,9 @@ connection = new RunnerConnection({
   onCommand: (command) => sessions.handle(command),
 });
 
+// Runs the previous process didn't finish go into the journal as interrupted before we connect (R42).
+const interrupted = sessions.recoverInterrupted();
+if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) for recovery`);
 connection.start();
 
 // The container healthcheck reads this file: it's touched while the server connection is live.

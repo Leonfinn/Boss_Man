@@ -15,6 +15,7 @@ import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
+import { recoveryService } from "./services/recovery.js";
 import { workService, WorkError } from "./services/work.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -85,14 +86,18 @@ export async function buildApp(opts: AppOptions) {
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
   const runsSvc = runsService(db, { runners });
   runsSvc.setWakeHook((w) => scheduler.wake(w));
+  const recovery = recoveryService(db);
+  recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
   runners.onConnect((runnerId) => decisionsSvc.redeliver(runnerId));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   runners.onEvent((_runner, event) => {
     if (event.type === "run.ended") {
       // A deploy whose run ended without a report is failed, which also ends its secrets.
+      // An interrupted run gets a recovery run (R42).
       void deploysSvc
         .onRunEnded(event.runId)
+        .then(() => (event.interrupted ? recovery.onInterrupted(event.runId) : null))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err }, "run-ended handling failed"));
     }
@@ -571,5 +576,5 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery };
 }
