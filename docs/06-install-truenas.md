@@ -257,3 +257,21 @@ Then, in Boss Man, open **Notifications** and fill in **How you're told**:
 Choose **Send a test to my phone** to check it. If it fails, the message says what ntfy answered.
 
 ntfy's docs site wasn't reachable when this was written, so these links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs). Setting up ntfy itself on TrueNAS isn't covered here.
+
+## 11. Feedback portal (optional)
+
+Each company can have a public feedback portal (see `docs/07-feature-requests.md`). Turn it on under **Feedback > Feedback portal**, and tick **Show on the feedback portal** on the features people may vote on.
+
+The server also listens on port 3101, which serves only the portal. By default it's bound to the NAS itself. To let people on your LAN or tailnet reach it, add this line to `.env`:
+
+```sh
+BOSSMAN_PORTAL_BIND=<nas-ip>
+```
+
+Then restart the server:
+
+```sh
+sudo docker compose up -d server
+```
+
+The portal link is `http://<nas-ip>:3101/portal.html#` followed by the secret from the link on the Feedback page. To share it more widely, expose port 3101 only, never 3100, through a reverse proxy or Tailscale Funnel; `docs/07-feature-requests.md` explains what the portal does and doesn't let people do.

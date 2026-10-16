@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
+import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { STATUS_TONE } from "./Features";
@@ -296,11 +296,83 @@ function NotePane({ id, companyId, features, onChanged, onClose }: { id: string;
   );
 }
 
+/** The public portal: on or off, its words, and its secret link. */
+function PortalSettings({ companyId, shown }: { companyId: string; shown: number }) {
+  const s = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `portal-${companyId}`);
+  const [form, setForm] = useState<{ title: string; intro: string } | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const d = s.data;
+  useEffect(() => {
+    if (d && !form) setForm({ title: d.portalTitle ?? "", intro: d.portalIntro ?? "" });
+  }, [d, form]);
+  if (!d || !form) return null;
+  const run = (p: Promise<unknown>, ok?: string) => void p.then(() => (setNote(ok ? { ok: true, text: ok } : null), s.reload()), (err: Error) => setNote({ ok: false, text: err.message }));
+  const link = d.portalToken ? `${window.location.origin}/portal.html#${d.portalToken}` : null;
+  return (
+    <section className="card" aria-labelledby="portal-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <h2 id="portal-h" style={{ fontSize: 17, fontWeight: 600 }}>
+        Feedback portal
+      </h2>
+      <p className="muted" style={{ fontSize: 14 }}>
+        A page for people outside: they see the features you choose (tick "Show on the feedback portal" on a feature), vote on how much each matters to them, comment, and suggest ideas. What they send arrives here marked "from outside". Anyone with the link can use it, so share it only where you mean to.
+      </p>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
+        <input type="checkbox" checked={d.portalEnabled} onChange={(e) => run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { enabled: e.target.checked } }))} />
+        Portal on ({shown} feature{shown === 1 ? "" : "s"} shown)
+      </label>
+      {d.portalEnabled && link && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <input className="search mono" readOnly aria-label="Portal link" value={link} onFocus={(e) => e.currentTarget.select()} style={{ fontSize: 12 }} />
+          <button type="button" className="btn small" onClick={() => void navigator.clipboard?.writeText(link).then(() => setNote({ ok: true, text: "Link copied." }))}>
+            Copy
+          </button>
+          <a className="btn small" href={link} target="_blank" rel="noopener noreferrer">
+            Open
+          </a>
+          <button type="button" className="btn small" onClick={() => window.confirm("Make a new link? The old one stops working at once.") && run(api(`/api/companies/${companyId}/portal/rotate`, { method: "POST" }), "New link made; the old one no longer works.")}>
+            New link
+          </button>
+        </div>
+      )}
+      {d.portalEnabled && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          This link uses the address you're on now. If you serve the portal on its own port (BOSSMAN_PORTAL_PORT, see the install guide), swap in that address and keep everything after "#".
+        </p>
+      )}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { title: form.title.trim() || null, intro: form.intro.trim() || null } }), "Saved.");
+        }}
+        style={{ display: "flex", flexDirection: "column", gap: 10 }}
+      >
+        <div className="field">
+          <label htmlFor="portal-title">Heading</label>
+          <input id="portal-title" maxLength={120} placeholder="e.g. What we're building next" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="portal-intro">Introduction</label>
+          <textarea id="portal-intro" rows={2} maxLength={2000} value={form.intro} onChange={(e) => setForm({ ...form, intro: e.target.value })} />
+        </div>
+        <button className="btn" type="submit" style={{ alignSelf: "flex-start" }}>
+          Save
+        </button>
+      </form>
+      {note && (
+        <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>
+          {note.text}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export function Feedback({ companies, companyId, noteId, go }: { companies: Company[]; companyId: string | undefined; noteId: string | undefined; go: (to: string) => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const [tab, setTab] = useState<State>("unprocessed");
   const [q, setQ] = useState("");
   const [search, setSearch] = useState("");
+  const [portal, setPortal] = useState(false);
   const list = usePoll(
     (signal) => (company ? api<NoteSummary[]>(`/api/companies/${company.id}/feedback?state=${tab}${search ? `&q=${encodeURIComponent(search)}` : ""}`, { signal }) : Promise.resolve([])),
     30_000,
@@ -337,7 +409,11 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
             <AddNote companyId={company.id} onAdded={(id) => (changed(), setTab("unprocessed"), open(id))} />
             <a href={`#/features/${company.id}`}>Features and priorities</a>
+            <button type="button" className="btn small" aria-expanded={portal} onClick={() => setPortal(!portal)} style={{ marginLeft: "auto" }}>
+              Feedback portal
+            </button>
           </div>
+          {portal && <PortalSettings companyId={company.id} shown={(features.data?.features ?? []).filter((f) => f.portalVisible && f.status !== "declined").length} />}
           <div className={`inbox ${noteId ? "has-note" : ""}`}>
             <section className="inbox-list" aria-label="Feedback">
               <div className="tabs" role="tablist" aria-label="Feedback by state">

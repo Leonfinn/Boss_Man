@@ -74,11 +74,15 @@ services:
       # Session cookies are Secure by default and need HTTPS (e.g. Tailscale Serve or a
       # reverse proxy). Set to 1 only for plain-HTTP access on a trusted LAN.
       BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
+      # The feedback portal alone, on its own port: the only port that may ever face the internet.
+      BOSSMAN_PORTAL_PORT: "3101"
     secrets:
       - master_key
     ports:
       # Bound to localhost by default; set BOSSMAN_BIND=0.0.0.0 to reach it from the LAN.
       - "${BOSSMAN_BIND:-127.0.0.1}:3100:3100"
+      # The portal; bound to localhost unless BOSSMAN_PORTAL_BIND says otherwise.
+      - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:3101:3101"
 
   runner-app-co:
     <<: *runner

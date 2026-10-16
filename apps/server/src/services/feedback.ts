@@ -2,10 +2,11 @@
 // as notes; passages of a note are linked to features as insights, each with how much it
 // matters to that person. Features are scored on demand (from their insights) and on the
 // company's own criteria, then divided by effort. Tickets deliver features.
-import { and, asc, count, desc, eq, ilike, inArray, lt, or, sql } from "drizzle-orm";
+import { randomBytes } from "node:crypto";
+import { and, asc, count, desc, eq, gt, ilike, inArray, lt, or, sql } from "drizzle-orm";
 import { demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
+import { companies, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
 
 export class FeedbackError extends Error {
   constructor(
@@ -147,6 +148,25 @@ export function feedbackService(
     return again!.id;
   }
 
+  async function createNote(companyId: string, input: NoteInput) {
+    const customerId = await customerFor(companyId, input);
+    const [n] = await db
+      .insert(feedbackNotes)
+      .values({
+        companyId,
+        title: input.title ?? null,
+        text: input.text,
+        source: input.source ?? "owner",
+        customerId,
+        untrusted: input.untrusted ?? false,
+        createdByAgentId: input.createdByAgentId ?? null,
+        portalVoter: input.portalVoter ?? null,
+      })
+      .returning();
+    await deps.onNote?.(n!);
+    return n!;
+}
+
   return {
     settings,
     async setSettings(companyId: string, patch: Partial<Pick<FeedbackSettings, "demandWeight" | "ceoTriage" | "portalTitle" | "portalIntro">>) {
@@ -207,6 +227,7 @@ export function feedbackService(
           milestoneId: input.milestoneId ?? null,
           portalVisible: input.portalVisible ?? false,
           createdByAgentId: input.createdByAgentId ?? null,
+          releasedAt: input.status === "released" ? now() : null,
         })
         .returning();
       return f!;
@@ -267,24 +288,7 @@ export function feedbackService(
         .limit(50),
 
     // ---- Notes and insights ----
-    async createNote(companyId: string, input: NoteInput) {
-      const customerId = await customerFor(companyId, input);
-      const [n] = await db
-        .insert(feedbackNotes)
-        .values({
-          companyId,
-          title: input.title ?? null,
-          text: input.text,
-          source: input.source ?? "owner",
-          customerId,
-          untrusted: input.untrusted ?? false,
-          createdByAgentId: input.createdByAgentId ?? null,
-          portalVoter: input.portalVoter ?? null,
-        })
-        .returning();
-      await deps.onNote?.(n!);
-      return n!;
-    },
+    createNote,
     async notes(companyId: string, opts: { state?: "unprocessed" | "processed" | "archived"; q?: string; before?: Date; limit?: number } = {}) {
       const q = opts.q?.trim();
       const like = q ? `%${q.replace(/[%_\\]/g, "\\$&")}%` : null;
@@ -423,6 +427,117 @@ export function feedbackService(
         if (evidence.length > 10) lines.push(`- and ${evidence.length - 10} more on the feature's page.`);
       }
       return { feature: f, body: lines.join("\n").slice(0, 20_000) };
+    },
+
+    // ---- The portal: a page outsiders reach by a secret link ----
+
+    /** Turns the portal on or off and sets its words. Turning it on the first time makes its link. */
+    async setPortal(companyId: string, patch: { enabled?: boolean; title?: string | null; intro?: string | null }) {
+      const current = await settings(companyId);
+      const token = patch.enabled && !current.portalToken ? randomBytes(24).toString("base64url") : current.portalToken;
+      const set = {
+        ...(patch.enabled !== undefined ? { portalEnabled: patch.enabled } : {}),
+        ...(patch.title !== undefined ? { portalTitle: patch.title } : {}),
+        ...(patch.intro !== undefined ? { portalIntro: patch.intro } : {}),
+        portalToken: token,
+      };
+      await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...set }).onConflictDoUpdate({ target: feedbackSettings.companyId, set });
+      return settings(companyId);
+    },
+    /** A new link; the old one stops working at once. */
+    async rotatePortal(companyId: string) {
+      const portalToken = randomBytes(24).toString("base64url");
+      await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, portalToken }).onConflictDoUpdate({ target: feedbackSettings.companyId, set: { portalToken } });
+      return settings(companyId);
+    },
+    /** The company behind an enabled portal's token, or null. */
+    async portalFor(token: string) {
+      if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
+      const [row] = await db
+        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, company: companies.name })
+        .from(feedbackSettings)
+        .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
+        .where(and(eq(feedbackSettings.portalToken, token), eq(feedbackSettings.portalEnabled, true)));
+      return row ?? null;
+    },
+    /** What a visitor sees: features shown on the portal, by stage, with their own votes. */
+    async portalView(companyId: string, voter: string | null) {
+      const cutoff = new Date(now().getTime() - 180 * 86_400_000);
+      const fs = await db
+        .select({ id: features.id, title: features.title, description: features.description, status: features.status, releasedAt: features.releasedAt })
+        .from(features)
+        .where(and(eq(features.companyId, companyId), eq(features.portalVisible, true), inArray(features.status, ["idea", "considering", "planned", "in_progress", "released"])))
+        .orderBy(asc(features.title));
+      const mine = voter && fs.length
+        ? await db
+            .select({ featureId: insights.featureId, importance: insights.importance, comment: feedbackNotes.text, hasComment: sql<boolean>`${feedbackNotes.title} like 'Portal comment:%'` })
+            .from(insights)
+            .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
+            .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.portalVoter, voter), inArray(insights.featureId, fs.map((f) => f.id))))
+        : [];
+      return fs
+        .filter((f) => f.status !== "released" || (f.releasedAt && f.releasedAt > cutoff))
+        .map((f) => {
+          const v = mine.find((m) => m.featureId === f.id);
+          return {
+            id: f.id,
+            title: f.title,
+            description: f.description?.slice(0, 1000) ?? null,
+            stage: f.status === "released" ? "released" : f.status === "planned" || f.status === "in_progress" ? "planned" : "considering",
+            myVote: v ? { importance: v.importance, comment: v.hasComment ? v.comment : null } : null,
+          };
+        });
+    },
+    /** A visitor's vote: one per visitor and feature; voting again changes it. */
+    async portalVote(companyId: string, voter: string, input: { featureId: string; importance: Importance; comment?: string | null; name?: string | null; email?: string | null }) {
+      const [f] = await db.select().from(features).where(and(eq(features.id, input.featureId), eq(features.companyId, companyId), eq(features.portalVisible, true)));
+      if (!f || f.status === "declined") throw new FeedbackError(404, "No such feature.");
+      const comment = input.comment?.trim() || null;
+      const [existing] = await db
+        .select({ noteId: feedbackNotes.id })
+        .from(insights)
+        .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
+        .where(and(eq(insights.featureId, f.id), eq(feedbackNotes.portalVoter, voter), eq(feedbackNotes.companyId, companyId)));
+      const customer = input.name?.trim() ? { name: input.name.trim(), email: input.email?.trim() || null, segment: "Portal" } : null;
+      const text = comment ?? `Voted "${IMPORTANCE_LABEL[input.importance]}" for "${f.title}" on the portal.`;
+      // A vote without words needs no reading, so it arrives processed; a comment waits in the inbox.
+      const state = comment ? ("unprocessed" as const) : ("processed" as const);
+      let noteId = existing?.noteId;
+      if (noteId) {
+        const customerId = customer ? await customerFor(companyId, { text, customer }) : undefined;
+        await db
+          .update(feedbackNotes)
+          .set({ text, title: comment ? `Portal comment: ${f.title}` : `Portal vote: ${f.title}`, ...(comment ? { state, processedAt: null } : {}), ...(customerId ? { customerId } : {}) })
+          .where(eq(feedbackNotes.id, noteId));
+      } else {
+        const n = await createNote(companyId, { text, title: comment ? `Portal comment: ${f.title}` : `Portal vote: ${f.title}`, source: "portal", untrusted: true, portalVoter: voter, customer });
+        noteId = n.id;
+        if (!comment) await db.update(feedbackNotes).set({ state, processedAt: now() }).where(eq(feedbackNotes.id, noteId));
+      }
+      await db
+        .insert(insights)
+        .values({ noteId, featureId: f.id, importance: input.importance, createdBy: "portal" })
+        .onConflictDoUpdate({ target: [insights.noteId, insights.featureId], set: { importance: input.importance } });
+      return { importance: input.importance, comment };
+    },
+    async portalUnvote(companyId: string, voter: string, featureId: string) {
+      const rows = await db
+        .select({ noteId: feedbackNotes.id })
+        .from(insights)
+        .innerJoin(feedbackNotes, eq(feedbackNotes.id, insights.noteId))
+        .where(and(eq(insights.featureId, featureId), eq(feedbackNotes.portalVoter, voter), eq(feedbackNotes.companyId, companyId)));
+      if (rows.length) await db.delete(feedbackNotes).where(inArray(feedbackNotes.id, rows.map((r) => r.noteId)));
+    },
+    /** A visitor's own idea, for the owner (or CEO) to triage. */
+    async portalIdea(companyId: string, voter: string, input: { title: string; text: string; name?: string | null; email?: string | null }) {
+      // At most 10 ideas a day from one visitor.
+      const [{ n }] = (await db
+        .select({ n: count() })
+        .from(feedbackNotes)
+        .where(and(eq(feedbackNotes.companyId, companyId), eq(feedbackNotes.portalVoter, voter), sql`${feedbackNotes.title} like 'Portal idea:%'`, gt(feedbackNotes.createdAt, new Date(now().getTime() - 86_400_000))))) as [{ n: number }];
+      if (Number(n) >= 10) throw new FeedbackError(429, "That's plenty of ideas for one day. Thank you!");
+      const customer = input.name?.trim() ? { name: input.name.trim(), email: input.email?.trim() || null, segment: "Portal" } : null;
+      await createNote(companyId, { title: `Portal idea: ${input.title}`.slice(0, 200), text: input.text, source: "portal", untrusted: true, portalVoter: voter, customer });
     },
 
     /** Unprocessed notes, oldest first, for whoever triages them. */
