@@ -101,6 +101,14 @@ These sit between the budget work and the self-hosting milestone:
 4. **v1.1:** risk tiers (R48), the notification ladder (R44), CEO chapters, and graded planning.
 
 ## v1.1
+Started 16 Oct 2026, alongside the v1 install. Built in this order, each as its own PR:
+1. Owner controls: configurable decision rules (R19) and the secrets screen. **In review.**
+2. Plan-first tickets (R40) and risk tiers (R48).
+3. The notification ladder with quiet hours (R44).
+4. Roadmap and plan views.
+5. CEO continuity and graded planning, then last-turn diffs (R39) and the owner chat.
+
+The full list:
 - Plan-first tickets (R40) and last-turn diffs from checkpoints (R39).
 - An owner chat that turns plain language into tickets and links, with board tools only.
 - Roadmap view: a milestone timeline grouped by objective and company.

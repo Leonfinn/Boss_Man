@@ -32,6 +32,22 @@ export const DEFAULT_POLICY: PolicyRuleSpec[] = [
   // Anything else (delete, move, unknown tools) falls through to the owner.
 ];
 
+/** ACP tool kinds a rule can match on. */
+export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"] as const;
+
+/** What's wrong with a rule's match, if anything: it needs a condition, and its patterns must compile. */
+export function ruleProblems(match: PolicyMatch): string[] {
+  const problems: string[] = [];
+  if (!match.kinds?.length && !match.commandPattern && !match.titlePattern) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
+  for (const k of match.kinds ?? []) if (!(TOOL_KINDS as readonly string[]).includes(k)) problems.push(`"${k}" isn't a tool kind. Use: ${TOOL_KINDS.join(", ")}.`);
+  for (const [label, p] of [["command pattern", match.commandPattern], ["title pattern", match.titlePattern]] as const) {
+    if (p == null) continue;
+    if (p.length > 500) problems.push(`The ${label} is too long (500 characters at most).`);
+    else if (!safeRegex(p)) problems.push(`The ${label} isn't a valid regular expression.`);
+  }
+  return problems;
+}
+
 export function commandOf(rawInput: unknown): string | null {
   if (!rawInput || typeof rawInput !== "object") return null;
   const c = (rawInput as Record<string, unknown>)["command"] ?? (rawInput as Record<string, unknown>)["cmd"];

@@ -126,12 +126,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   async function rulesFor(companyId: string): Promise<PolicyRuleSpec[]> {
+    // Company rules before global ones, each in the owner's order (R19).
     const rows = await db
       .select()
       .from(policyRules)
       .where(and(eq(policyRules.trigger, "permission"), or(eq(policyRules.companyId, companyId), isNull(policyRules.companyId))))
-      .orderBy(asc(policyRules.position));
-    // Company rules before global ones.
+      .orderBy(asc(policyRules.position), asc(policyRules.name));
     rows.sort((a, b) => Number(b.companyId !== null) - Number(a.companyId !== null) || a.position - b.position);
     return rows.map((r) => ({ name: r.name, match: r.condition as PolicyRuleSpec["match"], outcome: r.outcome }));
   }

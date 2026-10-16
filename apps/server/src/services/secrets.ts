@@ -1,8 +1,8 @@
-import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { checkSecretFormat, normaliseSecret, secretHint, type SecretKind } from "@boss-man/shared";
 import { decryptSecret, encryptSecret, type MasterKey } from "../crypto.js";
 import type { Db } from "../db/client.js";
-import { deploys, deployTargets, secretAccessLog, secretGrants, secrets } from "../db/schema.js";
+import { companies, deploys, deployTargets, secretAccessLog, secretGrants, secrets } from "../db/schema.js";
 
 /** A live check against the provider, e.g. a cheap authenticated call. */
 export type LiveValidator = (kind: SecretKind, value: string) => Promise<{ ok: boolean; message: string } | null>;
@@ -85,6 +85,28 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
     async revoke(grantId: string) {
       const rows = await db.delete(secretGrants).where(eq(secretGrants.id, grantId)).returning({ id: secretGrants.id });
       return rows.length > 0;
+    },
+
+    /** Who a secret is granted to, for the secrets screen. */
+    async grantsForSecret(secretId: string) {
+      return db
+        .select({ id: secretGrants.id, envName: secretGrants.envName, companyId: secretGrants.companyId, company: companies.name, deployTargetId: secretGrants.deployTargetId, deployTarget: deployTargets.name })
+        .from(secretGrants)
+        .innerJoin(companies, eq(companies.id, secretGrants.companyId))
+        .leftJoin(deployTargets, eq(deployTargets.id, secretGrants.deployTargetId))
+        .where(eq(secretGrants.secretId, secretId))
+        .orderBy(companies.name, secretGrants.envName);
+    },
+
+    /** Each time a run was given the secret, newest first. */
+    async accessLog(secretId: string, limit = 100) {
+      return db
+        .select({ id: secretAccessLog.id, at: secretAccessLog.at, companyId: secretAccessLog.companyId, company: companies.name, runId: secretAccessLog.runId, purpose: secretAccessLog.purpose })
+        .from(secretAccessLog)
+        .leftJoin(companies, eq(companies.id, secretAccessLog.companyId))
+        .where(eq(secretAccessLog.secretId, secretId))
+        .orderBy(desc(secretAccessLog.at))
+        .limit(limit);
     },
 
     async grantsForCompany(companyId: string) {

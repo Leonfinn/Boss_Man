@@ -7,6 +7,8 @@ const NAV = [
   { id: "runs", label: "Runs" },
   { id: "engagements", label: "Engagements" },
   { id: "funding", label: "Funding" },
+  { id: "rules", label: "Rules" },
+  { id: "secrets", label: "Secrets" },
   { id: "settings", label: "Settings" },
 ];
 
