@@ -89,7 +89,21 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
 
   it("runs a turn end to end: permissions via the server, MCP passthrough, cost deltas", async () => {
     const h = harness(null);
+    await sessionStarted(h.events);
+    const [pgid] = h.manager.processGroups();
     await h.ended;
+    // The adapter's whole process group, Claude Code included, is gone once the run ends (S4).
+    const alive = () => {
+      try {
+        process.kill(-pgid!, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const t0 = Date.now();
+    while (alive() && Date.now() - t0 < 8000) await new Promise((r) => setTimeout(r, 100));
+    expect(alive()).toBe(false);
 
     const ended = h.events.find((e) => e.type === "run.ended");
     expect(ended).toMatchObject({ stopReason: "end_turn", error: null });

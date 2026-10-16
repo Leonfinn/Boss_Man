@@ -56,6 +56,7 @@ const beat = setInterval(() => {
 const stop = () => {
   clearInterval(beat);
   rmSync(marker, { force: true });
+  sessions.shutdown();
   connection.stop();
   process.exit(0);
 };
