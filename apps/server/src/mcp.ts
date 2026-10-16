@@ -17,6 +17,7 @@ import { EngagementError, type EngagementAction, type engagementsService } from 
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
 import { ReviewError, type reviewService } from "./services/review.js";
+import type { notificationsService } from "./services/notifications.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -32,9 +33,16 @@ const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], is
 
 export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
 
-type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService>; runs: ReturnType<typeof runsService>; review: ReturnType<typeof reviewService> };
+type Services = {
+  decisions: ReturnType<typeof decisionsService>;
+  engagements: ReturnType<typeof engagementsService>;
+  deploys: ReturnType<typeof deploysService>;
+  runs: ReturnType<typeof runsService>;
+  review: ReturnType<typeof reviewService>;
+  notes: ReturnType<typeof notificationsService>;
+};
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -309,6 +317,30 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review }: 
         if (err instanceof RunError) return fail(err.message);
         throw err;
       }
+    },
+  );
+
+  server.registerTool(
+    "notify_owner",
+    {
+      description:
+        "Tell the owner something they should know without needing to answer: note (the feed only), flag (a browser notification) or page (also their phone; for something urgent). For a question, use raise_decision instead. Pass the ticket it's about, if any; otherwise this run is the evidence. Each agent has an hourly cap, past which notifications become notes, and quiet hours lower the level.",
+      inputSchema: {
+        level: z.enum(["note", "flag", "page"]),
+        title: z.string().min(1).max(200),
+        body: z.string().max(4000).optional(),
+        ticketId: z.string().uuid().optional(),
+      },
+    },
+    async (input) => {
+      if (input.ticketId) {
+        const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
+        if (!t) return fail("No ticket with that ID in your company.");
+      }
+      const link = input.ticketId ? `#/tickets/${input.ticketId}` : `#/runs/${scope.runId}`;
+      const n = await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: input.level, title: input.title, body: input.body ?? null, link });
+      if (!n) return fail("Couldn't record that notification.");
+      return text(n.level === input.level ? `Sent as a ${n.level}.` : `Sent as a ${n.level} instead of a ${input.level} (${n.demotedBy}).`);
     },
   );
 

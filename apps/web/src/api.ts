@@ -120,3 +120,29 @@ export type EngagementView = EngagementRow & {
   delivery: { summary?: string; refs?: string[] } | null;
   thread: Array<{ from: string; fromCompanyId: string; kind: string; body: string; at: string }>;
 };
+
+export type NotifyLevel = "note" | "flag" | "page" | "ask";
+export type Notice = {
+  id: string;
+  companyId: string | null;
+  company: string | null;
+  agentId: string | null;
+  requested: NotifyLevel;
+  level: NotifyLevel;
+  demotedBy: string | null;
+  title: string;
+  body: string | null;
+  link: string;
+  pushedAt: string | null;
+  pushError: string | null;
+  readAt: string | null;
+  createdAt: string;
+};
+export type NoticeFeed = { items: Notice[]; unread: number };
+export type NotifySettings = {
+  quietHours: { start: string; end: string; timeZone: string } | null;
+  agentHourlyCap: number;
+  ntfy: { url: string; topic: string; hasToken: boolean } | null;
+  pushLevels: NotifyLevel[];
+  publicUrl: string | null;
+};

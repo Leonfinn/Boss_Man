@@ -87,6 +87,12 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       return rows.length > 0;
     },
 
+    /** A secret's value, for the server's own use (e.g. its ntfy token). Never sent to a client. */
+    async reveal(secretId: string): Promise<string | null> {
+      const [row] = await db.select().from(secrets).where(eq(secrets.id, secretId));
+      return row ? decryptSecret(master, row) : null;
+    },
+
     /** Who a secret is granted to, for the secrets screen. */
     async grantsForSecret(secretId: string) {
       return db
