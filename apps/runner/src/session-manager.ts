@@ -4,7 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -26,6 +26,8 @@ export type SessionManagerOptions = {
   permissionTimeoutMs?: number;
   /** Override adapter executables, e.g. in tests. */
   adapterBins?: Partial<Record<string, string>>;
+  /** Where active runs are recorded, so a restart can report them as interrupted (R42). */
+  stateFile?: string;
   log?: (msg: string) => void;
 };
 
@@ -46,15 +48,70 @@ type RunState = {
   sessionId: string | null;
   cancel: () => void;
   pendingPermissions: Map<string, (verdict: "allow" | "deny") => void>;
+  /** Owner or CEO messages waiting to be sent as the next prompt (R37). */
+  queued: string[];
 };
+
+/** Stops an adapter and everything it started; escalates to SIGKILL if the group lingers. */
+function killGroup(child: ChildProcess, graceMs = 5000) {
+  const pid = child.pid;
+  if (!pid) return;
+  const signal = (sig: NodeJS.Signals) => {
+    try {
+      process.kill(-pid, sig);
+      return true;
+    } catch {
+      return false; // the group is already gone
+    }
+  };
+  if (signal("SIGTERM")) setTimeout(() => signal("SIGKILL"), graceMs).unref();
+}
 
 export class SessionManager {
   private readonly runs = new Map<string, RunState>();
 
   constructor(private readonly opts: SessionManagerOptions) {}
 
+  /**
+   * After a restart: every run the last process left unfinished is reported as interrupted,
+   * so the server can start a recovery run (R42). Call once, before handling commands.
+   */
+  recoverInterrupted() {
+    const file = this.opts.stateFile;
+    if (!file || !existsSync(file)) return [];
+    let leftover: string[] = [];
+    try {
+      leftover = (JSON.parse(readFileSync(file, "utf8")) as { runs?: string[] }).runs ?? [];
+    } catch {
+      this.opts.log?.("couldn't read the active-runs file; starting clean");
+    }
+    for (const runId of leftover) {
+      this.opts.emit({ type: "run.ended", runId, stopReason: null, error: "The runner restarted while this run was going.", interrupted: true });
+    }
+    this.saveState();
+    return leftover;
+  }
+
+  private saveState() {
+    const file = this.opts.stateFile;
+    if (!file) return;
+    // Write-then-rename so a crash mid-write can't leave a torn file.
+    writeFileSync(`${file}.tmp`, JSON.stringify({ runs: [...this.runs.keys()] }));
+    renameSync(`${file}.tmp`, file);
+  }
+
   get activeRuns() {
     return this.runs.size;
+  }
+
+  /** Process group ids of active runs, one per adapter. */
+  processGroups(): number[] {
+    return [...this.runs.values()].flatMap((r) => (r.child.pid ? [r.child.pid] : []));
+  }
+
+  /** Ends every run's process group, e.g. when the runner shuts down. */
+  shutdown() {
+    for (const run of this.runs.values()) killGroup(run.child, 2000);
   }
 
   handle(command: RunnerCommand) {
@@ -62,12 +119,27 @@ export class SessionManager {
       case "run.start":
         void this.start(command);
         return;
-      case "run.cancel":
-        this.runs.get(command.runId)?.cancel();
+      case "run.cancel": {
+        const run = this.runs.get(command.runId);
+        if (!run) return;
+        // A stop means stop: queued messages don't start another turn.
+        run.queued.length = 0;
+        run.cancel();
         return;
+      }
       case "permission.decide":
         this.runs.get(command.runId)?.pendingPermissions.get(command.requestId)?.(command.verdict);
         return;
+      case "run.message": {
+        const run = this.runs.get(command.runId);
+        if (!run) {
+          this.opts.emit({ type: "runner.log", level: "warn", message: `A message for run ${command.runId} arrived after it ended.` });
+          return;
+        }
+        run.queued.push(command.text);
+        if (command.interrupt) run.cancel();
+        return;
+      }
     }
   }
 
@@ -111,14 +183,18 @@ export class SessionManager {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: String((err as Error)?.message ?? err) });
       return;
     }
-    const child = spawn(bin, [], { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
+    // Claude Code carries on headless with every permission denied (spike S4). Ending the run
+    // kills the whole group.
+    const child = spawn(bin, [], { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stderr = "";
     child.stderr?.on("data", (d) => {
       stderr = (stderr + String(d)).slice(-4000);
     });
 
-    const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map() };
+    const state: RunState = { child, sessionId: null, cancel: () => {}, pendingPermissions: new Map(), queued: [] };
     this.runs.set(cmd.runId, state);
+    this.saveState();
 
     const onPermission = (req: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
       const requestId = randomUUID();
@@ -197,11 +273,12 @@ export class SessionManager {
     const finish = (stopReason: string | null, error: string | null) => {
       if (!this.runs.has(cmd.runId)) return;
       this.runs.delete(cmd.runId);
+      this.saveState();
       for (const settle of state.pendingPermissions.values()) settle("deny");
       if (messageText) emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: messageText.slice(0, 20_000) } });
       emit({ type: "run.ended", runId: cmd.runId, stopReason, error });
       connection.close();
-      child.kill("SIGTERM");
+      killGroup(child);
     };
     child.on("exit", (code) => {
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim());
@@ -217,10 +294,24 @@ export class SessionManager {
         await agent.request(methods.agent.authenticate, { methodId: "api-key" } as never);
       }
 
-      const session = await agent.request(methods.agent.session.new, {
-        cwd: cmd.cwd,
-        mcpServers: [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }],
-      });
+      const mcpServers = [{ type: "http" as const, name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
+      // Recovery (R42): reopen the interrupted session if the agent can, else start fresh.
+      // A crash before Claude Code flushes its transcript leaves nothing to load (spike S4).
+      const openSession = async (): Promise<{ sessionId: string; configOptions?: unknown[] | null }> => {
+        if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
+          try {
+            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers });
+            emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
+            return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null };
+          } catch (err) {
+            this.opts.log?.(`couldn't reopen session ${cmd.resumeSessionId}: ${String((err as Error)?.message ?? err)}; starting fresh`);
+          }
+        }
+        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers });
+        if (cmd.resumeSessionId) emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "fresh" } });
+        return fresh as { sessionId: string; configOptions?: unknown[] | null };
+      };
+      const session = await openSession();
       state.sessionId = session.sessionId;
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
 
@@ -236,7 +327,13 @@ export class SessionManager {
       }
       emit({ type: "run.started", runId: cmd.runId, agentId: cmd.agentId, acpSessionId: session.sessionId, model });
 
-      const result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: cmd.prompt }] });
+      let result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: cmd.prompt }] });
+      // Messages that arrived during the turn continue the same session (R37).
+      while (state.queued.length && this.runs.has(cmd.runId)) {
+        const text = state.queued.splice(0).join("\n\n");
+        emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 2000) } });
+        result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] });
+      }
       finish(result.stopReason, null);
     } catch (err) {
       finish(null, String((err as Error)?.message ?? err));

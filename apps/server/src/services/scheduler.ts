@@ -36,6 +36,8 @@ export type WakeInput = {
   causedByRunId?: string | null;
   /** The wake carries out this approved deploy; its run gets the target's secrets. */
   deployId?: string | null;
+  /** Recovery (R42): the interrupted run to pick up from. */
+  resumeRunId?: string | null;
 };
 
 type Alert = (companyId: string, question: string) => Promise<unknown>;
@@ -102,6 +104,8 @@ export function schedulerService(
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, model: agent.model, startedAt: now() });
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
+    // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
+    const [previous] = w.resumeRunId && agent.agentKind === "claude" ? await db.select({ acpSessionId: runs.acpSessionId }).from(runs).where(eq(runs.id, w.resumeRunId)) : [];
     const sent = deps.runners.send(runner.id, {
       type: "run.start",
       runId,
@@ -112,6 +116,7 @@ export function schedulerService(
       cwd: path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
       prompt: await prompt(w, agent, company.name),
       mcpToken,
+      ...(previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
     });
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);
@@ -149,6 +154,7 @@ export function schedulerService(
         causedByRunId: input.causedByRunId ?? null,
         causedByAgentId,
         deployId: input.deployId ?? null,
+        resumeRunId: input.resumeRunId ?? null,
       };
 
       if (depth > limits.maxDepth) {

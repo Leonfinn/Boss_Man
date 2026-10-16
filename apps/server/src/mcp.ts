@@ -4,16 +4,17 @@
 // to use each tool so Claude Code's tool search finds them.
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, eq, gt, ne } from "drizzle-orm";
+import { and, eq, gt, ne, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { companies, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, keyResults, objectives, projects, runTokens, tickets } from "./db/schema.js";
 import type { decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
+import { RunError, type runsService } from "./services/runs.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -29,9 +30,9 @@ const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], is
 
 export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
 
-type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService> };
+type Services = { decisions: ReturnType<typeof decisionsService>; engagements: ReturnType<typeof engagementsService>; deploys: ReturnType<typeof deploysService>; runs: ReturnType<typeof runsService> };
 
-function buildServer(db: Db, { decisions, engagements, deploys }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -61,7 +62,26 @@ function buildServer(db: Db, { decisions, engagements, deploys }: Services, scop
           throw err;
         }
       }
-      const [t] = await db.insert(tickets).values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null }).returning({ id: tickets.id });
+      // Safe to repeat (R42): a resumed run that calls this again gets the same open ticket back.
+      if (scope.agentId) {
+        const [same] = await db
+          .select({ id: tickets.id })
+          .from(tickets)
+          .where(
+            and(
+              eq(tickets.projectId, p.id),
+              eq(tickets.createdByAgentId, scope.agentId),
+              sql`lower(${tickets.title}) = lower(${title})`,
+              ne(tickets.systemState, "done"),
+              gt(tickets.createdAt, new Date(Date.now() - 24 * 3_600_000)),
+            ),
+          );
+        if (same) return text(`Ticket ${same.id} already exists in ${p.name}; no new ticket was created.`);
+      }
+      const [t] = await db
+        .insert(tickets)
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId })
+        .returning({ id: tickets.id });
       return text(`Created ticket ${t!.id} in ${p.name}.`);
     },
   );
@@ -101,6 +121,14 @@ function buildServer(db: Db, { decisions, engagements, deploys }: Services, scop
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
+      }
+      // Safe to repeat (R42): the same open question from the same agent isn't raised twice.
+      if (scope.agentId) {
+        const [same] = await db
+          .select({ id: decisionsTable.id })
+          .from(decisionsTable)
+          .where(and(eq(decisionsTable.raisedByAgentId, scope.agentId), eq(decisionsTable.status, "open"), eq(decisionsTable.question, question)));
+        if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
       const d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId });
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
@@ -228,6 +256,39 @@ function buildServer(db: Db, { decisions, engagements, deploys }: Services, scop
         return text(`Deploy ${d.id} recorded as ${d.status}. The target's secrets are no longer available.`);
       } catch (err) {
         if (err instanceof DeployError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "runs",
+    {
+      description:
+        "For CEOs: see your company's running agents and steer them. action: list; message (runId, message; add interrupt to stop the current turn first; an ended run is woken again with the message); stop (runId).",
+      inputSchema: {
+        action: z.enum(["list", "message", "stop"]),
+        runId: z.string().uuid().optional(),
+        message: z.string().max(20_000).optional(),
+        interrupt: z.boolean().optional(),
+      },
+    },
+    async (input) => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO can steer runs.");
+      try {
+        if (input.action === "list") return text(JSON.stringify(await runs.active(scope.companyId)));
+        if (!input.runId) return fail("Give the runId.");
+        if (input.runId === scope.runId) return fail("That's your own run.");
+        if (input.action === "stop") {
+          await runs.cancel(input.runId, scope.companyId);
+          return text(`Stopping run ${input.runId}.`);
+        }
+        if (!input.message) return fail("Give the message.");
+        const r = await runs.message(input.runId, { text: input.message, interrupt: input.interrupt, from: `${me.name} (your CEO)`, companyId: scope.companyId, causedByRunId: scope.runId });
+        return text(r.delivered === "woken" ? "That run had ended; the agent is woken again with your message." : `Message ${r.delivered}.`);
+      } catch (err) {
+        if (err instanceof RunError) return fail(err.message);
         throw err;
       }
     },

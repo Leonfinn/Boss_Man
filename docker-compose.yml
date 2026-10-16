@@ -15,7 +15,7 @@
 #   sudo chown 1000:1000 secrets/runner-app-co.token && chmod 600 secrets/runner-app-co.token
 #   docker compose --profile runners up -d
 # For another company, copy the runner-app-co block under a new name, with its own token
-# file and volumes. A runner can also run on another machine: point BOSSMAN_URL at the
+# file and its own three volumes (workspaces, journal, Claude sessions). A runner can also run on another machine: point BOSSMAN_URL at the
 # server (wss:// behind HTTPS). Runners only dial out, so they need no published ports.
 
 x-runner: &runner
@@ -80,6 +80,7 @@ services:
     volumes:
       - app-co-workspaces:/home/node/workspaces
       - app-co-runner-data:/home/node/runner-data
+      - app-co-claude:/home/node/.claude
 
 secrets:
   master_key:
@@ -91,3 +92,4 @@ volumes:
   db-data:
   app-co-workspaces:
   app-co-runner-data:
+  app-co-claude:

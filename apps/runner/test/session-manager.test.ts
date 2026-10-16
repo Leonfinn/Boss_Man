@@ -1,6 +1,6 @@
 // Drives the real claude-agent-acp adapter (and its bundled Claude Code) against the
 // scripted stub model, so no credentials are used. Same scenario as spike S2.
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -26,9 +26,9 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null) {
+function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string } = {}) {
   const events: RunnerEvent[] = [];
-  const home = mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
+  const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
   let done!: () => void;
   const ended = new Promise<void>((r) => (done = r));
@@ -48,15 +48,73 @@ function harness(model: string | null) {
     },
   });
   const runId = randomUUID();
-  const cwd = mkdtempSync(path.join(tmpdir(), "bm-ws-"));
-  manager.handle({ type: "run.start", runId, agentId: randomUUID(), agentKind: "claude", model, fundingSourceId, cwd, prompt: "Run the spike scenario.", mcpToken: "bm_sess_test" });
-  return { events, ended, runId, cwd, manager };
+  const cwd = opts.cwd ?? mkdtempSync(path.join(tmpdir(), "bm-ws-"));
+  manager.handle({
+    type: "run.start",
+    runId,
+    agentId: randomUUID(),
+    agentKind: "claude",
+    model,
+    fundingSourceId,
+    cwd,
+    prompt: "Run the spike scenario.",
+    mcpToken: "bm_sess_test",
+    ...(opts.resumeSessionId ? { resumeSessionId: opts.resumeSessionId } : {}),
+  });
+  return { events, ended, runId, cwd, home, manager };
 }
 
+const sessionStarted = (events: RunnerEvent[]) =>
+  new Promise<void>((resolve) => {
+    const t = setInterval(() => {
+      if (events.some((e) => e.type === "run.started")) {
+        clearInterval(t);
+        resolve();
+      }
+    }, 20);
+  });
+
 describe("SessionManager with Claude Code over ACP (stub model)", () => {
+  it("delivers a steering message as a second turn in the same session (R37)", async () => {
+    const h = harness(null);
+    // Send the message as soon as the session exists; it waits for the current turn.
+    await sessionStarted(h.events);
+    h.manager.handle({ type: "run.message", runId: h.runId, text: "Message from the owner: also add a README.", interrupt: false });
+    await h.ended;
+    const delivered = h.events.find((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "message_delivered");
+    expect((delivered as { update: { text: string } }).update.text).toContain("also add a README");
+    expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "end_turn", error: null });
+    // Two turns reached the model's final step: the original and the steered one.
+    expect(stubLog.filter((l) => l.step === "final").length).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  it("a stop drops queued messages instead of starting another turn", async () => {
+    const h = harness(null);
+    await sessionStarted(h.events);
+    h.manager.handle({ type: "run.message", runId: h.runId, text: "Message from the owner: keep going", interrupt: false });
+    h.manager.handle({ type: "run.cancel", runId: h.runId });
+    await h.ended;
+    expect(h.events.some((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "message_delivered")).toBe(false);
+    expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "cancelled" });
+  }, 60_000);
+
   it("runs a turn end to end: permissions via the server, MCP passthrough, cost deltas", async () => {
     const h = harness(null);
+    await sessionStarted(h.events);
+    const [pgid] = h.manager.processGroups();
     await h.ended;
+    // The adapter's whole process group, Claude Code included, is gone once the run ends (S4).
+    const alive = () => {
+      try {
+        process.kill(-pgid!, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const t0 = Date.now();
+    while (alive() && Date.now() - t0 < 8000) await new Promise((r) => setTimeout(r, 100));
+    expect(alive()).toBe(false);
 
     const ended = h.events.find((e) => e.type === "run.ended");
     expect(ended).toMatchObject({ stopReason: "end_turn", error: null });
@@ -85,4 +143,34 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
     expect([...models]).toEqual(["claude-future-model-x"]);
     expect(h.events.find((e) => e.type === "run.started")).toMatchObject({ model: "claude-future-model-x" });
   }, 60_000);
+
+  it("a recovery run reopens the interrupted session, or starts fresh when it can't (R42)", async () => {
+    const first = harness(null);
+    await first.ended;
+    const sessionId = (first.events.find((e) => e.type === "run.started") as { acpSessionId: string }).acpSessionId;
+
+    const resumed = harness(null, { home: first.home, cwd: first.cwd, resumeSessionId: sessionId });
+    await resumed.ended;
+    expect(resumed.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "resumed", mode: "load" } }));
+    expect(resumed.events.find((e) => e.type === "run.started")).toMatchObject({ acpSessionId: sessionId });
+
+    const lost = harness(null, { home: first.home, cwd: first.cwd, resumeSessionId: "00000000-0000-4000-8000-00000000dead" });
+    await lost.ended;
+    expect(lost.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "resumed", mode: "fresh" } }));
+    expect(lost.events.find((e) => e.type === "run.ended")).toMatchObject({ error: null });
+  }, 120_000);
+});
+
+describe("interrupted runs (R42)", () => {
+  it("reports runs the previous process left unfinished, once", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "bm-state-"));
+    const stateFile = path.join(dir, "active-runs.json");
+    writeFileSync(stateFile, JSON.stringify({ runs: ["11111111-1111-4111-8111-111111111111"] }));
+    const events: RunnerEvent[] = [];
+    const m = new SessionManager({ mcpUrl: "http://127.0.0.1:1/mcp", emit: (e) => events.push(e), resolveEnv: async () => ({}), stateFile });
+    expect(m.recoverInterrupted()).toEqual(["11111111-1111-4111-8111-111111111111"]);
+    expect(events).toEqual([{ type: "run.ended", runId: "11111111-1111-4111-8111-111111111111", stopReason: null, error: "The runner restarted while this run was going.", interrupted: true }]);
+    expect(JSON.parse(readFileSync(stateFile, "utf8"))).toEqual({ runs: [] });
+    expect(new SessionManager({ mcpUrl: "x", emit: (e) => events.push(e), resolveEnv: async () => ({}), stateFile }).recoverInterrupted()).toEqual([]);
+  });
 });
