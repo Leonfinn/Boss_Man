@@ -123,10 +123,44 @@ Sending these as pull requests upstream is impractical. Paperclip's CONTRIBUTING
 - **R28.** **Budgets.** A budget is set per company, per project or per agent, against a funding source. Its window is the billing cycle, a calendar month, a rolling period or lifetime. Thresholds can be soft or hard. A hard stop pauses the scope.
 - **R29.** **Estimated costs.** Each run records an API-equivalent cost estimate (from `total_cost_usd` and token usage), which lets projects be compared even on subscription usage.
 
+### Operational safety (added after the Kandev review, 2026-10-16)
+
+These requirements come from failure modes the Kandev project ran into and wrote down (see [04-research.md](04-research.md#f-kandev-review-2026-10-16)). Our plan had none of them.
+
+- **R30. Launch safety.**
+  - Concurrency ceilings per instance, per company and per agent.
+  - A limit on how deep a chain of wake-ups can go, so one agent waking another can't loop for ever.
+  - A rate limit on an agent waking itself.
+  - A kill switch for each company and one for everything.
+  - Launches start in priority order.
+  - All of this must ship **before** event-driven wake-ups (Phases 3–4).
+- **R31. Runner event delivery.**
+  - Runner events carry sequence numbers.
+  - The runner keeps a journal and replays any events the server hasn't acknowledged after a reconnect.
+  - A liveness heartbeat detects a connection that has died silently.
+- **R32. Stalled runs.** A running agent that sends no events for a set time (5 minutes by default) creates a decision-queue row. It only advises: it never cancels the run on its own.
+- **R33. Provider errors.**
+  - Errors are classified as transient or hard.
+  - A quota or account block holds the run until the window resets, rather than failing it.
+  - Transient errors are retried with backoff.
+- **R34. Cost accounting.**
+  - `usage_update.cost` may be cumulative for each session. Kandev reports this; we haven't confirmed it yet. Boss Man records the change between updates and copes with a counter that resets.
+  - Events with no price are flagged as unpriced, never treated as $0.
+  - Budget alerts fire once for each policy, period and level.
+  - Unattended runs get a default spending ceiling.
+  - Before a run launches, a budget check that can't complete blocks the run.
+- **R35. Upgrades.** Boss Man takes a database backup (`pg_dump`) before applying migrations, and records the schema version.
+- **R36. A small MCP surface.**
+  - Each session gets a small, always-available set of tools.
+  - The UI shows how many tokens the tool definitions cost.
+  - Writes an agent seldom needs may move to a signed per-run CLI later.
+  - Long-running tools never block. They re-wake the agent instead, or, if they must block, send progress at least every 20 seconds (Claude Code aborts a silent HTTP MCP call after 300 seconds, according to Kandev's notes).
+- **R13b (later). Credential leases.** Git and deploy credentials can be handed out as short-lived, scoped leases that are revoked when the run ends, on top of grants.
+
 ## Scope by release
 
 | Release | Contents |
 |---|---|
-| **v1** | Companies, projects and tickets. The mapped kanban. Claude Code and Codex agents over ACP. CEO onboarding. The decision queue with stale blockers and the default rules. Minimal engagements. Objectives and key results. The API-credit budget. The data model for secrets and grants. Deploy targets. |
+| **v1** | Launch safety (R30), the runner journal (R31), stalled-run rows (R32), provider-error holds (R33) and cost-accounting hygiene (R34). Companies, projects and tickets. The mapped kanban. Claude Code and Codex agents over ACP. CEO onboarding. The decision queue with stale blockers and the default rules. Minimal engagements. Objectives and key results. The API-credit budget. The data model for secrets and grants. Deploy targets. |
 | **v1.1** | Roadmap and plan views. Configurable CEO decision rules. The quota display, if spike S1 succeeds. The secrets management screen. |
 | **Later** | A Paperclip importer, using Paperclip's company export. More ACP agents. A review before any public release, covering Anthropic policy, Claude Code redistribution and multiple users. |

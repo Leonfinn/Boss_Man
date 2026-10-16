@@ -11,7 +11,10 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 | **S3** Credit tracking (S). **Answered 2026-10-16: not available on an individual account.** A workspace API key gets `authentication_error: The Admin API requires an Admin API key or an organization-scoped API key`, and the Admin keys page returns 404. v1 uses the fallback | With a Console organisation and admin key, does `cost_report` show the spend made with the API key, and how quickly? | Spend appears within a few minutes, matching runs | Estimate from run `total_cost_usd` and label it as an estimate |
 
 ### Follow-ups from S2
-- Write a minimal seccomp profile that allows user namespaces, for Codex's sandbox in runner containers.
+- Write a minimal seccomp profile that allows user namespaces, for Codex's sandbox in runner containers. Kandev's syscall list is the starting point (see 02-architecture). Verify it with our own probe.
+- Check whether codex-acp 2.2.2's `agent-full-access` mode still sends approvals to the client. If it does, the container could act as the sandbox.
+- Confirm whether `usage_update.cost` is cumulative across a session's turns. Spike S2 ran only one turn per session.
+- Measure how long Boss Man's HTTP MCP server takes to start on the first turn under Claude Code.
 - Propose a `codex-acp` mode upstream with full access but approvals routed to the user. With it, the container could be the sandbox.
 - Run S2 for Codex against the real model.
 - Confirm how the `_claude/rateLimit` utilisation is scaled (0–1 or %) across a few readings below 100%.
@@ -36,10 +39,11 @@ Each phase ends with a working build that has tests. The phases deal with the ri
    - Projects and tickets, with system states and mapped columns: the kanban with custom fields and swimlanes.
    - Objectives, key results and milestones.
    - Ticket dependencies.
-   - Scheduled and event-driven agent wake-ups.
+   - Scheduled and event-driven agent wake-ups, **with the launch safety in R30 in place before the first event-driven wake-up**.
 4. **Decision queue (M)**
    - `raise_decision` with a required recommended answer, and the ranking score.
    - The queue UI with answering in place.
+   - Rows for stalled runs (R32).
    - The stale-blocker sweep.
    - Default rules for the decision tiers, including production deploys going to the owner.
 5. **Engagements and deploy targets (M)**

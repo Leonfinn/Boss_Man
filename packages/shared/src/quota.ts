@@ -92,7 +92,11 @@ export function parseCodexRateLimits(resp: unknown): QuotaSample[] {
 
 export type UsageCost = { costMicros: number; currency: string; model: string | null; contextUsed: number | null };
 
-/** Cost from an ACP `usage_update` (claude-agent-acp attaches `cost` on the final update of a turn). */
+/**
+ * Cost from an ACP `usage_update` (claude-agent-acp attaches `cost` on the final update of a turn).
+ * Kandev reports this figure is cumulative per session; until confirmed, callers record the
+ * delta from the previous value for the same session (R34).
+ */
 export function parseAcpUsageCost(update: unknown): UsageCost | null {
   if (!isRecord(update)) return null;
   const cost = update["cost"];
