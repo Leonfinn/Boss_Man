@@ -27,6 +27,7 @@ import { SecretRejected, secretsService, type LiveValidator } from "./services/s
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
+import { policyRulesService, RuleError } from "./services/policy-rules.js";
 
 export type AppOptions = {
   db: Db;
@@ -108,6 +109,7 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
+  const rules = policyRulesService(db);
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now);
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
@@ -354,6 +356,44 @@ export async function buildApp(opts: AppOptions) {
         if ((err as Error).message.startsWith("That deploy target")) return reply.code(422).send({ error: "invalid_target", message: (err as Error).message });
         throw err;
       }
+    });
+
+    owner.get("/api/secrets/:id/grants", async (req) => secretsSvc.grantsForSecret(IdParam.parse(req.params).id));
+    owner.get("/api/secrets/:id/access-log", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
+      return secretsSvc.accessLog(id, limit);
+    });
+
+    // Decision rules (R19): what happens when an agent asks to use a tool.
+    const Match = z.object({
+      kinds: z.array(z.string()).max(10).optional(),
+      commandPattern: z.string().min(1).max(500).optional(),
+      titlePattern: z.string().min(1).max(500).optional(),
+    });
+    const Outcome = z.enum(["allow", "ceo", "owner", "deny"]);
+    const ruleErrors = (reply: FastifyReply) => (err: unknown) => {
+      if (err instanceof RuleError) return reply.code(err.status).send({ error: "rejected", message: err.message });
+      throw err;
+    };
+    owner.get("/api/policy-rules", async (req) => rules.list(z.object({ companyId: Uuid.optional() }).parse(req.query).companyId ?? null));
+    owner.post("/api/policy-rules", async (req, reply) => {
+      const b = z.object({ companyId: Uuid.nullable(), name: z.string().trim().min(1).max(120), match: Match, outcome: Outcome }).parse(req.body);
+      return rules.create(b).then((r) => reply.code(201).send(r), ruleErrors(reply));
+    });
+    owner.patch("/api/policy-rules/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ name: z.string().trim().min(1).max(120), match: Match, outcome: Outcome }).partial().parse(req.body);
+      return rules.update(id, b).catch(ruleErrors(reply));
+    });
+    owner.delete("/api/policy-rules/:id", async (req, reply) => rules.remove(IdParam.parse(req.params).id).then(() => reply.code(204).send(), ruleErrors(reply)));
+    owner.post("/api/policy-rules/order", async (req, reply) => {
+      const b = z.object({ companyId: Uuid.nullable(), ids: z.array(Uuid).max(500) }).parse(req.body);
+      return rules.reorder(b.companyId, b.ids).catch(ruleErrors(reply));
+    });
+    owner.post("/api/policy-rules/test", async (req) => {
+      const b = z.object({ companyId: Uuid, command: z.string().max(5000).optional(), title: z.string().max(500).optional(), kind: z.string().max(40).optional() }).parse(req.body);
+      return rules.test(b.companyId, { title: b.title ?? b.command ?? null, kind: b.kind ?? (b.command ? "execute" : null), rawInput: b.command ? { command: b.command } : null });
     });
 
     owner.delete("/api/grants/:id", async (req, reply) => {
@@ -741,5 +781,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules };
 }
