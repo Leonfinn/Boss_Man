@@ -104,21 +104,31 @@ describe("permission requests through the policy engine", () => {
     await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "Homelab may restart containers", trigger: "permission", condition: { commandPattern: "^docker\\s+restart\\b" }, outcome: "allow" });
 
     const commands: RunnerCommand[] = [];
+    const runId = randomUUID();
+    // Like a real runner, it says which requests it is still waiting on when it reconnects.
+    const waiting = new Set<string>();
     const conn = new RunnerConnection({
       url: `ws://${ctx.base}/api/runner/connect`,
       token: reg.token,
       journal: new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-")), "j.jsonl")),
       runnerVersion: "test",
       heartbeatMs: 200,
-      onCommand: (c) => commands.push(c),
+      onCommand: (c) => {
+        if (c.type === "permission.decide") {
+          if (!waiting.delete(c.requestId)) return;
+        }
+        commands.push(c);
+      },
+      pendingPermissions: () => [...waiting].map((requestId) => ({ runId, requestId })),
     });
     conn.start();
     await waitFor(() => conn.isLive, Boolean);
 
-    const runId = randomUUID();
     conn.emit({ type: "run.started", runId, agentId: ctx.homelab.ceo.id, acpSessionId: "s", model: null });
-    const ask = (requestId: string, command: string) =>
+    const ask = (requestId: string, command: string) => {
+      waiting.add(requestId);
       conn.emit({ type: "run.permission_request", runId, requestId, title: command, kind: "execute", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] });
+    };
 
     ask("r1", "echo hello");
     ask("r2", "docker restart web");
