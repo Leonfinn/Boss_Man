@@ -25,7 +25,9 @@ export type DecisionContext =
   | { type: "question" }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
-  | { type: "deploy"; deployId: string };
+  | { type: "deploy"; deployId: string }
+  | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
+  | { type: "ticket_cap"; ticketId: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -44,11 +46,17 @@ type WakeHook = (input: { agentId: string; reason: string; ticketId?: string | n
 
 type EngagementHook = (engagementId: string, approved: boolean) => Promise<unknown>;
 type DeployHook = (deployId: string, approved: boolean) => Promise<unknown>;
+export type LoopHooks = {
+  sendBack(ticketId: string, text: string, reviewer: string): Promise<unknown>;
+  stopTicket(ticketId: string): Promise<unknown>;
+  raiseCap(ticketId: string): Promise<unknown>;
+};
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date()) {
   let wake: WakeHook | null = null;
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
+  let loopHooks: LoopHooks | null = null;
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true) {
@@ -206,6 +214,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onDeploy = hook;
     },
 
+    setLoopHooks(hooks: LoopHooks) {
+      loopHooks = hooks;
+    },
+
     setWakeHook(hook: WakeHook) {
       wake = hook;
     },
@@ -353,6 +365,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await onEngagement?.(ctx.engagementId, answer === "Approve");
       } else if (ctx.type === "deploy") {
         await onDeploy?.(ctx.deployId, answer === "Approve");
+      } else if (ctx.type === "review_loop" || ctx.type === "ticket_cap") {
+        // Free the ticket from this decision first, so the action below sets its final state.
+        await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+        if (answer === "Stop work on it") await loopHooks?.stopTicket(ctx.ticketId);
+        else if (ctx.type === "review_loop") await loopHooks?.sendBack(ctx.ticketId, ctx.message, ctx.reviewer);
+        else await loopHooks?.raiseCap(ctx.ticketId);
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {

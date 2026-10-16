@@ -71,6 +71,13 @@
       "when": 1792172296324,
       "tag": "0009_merge",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1792172574164,
+      "tag": "0010_loop_guards",
+      "breakpoints": true
     }
   ]
 }

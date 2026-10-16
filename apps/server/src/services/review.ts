@@ -8,6 +8,7 @@ import { projects, runners, runs, settings, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 import type { runsService } from "./runs.js";
 import type { workService } from "./work.js";
+import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 
 export class ReviewError extends Error {
   constructor(
@@ -23,7 +24,7 @@ type WakeHook = (input: { agentId: string; reason: string; note: string; ticketI
 
 export function reviewService(
   db: Db,
-  deps: { runners: ReturnType<typeof runnersService>; runs: ReturnType<typeof runsService>; work: ReturnType<typeof workService> },
+  deps: { runners: ReturnType<typeof runnersService>; runs: ReturnType<typeof runsService>; work: ReturnType<typeof workService>; loops: ReturnType<typeof loopGuards> },
 ) {
   let wake: WakeHook | null = null;
 
@@ -88,14 +89,26 @@ export function reviewService(
       // The coder doesn't review its own work (R49).
       if (input.reviewerAgentId && t.assigneeAgentId === input.reviewerAgentId) throw new ReviewError(403, "You can't review a ticket assigned to you.");
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
-      if (input.verdict === "approved") return { verdict: "approved" as const, ...(await this.land(ticketId, input.reviewer, input.causedByRunId)) };
+      if (input.verdict === "approved") {
+        await deps.loops.approved(ticketId, input.reviewer);
+        return { verdict: "approved" as const, ...(await this.land(ticketId, input.reviewer, input.causedByRunId)) };
+      }
       if (!input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
       let diffText = "";
       if (input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
       const text = formatReviewComments(input.reviewer, input.comments ?? [], diffText, input.summary);
+      // A review that keeps coming back goes to the owner instead of another round (R49).
+      const round = await deps.loops.reviewRound({ ticketId, reviewer: input.reviewer, comments: input.comments ?? [], message: text });
+      if (round.escalated) return { verdict: "changes_requested" as const, delivered: `held for the owner (decision ${round.escalated})`, message: text, round: round.round };
+      const delivered = await this.sendBack(ticketId, text, input.reviewer, input.causedByRunId);
+      return { verdict: "changes_requested" as const, delivered, message: text, round: round.round };
+    },
+
+    /** Moves the ticket back to in progress and gives the agent the review. */
+    async sendBack(ticketId: string, text: string, reviewer: string, causedByRunId?: string | null) {
+      const { t } = await ticketWithRepo(ticketId);
       await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
-      const delivered = await tellAgent({ ...t, systemState: "in_progress" }, text, "review", input.reviewer, input.causedByRunId);
-      return { verdict: "changes_requested" as const, delivered, message: text };
+      return tellAgent({ ...t, systemState: "in_progress" }, text, "review", reviewer, causedByRunId);
     },
 
     /**
@@ -128,7 +141,9 @@ export function reviewService(
         const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command: verifyCommand }), 11 * 60_000);
         if (!v.ok) {
           const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
-          const delivered = await sendBack(`The review was approved, but the check \`${verifyCommand}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}`, "verify failed");
+          // The same failing check again and again means the agent is going round in circles (R50).
+          const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${verifyCommand}` : v.output, what: "The check" });
+          const delivered = await sendBack(`The review was approved, but the check \`${verifyCommand}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
           return { outcome: "verify_failed", delivered, detail: v };
         }
       }

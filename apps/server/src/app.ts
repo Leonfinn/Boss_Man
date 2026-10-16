@@ -1,13 +1,13 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import websocket from "@fastify/websocket";
-import { count, eq, gt, and } from "drizzle-orm";
+import { and, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
 import { SECRET_KINDS, SYSTEM_STATES, findCredential, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, engagements, owners, projects, sessions } from "./db/schema.js";
+import { agents, companies, engagements, owners, projects, runs as runsTable, sessions, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -17,6 +17,7 @@ import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { ReviewError, reviewService } from "./services/review.js";
+import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -38,6 +39,8 @@ export type AppOptions = {
   workspaceRoot?: string;
   /** Stale-blocker and stalled-run thresholds (R21, R32). */
   sweepLimits?: Partial<SweepLimits>;
+  /** Review-loop and circular-failure limits (R49, R50). */
+  loopLimits?: Partial<LoopLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
   now?: () => Date;
 };
@@ -56,6 +59,8 @@ function pgCode(err: unknown): string | undefined {
   }
   return undefined;
 }
+
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
@@ -99,6 +104,12 @@ export async function buildApp(opts: AppOptions) {
       void deploysSvc
         .onRunEnded(event.runId)
         .then(() => (event.interrupted ? recovery.onInterrupted(event.runId) : null))
+        .then(async () => {
+          // The same run error again and again means the agent is going round in circles (R50).
+          if (!event.error || event.interrupted) return;
+          const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
+          if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
+        })
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err }, "run-ended handling failed"));
     }
@@ -108,8 +119,23 @@ export async function buildApp(opts: AppOptions) {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
   });
-  const review = reviewService(db, { runners, runs: runsSvc, work });
+  const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now });
+  const review = reviewService(db, { runners, runs: runsSvc, work, loops });
   review.setWakeHook((w) => scheduler.wake(w));
+  decisionsSvc.setLoopHooks({
+    sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
+    stopTicket: async (ticketId) => {
+      await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
+      await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
+    },
+    raiseCap: async (ticketId) => {
+      const [t] = await db.select({ cap: tickets.costCapMicros, projectCap: projects.ticketCostCapMicros }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, ticketId));
+      const cap = t?.cap ?? t?.projectCap;
+      if (cap) await db.update(tickets).set({ costCapMicros: Math.ceil(cap * 1.5) }).where(eq(tickets.id, ticketId));
+      // Waiting work for the ticket can go again.
+      await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
+    },
+  });
   await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
 
   app.setErrorHandler((err, _req, reply) => {
@@ -353,8 +379,9 @@ export async function buildApp(opts: AppOptions) {
     });
 
     const PolicyInput = z.object({
-      scopeKind: z.enum(["company", "project", "agent"]),
-      scopeId: Uuid,
+      scopeKind: z.enum(["company", "project", "agent", "instance"]),
+      /** Not needed for an instance-wide cap (R53). */
+      scopeId: Uuid.optional(),
       fundingSourceId: Uuid.optional(),
       windowKind: z.enum(["lifetime", "calendar_month", "billing_cycle", "rolling_days"]),
       rollingDays: z.number().int().positive().optional(),
@@ -364,8 +391,9 @@ export async function buildApp(opts: AppOptions) {
     });
 
     owner.post("/api/budget-policies", async (req, reply) => {
-      const { limitUsd, ...rest } = PolicyInput.parse(req.body);
-      return reply.code(201).send(await funding.createPolicy({ ...rest, limitMicros: usdToMicros(limitUsd) }));
+      const { limitUsd, scopeId, ...rest } = PolicyInput.parse(req.body);
+      if (rest.scopeKind !== "instance" && !scopeId) return reply.code(400).send({ error: "scope_id_required" });
+      return reply.code(201).send(await funding.createPolicy({ ...rest, scopeId: rest.scopeKind === "instance" ? NIL_UUID : scopeId!, limitMicros: usdToMicros(limitUsd) }));
     });
 
     owner.get("/api/budgets", async () => funding.budgetStatuses());
@@ -409,10 +437,16 @@ export async function buildApp(opts: AppOptions) {
             .nullable(),
           defaultBranch: z.string().trim().min(1).max(200),
           verifyCommand: z.string().trim().min(1).max(1000).nullable(),
+          ticketCostCapUsd: z.number().positive().nullable(),
         })
         .partial()
         .parse(req.body);
-      const [p] = await db.update(projects).set(b).where(eq(projects.id, id)).returning();
+      const { ticketCostCapUsd, ...fields } = b;
+      const [p] = await db
+        .update(projects)
+        .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}) })
+        .where(eq(projects.id, id))
+        .returning();
       return p ?? reply.code(404).send({ error: "not_found" });
     });
 
@@ -431,7 +465,10 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/tickets/:id", async (req) => {
       const { id } = IdParam.parse(req.params);
-      return work.updateTicket(id, TicketFields.partial().parse(req.body));
+      const { costCapUsd, ...fields } = TicketFields.extend({ costCapUsd: z.number().positive().nullable() }).partial().parse(req.body);
+      // A per-ticket spend ceiling across all its runs (R53); null falls back to the project's default.
+      if (costCapUsd !== undefined) await db.update(tickets).set({ costCapMicros: costCapUsd === null ? null : usdToMicros(costCapUsd) }).where(eq(tickets.id, id));
+      return work.updateTicket(id, fields);
     });
 
     owner.post("/api/tickets/:id/dependencies", async (req, reply) => {
@@ -625,5 +662,5 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/sweep", async () => sweeps.run());
   });
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops };
 }

@@ -112,7 +112,9 @@ export function fundingService(db: Db) {
       for (const p of policies) {
         // Engagement charge-back (R26): spend counts against the company and project it was charged to.
         const scope =
-          p.scopeKind === "company"
+          p.scopeKind === "instance"
+            ? sql`true`
+            : p.scopeKind === "company"
             ? sql`coalesce(${costEvents.chargedCompanyId}, ${costEvents.companyId}) = ${p.scopeId}`
             : p.scopeKind === "project"
               ? sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}) = ${p.scopeId}`
