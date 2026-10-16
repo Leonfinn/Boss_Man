@@ -41,6 +41,12 @@ export type SessionManagerOptions = {
 type ToolCallContent = { type: string; content?: { type: string; text?: string } };
 const isEmpty = (v: unknown) => v == null || (typeof v === "object" && Object.keys(v as object).length === 0);
 /** The text parts of a tool call's content. */
+/** ExitPlanMode's input carries the plan as `plan` once the CLI has filled it in. */
+function planOf(rawInput: unknown): string {
+  const plan = rawInput && typeof rawInput === "object" ? (rawInput as { plan?: unknown }).plan : undefined;
+  return typeof plan === "string" ? plan : "";
+}
+
 const textOf = (content: ToolCallContent[] | null | undefined) =>
   (content ?? [])
     .flatMap((c) => (c.type === "content" && c.content?.type === "text" && c.content.text ? [c.content.text] : []))
@@ -270,14 +276,20 @@ export class SessionManager {
     this.runs.set(cmd.runId, state);
     this.saveState();
 
-    const onPermission = (req: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
+    const onPermission = async (req: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
       const requestId = randomUUID();
       const pick = (kind: string) => req.options.find((o) => o.kind === kind);
+      const id = req.toolCall.toolCallId;
+      // A plan approval needs the plan. The adapter can send the request before the tool call
+      // update that carries the plan text has been handled here, so wait briefly for it.
+      if (req.toolCall.kind === "switch_mode" && !textOf(req.toolCall.content) && !planOf(req.toolCall.rawInput)) {
+        for (let i = 0; i < 100 && !toolCalls.get(id)?.text && this.runs.has(cmd.runId); i++) await new Promise((r) => setTimeout(r, 20));
+      }
       // The request only adds what's new since the tool call was announced, so fill in its input
       // and text (e.g. the plan when the agent asks to leave plan mode) from what was seen then.
-      const seen = toolCalls.get(req.toolCall.toolCallId);
+      const seen = toolCalls.get(id);
       const rawInput = isEmpty(req.toolCall.rawInput) ? (seen?.rawInput ?? req.toolCall.rawInput ?? null) : req.toolCall.rawInput;
-      const detail = (textOf(req.toolCall.content) || seen?.text || "").slice(0, 20_000);
+      const detail = (textOf(req.toolCall.content) || seen?.text || planOf(rawInput) || "").slice(0, 20_000);
       // Register for the verdict before announcing the request, so a fast verdict can't be lost.
       const verdict = new Promise<RequestPermissionResponse>((resolve) => {
         const settle = (v: "allow" | "deny") => {

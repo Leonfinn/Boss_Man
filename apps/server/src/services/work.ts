@@ -238,8 +238,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return k!;
     },
 
-    async addMilestone(objectiveId: string, input: { title: string; targetDate?: string }) {
-      const [m] = await db.insert(milestones).values({ objectiveId, title: input.title, targetDate: input.targetDate ?? null }).returning();
+    async addMilestone(objectiveId: string, input: { title: string; targetDate?: string; horizon?: "now" | "next" | "later" }) {
+      const [m] = await db.insert(milestones).values({ objectiveId, title: input.title, targetDate: input.targetDate ?? null, horizon: input.horizon ?? null }).returning();
       return m!;
     },
 

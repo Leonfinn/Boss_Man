@@ -2,6 +2,13 @@
 // their tickets and target date.
 
 export type MilestoneCounts = { total: number; done: number; blocked: number };
+
+export const HORIZONS = ["now", "next", "later"] as const;
+export type Horizon = (typeof HORIZONS)[number];
+
+/** Days ahead that a target date puts a milestone in Now, and in Next. */
+export const NOW_DAYS = 30;
+export const NEXT_DAYS = 90;
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
 
 /** Days before its target date that a milestone can be flagged as at risk. */
@@ -25,4 +32,18 @@ export function milestoneStatus(counts: MilestoneCounts, targetDate: string | nu
 /** Today's date, YYYY-MM-DD, in the given time zone. */
 export function dateIn(now: Date, timeZone: string): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+}
+
+/**
+ * Where a milestone sits on the Now / Next / Later roadmap. The owner can pin it; otherwise
+ * it's Now while its tickets are being worked on, it's late or it's due within 30 days; Next
+ * when it's due within 90 days; and Later otherwise, including when it has no date.
+ */
+export function milestoneHorizon(m: MilestoneCounts & { active: number; targetDate: string | null; horizon: Horizon | null }, today: string): Horizon {
+  if (m.horizon) return m.horizon;
+  if (m.active > 0 || m.blocked > 0) return "now";
+  if (!m.targetDate) return "later";
+  const days = (Date.parse(`${m.targetDate}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000;
+  if (days <= NOW_DAYS) return "now";
+  return days <= NEXT_DAYS ? "next" : "later";
 }

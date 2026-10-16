@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateIn, layoutPlan, milestoneStatus } from "../src/index.js";
+import { dateIn, layoutPlan, milestoneHorizon, milestoneStatus } from "../src/index.js";
 
 describe("layoutPlan", () => {
   // design -> api -> ui, api -> docs; vendor (engagement) -> api; done "spec" -> design.
@@ -56,5 +56,24 @@ describe("milestoneStatus", () => {
   it("reads today in the owner's time zone", () => {
     expect(dateIn(new Date("2026-10-16T23:30:00Z"), "Europe/London")).toBe("2026-10-17");
     expect(dateIn(new Date("2026-10-16T23:30:00Z"), "America/New_York")).toBe("2026-10-16");
+  });
+});
+
+describe("milestoneHorizon", () => {
+  const today = "2026-10-16";
+  const m = (o: Partial<Parameters<typeof milestoneHorizon>[0]>) => milestoneHorizon({ total: 2, done: 0, blocked: 0, active: 0, targetDate: null, horizon: null, ...o }, today);
+  it("puts work in progress, late and soon-due milestones in Now, the next 90 days in Next, the rest in Later", () => {
+    expect(m({ active: 1, targetDate: "2027-06-01" })).toBe("now");
+    expect(m({ blocked: 1 })).toBe("now");
+    expect(m({ targetDate: "2026-09-30" })).toBe("now");
+    expect(m({ targetDate: "2026-11-15" })).toBe("now");
+    expect(m({ targetDate: "2026-11-16" })).toBe("next");
+    expect(m({ targetDate: "2027-01-14" })).toBe("next");
+    expect(m({ targetDate: "2027-01-15" })).toBe("later");
+    expect(m({})).toBe("later");
+  });
+  it("lets the owner pin a milestone", () => {
+    expect(m({ active: 3, horizon: "later" })).toBe("later");
+    expect(m({ horizon: "next" })).toBe("next");
   });
 });

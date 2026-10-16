@@ -148,7 +148,8 @@ export type NotifySettings = {
 };
 
 export type MilestoneStatus = "done" | "late" | "at_risk" | "on_track" | "no_work" | "unscheduled";
-export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; status: MilestoneStatus };
+export type Horizon = "now" | "next" | "later";
+export type RoadmapMilestone = { id: string; title: string; targetDate: string | null; total: number; done: number; blocked: number; active: number; status: MilestoneStatus; horizon: Horizon; pinned: Horizon | null };
 export type RoadmapObjective = {
   id: string;
   title: string;
