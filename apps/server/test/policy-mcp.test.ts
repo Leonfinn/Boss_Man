@@ -47,26 +47,88 @@ afterEach(async () => {
 });
 
 describe("permission requests through the policy engine", () => {
-  it("auto-answers routine requests and queues destructive ones for the owner", async () => {
+  it("re-sends verdicts lost in a dropped connection, for requests the runner is still waiting on", async () => {
     const reg = (await ctx.app.inject({ method: "POST", url: `/api/companies/${ctx.homelab.company.id}/runner`, headers: { cookie: ctx.cookie } })).json();
-    await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "Homelab may restart containers", trigger: "permission", condition: { commandPattern: "^docker\\s+restart\\b" }, outcome: "allow" });
-
-    const commands: RunnerCommand[] = [];
+    const runId = randomUUID();
+    const waiting = new Set<string>();
+    const got: RunnerCommand[] = [];
+    let dropNext = false;
     const conn = new RunnerConnection({
       url: `ws://${ctx.base}/api/runner/connect`,
       token: reg.token,
       journal: new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-")), "j.jsonl")),
       runnerVersion: "test",
       heartbeatMs: 200,
-      onCommand: (c) => commands.push(c),
+      // Stands in for a verdict that was written to a socket just before it died.
+      onCommand: (c) => {
+        if (c.type !== "permission.decide") return;
+        if (dropNext) return void (dropNext = false);
+        waiting.delete(c.requestId);
+        got.push(c);
+      },
+      pendingPermissions: () => [...waiting].map((requestId) => ({ runId, requestId })),
+    });
+    conn.start();
+    try {
+      await waitFor(() => conn.isLive, Boolean);
+      conn.emit({ type: "run.started", runId, agentId: ctx.homelab.ceo.id, acpSessionId: "s", model: null });
+
+      // A policy verdict, lost.
+      dropNext = true;
+      waiting.add("r1");
+      conn.emit({ type: "run.permission_request", runId, requestId: "r1", title: "echo hi", kind: "execute", rawInput: { command: "echo hi" }, optionKinds: ["allow_once", "reject_once"] });
+      await waitFor(() => dropNext, (v) => v === false);
+      expect(got).toEqual([]);
+      conn.breakConnection();
+      await waitFor(() => got.length, (n) => n === 1);
+      expect(got[0]).toEqual({ type: "permission.decide", runId, requestId: "r1", verdict: "allow" });
+
+      // The owner's answer, lost.
+      waiting.add("r2");
+      conn.emit({ type: "run.permission_request", runId, requestId: "r2", title: "rm -rf /tmp/x", kind: "execute", rawInput: { command: "rm -rf /tmp/x" }, optionKinds: ["allow_once", "reject_once"] });
+      const [d] = await waitFor(async () => (await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json() as Array<{ id: string; recommendedOption: string }>, (x) => x.length === 1);
+      dropNext = true;
+      await ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: d!.recommendedOption } });
+      await waitFor(() => dropNext, (v) => v === false);
+      conn.breakConnection();
+      await waitFor(() => got.length, (n) => n === 2);
+      expect(got[1]).toEqual({ type: "permission.decide", runId, requestId: "r2", verdict: "deny" });
+      expect(waiting.size).toBe(0);
+    } finally {
+      conn.stop();
+    }
+  });
+
+  it("auto-answers routine requests and queues destructive ones for the owner", async () => {
+    const reg = (await ctx.app.inject({ method: "POST", url: `/api/companies/${ctx.homelab.company.id}/runner`, headers: { cookie: ctx.cookie } })).json();
+    await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "Homelab may restart containers", trigger: "permission", condition: { commandPattern: "^docker\\s+restart\\b" }, outcome: "allow" });
+
+    const commands: RunnerCommand[] = [];
+    const runId = randomUUID();
+    // Like a real runner, it says which requests it is still waiting on when it reconnects.
+    const waiting = new Set<string>();
+    const conn = new RunnerConnection({
+      url: `ws://${ctx.base}/api/runner/connect`,
+      token: reg.token,
+      journal: new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-")), "j.jsonl")),
+      runnerVersion: "test",
+      heartbeatMs: 200,
+      onCommand: (c) => {
+        if (c.type === "permission.decide") {
+          if (!waiting.delete(c.requestId)) return;
+        }
+        commands.push(c);
+      },
+      pendingPermissions: () => [...waiting].map((requestId) => ({ runId, requestId })),
     });
     conn.start();
     await waitFor(() => conn.isLive, Boolean);
 
-    const runId = randomUUID();
     conn.emit({ type: "run.started", runId, agentId: ctx.homelab.ceo.id, acpSessionId: "s", model: null });
-    const ask = (requestId: string, command: string) =>
+    const ask = (requestId: string, command: string) => {
+      waiting.add(requestId);
       conn.emit({ type: "run.permission_request", runId, requestId, title: command, kind: "execute", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] });
+    };
 
     ask("r1", "echo hello");
     ask("r2", "docker restart web");
