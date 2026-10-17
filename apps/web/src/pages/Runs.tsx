@@ -36,7 +36,8 @@ export const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n 
 /** On a subscription a run costs allowance, not money, so it shows tokens; API credit shows cost (R67). */
 export function usage(r: RunRow) {
   if (r.fundingKind !== "subscription") return { text: usd(r.costMicros ?? 0), title: undefined };
-  if (r.inputTokens == null || r.outputTokens == null) return { text: "Not reported", title: "The agent didn't report token use for this run." };
+  // Runs from before token counts were recorded (R67) still show what paid for them.
+  if (r.inputTokens == null || r.outputTokens == null) return { text: "Subscription", title: "Paid by the subscription. This run's token use wasn't recorded." };
   return {
     text: `${tokens(r.inputTokens)} in · ${tokens(r.outputTokens)} out`,
     title: `${r.inputTokens.toLocaleString()} input and ${r.outputTokens.toLocaleString()} output tokens; ${(r.cachedReadTokens ?? 0).toLocaleString()} read from the cache and ${(r.cachedWriteTokens ?? 0).toLocaleString()} written to it.`,
