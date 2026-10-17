@@ -887,6 +887,9 @@ export const skills = pgTable(
     /** Where a linked skill came from, and the commit it's pinned to. */
     sourceUrl: text("source_url"),
     sourceRef: text("source_ref"),
+    /** Skills added together from one link form a pack (e.g. "obra/superpowers"), given and updated as one. */
+    pack: text("pack"),
+    packUrl: text("pack_url"),
     /** The folder's files, SKILL.md first; content is base64 so scripts and images survive. */
     files: jsonb("files").$type<Array<{ path: string; content: string }>>().notNull(),
     sizeBytes: integer("size_bytes").notNull(),

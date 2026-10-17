@@ -763,6 +763,24 @@ export async function buildApp(opts: AppOptions) {
       const { id, skillId } = SkillParams.parse(req.params);
       return skillsSvc.remove(id, skillId).then(() => reply.code(204).send(), skillErrors(reply));
     });
+    // Packs: skills added together from one link (R71), given and updated as one. A pack's name
+    // has a slash in it (owner/repo), so it travels in the body or the query.
+    const PackName = z.string().min(1).max(200);
+    owner.put("/api/companies/:id/skill-packs/agents", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { pack, agentIds } = z.object({ pack: PackName, agentIds: z.array(Uuid).max(200) }).parse(req.body);
+      return skillsSvc.setPackHolders(id, pack, agentIds).then(() => ({ pack, agentIds }), skillErrors(reply));
+    });
+    owner.post("/api/companies/:id/skill-packs/refresh", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { pack } = z.object({ pack: PackName }).parse(req.body);
+      return skillsSvc.refreshPack(id, pack).catch(skillErrors(reply));
+    });
+    owner.delete("/api/companies/:id/skill-packs", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { pack } = z.object({ pack: PackName }).parse(req.query);
+      return skillsSvc.removePack(id, pack).then(() => reply.code(204).send(), skillErrors(reply));
+    });
     owner.put("/api/companies/:id/skills/:skillId/agents", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
       const { agentIds } = z.object({ agentIds: z.array(Uuid).max(200) }).parse(req.body);
