@@ -169,6 +169,13 @@
       "when": 1792262711428,
       "tag": "0023_wiki_maintainer",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1792264364397,
+      "tag": "0024_skills",
+      "breakpoints": true
     }
   ]
 }

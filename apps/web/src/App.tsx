@@ -19,6 +19,7 @@ import { Notifications } from "./pages/Notifications";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
+import { Skills } from "./pages/Skills";
 import { Features } from "./pages/Features";
 import { Wiki } from "./pages/Wiki";
 import { Feedback } from "./pages/Feedback";
@@ -143,6 +144,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <ChatPage companies={list} companyId={companyId} agentId={route[2]} go={go} />
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
+        ) : page === "skills" ? (
+          <Skills company={current} />
         ) : page === "features" ? (
           <Features companies={list} companyId={companyId} featureId={route[2]} go={go} />
         ) : page === "feedback" ? (

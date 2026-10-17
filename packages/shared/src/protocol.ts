@@ -90,6 +90,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     mode: z.enum(["plan"]).optional(),
     /** Git workspace (R38): the run works in the ticket's worktree instead of cwd. */
     workspace: z.object({ projectId: Uuid, ticketId: Uuid, repoUrl: z.string(), baseRef: z.string() }).optional(),
+    /** The agent's skills (R71): Agent Skills folders, file contents in base64. */
+    skills: z
+      .array(z.object({ name: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64), files: z.array(z.object({ path: z.string().min(1).max(500), content: z.string() })).max(200) }))
+      .max(100)
+      .optional(),
   }),
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),

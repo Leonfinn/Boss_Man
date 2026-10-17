@@ -29,6 +29,7 @@ const GROUPS: Array<{ title: string | null; items: Item[] }> = [
   {
     title: "Company",
     items: [
+      { id: "skills", label: "Skills" },
       { id: "runs", label: "Runs" },
       { id: "engagements", label: "Engagements" },
       { id: "funding", label: "Funding" },

@@ -14,6 +14,7 @@ import { issueRunToken } from "../mcp.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
+import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
 
 export type Limits = {
@@ -193,6 +194,8 @@ export function schedulerService(
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
     const [previous] = w.resumeRunId && agent.agentKind === "claude" ? await db.select({ acpSessionId: runs.acpSessionId }).from(runs).where(eq(runs.id, w.resumeRunId)) : [];
+    // The agent's skills (R71) go with the run; chat runs have no built-in tools to use them.
+    const skillSet = !chat && agent.agentKind === "claude" ? await skillsForRun(db, agent.id) : [];
     const sent = deps.runners.send(runner.id, {
       type: "run.start",
       runId,
@@ -210,6 +213,7 @@ export function schedulerService(
       mcpToken,
       ...(chapter?.resumeSessionId ? { resumeSessionId: chapter.resumeSessionId } : !chapter && previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
       ...(chapter?.freshPrompt ? { freshPrompt: chapter.freshPrompt } : {}),
+      ...(skillSet.length ? { skills: skillSet } : {}),
     });
     if (!sent) {
       if (w.deployId) await deps.deploys?.unbindRun(w.deployId);

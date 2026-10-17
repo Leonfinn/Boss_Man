@@ -5,7 +5,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 
-export type StubLogEntry = { method: string; path: string; stream?: boolean; step?: string; hasTools?: boolean; model?: string; userAgent?: string; shape?: string; firstUserText?: string; toolNames?: string[] };
+export type StubLogEntry = { method: string; path: string; raw?: string; stream?: boolean; step?: string; hasTools?: boolean; model?: string; userAgent?: string; shape?: string; firstUserText?: string; toolNames?: string[] };
 
 /** The text of the conversation's first user message. */
 function firstUserText(messages: any[]): string {
@@ -145,7 +145,7 @@ export async function startStubAnthropic(log: StubLogEntry[]): Promise<{ url: st
         const { step, blocks } = hasTools
           ? scriptedReply(body.messages ?? [])
           : { step: "side-query", blocks: [{ type: "text", text: "Spike" } as Block] };
-        log.push({ method: req.method, path, stream: !!body.stream, step, hasTools, model: body.model, userAgent: req.headers["user-agent"] ?? undefined, shape: conversationShape(body.messages ?? []), firstUserText: firstUserText(body.messages ?? []), toolNames: Array.isArray(body.tools) ? body.tools.map((t: any) => String(t.name)) : [] });
+        log.push({ method: req.method, path, stream: !!body.stream, step, hasTools, model: body.model, userAgent: req.headers["user-agent"] ?? undefined, shape: conversationShape(body.messages ?? []), firstUserText: firstUserText(body.messages ?? []), toolNames: Array.isArray(body.tools) ? body.tools.map((t: any) => String(t.name)) : [], raw });
         return body.stream ? sendStream(res, body.model, blocks) : sendJson(res, body.model, blocks);
       }
       if (req.method === "POST" && path === "/v1/responses") {
