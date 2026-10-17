@@ -295,6 +295,7 @@ function Funding({ company, onChanged }: { company: Company; onChanged: () => vo
                 <th scope="col">Kind</th>
                 <th scope="col">Model</th>
                 <th scope="col">Paid from</th>
+                <th scope="col">Status</th>
               </tr>
             </thead>
             <tbody>
@@ -303,6 +304,7 @@ function Funding({ company, onChanged }: { company: Company; onChanged: () => vo
                   <th scope="row" style={{ fontWeight: 500 }}>
                     {a.name}
                     {a.role === "ceo" && <span className="muted"> · CEO</span>}
+                    {a.duty === "wiki" && <span className="muted"> · keeps the wiki tidy</span>}
                   </th>
                   <td>{a.agentKind}</td>
                   <td>
@@ -324,6 +326,14 @@ function Funding({ company, onChanged }: { company: Company; onChanged: () => vo
                         </option>
                       ))}
                     </select>
+                  </td>
+                  <td>
+                    <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
+                      <span className={`tag${a.paused ? " amber" : " green"}`}>{a.paused ? "Paused" : "Running"}</span>
+                      <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} onClick={() => setAgent(a.id, { paused: !a.paused })} aria-label={`${a.paused ? "Start" : "Pause"} ${a.name}`}>
+                        {a.paused ? "Start" : "Pause"}
+                      </button>
+                    </span>
                   </td>
                 </tr>
               ))}

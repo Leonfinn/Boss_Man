@@ -350,6 +350,8 @@ export async function buildApp(opts: AppOptions) {
           .insert(agents)
           .values({ companyId: company!.id, name: body.ceo.name, role: "ceo", agentKind: body.ceo.agentKind, model: body.ceo.model })
           .returning();
+        // The wiki maintainer starts paused: the owner gives it a model and starts it (R73).
+        await tx.insert(agents).values({ companyId: company!.id, name: "Wiki Maintainer", role: "worker", agentKind: "claude", paused: true, duty: "wiki" });
         return { company: company!, ceo: ceo! };
       });
       return reply.code(201).send(result);
@@ -938,9 +940,17 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/agents/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1) }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean() }).partial().parse(req.body);
+      const [before] = await db.select().from(agents).where(eq(agents.id, id));
+      if (!before) return reply.code(404).send({ error: "not_found" });
+      // An agent with a standing job starts with no model; it needs one before it can run (R73).
+      if (b.paused === false && before.duty && !(b.model !== undefined ? b.model : before.model)) {
+        return reply.code(409).send({ error: "needs_model", message: `Choose a model for ${before.name} before starting it.` });
+      }
       const [a] = await db.update(agents).set(b).where(eq(agents.id, id)).returning();
-      return a ?? reply.code(404).send({ error: "not_found" });
+      // Unpausing lets its waiting work start now rather than at the next tick.
+      if (b.paused === false && before.paused) void scheduler.tick().catch((err) => app.log.error({ err }, "tick after unpause failed"));
+      return a;
     });
 
     // Scheduling and kill switches (R30).

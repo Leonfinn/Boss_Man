@@ -9,7 +9,7 @@ import { planningGuidance, UNTRUSTED_NOTE } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
-import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET } from "./decisions.js";
 import type { fundingService } from "./funding.js";
@@ -33,6 +33,8 @@ export type Limits = {
 };
 
 /** Wakes the owner asked for; never limited. A message counts only when no run sent it. */
+/** Why the wiki maintainer is woken (R73). */
+export const WIKI_REASON = "wiki upkeep";
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
@@ -95,6 +97,38 @@ export function schedulerService(
     return row?.value === true;
   }
 
+  /** The wiki maintainer's standing job, and the tickets finished since its last run (R73). */
+  async function wikiDuty(agent: typeof agents.$inferSelect) {
+    const [last] = await db.select({ at: runs.startedAt }).from(runs).where(eq(runs.agentId, agent.id)).orderBy(desc(runs.startedAt)).limit(1);
+    const finished = await db
+      .select({ id: tickets.id, title: tickets.title, outcome: tickets.outcome })
+      .from(tickets)
+      .where(and(eq(tickets.companyId, agent.companyId), eq(tickets.systemState, "done"), last ? gt(tickets.lastActivityAt, last.at) : undefined))
+      .orderBy(desc(tickets.lastActivityAt))
+      .limit(20);
+    const made = finished.length
+      ? await db
+          .select({ ticketId: ticketArtifacts.ticketId, kind: ticketArtifacts.kind, title: ticketArtifacts.title, slug: wikiPages.slug, path: ticketArtifacts.path, ref: ticketArtifacts.ref, url: ticketArtifacts.url })
+          .from(ticketArtifacts)
+          .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
+          .where(inArray(ticketArtifacts.ticketId, finished.map((t) => t.id)))
+      : [];
+    return [
+      "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
+      "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
+      "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
+      "- When finished work produced a document, make sure it's in the wiki, linked to its ticket, and linked from related pages. Write a short summary page if a ticket produced something useful but no page.",
+      "- Don't change what a page says is true unless another page or a ticket shows it's out of date; then update it and say what changed at the bottom.",
+      "- Don't create tickets or change code; when something needs doing, tell the owner with notify_owner and a link.",
+      "",
+      finished.length ? "Tickets finished since your last run, newest first:" : "No tickets have finished since your last run; tidy the wiki and the Index page.",
+      ...finished.map((t) => {
+        const outs = made.filter((m) => m.ticketId === t.id).map((m) => (m.kind === "wiki_page" ? `wiki page ${m.slug}` : m.kind === "url" ? `link ${m.url}` : `repo file ${m.path}${m.ref ? ` on ${m.ref}` : ""}`));
+        return `- ${t.id} "${t.title}" (${t.outcome ?? "done"})${outs.length ? `: produced ${outs.join("; ")}` : ": nothing attached"}`;
+      }),
+    ];
+  }
+
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string) {
     const lines = [`You are ${agent.name}, the ${agent.role === "ceo" ? "CEO" : agent.role} of ${companyName}, working through Boss Man.`];
     if (w.ticketId) {
@@ -112,6 +146,7 @@ export function schedulerService(
         if (talk.length) lines.push("", "The ticket's conversation so far, oldest first:", ...talk);
       }
     }
+    if (agent.duty === "wiki" && !w.ticketId) lines.push("", ...(await wikiDuty(agent)));
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
@@ -336,6 +371,7 @@ export function schedulerService(
         return { ...result, deferred: queue.length };
       }
       const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
+      const pausedAgents = new Set((await db.select({ id: agents.id }).from(agents).where(eq(agents.paused, true))).map((a) => a.id));
 
       for (const w of queue) {
         const defer = async (reason: string, notBefore: Date | null) => {
@@ -349,6 +385,10 @@ export function schedulerService(
 
         if (paused.has(w.companyId)) {
           await wait("company paused");
+          continue;
+        }
+        if (pausedAgents.has(w.agentId)) {
+          await wait("agent paused");
           continue;
         }
         const isChat = w.reason === CHAT_REASON;
@@ -479,6 +519,17 @@ export function schedulerService(
         if (blockers.some((b) => b.state !== "done")) continue;
         const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, id), eq(tickets.systemState, "blocked"))).returning();
         if (t?.assigneeAgentId) await this.wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", causedByRunId });
+      }
+      // The wiki maintainer files what finished work produced (R73). One waiting run covers
+      // every ticket finished before it starts, and a paused maintainer's run waits.
+      const [done] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+      const [keeper] = done ? await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, done.companyId), eq(agents.duty, "wiki"))) : [];
+      if (keeper) {
+        const [waiting] = await db
+          .select({ id: wakes.id })
+          .from(wakes)
+          .where(and(eq(wakes.agentId, keeper.id), eq(wakes.reason, WIKI_REASON), inArray(wakes.status, ["queued", "deferred"])));
+        if (!waiting) await this.wake({ agentId: keeper.id, reason: WIKI_REASON, priority: 1, causedByRunId });
       }
     },
   };

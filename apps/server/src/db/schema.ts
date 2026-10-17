@@ -70,11 +70,16 @@ export const agents = pgTable(
     /** A pinned model ID applied at launch (spike S2: ACP refuses unlisted models). */
     model: text("model"),
     fundingSourceId: uuid("funding_source_id").references(() => fundingSources.id, { onDelete: "set null" }),
+    /** A paused agent isn't started; its work waits until the owner unpauses it. */
+    paused: boolean("paused").notNull().default(false),
+    /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
+    duty: text("duty"),
     createdAt: createdAt(),
   },
   (t) => [
     // One CEO per company (R18).
     uniqueIndex("agents_one_ceo_per_company").on(t.companyId).where(sql`${t.role} = 'ceo'`),
+    uniqueIndex("agents_one_duty_per_company").on(t.companyId, t.duty).where(sql`${t.duty} is not null`),
   ],
 );
 

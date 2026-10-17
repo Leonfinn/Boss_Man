@@ -202,7 +202,8 @@ describe("scheduler", () => {
     await ctx.db.delete(wakes);
     await ctx.req("PATCH", `/api/tickets/${domain.id}`, { state: "done" });
     const queued = await ctx.db.select().from(wakes);
-    expect(queued).toEqual([expect.objectContaining({ agentId: worker.id, ticketId: tls.id, reason: "unblocked" })]);
+    // The (paused) wiki maintainer is nudged too; see the wiki maintainer test.
+    expect(queued.filter((w) => w.reason !== "wiki upkeep")).toEqual([expect.objectContaining({ agentId: worker.id, ticketId: tls.id, reason: "unblocked" })]);
     const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json();
     const tlsCard = board.columns.flatMap((c: { tickets: Array<{ id: string; systemState: string }> }) => c.tickets).find((c: { id: string }) => c.id === tls.id);
     expect(tlsCard.systemState).toBe("ready");

@@ -144,6 +144,7 @@ describe("owner chat", () => {
     expect(threads.map((t: { name: string; state: string; last: { text: string } | null }) => [t.name, t.state, t.last?.text])).toEqual([
       [threads[0].name, "queued", "How is the beta going?"],
       ["Engineer", "queued", "What are you working on?"],
+      ["Wiki Maintainer", "idle", undefined],
     ]);
     expect(threads[0].role).toBe("ceo");
     expect((await c.req("GET", `${base}?agentId=${c.worker.id}`)).json().items.map((m: { text: string }) => m.text)).toEqual(["What are you working on?"]);

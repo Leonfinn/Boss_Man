@@ -53,7 +53,11 @@ describe("companies", () => {
     const body = res.json();
     expect(body.ceo).toMatchObject({ role: "ceo", agentKind: "claude", model: "claude-opus-5-5" });
     const list = await t.app.inject({ method: "GET", url: "/api/companies", headers: { cookie } });
-    expect(list.json()[0].agents).toHaveLength(1);
+    // Each company also gets a wiki maintainer, paused until the owner gives it a model (R73).
+    expect(list.json()[0].agents.map((a: { role: string; duty: string | null; paused: boolean }) => [a.role, a.duty, a.paused]).sort()).toEqual([
+      ["ceo", null, false],
+      ["worker", "wiki", true],
+    ]);
   });
 
   it("refuses a second CEO in the same company", async () => {
