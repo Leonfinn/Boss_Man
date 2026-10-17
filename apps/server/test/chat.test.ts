@@ -64,7 +64,7 @@ describe("owner chat", () => {
     c.sent.length = 0;
     await c.scheduler.tick();
     const start = c.sent.find((x): x is Start => x.type === "run.start")!;
-    expect(start).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}` });
+    expect(start).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.ceo.id}` });
     expect(start.resumeSessionId).toBeUndefined();
     expect(start.prompt).toContain("Owner: Add rate limiting to the login API before the beta.\nOwner: And make it wait on the auth refactor.");
     expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ purpose: "chat", chapterId: null });
@@ -117,7 +117,7 @@ describe("owner chat", () => {
     const first = c.sent.find((x): x is Start => x.type === "run.start")!;
     await c.emit({ type: "run.ended", runId: first.runId, stopReason: null, error: "rate limited" });
     await c.settle();
-    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "system", text: "The assistant couldn't finish: rate limited" });
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "system", text: "The reply couldn't be finished: rate limited" });
 
     await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Try again." });
     c.sent.length = 0;
@@ -129,8 +129,40 @@ describe("owner chat", () => {
     // Asked again as a chat run: board tools only, not resumed as CEO work.
     const again = c.sent.filter((x): x is Start => x.type === "run.start").at(-1)!;
     expect(again.runId).not.toBe(second.runId);
-    expect(again).toMatchObject({ boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}` });
+    expect(again).toMatchObject({ boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.ceo.id}` });
     expect(again.resumeSessionId).toBeUndefined();
+  });
+
+  it("lets the owner message any agent directly, each in its own conversation, one run per agent", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    const base = `/api/companies/${c.company.id}/chat`;
+    await c.req("POST", base, { text: "How is the beta going?" });
+    expect((await c.req("POST", base, { text: "What are you working on?", agentId: c.worker.id })).statusCode).toBe(201);
+    // CEO first, then the rest, each with their last message.
+    const threads = (await c.req("GET", `${base}/threads`)).json();
+    expect(threads.map((t: { name: string; state: string; last: { text: string } | null }) => [t.name, t.state, t.last?.text])).toEqual([
+      [threads[0].name, "queued", "How is the beta going?"],
+      ["Engineer", "queued", "What are you working on?"],
+    ]);
+    expect(threads[0].role).toBe("ceo");
+    expect((await c.req("GET", `${base}?agentId=${c.worker.id}`)).json().items.map((m: { text: string }) => m.text)).toEqual(["What are you working on?"]);
+    expect((await c.req("GET", base)).json().items.map((m: { text: string }) => m.text)).toEqual(["How is the beta going?"]);
+
+    // Both answer at once: one chat run each, in their own folders.
+    await c.scheduler.tick();
+    const starts = c.sent.filter((x): x is Start => x.type === "run.start");
+    expect(starts.map((x) => x.agentId).sort()).toEqual([c.ceo.id, c.worker.id].sort());
+    const workerStart = starts.find((x) => x.agentId === c.worker.id)!;
+    expect(workerStart).toMatchObject({ boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.worker.id}` });
+    expect(workerStart.prompt).toContain("You are Engineer, the worker at App Co. The owner is messaging you directly");
+    expect(workerStart.prompt).toContain("Owner: What are you working on?");
+    expect(workerStart.prompt).not.toContain("How is the beta going?");
+
+    await c.emit({ type: "run.update", runId: workerStart.runId, update: { kind: "agent_message", text: "The login page." } });
+    await c.settle();
+    expect((await c.req("GET", `${base}?agentId=${c.worker.id}`)).json()).toMatchObject({ state: "answering", items: [{ role: "owner" }, { role: "assistant", text: "The login page.", agentId: c.worker.id }] });
+    expect((await c.req("POST", base, { text: "hi", agentId: "00000000-0000-4000-8000-000000000000" })).statusCode).toBe(404);
   });
 
   it("needs a CEO and a message", async () => {

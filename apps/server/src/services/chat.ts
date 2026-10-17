@@ -1,7 +1,9 @@
-// The owner chat (v1.1). The owner writes in plain language; a run answers with board tools
-// only, turning the request into tickets, milestones and links between tickets. It runs as
-// the company's CEO (its model and funding) but in its own empty folder, with no workspace,
-// outside the CEO's chapters, and every tool except Boss Man's board tools is refused.
+// The owner chat (v1.1, R70). The owner messages the CEO, or any agent directly, in plain
+// language; a run answers with board tools only, turning the request into tickets,
+// milestones and links between tickets. It runs as that agent (its model and funding) but in
+// its own empty folder, with no workspace, outside the CEO's chapters, and every tool except
+// Boss Man's board tools is refused. Each agent has its own conversation and answers one
+// message batch at a time.
 import path from "node:path";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
@@ -19,41 +21,95 @@ export class ChatError extends Error {
   }
 }
 
+type Agent = typeof agents.$inferSelect;
+
 export function chatService(db: Db, deps: { wake: (input: { agentId: string; reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string }) {
+  /** The agent the conversation is with: the one named, or the company's CEO. */
+  async function who(companyId: string, agentId?: string | null): Promise<Agent> {
+    const [a] = await db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.companyId, companyId), agentId ? eq(agents.id, agentId) : eq(agents.role, "ceo")));
+    if (!a) throw new ChatError(agentId ? 404 : 409, agentId ? "No such agent in this company." : "This company has no CEO to answer.");
+    return a;
+  }
+
+  /** What the agent's chat is doing: answering, waiting to start, or idle. */
+  async function state(companyId: string, agentId: string) {
+    const [queued] = await db
+      .select({ id: wakes.id, status: wakes.status, reason: wakes.statusReason })
+      .from(wakes)
+      .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, CHAT_REASON), inArray(wakes.status, ["queued", "deferred"])));
+    const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.companyId, companyId), eq(runs.agentId, agentId), eq(runs.purpose, "chat"), isNull(runs.endedAt)));
+    return running ? "answering" : queued ? (queued.status === "deferred" ? `waiting: ${queued.reason ?? "deferred"}` : "queued") : "idle";
+  }
+
   return {
-    async send(companyId: string, text: string) {
-      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
-      if (!ceo) throw new ChatError(409, "This company has no CEO to answer.");
-      const [m] = await db.insert(ownerChatMessages).values({ companyId, role: "owner", text }).returning();
-      // One chat run at a time per company picks up everything sent so far.
+    async send(companyId: string, text: string, agentId?: string | null) {
+      const agent = await who(companyId, agentId);
+      const [m] = await db.insert(ownerChatMessages).values({ companyId, agentId: agent.id, role: "owner", text }).returning();
+      // One chat run at a time per agent picks up everything sent to it so far.
       const [waiting] = await db
         .select({ id: wakes.id })
         .from(wakes)
-        .where(and(eq(wakes.companyId, companyId), eq(wakes.reason, CHAT_REASON), inArray(wakes.status, ["queued", "deferred"])));
-      if (!waiting) await deps.wake({ agentId: ceo.id, reason: CHAT_REASON, priority: 4 });
+        .where(and(eq(wakes.agentId, agent.id), eq(wakes.reason, CHAT_REASON), inArray(wakes.status, ["queued", "deferred"])));
+      if (!waiting) await deps.wake({ agentId: agent.id, reason: CHAT_REASON, priority: 4 });
       return m!;
     },
 
-    async list(companyId: string) {
-      const items = await db.select().from(ownerChatMessages).where(eq(ownerChatMessages.companyId, companyId)).orderBy(desc(ownerChatMessages.createdAt)).limit(200);
-      const [queued] = await db
-        .select({ id: wakes.id, status: wakes.status, reason: wakes.statusReason })
-        .from(wakes)
-        .where(and(eq(wakes.companyId, companyId), eq(wakes.reason, CHAT_REASON), inArray(wakes.status, ["queued", "deferred"])));
-      const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.companyId, companyId), eq(runs.purpose, "chat"), isNull(runs.endedAt)));
-      return { items: items.reverse(), state: running ? "answering" : queued ? (queued.status === "deferred" ? `waiting: ${queued.reason ?? "deferred"}` : "queued") : "idle" };
+    async list(companyId: string, agentId?: string | null) {
+      const agent = await who(companyId, agentId);
+      const items = await db
+        .select()
+        .from(ownerChatMessages)
+        .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agent.id)))
+        .orderBy(desc(ownerChatMessages.createdAt))
+        .limit(200);
+      return { agentId: agent.id, items: items.reverse(), state: await state(companyId, agent.id) };
     },
 
-    cwd: (companyId: string) => path.posix.join(deps.workspaceRoot, "chat", companyId),
+    /** Everyone the owner can message, CEO first, each with their last message and what they're doing. */
+    async threads(companyId: string) {
+      const team = await db.select({ id: agents.id, name: agents.name, role: agents.role }).from(agents).where(eq(agents.companyId, companyId));
+      const last = team.length
+        ? await db
+            .selectDistinctOn([ownerChatMessages.agentId], { agentId: ownerChatMessages.agentId, role: ownerChatMessages.role, text: ownerChatMessages.text, createdAt: ownerChatMessages.createdAt })
+            .from(ownerChatMessages)
+            .where(and(eq(ownerChatMessages.companyId, companyId), inArray(ownerChatMessages.agentId, team.map((a) => a.id))))
+            .orderBy(ownerChatMessages.agentId, desc(ownerChatMessages.createdAt))
+        : [];
+      const byAgent = new Map(last.map((m) => [m.agentId, m]));
+      const rank = { ceo: 0, manager: 1, worker: 2 } as const;
+      const rows = await Promise.all(
+        team.map(async (a) => {
+          const m = byAgent.get(a.id);
+          return { ...a, last: m ? { role: m.role, text: m.text.slice(0, 140), createdAt: m.createdAt } : null, state: await state(companyId, a.id) };
+        }),
+      );
+      return rows.sort((x, y) => rank[x.role] - rank[y.role] || x.name.localeCompare(y.name));
+    },
+
+    cwd: (companyId: string, agentId: string) => path.posix.join(deps.workspaceRoot, "chat", companyId, agentId),
 
     /** The run's prompt: the conversation so far and what it's for. */
-    async prompt(companyId: string) {
+    async prompt(companyId: string, agentId: string) {
       const [company] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, companyId));
-      const recent = (await db.select().from(ownerChatMessages).where(eq(ownerChatMessages.companyId, companyId)).orderBy(desc(ownerChatMessages.createdAt)).limit(HISTORY)).reverse();
+      const agent = await who(companyId, agentId);
+      const recent = (
+        await db
+          .select()
+          .from(ownerChatMessages)
+          .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId)))
+          .orderBy(desc(ownerChatMessages.createdAt))
+          .limit(HISTORY)
+      ).reverse();
+      const ceo = agent.role === "ceo";
       return [
-        `You are the board assistant for ${company?.name ?? "this company"} in Boss Man. The owner writes to you in plain language; you turn what they ask into work on the board.`,
+        ceo
+          ? `You are ${agent.name}, the CEO of ${company?.name ?? "this company"}, chatting with the owner in Boss Man. The owner writes to you in plain language; you turn what they ask into work on the board.`
+          : `You are ${agent.name}, the ${agent.role} at ${company?.name ?? "this company"}. The owner is messaging you directly in Boss Man's chat. Answer their questions about your work, and turn what they ask for into work on the board.`,
         "",
-        "Your tools are Boss Man's board tools only: board (projects, objectives and milestones, agents, open tickets), create_ticket, link_tickets (one ticket waits on another), set_milestone, features (the feature requests, by priority) and log_feedback (file feedback the owner passes on). You can't read or change code, run commands or browse; any other tool will be refused.",
+        "In this chat your tools are Boss Man's board tools only: board (projects, objectives and milestones, agents, open tickets), create_ticket, link_tickets (one ticket waits on another), set_milestone, features (the feature requests, by priority) and log_feedback (file feedback the owner passes on). You can't read or change code, run commands or browse; any other tool will be refused. Real work happens on tickets, so if the owner asks for it, create a ticket (assigned to the right agent) rather than promising to do it here.",
         "- Look at the board first, so you reuse existing tickets and milestones instead of making duplicates.",
         "- Rate each ticket's risk honestly. Assign an agent only if the owner says who, or it's obvious. When a ticket delivers a feature request, pass its featureId.",
         "- When the owner passes on what someone else said (a customer's email, a call), file it with log_feedback as they said it, rather than turning it straight into tickets.",
@@ -66,21 +122,24 @@ export function chatService(db: Db, deps: { wake: (input: { agentId: string; rea
     },
 
     /** Marks the owner's messages that this run answers, once its row exists. */
-    async claim(companyId: string, runId: string) {
-      await db.update(ownerChatMessages).set({ runId }).where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.role, "owner"), isNull(ownerChatMessages.runId)));
+    async claim(companyId: string, agentId: string, runId: string) {
+      await db
+        .update(ownerChatMessages)
+        .set({ runId })
+        .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId), eq(ownerChatMessages.role, "owner"), isNull(ownerChatMessages.runId)));
     },
 
-    /** The answering run's final message becomes the assistant's reply. */
+    /** The answering run's final message becomes the agent's reply. */
     async onAgentMessage(runId: string, text: string) {
-      const [r] = await db.select({ companyId: runs.companyId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
+      const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
       if (r?.purpose !== "chat") return;
-      await db.insert(ownerChatMessages).values({ companyId: r.companyId, role: "assistant", text, runId });
+      await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text, runId });
     },
 
     async onRunEnded(runId: string, error: string | null) {
-      const [r] = await db.select({ companyId: runs.companyId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
+      const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
       if (r?.purpose !== "chat" || !error) return;
-      await db.insert(ownerChatMessages).values({ companyId: r.companyId, role: "system", text: `The assistant couldn't finish: ${error.slice(0, 500)}`, runId });
+      await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "system", text: `The reply couldn't be finished: ${error.slice(0, 500)}`, runId });
     },
   };
 }

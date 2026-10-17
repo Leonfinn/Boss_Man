@@ -381,3 +381,36 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
 .wiki-list details > summary { cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
 .wiki-list details > summary:hover { background: var(--ground); }
 .wiki-list details > ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }
+
+/* Chat as a messenger (R70) */
+.messenger { display: grid; grid-template-columns: 300px minmax(0, 1fr); padding: 0; overflow: hidden; height: min(72vh, 760px); min-height: 420px; }
+.messenger-list { border-right: 1px solid var(--line); overflow-y: auto; }
+.messenger-list ul { list-style: none; margin: 0; padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.messenger-list a { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
+.messenger-list a:hover { background: var(--ground); }
+.messenger-list a[aria-current="page"] { background: var(--accent-soft); }
+.messenger .avatar { width: 38px; height: 38px; font-size: 13px; }
+.avatar.ceo { background: var(--accent); }
+.avatar.manager { background: var(--green-ink); }
+.avatar.worker { background: var(--muted); }
+.messenger-list .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.messenger-list .name { font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.messenger-list .name small { font-weight: 400; color: var(--muted); font-size: 12px; }
+.messenger-list .preview { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.messenger-list .when { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.messenger-list .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.messenger-chat { display: flex; flex-direction: column; min-height: 0; }
+.messenger-head { display: flex; gap: 10px; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+.messenger-head h2 { font-size: 16px; font-weight: 600; }
+.messenger-head .back { display: none; font-size: 20px; text-decoration: none; padding: 0 6px; }
+.messenger .chat-log { flex: 1; max-height: none; min-height: 0; }
+.messenger .chat-form { padding-top: 10px; border-top: 1px solid var(--line); }
+@media (max-width: 760px) {
+  .messenger { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; }
+  .messenger .chat-log { max-height: 55dvh; min-height: 160px; }
+  .messenger[data-picked="no"] .messenger-chat { display: none; }
+  .messenger[data-picked="yes"] .messenger-list { display: none; }
+  .messenger-list { border-right: 0; }
+  .messenger-head { padding: 10px 12px; }
+  .messenger-head .back { display: inline; }
+}
