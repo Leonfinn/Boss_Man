@@ -1,8 +1,8 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, usd, type Company } from "../api";
+import { api, type Company } from "../api";
 import { describe, MAX_ITEMS, useTranscript } from "../transcript";
-import { outcomeTag, when } from "./Runs";
+import { outcomeTag, usage, when } from "./Runs";
 
 /** Steering (R37): a message after the current turn, or one that interrupts it, and stop. */
 function Steer({ runId }: { runId: string }) {
@@ -95,7 +95,9 @@ export function Run({ runId, companies }: { runId: string; companies: Company[] 
               <span>Started {when(run.startedAt)}</span>
               {run.endedAt && <span>Ended {when(run.endedAt)}</span>}
               <span className="mono">{run.model ?? "default model"}</span>
-              <span className="mono">{usd(run.costMicros)}</span>
+              <span className="mono" title={usage(run).title}>
+                {usage(run).text}
+              </span>
             </p>
           )}
         </div>

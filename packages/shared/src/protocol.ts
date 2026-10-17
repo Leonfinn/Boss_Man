@@ -46,6 +46,10 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     error: z.string().nullable(),
     /** The runner restarted while this run was going (R42); the server starts a recovery run. */
     interrupted: z.boolean().optional(),
+    /** Tokens over every turn of the run, when the agent reports them (R67). */
+    usage: z
+      .object({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(), cachedReadTokens: z.number().int().nonnegative(), cachedWriteTokens: z.number().int().nonnegative() })
+      .optional(),
   }),
   z.object({ type: z.literal("runner.log"), level: z.enum(["info", "warn", "error"]), message: z.string() }),
   // Disk use of the runner's workspaces after its clean-up pass (R54).

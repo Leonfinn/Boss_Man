@@ -124,6 +124,10 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
 
     const ended = h.events.find((e) => e.type === "run.ended");
     expect(ended).toMatchObject({ stopReason: "end_turn", error: null });
+    // Token use from the turns' PromptResponse.usage (R67); the stub model reports 120 in, 42 out per call.
+    const usage = (ended as { usage?: { inputTokens: number; outputTokens: number } }).usage;
+    expect(usage?.inputTokens).toBeGreaterThan(0);
+    expect(usage?.outputTokens).toBeGreaterThan(0);
     expect(existsSync(path.join(h.cwd, "spike.txt"))).toBe(true);
 
     const permissions = h.events.filter((e) => e.type === "run.permission_request");

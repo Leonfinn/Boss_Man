@@ -30,6 +30,19 @@ export function whyRun(r: RunRow) {
   return WHY[r.reason] ?? r.reason[0]!.toUpperCase() + r.reason.slice(1);
 }
 
+/** 1234 -> "1.2k", 1234567 -> "1.2M". */
+export const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+
+/** On a subscription a run costs allowance, not money, so it shows tokens; API credit shows cost (R67). */
+export function usage(r: RunRow) {
+  if (r.fundingKind !== "subscription") return { text: usd(r.costMicros ?? 0), title: undefined };
+  if (r.inputTokens == null || r.outputTokens == null) return { text: "Not reported", title: "The agent didn't report token use for this run." };
+  return {
+    text: `${tokens(r.inputTokens)} in · ${tokens(r.outputTokens)} out`,
+    title: `${r.inputTokens.toLocaleString()} input and ${r.outputTokens.toLocaleString()} output tokens; ${(r.cachedReadTokens ?? 0).toLocaleString()} read from the cache and ${(r.cachedWriteTokens ?? 0).toLocaleString()} written to it.`,
+  };
+}
+
 /** A run's result in a few words: errors and interruptions stand out. */
 export function outcomeTag(outcome: string | null | undefined) {
   if (!outcome) return <span className="tag blue">Running</span>;
@@ -50,7 +63,7 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
             <th scope="col">What for</th>
             <th scope="col">Model</th>
             <th scope="col">Result</th>
-            {finished && <th scope="col" style={{ textAlign: "right" }}>Cost</th>}
+            {finished && <th scope="col" style={{ textAlign: "right" }}>Used</th>}
           </tr>
         </thead>
         <tbody>
@@ -71,7 +84,11 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
               </td>
               <td className="mono">{r.model ?? "default"}</td>
               <td>{outcomeTag(finished ? r.outcome : null)}</td>
-              {finished && <td className="mono" style={{ textAlign: "right" }}>{usd(r.costMicros ?? 0)}</td>}
+              {finished && (
+                <td className="mono" style={{ textAlign: "right", whiteSpace: "nowrap" }} title={usage(r).title}>
+                  {usage(r).text}
+                </td>
+              )}
             </tr>
           ))}
         </tbody>

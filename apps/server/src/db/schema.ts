@@ -365,6 +365,11 @@ export const runs = pgTable("runs", {
   engagementId: uuid("engagement_id").references(() => engagements.id, { onDelete: "set null" }),
   acpSessionId: text("acp_session_id"),
   /** "chat" for an owner chat run: board tools only, no workspace (v1.1). */
+  /** Tokens over the run's turns, when the agent reports them (R67). */
+  inputTokens: bigint("input_tokens", { mode: "number" }),
+  outputTokens: bigint("output_tokens", { mode: "number" }),
+  cachedReadTokens: bigint("cached_read_tokens", { mode: "number" }),
+  cachedWriteTokens: bigint("cached_write_tokens", { mode: "number" }),
   purpose: text("purpose"),
   /** The CEO chapter this run belongs to, if any. */
   chapterId: uuid("chapter_id").references((): AnyPgColumn => ceoChapters.id, { onDelete: "set null" }),

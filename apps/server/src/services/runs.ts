@@ -3,7 +3,7 @@
 // ended wakes the agent again on the same ticket with the message instead.
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, costEvents, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
+import { agents, costEvents, fundingSources, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export class RunError extends Error {
@@ -35,11 +35,13 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     /** Runs that have finished, newest first, with what they cost. */
     async recent(limit = 50, companyId?: string) {
       const rows = await db
-        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome , purpose: runs.purpose, reason: wakes.reason, note: wakes.note })
+        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome , purpose: runs.purpose, reason: wakes.reason, note: wakes.note, inputTokens: runs.inputTokens, outputTokens: runs.outputTokens, cachedReadTokens: runs.cachedReadTokens, cachedWriteTokens: runs.cachedWriteTokens, fundingKind: fundingSources.kind })
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .leftJoin(tickets, eq(tickets.id, runs.ticketId))
         .leftJoin(wakes, eq(wakes.runId, runs.id))
+        // How the agent is paid for decides whether the page shows tokens or money (R67).
+        .leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId))
         .where(companyId ? and(isNotNull(runs.endedAt), eq(runs.companyId, companyId)) : isNotNull(runs.endedAt))
         .orderBy(desc(runs.endedAt))
         .limit(limit);
@@ -60,7 +62,9 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
      */
     async transcript(runId: string, opts: { after?: number; limit?: number } = {}) {
       const { run } = await load(runId);
-      const [agent] = run.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, run.agentId)) : [];
+      const [agent] = run.agentId
+        ? await db.select({ name: agents.name, fundingKind: fundingSources.kind }).from(agents).leftJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId)).where(eq(agents.id, run.agentId))
+        : [];
       const [ticket] = run.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, run.ticketId)) : [];
       const limit = Math.min(Math.max(opts.limit ?? 500, 1), 1000);
       const rows = await db
@@ -77,7 +81,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
         .limit(limit);
       const [spent] = await db.select({ micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` }).from(costEvents).where(eq(costEvents.runId, runId));
       return {
-        run: { id: run.id, companyId: run.companyId, agent: agent?.name ?? null, ticketId: run.ticketId, ticket: ticket?.title ?? null, model: run.model, startedAt: run.startedAt, endedAt: run.endedAt, outcome: run.outcome, costMicros: Number(spent?.micros ?? 0) },
+        run: { id: run.id, companyId: run.companyId, agent: agent?.name ?? null, ticketId: run.ticketId, ticket: ticket?.title ?? null, model: run.model, startedAt: run.startedAt, endedAt: run.endedAt, outcome: run.outcome, costMicros: Number(spent?.micros ?? 0), inputTokens: run.inputTokens, outputTokens: run.outputTokens, cachedReadTokens: run.cachedReadTokens, cachedWriteTokens: run.cachedWriteTokens, fundingKind: agent?.fundingKind ?? null },
         items: rows.map((r) => ({ seq: r.seq, type: r.type, at: r.at, event: r.payload })),
         next: rows.at(-1)?.seq ?? opts.after ?? 0,
         more: rows.length === limit,

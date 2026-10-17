@@ -381,13 +381,26 @@ export class SessionManager {
       );
     const agent = connection.agent;
 
+    // Token use over the run's turns, from each PromptResponse.usage (ACP marks it unstable) (R67).
+    let usage: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number } | undefined;
+    const countTokens = (response: unknown) => {
+      const u = (response as { usage?: { inputTokens?: number; outputTokens?: number; cachedReadTokens?: number | null; cachedWriteTokens?: number | null } | null } | null)?.usage;
+      if (!u || typeof u.inputTokens !== "number" || typeof u.outputTokens !== "number") return;
+      const n = (v: number | null | undefined) => (typeof v === "number" && v > 0 ? Math.round(v) : 0);
+      usage = {
+        inputTokens: (usage?.inputTokens ?? 0) + n(u.inputTokens),
+        outputTokens: (usage?.outputTokens ?? 0) + n(u.outputTokens),
+        cachedReadTokens: (usage?.cachedReadTokens ?? 0) + n(u.cachedReadTokens),
+        cachedWriteTokens: (usage?.cachedWriteTokens ?? 0) + n(u.cachedWriteTokens),
+      };
+    };
     const finish = (stopReason: string | null, error: string | null) => {
       if (!this.runs.has(cmd.runId)) return;
       this.runs.delete(cmd.runId);
       this.saveState();
       for (const settle of state.pendingPermissions.values()) settle("deny");
       if (messageText) emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: messageText.slice(0, 20_000) } });
-      emit({ type: "run.ended", runId: cmd.runId, stopReason, error });
+      emit({ type: "run.ended", runId: cmd.runId, stopReason, error, ...(usage ? { usage } : {}) });
       connection.close();
       killGroup(child);
     };
@@ -459,12 +472,14 @@ export class SessionManager {
       };
       await checkpoint("before the run");
       let result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text: first }] });
+      countTokens(result);
       await checkpoint("after a turn");
       // Messages that arrived during the turn continue the same session (R37).
       while (state.queued.length && this.runs.has(cmd.runId)) {
         const text = state.queued.splice(0).join("\n\n");
         emit({ type: "run.update", runId: cmd.runId, update: { kind: "message_delivered", text: text.slice(0, 2000) } });
         result = await agent.request(methods.agent.session.prompt, { sessionId: session.sessionId, prompt: [{ type: "text", text }] });
+        countTokens(result);
         await checkpoint("after a turn");
       }
       finish(result.stopReason, null);
