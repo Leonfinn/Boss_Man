@@ -106,6 +106,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
   /** Merges the ticket's branch into a named target (R46). */
   z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
+  /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
+  z.object({ type: z.literal("workspace.push"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
   z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),
@@ -169,3 +171,6 @@ export type MergeResult =
   | { status: "merged" | "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] };
+
+/** The outcome of pushing a ticket's branch for a pull request (R59). */
+export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | { status: "uncommitted"; files: string[] };

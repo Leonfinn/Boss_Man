@@ -75,6 +75,29 @@ describe("merging a ticket's branch (R46)", () => {
   });
 });
 
+describe("pushing a ticket's branch for a pull request (R59)", () => {
+  it("pushes the branch without touching the target, and refuses conflicts and uncommitted work", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const before = o.mainSha();
+    const r = await ws.pushForReview(spec, "main");
+    expect(r).toEqual({ status: "pushed", branch: `bossman/${ids.t}`, commit: git(w.path, "rev-parse", "HEAD") });
+    expect(git(o.url, "rev-parse", `bossman/${ids.t}`)).toBe(git(w.path, "rev-parse", "HEAD"));
+    expect(o.mainSha()).toBe(before);
+
+    writeFileSync(path.join(w.path, "draft.txt"), "not committed\n");
+    expect(await ws.pushForReview(spec, "main")).toEqual({ status: "uncommitted", files: ["draft.txt"] });
+  });
+
+  it("reports conflicts with the target instead of pushing", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "app.txt", "line 1\nticket's line 2\nline 3\n");
+    o.pushChange("app.txt", "line 1\nmain's line 2\nline 3\n");
+    expect(await ws.pushForReview(spec, "main")).toEqual({ status: "conflicts", files: ["app.txt"] });
+    expect(() => git(o.url, "rev-parse", "--verify", "--quiet", `refs/heads/bossman/${ids.t}`)).toThrow();
+  });
+});
+
 describe("verify before done (R47)", () => {
   it("passes or fails on the command's exit code, with the tail of its output", async () => {
     const o = origin();

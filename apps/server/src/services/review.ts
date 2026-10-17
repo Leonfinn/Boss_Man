@@ -1,14 +1,16 @@
 // Review (R39): the review state carries the ticket's diff against its base, line comments
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
-import { and, desc, eq, isNull } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, ownerReviews, renderTemplate, riskOf, type MergeResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
+import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, ownerReviews, parseRepoUrl, renderTemplate, riskOf, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { decisions, projects, runners, runs, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 import type { runsService } from "./runs.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
+import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
+import type { notificationsService } from "./notifications.js";
 
 export class ReviewError extends Error {
   constructor(
@@ -24,18 +26,68 @@ type WakeHook = (input: { agentId: string; reason: string; note: string; ticketI
 
 export function reviewService(
   db: Db,
-  deps: { runners: ReturnType<typeof runnersService>; runs: ReturnType<typeof runsService>; work: ReturnType<typeof workService>; loops: ReturnType<typeof loopGuards> },
+  deps: {
+    runners: ReturnType<typeof runnersService>;
+    runs: ReturnType<typeof runsService>;
+    work: ReturnType<typeof workService>;
+    loops: ReturnType<typeof loopGuards>;
+    /** Pull requests on the git host (R59), with the company's GIT_TOKEN. */
+    gitHosts?: ReturnType<typeof gitHostService>;
+    gitToken?: (companyId: string) => Promise<string | undefined>;
+    notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
+  },
 ) {
   let wake: WakeHook | null = null;
 
   async function ticketWithRepo(ticketId: string, companyId?: string) {
     const [row] = await db
-      .select({ t: tickets, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, verifyCommand: projects.verifyCommand, deepVerifyCommand: projects.deepVerifyCommand })
+      .select({
+        t: tickets,
+        repoUrl: projects.repoUrl,
+        defaultBranch: projects.defaultBranch,
+        verifyCommand: projects.verifyCommand,
+        deepVerifyCommand: projects.deepVerifyCommand,
+        landing: projects.landing,
+        gitHost: projects.gitHost,
+        gitApiBase: projects.gitApiBase,
+      })
       .from(tickets)
       .innerJoin(projects, eq(projects.id, tickets.projectId))
       .where(eq(tickets.id, ticketId));
     if (!row || (companyId && row.t.companyId !== companyId)) throw new ReviewError(404, "No such ticket.");
     return row;
+  }
+
+  /** The host and token for a pull request; without either, approval stops with what to set (R59). */
+  async function prTarget(companyId: string, repoUrl: string | null, gitHost: string | null, gitApiBase: string | null): Promise<{ cfg: GitHostConfig; token: string }> {
+    const a = repoUrl ? parseRepoUrl(repoUrl) : null;
+    if (!deps.gitHosts || !a || (gitHost !== "gitea" && gitHost !== "github") || !gitApiBase)
+      throw new ReviewError(409, "Boss Man doesn't know this project's git host, so it can't open a pull request. Set the host in the project's settings, or land work by merging.");
+    const token = await deps.gitToken?.(companyId);
+    if (!token) throw new ReviewError(409, "Grant the company a GIT_TOKEN secret that can push and open pull requests, then approve again.");
+    return { cfg: { kind: gitHost as GitHostKind, apiBase: gitApiBase, owner: a.owner, repo: a.repo }, token };
+  }
+
+  async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null) {
+    await db.update(tickets).set({ mergeCommit: commit, pullRequestNote: null }).where(eq(tickets.id, t.id));
+    await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
+    return { outcome: "merged" as const, delivered: null, detail: { commit } };
+  }
+
+  /** The ticket stays in review with the host's reason; the owner hears once per new reason. */
+  async function wait(t: typeof tickets.$inferSelect, note: string) {
+    const changed = note !== t.pullRequestNote;
+    await db.update(tickets).set({ pullRequestNote: note }).where(eq(tickets.id, t.id));
+    if (changed)
+      await deps.notes?.notify({
+        companyId: t.companyId,
+        agentId: null,
+        level: "note",
+        title: `Pull request waiting: ${t.title}`,
+        body: `${note}${t.pullRequestUrl ? `\n${t.pullRequestUrl}` : ""}`,
+        link: `#/tickets/${t.id}`,
+      });
+    return { outcome: "pull_request" as const, delivered: null, detail: { note, url: t.pullRequestUrl } };
   }
 
   /** Sends text to the ticket's live run if there is one, otherwise wakes its assignee with it. */
@@ -149,8 +201,8 @@ export function reviewService(
      * default branch, and the merge closes the ticket. A failed check, a conflict or
      * uncommitted work sends the ticket back to the agent with what to do.
      */
-    async land(ticketId: string, reviewer: string, causedByRunId?: string | null): Promise<{ outcome: "done" | "merged" | "verify_failed" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
-      const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand } = await ticketWithRepo(ticketId);
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null): Promise<{ outcome: "done" | "merged" | "pull_request" | "verify_failed" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+      const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null };
@@ -182,10 +234,11 @@ export function reviewService(
         }
       }
 
-      const m = await ask<MergeResult>(
-        (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }),
-        2 * 60_000,
-      );
+      // A pull request: the host must be known and reachable before anything is pushed (R59).
+      const pr = landing === "pull_request" ? await prTarget(t.companyId, repoUrl, gitHost, gitApiBase) : null;
+      const m: MergeResult | PushResult = pr
+        ? await ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), 2 * 60_000)
+        : await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }), 2 * 60_000);
       if (m.status === "uncommitted") {
         const tpl = (await templates(t.companyId)).commit;
         const delivered = await sendBack(`The review was approved, but these files aren't committed: ${m.files.join(", ")}. ${renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title })} Then move the ticket back to review.`, "commit");
@@ -198,9 +251,58 @@ export function reviewService(
         );
         return { outcome: "conflicts", delivered, detail: m };
       }
+      if (m.status === "pushed" && pr) {
+        let opened;
+        try {
+          opened = await deps.gitHosts!.open(pr.cfg, pr.token, {
+            head: m.branch,
+            base: defaultBranch,
+            title: t.title,
+            body: `${t.body?.trim() ? `${t.body.trim()}\n\n` : ""}Opened by Boss Man for ticket ${t.id}, approved by ${reviewer}.`,
+          });
+        } catch (err) {
+          throw new ReviewError(502, err instanceof GitHostError ? err.message : `Couldn't reach the git host: ${(err as Error).message}`);
+        }
+        await db.update(tickets).set({ pullRequestUrl: opened.url, pullRequestNumber: opened.number, pullRequestHead: m.commit, pullRequestNote: null }).where(eq(tickets.id, ticketId));
+        return this.mergePullRequest(ticketId);
+      }
       await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, ticketId));
       await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
       return { outcome: "merged", delivered: null, detail: m };
+    },
+
+    /**
+     * Merges the ticket's pull request if the host allows it now (R59). If not (approvals or
+     * status checks still needed, or someone else must merge), the ticket waits in review with
+     * the host's reason; the sync tries again, and finishes the ticket if it's merged on the host.
+     */
+    async mergePullRequest(ticketId: string): Promise<{ outcome: "merged" | "pull_request"; delivered: null; detail?: unknown }> {
+      const { t, repoUrl, defaultBranch, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
+      if (!t.pullRequestNumber) throw new ReviewError(409, "This ticket has no pull request.");
+      if (t.systemState === "done") return { outcome: "merged", delivered: null };
+      const { cfg, token } = await prTarget(t.companyId, repoUrl, gitHost, gitApiBase);
+      try {
+        const now = await deps.gitHosts!.get(cfg, token, t.pullRequestNumber);
+        if (now.merged) return finishMerged(t, now.mergeCommit);
+        if (now.closed) return wait(t, "The pull request was closed on the host without merging. Reopen it there, or approve the ticket again to open a new one.");
+        // Only the reviewed commit is merged: anything pushed to the branch since needs a new review.
+        const tried = await deps.gitHosts!.merge(cfg, token, t.pullRequestNumber, { headSha: t.pullRequestHead, title: `Merge "${t.title}" into ${defaultBranch}`, message: `Boss Man ticket ${t.id}.` });
+        return tried.merged ? finishMerged(t, tried.commit) : wait(t, tried.note);
+      } catch (err) {
+        if (err instanceof GitHostError) return wait(t, err.message);
+        throw err;
+      }
+    },
+
+    /** Checks every ticket waiting on a pull request: merged on the host, or mergeable now. */
+    async syncPullRequests() {
+      const waiting = await db.select({ id: tickets.id }).from(tickets).where(and(isNotNull(tickets.pullRequestNumber), eq(tickets.systemState, "review")));
+      let merged = 0;
+      for (const w of waiting) {
+        const r = await this.mergePullRequest(w.id).catch(() => null);
+        if (r?.outcome === "merged") merged++;
+      }
+      return { checked: waiting.length, merged };
     },
 
     templates,

@@ -209,7 +209,8 @@ export class SessionManager {
         return;
       }
       case "workspace.verify":
-      case "workspace.merge": {
+      case "workspace.merge":
+      case "workspace.push": {
         const reply = this.opts.reply ?? (() => {});
         const ws = this.opts.workspaces;
         if (!ws) {
@@ -219,8 +220,10 @@ export class SessionManager {
         const work =
           command.type === "workspace.verify"
             ? ws.verify({ ticketId: command.ticketId }, command.command)
-            : (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets) =>
-                ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets),
+            : (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets): Promise<unknown> =>
+                command.type === "workspace.push"
+                  ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
+                  : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),

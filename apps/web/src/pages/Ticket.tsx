@@ -110,8 +110,23 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             ? `Sent back: ${r.delivered ?? "done"}.`
             : r.outcome === "merged" || r.outcome === "done"
               ? "Approved and merged; the ticket is done."
-              : `Approved, but it couldn't merge yet (${(r.outcome ?? "").replace(/_/g, " ")}); it's gone back to the assignee with what to fix.`,
+              : r.outcome === "pull_request"
+                ? "Approved. The pull request is open; the host hasn't let Boss Man merge it yet (see Review). Boss Man checks again every couple of minutes."
+                : `Approved, but it couldn't merge yet (${(r.outcome ?? "").replace(/_/g, " ")}); it's gone back to the assignee with what to fix.`,
       });
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mergeNow = async () => {
+    setBusy(true);
+    try {
+      const r = await api<{ outcome: string }>(`/api/tickets/${id}/pull-request/merge`, { method: "POST" });
+      setNote({ ok: true, text: r.outcome === "merged" ? "Merged; the ticket is done." : "Still waiting on the host." });
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -223,14 +238,32 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           )}
 
           {t.systemState === "review" && (
-            <Fold title="Review" hint="waiting for you">
+            <Fold title="Review" hint={t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" : "waiting for you"}>
+              {t.pullRequestNumber && t.pullRequestNote && (
+                <div className="banner" role="status" style={{ flexWrap: "wrap" }}>
+                  <span>
+                    Approved, and waiting on{" "}
+                    {t.pullRequestUrl ? (
+                      <a href={t.pullRequestUrl} target="_blank" rel="noreferrer">
+                        pull request #{t.pullRequestNumber}
+                      </a>
+                    ) : (
+                      `pull request #${t.pullRequestNumber}`
+                    )}
+                    . The host says: {t.pullRequestNote}
+                  </span>
+                  <button type="button" className="btn" disabled={busy} onClick={() => void mergeNow()}>
+                    Try merging now
+                  </button>
+                </div>
+              )}
               <div className="field">
                 <label htmlFor="review-summary">Comments for the agent (needed to send it back)</label>
                 <textarea id="review-summary" rows={3} value={summary} onChange={(e) => setSummary(e.target.value)} />
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button type="button" className="btn primary" disabled={busy} onClick={() => void review("approved")}>
-                  {t.repoUrl ? "Approve and merge" : "Approve"}
+                  {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
                 </button>
                 <button type="button" className="btn" disabled={busy || !summary.trim()} onClick={() => void review("changes_requested")}>
                   Request changes
@@ -297,6 +330,21 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dd>
               <a href={`#/board/${t.projectId}`}>{t.project}</a>
             </dd>
+            {t.pullRequestNumber && (
+              <>
+                <dt>Pull request</dt>
+                <dd>
+                  {t.pullRequestUrl ? (
+                    <a href={t.pullRequestUrl} target="_blank" rel="noreferrer">
+                      #{t.pullRequestNumber}
+                    </a>
+                  ) : (
+                    `#${t.pullRequestNumber}`
+                  )}
+                  {t.systemState === "done" && t.mergeCommit ? " · merged" : ""}
+                </dd>
+              </>
+            )}
             {t.branch && (
               <>
                 <dt>Branch</dt>

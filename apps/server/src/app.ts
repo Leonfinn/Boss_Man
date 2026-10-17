@@ -5,12 +5,13 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, asc, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, repoUrlAllowed, riskSummary, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
+import { gitHostService } from "./services/git-hosts.js";
 import { runnersService } from "./services/runners.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -218,7 +219,16 @@ export async function buildApp(opts: AppOptions) {
     now: opts.now,
   });
   const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now });
-  const review = reviewService(db, { runners, runs: runsSvc, work, loops });
+  const gitHosts = gitHostService({ fetch: opts.fetch });
+  const review = reviewService(db, {
+    runners,
+    runs: runsSvc,
+    work,
+    loops,
+    gitHosts,
+    gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
+    notes,
+  });
   review.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
@@ -662,17 +672,30 @@ export async function buildApp(opts: AppOptions) {
             .string()
             .trim()
             .max(500)
-            .refine((u) => /^(https:\/\/|ssh:\/\/|git@|file:\/\/|\/)/.test(u), "Give an https://, ssh://, git@ or local path address.")
+            .refine(repoUrlAllowed, "Give an https://, ssh://, git@ or local path address. Plain http:// works for a LAN address such as http://192.168.68.67:3003/you/repo.git.")
             .refine((u) => !findCredential(u), "The address looks like it contains a credential. Grant a GIT_TOKEN secret to the company instead.")
             .nullable(),
           defaultBranch: z.string().trim().min(1).max(200),
           verifyCommand: z.string().trim().min(1).max(1000).nullable(),
           deepVerifyCommand: z.string().trim().min(1).max(1000).nullable(),
           ticketCostCapUsd: z.number().positive().nullable(),
+          landing: z.enum(["merge", "pull_request"]),
+          gitHost: z.enum(["github", "gitea"]).nullable(),
+          gitApiBase: z
+            .string()
+            .trim()
+            .max(500)
+            .refine((u) => /^https:\/\//.test(u) || (u.startsWith("http://") && repoUrlAllowed(u)), "Give the API's https:// address, or http:// on a LAN address.")
+            .nullable(),
         })
         .partial()
         .parse(req.body);
       const { ticketCostCapUsd, ...fields } = b;
+      // A new repo address finds its host (R59), unless the owner set one with it.
+      if (fields.repoUrl !== undefined && fields.gitHost === undefined) {
+        const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
+        Object.assign(fields, { gitHost: found?.gitHost ?? null, gitApiBase: found?.gitApiBase ?? null });
+      }
       const [p] = await db
         .update(projects)
         .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}) })
@@ -698,13 +721,13 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/tickets/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const [row] = await db
-        .select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, assignee: agents.name })
+        .select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, landing: projects.landing, assignee: agents.name })
         .from(tickets)
         .innerJoin(projects, eq(projects.id, tickets.projectId))
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
-      return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, assignee: row.assignee };
+      return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, assignee: row.assignee };
     });
 
     // The runs on a ticket, oldest first, for its activity feed (R76).
@@ -1165,6 +1188,8 @@ export async function buildApp(opts: AppOptions) {
         .parse(req.body);
       return review.submit(id, { ...b, reviewer: "the owner" }).catch(reviewErrors(reply));
     });
+    // Try the ticket's pull request again now, rather than waiting for the sync (R59).
+    owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { action } = z.object({ action: z.enum(["commit", "pr"]) }).parse(req.body);
