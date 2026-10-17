@@ -347,3 +347,4 @@ blockquote.selected { background: #fff6d6; border-left-color: #e2b13c; display: 
 .portal-card { display: flex; flex-direction: column; gap: 10px; }
 .portal-card h3 { font-size: 17px; font-weight: 600; }
 a.btn { display: inline-flex; align-items: center; text-decoration: none; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }

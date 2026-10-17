@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import { api, type Company, type FundingSource, type Project } from "../api";
+import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
@@ -60,7 +61,8 @@ function Runner({ company }: { company: Company }) {
       setToken((await api<{ token: string }>(`/api/companies/${company.id}/runner`, { method: "POST" })).token);
       status.reload();
     });
-  const file = `secrets/runner-${company.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}.token`;
+  // The compose file's first runner reads this file; R55's launcher replaces the copying.
+  const file = "secrets/runner-app-co.token";
   return (
     <Section id="runner-h" title="Runner">
       {s && !s.registered && <p>This company has no runner yet. A runner is the container its agents work in; it connects out to this server, so it needs no open ports.</p>}
@@ -78,12 +80,18 @@ function Runner({ company }: { company: Company }) {
             <strong>Copy this token now; it isn't shown again.</strong> On the server, save it as <code className="mono">{file}</code> next to <code className="mono">docker-compose.yml</code>, readable only by uid 1000, then start the runner.
           </p>
           <pre className="mono codebox">{token}</pre>
-          <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={() => void navigator.clipboard?.writeText(token)}>
+          <button type="button" className="btn" style={{ alignSelf: "flex-start" }} onClick={() => void act.run(async () => copyMessage(await copyText(token), "Token"))}>
             Copy token
           </button>
         </div>
       ) : (
-        <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={act.busy} onClick={() => void issue()}>
+        <button
+          type="button"
+          className="btn primary"
+          style={{ alignSelf: "flex-start" }}
+          disabled={act.busy}
+          onClick={() => (!s?.registered || window.confirm("Issue a new token? The current one stops working at once, and the runner stays offline until you save the new token and restart it.")) && void issue()}
+        >
           {s?.registered ? "Issue a new runner token" : "Register a runner"}
         </button>
       )}
@@ -102,6 +110,24 @@ function Credentials({ company }: { company: Company }) {
   const [existing, setExisting] = useState("");
   const act = useAction();
   const c = CREDENTIALS[choice]!;
+  const describe = (r: { problems?: string[]; live: { ok: boolean; message: string } | null }) => {
+    const problems = r.problems?.length ? ` ${r.problems.join(" ")}` : "";
+    if (r.live) {
+      if (!r.live.ok) throw new Error(`${r.live.message}${problems}`);
+      return `${r.live.message}${problems}`;
+    }
+    if (problems) throw new Error(problems.trim());
+    return c.kind === "claude_oauth_token" ? "The format looks right. A setup-token can only be fully checked by Claude Code itself, which a later check will do through the runner." : "The format looks right. Boss Man can't ask a provider about this kind of value.";
+  };
+  const check = () =>
+    void act.run(async () => describe(await api<{ problems: string[]; live: { ok: boolean; message: string } | null }>("/api/secrets/check", { method: "POST", body: { kind: c.kind, value } })));
+  const checkSaved = (g: Grant) =>
+    void act.run(async () => {
+      const r = await api<{ live: { ok: boolean; message: string } | null }>(`/api/secrets/${g.secretId}/check`, { method: "POST" });
+      if (!r.live) return `${g.secretName}: Boss Man can't ask a provider about this kind of value.`;
+      if (!r.live.ok) throw new Error(`${g.secretName}: ${r.live.message}`);
+      return `${g.secretName}: ${r.live.message}`;
+    });
 
   const add = (e: FormEvent) => {
     e.preventDefault();
@@ -137,6 +163,9 @@ function Credentials({ company }: { company: Company }) {
                 <th scope="col">Secret</th>
                 <th scope="col">Ends in</th>
                 <th scope="col">Used for</th>
+                <th scope="col">
+                  <span className="sr-only">Check</span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -146,6 +175,11 @@ function Credentials({ company }: { company: Company }) {
                   <td>{g.secretName}</td>
                   <td className="mono muted">{g.hint ?? ""}</td>
                   <td>{g.deployTargetId ? "One deploy target" : "Every run"}</td>
+                  <td>
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => checkSaved(g)}>
+                      Check
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -203,9 +237,16 @@ function Credentials({ company }: { company: Company }) {
           <label htmlFor="cred-env">Variable name</label>
           <input id="cred-env" className="mono" required pattern="[A-Z_][A-Z0-9_]*" value={env} onChange={(e) => setEnv(e.target.value.toUpperCase())} />
         </div>
-        <button className="btn primary" type="submit" disabled={act.busy}>
-          Save
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {!existing && (
+            <button className="btn" type="button" disabled={act.busy || !value.trim()} onClick={check}>
+              Check
+            </button>
+          )}
+          <button className="btn primary" type="submit" disabled={act.busy}>
+            Save
+          </button>
+        </div>
       </form>
       <p className="muted" style={{ fontSize: 13 }}>
         {c.help.split("`").map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part))}

@@ -67,6 +67,22 @@ describe("secrets store", () => {
     expect(ok.json().verified).toEqual({ ok: true, message: "ok" });
   });
 
+  it("checks a value without saving it, and checks a saved one again (R58)", async () => {
+    const bad = (await t.app.inject({ method: "POST", url: "/api/secrets/check", headers: { cookie }, payload: { kind: "anthropic_api_key", value: " sk-ant-api03-bad\n" } })).json();
+    expect(bad.live).toEqual({ ok: false, message: "The provider rejected the key (HTTP 401)." });
+    const good = (await t.app.inject({ method: "POST", url: "/api/secrets/check", headers: { cookie }, payload: { kind: "anthropic_api_key", value: "sk-ant-api03-good" } })).json();
+    expect(good).toEqual({ problems: [], live: { ok: true, message: "ok" } });
+    // A kind the provider can't be asked about only gets its format checked.
+    const token = (await t.app.inject({ method: "POST", url: "/api/secrets/check", headers: { cookie }, payload: { kind: "claude_oauth_token", value: "sk-ant-api03-wrongkind" } })).json();
+    expect(token.live).toBeNull();
+    expect(token.problems.length).toBeGreaterThan(0);
+    expect((await t.app.inject({ method: "GET", url: "/api/secrets", headers: { cookie } })).json()).toEqual([]);
+
+    const saved = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name: "API", kind: "anthropic_api_key", value: "sk-ant-api03-good" } })).json();
+    expect((await t.app.inject({ method: "POST", url: `/api/secrets/${saved.secret.id}/check`, headers: { cookie } })).json()).toEqual({ live: { ok: true, message: "ok" } });
+    expect((await t.app.inject({ method: "POST", url: `/api/secrets/${crypto.randomUUID()}/check`, headers: { cookie } })).statusCode).toBe(404);
+  });
+
   it("grants one secret to several companies, logs each use, and rotates once for all", async () => {
     const appCo = await company("App Co");
     const homelab = await company("Homelab Co");

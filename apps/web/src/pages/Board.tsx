@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api, RISKS, type Board as BoardData, type Company, type Project, type Risk } from "../api";
 import { art } from "../brand";
+import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
 
@@ -51,51 +52,124 @@ function QuickAdd({ label, button, onAdd }: { label: string; button: string; onA
   );
 }
 
-/** New ticket: a title, how risky it is, and whether it should be planned first (R40, R48). */
-function NewTicket({ onAdd }: { onAdd: (t: { title: string; risk: Risk | null; planFirst: boolean }) => Promise<unknown> }) {
-  const [title, setTitle] = useState("");
-  const [risk, setRisk] = useState<Risk | "">("");
-  const [planFirst, setPlanFirst] = useState(false);
+type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean };
+
+/** New ticket (R63): a button that opens a card with everything a ticket needs to start well. */
+function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers: RiskTiers; onAdd: (t: NewTicketInput) => Promise<unknown> }) {
+  const blank = { title: "", body: "", risk: "medium" as Risk, planFirst: null as boolean | null, assignee: "" };
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!title.trim()) return;
+  const [busy, setBusy] = useState(false);
+  // Plan first follows the risk level until the owner ticks or unticks it.
+  const planFirst = form.planFirst ?? (form.risk === "high" || form.risk === "critical");
+  const close = () => {
+    setForm(blank);
+    setError(null);
+    setOpen(false);
+  };
+  const submit = async (e?: FormEvent) => {
+    e?.preventDefault();
+    if (!form.title.trim() || busy) return;
+    setBusy(true);
     try {
-      await onAdd({ title: title.trim(), risk: risk || null, planFirst });
-      setTitle("");
-      setRisk("");
-      setPlanFirst(false);
-      setError(null);
+      await onAdd({
+        title: form.title.trim(),
+        body: form.body.trim() || null,
+        risk: form.risk === "medium" ? null : form.risk,
+        planFirst,
+        assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
+        assignedToOwner: form.assignee === "owner",
+      });
+      close();
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
+  if (!open) {
+    return (
+      <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} onClick={() => setOpen(true)}>
+        New ticket
+      </button>
+    );
+  }
+  const agentChosen = !!form.assignee && form.assignee !== "owner";
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
-      <div className="field" style={{ flex: "1 1 260px" }}>
-        <label htmlFor="new-ticket">New ticket</label>
-        <input id="new-ticket" value={title} onChange={(e) => setTitle(e.target.value)} />
+    <form
+      className="card"
+      aria-label="New ticket"
+      onSubmit={submit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
+        if (e.key === "Escape") close();
+      }}
+      style={{ display: "flex", flexDirection: "column", gap: 12 }}
+    >
+      <div className="field">
+        <label htmlFor="nt-title">Title</label>
+        <input id="nt-title" autoFocus required maxLength={200} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
       </div>
       <div className="field">
-        <label htmlFor="new-risk">Risk</label>
-        <select id="new-risk" value={risk} onChange={(e) => setRisk(e.target.value as Risk | "")}>
-          <option value="">Medium (default)</option>
-          {RISKS.filter((r) => r !== "medium").map((r) => (
-            <option key={r} value={r}>
-              {r[0]!.toUpperCase() + r.slice(1)}
-            </option>
-          ))}
-        </select>
+        <label htmlFor="nt-body">Description</label>
+        <textarea
+          id="nt-body"
+          rows={6}
+          maxLength={20_000}
+          placeholder="What should be done, and what counts as finished."
+          value={form.body}
+          onChange={(e) => setForm({ ...form, body: e.target.value })}
+          style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+        />
       </div>
-      <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
-        <input type="checkbox" checked={planFirst} onChange={(e) => setPlanFirst(e.target.checked)} />
-        Plan first
-      </label>
-      <button className="btn primary" type="submit">
-        Add to backlog
-      </button>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
+        <div className="field">
+          <label htmlFor="nt-assignee">Assign to</label>
+          <select id="nt-assignee" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })}>
+            <option value="">Nobody yet</option>
+            <option value="owner">You</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field" style={{ flex: "1 1 280px" }}>
+          <label htmlFor="nt-risk">Risk</label>
+          <select id="nt-risk" value={form.risk} onChange={(e) => setForm({ ...form, risk: e.target.value as Risk })} style={{ maxWidth: 200 }}>
+            {RISKS.map((r) => (
+              <option key={r} value={r}>
+                {r[0]!.toUpperCase() + r.slice(1)}
+              </option>
+            ))}
+          </select>
+          <RiskHelp tiers={tiers} current={form.risk} />
+        </div>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14, marginTop: 22 }}>
+          <input type="checkbox" checked={planFirst} onChange={(e) => setForm({ ...form, planFirst: e.target.checked })} />
+          Plan first
+        </label>
+      </div>
+      {agentChosen && (
+        <p role="note" style={{ fontSize: 14, margin: 0 }}>
+          <strong>Starts straight away:</strong> {agents.find((a) => a.id === form.assignee)?.name ?? "The agent"} begins as soon as you add the ticket.
+        </p>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <button className="btn primary" type="submit" disabled={busy || !form.title.trim()}>
+          {agentChosen ? "Add and start" : "Add to backlog"}
+        </button>
+        <button className="btn" type="button" onClick={close}>
+          Cancel
+        </button>
+        <span className="muted" style={{ fontSize: 13 }}>
+          Ctrl+Enter (Cmd+Enter on a Mac) adds it. The feature and milestone are set on the ticket page.
+        </span>
+      </div>
       {error && (
-        <p className="error" role="alert" style={{ flexBasis: "100%" }}>
+        <p className="error" role="alert">
           {error}
         </p>
       )}
@@ -112,6 +186,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
   const current = projects.data?.find((p) => p.id === projectId) ?? projects.data?.[0];
   const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
+  const tiers = useRiskTiers();
 
   if (companies.length === 0) {
     return (
@@ -169,6 +244,8 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
       </header>
       {current && (
         <NewTicket
+          agents={company?.agents ?? []}
+          tiers={tiers}
           onAdd={async (t) => {
             await api(`/api/projects/${current.id}/tickets`, { method: "POST", body: t });
             board.reload();
@@ -209,7 +286,11 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
                       </h3>
                       {(t.risk === "high" || t.risk === "critical" || (t.planFirst && !t.planApprovedAt)) && (
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {(t.risk === "high" || t.risk === "critical") && <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`}>{t.risk} risk</span>}
+                          {(t.risk === "high" || t.risk === "critical") && (
+                            <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
+                              {t.risk} risk
+                            </span>
+                          )}
                           {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
                         </div>
                       )}

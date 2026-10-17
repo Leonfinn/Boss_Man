@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api, FEATURE_STATUS_LABEL, IMPORTANCE_LABEL, IMPORTANCES, type Company, type Feature, type FeedbackSettingsView, type Importance, type NoteDetail, type NoteSummary, type ScoredFeatures } from "../api";
+import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { STATUS_TONE } from "./Features";
@@ -323,7 +324,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
       {d.portalEnabled && link && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input className="search mono" readOnly aria-label="Portal link" value={link} onFocus={(e) => e.currentTarget.select()} style={{ fontSize: 12 }} />
-          <button type="button" className="btn small" onClick={() => void navigator.clipboard?.writeText(link).then(() => setNote({ ok: true, text: "Link copied." }))}>
+          <button type="button" className="btn small" onClick={() => void copyText(link).then((ok) => setNote({ ok, text: copyMessage(ok, "Link") }))}>
             Copy
           </button>
           <a className="btn small" href={link} target="_blank" rel="noopener noreferrer">
