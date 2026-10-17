@@ -795,3 +795,65 @@ export const insights = pgTable(
   },
   (t) => [uniqueIndex("insights_note_feature").on(t.noteId, t.featureId), index("insights_feature").on(t.featureId)],
 );
+
+// ---------- Wiki and what tickets produce (R69) ----------
+
+/** The company's wiki: Markdown pages the owner and agents write and keep up to date. */
+export const wikiPages = pgTable(
+  "wiki_pages",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** The page's address: its folders and name, lower-case and hyphenated ("research/agent-landscape"); unique within the company. */
+    slug: text("slug").notNull(),
+    /** The folders it sits in, as written ("Research/Competitors"); empty at the top level. */
+    folder: text("folder").notNull().default(""),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    /** The ticket the page was first written for, if any. */
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    /** Who last changed it: an agent, or the owner when null. */
+    updatedByAgentId: uuid("updated_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("wiki_pages_company_slug").on(t.companyId, t.slug)],
+);
+
+/** Every saved version of a page, newest last, so a change can be seen and undone. */
+export const wikiRevisions = pgTable(
+  "wiki_revisions",
+  {
+    id: id(),
+    pageId: uuid("page_id").notNull().references(() => wikiPages.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("wiki_revisions_page_time").on(t.pageId, t.createdAt)],
+);
+
+export const artifactKind = pgEnum("artifact_kind", ["wiki_page", "repo_file", "url"]);
+
+/** What a ticket produced: a wiki page, a file in the repo, or a link, shown on the ticket. */
+export const ticketArtifacts = pgTable(
+  "ticket_artifacts",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    kind: artifactKind("kind").notNull(),
+    title: text("title").notNull(),
+    wikiPageId: uuid("wiki_page_id").references(() => wikiPages.id, { onDelete: "cascade" }),
+    /** repo_file: the path in the repo, and the branch or commit it's on. */
+    path: text("path"),
+    ref: text("ref"),
+    url: text("url"),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("ticket_artifacts_ticket").on(t.ticketId), uniqueIndex("ticket_artifacts_one_page").on(t.ticketId, t.wikiPageId)],
+);

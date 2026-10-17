@@ -21,7 +21,7 @@ import { when } from "./Runs";
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
 
-function CompanySelect({ companies, value, onChange, id }: { companies: Company[]; value: string | undefined; onChange: (id: string) => void; id: string }) {
+export function CompanySelect({ companies, value, onChange, id }: { companies: Company[]; value: string | undefined; onChange: (id: string) => void; id: string }) {
   if (companies.length < 2) return null;
   return (
     <div className="field">

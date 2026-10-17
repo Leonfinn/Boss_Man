@@ -27,6 +27,7 @@ import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, type PortalLimits } from "./portal.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
+import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
@@ -167,6 +168,7 @@ export async function buildApp(opts: AppOptions) {
   const runsSvc = runsService(db, { runners });
   runsSvc.setWakeHook((w) => scheduler.wake(w));
   const ticketChat = ticketChatService(db, { runs: runsSvc, wake: (w) => scheduler.wake(w) });
+  const wiki = wikiService(db);
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
@@ -234,7 +236,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -714,6 +716,47 @@ export async function buildApp(opts: AppOptions) {
         .catch(ticketChatErrors(reply));
     });
 
+    // The company wiki, and what each ticket produced (R69).
+    const wikiErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof WikiError) return reply.code(err.status).send({ error: "wiki", message: err.message });
+      throw err;
+    };
+    // A page's address can hold folders ("research/agent-landscape"), so it's the rest of the path.
+    const SlugParams = z.object({ id: Uuid, "*": z.string().min(1).max(500) }).transform((p) => ({ id: p.id, slug: p["*"] }));
+    const PageBody = z.object({ title: z.string().trim().min(1).max(200), body: z.string().max(MAX_BODY), folder: z.string().max(400).optional() });
+    owner.get("/api/companies/:id/wiki", async (req) => wiki.list(IdParam.parse(req.params).id, z.object({ q: z.string().max(200).optional() }).parse(req.query).q));
+    owner.post("/api/companies/:id/wiki", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = PageBody.parse(req.body);
+      try {
+        const slug = pageSlug(cleanFolder(b.folder ?? ""), b.title);
+        const [taken] = (await wiki.list(id)).filter((p) => p.slug === slug);
+        if (taken) return reply.code(409).send({ error: "wiki", message: `There's already a page called "${taken.title}" there. Open it to change it, or pick another title.` });
+        const r = await wiki.write(id, { ...b, slug, folder: b.folder ?? "", agentId: null, runId: null });
+        return reply.code(201).send(r.page);
+      } catch (err) {
+        return wikiErrors(reply)(err);
+      }
+    });
+    owner.get("/api/companies/:id/wiki/*", async (req, reply) => {
+      const { id, slug } = SlugParams.parse(req.params);
+      return wiki.get(id, slug).catch(wikiErrors(reply));
+    });
+    owner.put("/api/companies/:id/wiki/*", async (req, reply) => {
+      const { id, slug } = SlugParams.parse(req.params);
+      return wiki.write(id, { ...PageBody.parse(req.body), slug, agentId: null, runId: null }).then((r) => r.page, wikiErrors(reply));
+    });
+    owner.delete("/api/companies/:id/wiki/*", async (req, reply) => {
+      const { id, slug } = SlugParams.parse(req.params);
+      return wiki.remove(id, slug).then(() => reply.code(204).send(), wikiErrors(reply));
+    });
+    owner.get("/api/companies/:id/wiki-revisions/:rev", async (req, reply) => {
+      const { id, rev } = z.object({ id: Uuid, rev: Uuid }).parse(req.params);
+      return wiki.revision(id, rev).catch(wikiErrors(reply));
+    });
+    owner.get("/api/tickets/:id/artifacts", async (req) => wiki.artifacts(IdParam.parse(req.params).id));
+    owner.delete("/api/artifacts/:id", async (req, reply) => wiki.removeArtifact(IdParam.parse(req.params).id).then(() => reply.code(204).send(), wikiErrors(reply)));
+
     owner.patch("/api/tickets/:id", async (req) => {
       const { id } = IdParam.parse(req.params);
       const { costCapUsd, ...fields } = TicketFields.extend({ costCapUsd: z.number().positive().nullable() }).partial().parse(req.body);
@@ -1063,5 +1106,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki };
 }

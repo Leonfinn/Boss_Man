@@ -1,0 +1,311 @@
+// The company wiki (R69): Markdown pages the owner and agents share. Pages written for a
+// ticket link back to it, and every save is kept, so an older version can be put back.
+import { useEffect, useState, type FormEvent } from "react";
+import { api, type Company } from "../api";
+import { Markdown } from "../components/Markdown";
+import { usePoll } from "../hooks";
+import { CompanySelect } from "./Features";
+import { when } from "./Runs";
+
+type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
+type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null };
+type PageDetail = { id: string; slug: string; folder: string; title: string; body: string; updatedAt: string; updatedBy: string | null; revisions: Revision[]; tickets: Array<{ id: string; title: string }> };
+type OldVersion = { id: string; title: string; body: string; createdAt: string; agent: string | null };
+
+type Draft = { title: string; body: string; folder: string };
+
+function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Draft; folders: string[]; onSave: (v: Draft) => Promise<void>; onCancel: () => void; saveLabel: string }) {
+  const [title, setTitle] = useState(initial.title);
+  const [folder, setFolder] = useState(initial.folder);
+  const [body, setBody] = useState(initial.body);
+  const [preview, setPreview] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) return;
+    onSave({ title: title.trim(), body, folder }).catch((err: Error) => setError(err.message));
+  };
+  return (
+    <form className="card wiki-editor" onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div className="field">
+        <label htmlFor="wiki-title">Title</label>
+        <input id="wiki-title" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
+      </div>
+      <div className="field">
+        <label htmlFor="wiki-folder">Folder</label>
+        <input id="wiki-folder" value={folder} maxLength={400} list="wiki-folders" placeholder="Top level. Use / for folders inside folders, e.g. Research/Competitors" onChange={(e) => setFolder(e.target.value)} />
+        <datalist id="wiki-folders">
+          {folders.map((f) => (
+            <option key={f} value={f} />
+          ))}
+        </datalist>
+      </div>
+      <div style={{ display: "flex", gap: 8 }} role="group" aria-label="Editor view">
+        <button type="button" className={`btn${preview ? "" : " primary"}`} aria-pressed={!preview} onClick={() => setPreview(false)}>
+          Write
+        </button>
+        <button type="button" className={`btn${preview ? " primary" : ""}`} aria-pressed={preview} onClick={() => setPreview(true)}>
+          Preview
+        </button>
+      </div>
+      {preview ? (
+        <Markdown text={body || "_Nothing yet._"} />
+      ) : (
+        <>
+          <label htmlFor="wiki-body" className="sr-only">
+            Page text, in Markdown
+          </label>
+          <textarea id="wiki-body" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Write in Markdown: # headings, - lists, | tables |, **bold**, [links](#/tickets/…)." />
+        </>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="submit" className="btn primary" disabled={!title.trim()}>
+          {saveLabel}
+        </button>
+        <button type="button" className="btn" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+function PageView({ companyId, slug, folders, go, onChanged, onNewHere }: { companyId: string; slug: string; folders: string[]; go: (to: string) => void; onChanged: () => void; onNewHere: (folder: string) => void }) {
+  const page = usePoll((signal) => api<PageDetail>(`/api/companies/${companyId}/wiki/${slug}`, { signal }), 30_000, `${companyId}/${slug}`);
+  const [editing, setEditing] = useState(false);
+  const [history, setHistory] = useState(false);
+  const [old, setOld] = useState<OldVersion | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => (setEditing(false), setHistory(false), setOld(null)), [slug]);
+  const p = page.data;
+
+  const save = async (v: Draft) => {
+    const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: v });
+    setEditing(false);
+    setOld(null);
+    onChanged();
+    // Moving it to another folder changes its address.
+    if (saved.slug !== slug) go(`wiki/${companyId}/${saved.slug}`);
+    else page.reload();
+  };
+  const remove = async () => {
+    if (!p || !window.confirm(`Delete "${p.title}" and its history? This can't be undone.`)) return;
+    try {
+      await api(`/api/companies/${companyId}/wiki/${slug}`, { method: "DELETE" });
+      onChanged();
+      go(`wiki/${companyId}`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  const showOld = async (id: string) => setOld(await api<OldVersion>(`/api/companies/${companyId}/wiki-revisions/${id}`));
+
+  if (page.error) return <p className="error" role="alert">{page.error.status === 404 ? "There's no such page. It may have been deleted or renamed." : page.error.message}</p>;
+  if (!p) return null;
+  if (editing) return <Editor initial={{ title: p.title, body: p.body, folder: p.folder }} folders={folders} onSave={save} onCancel={() => setEditing(false)} saveLabel="Save page" />;
+  return (
+    <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <header style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-start", justifyContent: "space-between" }}>
+        <div>
+          {p.folder && (
+            <p className="label" aria-label="Folder">
+              {p.folder.split("/").join(" / ")}
+            </p>
+          )}
+          <h2 style={{ fontSize: 22, fontWeight: 600 }}>{p.title}</h2>
+          <p className="muted" style={{ fontSize: 13 }}>
+            Changed {when(p.updatedAt)} by {p.updatedBy ?? "you"}
+            {p.tickets.length > 0 && (
+              <>
+                {" · for "}
+                {p.tickets.map((t, i) => (
+                  <span key={t.id}>
+                    {i > 0 && ", "}
+                    <a href={`#/tickets/${t.id}`}>{t.title}</a>
+                  </span>
+                ))}
+              </>
+            )}
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" className="btn" onClick={() => setEditing(true)}>
+            Edit
+          </button>
+          <button type="button" className="btn" onClick={() => onNewHere(p.folder)}>
+            New page here
+          </button>
+          <button type="button" className="btn" aria-expanded={history} onClick={() => setHistory((h) => !h)}>
+            History ({p.revisions.length})
+          </button>
+          <button type="button" className="btn" onClick={() => void remove()}>
+            Delete
+          </button>
+        </div>
+      </header>
+      {history && (
+        <section aria-label="History" style={{ borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+          <ul style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {p.revisions.map((r, i) => (
+              <li key={r.id} style={{ fontSize: 14 }}>
+                <button type="button" className="link" onClick={() => void showOld(r.id)}>
+                  {when(r.createdAt)}
+                </button>{" "}
+                by {r.agent ?? "you"}
+                {i === 0 && " (current)"}
+                {r.runId && (
+                  <>
+                    {" · "}
+                    <a href={`#/runs/${r.runId}`}>run</a>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {old && (
+        <div className="banner" role="status" style={{ flexWrap: "wrap" }}>
+          <span>
+            You're looking at the version from {when(old.createdAt)} by {old.agent ?? "you"}.
+          </span>
+          <button type="button" className="btn primary" onClick={() => void save({ title: old.title, body: old.body, folder: p.folder }).catch((err: Error) => setError(err.message))}>
+            Put this version back
+          </button>
+          <button type="button" className="btn" onClick={() => setOld(null)}>
+            Back to the current one
+          </button>
+        </div>
+      )}
+      <Markdown text={(old ?? p).body} />
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </article>
+  );
+}
+
+type Folder = { key: string; name: string; path: string; folders: Folder[]; pages: PageRow[] };
+
+/** Pages arranged by folder; folders that differ only in case are one folder. */
+function tree(pages: PageRow[]): Folder {
+  const root: Folder = { key: "", name: "", path: "", folders: [], pages: [] };
+  for (const p of pages) {
+    let at = root;
+    for (const part of p.folder ? p.folder.split("/") : []) {
+      const key = `${at.key}/${part.toLowerCase()}`;
+      let next = at.folders.find((f) => f.key === key);
+      if (!next) at.folders.push((next = { key, name: part, path: at.path ? `${at.path}/${part}` : part, folders: [], pages: [] }));
+      at = next;
+    }
+    at.pages.push(p);
+  }
+  const sort = (f: Folder) => {
+    f.folders.sort((a, b) => a.name.localeCompare(b.name));
+    f.pages.sort((a, b) => a.title.localeCompare(b.title));
+    f.folders.forEach(sort);
+  };
+  sort(root);
+  return root;
+}
+
+const countPages = (f: Folder): number => f.pages.length + f.folders.reduce((n, x) => n + countPages(x), 0);
+
+function TreeList({ folder, companyId, current, currentFolder, open, onPick }: { folder: Folder; companyId: string; current: string | undefined; currentFolder: string; open: boolean; onPick: () => void }) {
+  return (
+    <ul>
+      {folder.folders.map((f) => (
+        <li key={f.key}>
+          <details open={open || `${currentFolder}/`.startsWith(`${f.key.slice(1)}/`) || undefined}>
+            <summary>
+              {f.name} <span className="muted">({countPages(f)})</span>
+            </summary>
+            <TreeList folder={f} companyId={companyId} current={current} currentFolder={currentFolder} open={open} onPick={onPick} />
+          </details>
+        </li>
+      ))}
+      {folder.pages.map((p) => (
+        <li key={p.id}>
+          <a href={`#/wiki/${companyId}/${p.slug}`} aria-current={p.slug === current ? "page" : undefined} onClick={onPick}>
+            {p.title}
+            <small>
+              {when(p.updatedAt)} · {p.updatedBy ?? "you"}
+            </small>
+          </a>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function Wiki({ companies, companyId, slug, go }: { companies: Company[]; companyId: string | undefined; slug: string | undefined; go: (to: string) => void }) {
+  const company = companies.find((c) => c.id === companyId) ?? companies[0];
+  const [q, setQ] = useState("");
+  // The folder a new page starts in, or null when no page is being created.
+  const [creating, setCreating] = useState<string | null>(null);
+  const list = usePoll(
+    (signal) => (company ? api<PageRow[]>(`/api/companies/${company.id}/wiki${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`, { signal }) : Promise.resolve([])),
+    30_000,
+    `${company?.id ?? "none"}/${q}`,
+  );
+  const pages = list.data ?? [];
+  const folders = [...new Set(pages.map((p) => p.folder).filter(Boolean))].sort();
+  const create = async (v: Draft) => {
+    const p = await api<{ slug: string }>(`/api/companies/${company!.id}/wiki`, { method: "POST", body: v });
+    setCreating(null);
+    list.reload();
+    go(`wiki/${company!.id}/${p.slug}`);
+  };
+
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <h1>Wiki</h1>
+          <p className="sub">The company's shared pages: research, specs, how-tos. Agents write here too, and a page written for a ticket shows on that ticket.</p>
+        </div>
+        <CompanySelect companies={companies} id="wiki-company" value={company?.id} onChange={(id) => go(`wiki/${id}`)} />
+      </header>
+      {!company ? (
+        <p>Create a company on the Board first.</p>
+      ) : (
+        <div className="wiki">
+          <nav className="card wiki-list" aria-label="Pages">
+            <button type="button" className="btn primary" onClick={() => setCreating("")}>
+              New page
+            </button>
+            <div className="field">
+              <label htmlFor="wiki-q">Search</label>
+              <input id="wiki-q" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Titles and text" />
+            </div>
+            {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "No pages yet."}</p>}
+            <TreeList
+              folder={tree(pages)}
+              companyId={company.id}
+              current={creating === null ? slug : undefined}
+              currentFolder={(creating ?? pages.find((p) => p.slug === slug)?.folder ?? "").toLowerCase()}
+              open={!!q.trim()}
+              onPick={() => setCreating(null)}
+            />
+          </nav>
+          <div>
+            {creating !== null ? (
+              <Editor key={creating} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
+            ) : slug ? (
+              <PageView companyId={company.id} slug={slug} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
+            ) : (
+              <p className="muted card">{pages.length ? "Pick a page on the left." : "Start a page with New page, or ask an agent to write one."}</p>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
