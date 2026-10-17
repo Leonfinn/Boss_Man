@@ -100,6 +100,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
   /** Asks for the ticket's changes against its base (R39). Answered with a reply, not an event. */
   z.object({ type: z.literal("workspace.diff"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, range: z.enum(["base", "last_turn"]).optional() }),
+  /** Reads one file of a ticket's work: its worktree if it has one here, else its branch (R77). */
+  z.object({ type: z.literal("workspace.file"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** Runs the ticket's check in its worktree (R47). */
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
   /** Merges the ticket's branch into a named target (R46). */

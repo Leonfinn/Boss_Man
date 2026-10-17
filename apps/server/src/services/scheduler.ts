@@ -118,7 +118,7 @@ export function schedulerService(
       "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
       "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
-      "- When finished work produced a document, make sure it's in the wiki, linked to its ticket, and linked from related pages. Write a short summary page if a ticket produced something useful but no page.",
+      "- When finished work produced a document, make sure it's in the wiki, linked to its ticket, and linked from related pages. Read the ticket with tickets read, and a document that's only in the repo with tickets file (it reads the ticket's branch even if it was never merged). Copy it into the wiki with the ticket's id. Write a short summary page if a ticket produced something useful but no page.",
       "- Don't change what a page says is true unless another page or a ticket shows it's out of date; then update it and say what changed at the bottom.",
       "- Don't create tickets or change code; when something needs doing, tell the owner with notify_owner and a link.",
       "",
@@ -151,6 +151,7 @@ export function schedulerService(
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
+      "Look things up before saying you can't: tickets finds and reads any ticket in your company (what it produced, and files from its branch), and wiki reads the company's pages. If you can resolve something with your tools, do it rather than leaving a follow-up note.",
       "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished; raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
       "Ending your turn does not move the ticket.",
       UNTRUSTED_NOTE,

@@ -77,6 +77,19 @@ export function reviewService(
       }
     },
 
+    /** One file of a ticket's work, from the runner that holds its repo (R77). */
+    async readFile(ticketId: string, file: string, companyId?: string): Promise<{ text: string; truncated: boolean; from: "worktree" | "branch" }> {
+      const { t, repoUrl } = await ticketWithRepo(ticketId, companyId);
+      if (!repoUrl) throw new ReviewError(422, "That ticket's project has no git repo.");
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+      if (!runner) throw new ReviewError(409, "The company has no runner.");
+      try {
+        return await deps.runners.request(runner.id, (requestId) => ({ type: "workspace.file", requestId, projectId: t.projectId, ticketId, path: file }));
+      } catch (err) {
+        throw new ReviewError(409, (err as Error).message);
+      }
+    },
+
     /**
      * Records a review. Changes requested go to the agent as one message and move the ticket
      * back to in progress; approval finishes it.

@@ -4,7 +4,7 @@
 // to use each tool so Claude Code's tool search finds them.
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, asc, eq, gt, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -23,6 +23,7 @@ import { WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { WikiError, type wikiService } from "./services/wiki.js";
+import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
@@ -156,79 +157,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  server.registerTool(
-    "skills",
-    {
-      description:
-        "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; the owner is told. Skills are added to the library by the owner.",
-      inputSchema: { action: z.enum(["list", "give", "take"]), skill: z.string().max(64).optional(), agent: z.string().max(80).optional() },
-    },
-    async ({ action, skill, agent }) => {
-      if (action === "list") return text(JSON.stringify((await skills.list(scope.companyId)).map((s) => ({ name: s.name, description: s.description, agents: s.agents.map((a) => a.name) }))));
-      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-      if (me?.role !== "ceo") return fail("Only your company's CEO can give or take skills.");
-      if (!skill || !agent) return fail("Give the skill's name and the agent's name.");
-      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`));
-      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
-      try {
-        if (action === "give") await skills.give(scope.companyId, skill, who.id, scope.agentId);
-        else await skills.take(scope.companyId, skill, who.id);
-      } catch (err) {
-        if (err instanceof SkillError) return fail(err.message);
-        throw err;
-      }
-      await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title: action === "give" ? `The CEO gave ${who.name} the ${skill} skill` : `The CEO took the ${skill} skill from ${who.name}`, body: null, link: "#/skills" });
-      return text(action === "give" ? `${who.name} has the ${skill} skill from their next run.` : `${who.name} no longer has the ${skill} skill.`);
-    },
-  );
-
-  server.registerTool(
-    "wiki",
-    {
-      description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; gives each page's slug and folder), read (slug), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. Writing to an existing slug updates it; older versions are kept.",
-      inputSchema: {
-        action: z.enum(["list", "read", "write", "attach"]),
-        q: z.string().max(200).optional(),
-        slug: z.string().max(500).optional(),
-        folder: z.string().max(400).optional(),
-        title: z.string().max(200).optional(),
-        body: z.string().max(200_000).optional(),
-        ticketId: z.string().uuid().optional(),
-        path: z.string().max(500).optional(),
-        ref: z.string().max(200).optional(),
-        url: z.string().max(2000).optional(),
-      },
-    },
-    async (input) => {
-      const by = { agentId: scope.agentId, runId: scope.runId };
-      try {
-        switch (input.action) {
-          case "list":
-            return text(JSON.stringify((await wiki.list(scope.companyId, input.q)).map((p) => ({ slug: p.slug, folder: p.folder, title: p.title, updatedAt: p.updatedAt }))));
-          case "read": {
-            if (!input.slug) return fail("Give the page's slug.");
-            const p = await wiki.get(scope.companyId, input.slug);
-            return text(`# ${p.title}\n\n${p.body}`);
-          }
-          case "write": {
-            if (!input.title || input.body === undefined) return fail("Give a title and a body.");
-            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
-            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
-            return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
-          }
-          case "attach": {
-            if (!input.ticketId) return fail("Give the ticketId it belongs to.");
-            await wiki.attach(scope.companyId, { ticketId: input.ticketId, title: input.title ?? "", path: input.path ?? null, ref: input.ref ?? null, url: input.url ?? null, ...by });
-            return text("Linked to the ticket.");
-          }
-        }
-      } catch (err) {
-        if (err instanceof WikiError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
+  registerSharedTools(server, db, { notes, wiki, skills, review }, scope);
 
   server.registerTool(
     "ticket_reply",
@@ -674,11 +603,152 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
 }
 
 /**
+ * Tools every run has, chat included (R69, R71, R77): the wiki, the skill library, and reading
+ * the company's tickets, so an agent can look things up instead of saying it can't see them.
+ */
+function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, review }: Pick<Services, "notes" | "wiki" | "skills" | "review">, scope: Scope) {
+  server.registerTool(
+    "tickets",
+    {
+      description:
+        "Look up your company's tickets. find (optional q to search titles and descriptions, optional state) lists matches with their ids; read (ticketId) gives one ticket in full: description, state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged.",
+      inputSchema: { action: z.enum(["find", "read", "file"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().uuid().optional(), path: z.string().max(500).optional() },
+    },
+    async ({ action, q, state, ticketId, path }) => {
+      if (action === "file") {
+        if (!ticketId || !path) return fail("Give the ticketId and the file's path in the repo.");
+        try {
+          const f = await review.readFile(ticketId, path, scope.companyId);
+          return text(`${path} (from the ticket's ${f.from === "worktree" ? "worktree" : "branch"}${f.truncated ? "; cut off at 256 KB" : ""}):\n\n${f.text}`);
+        } catch (err) {
+          if (err instanceof ReviewError) return fail(err.message);
+          throw err;
+        }
+      }
+      if (action === "find") {
+        const like = q?.trim() ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
+        const rows = await db
+          .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt })
+          .from(tickets)
+          .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+          .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like)) : undefined))
+          .orderBy(desc(tickets.lastActivityAt))
+          .limit(40);
+        return text(JSON.stringify(rows));
+      }
+      if (!ticketId) return fail("Give the ticketId to read.");
+      const [row] = await db
+        .select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl, assignee: agents.name })
+        .from(tickets)
+        .innerJoin(projects, eq(projects.id, tickets.projectId))
+        .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!row) return fail("No ticket with that ID in your company.");
+      const made = await wiki.artifacts(ticketId);
+      const talk = await conversationLines(db, ticketId);
+      const t = row.t;
+      return text(
+        [
+          `# ${t.title}`,
+          `Ticket ${t.id} in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+          t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
+          "",
+          "## Description",
+          t.body ?? "(none)",
+          "",
+          "## What it produced",
+          ...(made.length ? made.map((m) => (m.kind === "wiki_page" ? `- wiki page ${m.slug} (read it with wiki read)` : m.kind === "url" ? `- link ${m.url}` : `- repo file ${m.path}${m.ref ? ` at ${m.ref}` : ""} (read it with tickets file)`)) : ["(nothing attached)"]),
+          "",
+          "## Recent conversation",
+          ...(talk.length ? talk : ["(none)"]),
+        ].join("\n"),
+      );
+    },
+  );
+
+  server.registerTool(
+    "skills",
+    {
+      description:
+        "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; the owner is told. Skills are added to the library by the owner.",
+      inputSchema: { action: z.enum(["list", "give", "take"]), skill: z.string().max(64).optional(), agent: z.string().max(80).optional() },
+    },
+    async ({ action, skill, agent }) => {
+      if (action === "list") return text(JSON.stringify((await skills.list(scope.companyId)).map((s) => ({ name: s.name, description: s.description, agents: s.agents.map((a) => a.name) }))));
+      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO can give or take skills.");
+      if (!skill || !agent) return fail("Give the skill's name and the agent's name.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      try {
+        if (action === "give") await skills.give(scope.companyId, skill, who.id, scope.agentId);
+        else await skills.take(scope.companyId, skill, who.id);
+      } catch (err) {
+        if (err instanceof SkillError) return fail(err.message);
+        throw err;
+      }
+      await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title: action === "give" ? `The CEO gave ${who.name} the ${skill} skill` : `The CEO took the ${skill} skill from ${who.name}`, body: null, link: "#/skills" });
+      return text(action === "give" ? `${who.name} has the ${skill} skill from their next run.` : `${who.name} no longer has the ${skill} skill.`);
+    },
+  );
+
+  server.registerTool(
+    "wiki",
+    {
+      description:
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; gives each page's slug and folder), read (slug), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. Writing to an existing slug updates it; older versions are kept.",
+      inputSchema: {
+        action: z.enum(["list", "read", "write", "attach"]),
+        q: z.string().max(200).optional(),
+        slug: z.string().max(500).optional(),
+        folder: z.string().max(400).optional(),
+        title: z.string().max(200).optional(),
+        body: z.string().max(200_000).optional(),
+        ticketId: z.string().uuid().optional(),
+        path: z.string().max(500).optional(),
+        ref: z.string().max(200).optional(),
+        url: z.string().max(2000).optional(),
+      },
+    },
+    async (input) => {
+      const by = { agentId: scope.agentId, runId: scope.runId };
+      try {
+        switch (input.action) {
+          case "list":
+            return text(JSON.stringify((await wiki.list(scope.companyId, input.q)).map((p) => ({ slug: p.slug, folder: p.folder, title: p.title, updatedAt: p.updatedAt }))));
+          case "read": {
+            if (!input.slug) return fail("Give the page's slug.");
+            const p = await wiki.get(scope.companyId, input.slug);
+            return text(`# ${p.title}\n\n${p.body}`);
+          }
+          case "write": {
+            if (!input.title || input.body === undefined) return fail("Give a title and a body.");
+            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "attach": {
+            if (!input.ticketId) return fail("Give the ticketId it belongs to.");
+            await wiki.attach(scope.companyId, { ticketId: input.ticketId, title: input.title ?? "", path: input.path ?? null, ref: input.ref ?? null, url: input.url ?? null, ...by });
+            return text("Linked to the ticket.");
+          }
+        }
+      } catch (err) {
+        if (err instanceof WikiError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+}
+
+/**
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback }: Services, scope: Scope) {
+function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review }: Services, scope: Scope) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  registerSharedTools(server, db, { notes, wiki, skills, review }, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
   const workFail = (err: unknown) => {
     if (err instanceof WorkError) return fail(err.message);
