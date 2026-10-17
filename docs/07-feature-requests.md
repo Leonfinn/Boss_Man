@@ -43,12 +43,12 @@ Checked on 16 Oct 2026 against Productboard's help centre and public portals:
 The portal is the only part of Boss Man meant for people other than you.
 
 - **The link.** The secret is after `#` (`/portal.html#<secret>`). Browsers don't send that part to servers, so it stays out of logs and Referer headers. The page sends it to the API in a header. **New link** on the Feedback page makes a new secret and ends the old one at once.
-- **Its own port.** The portal page is separate from your app and loads none of its code. With `BOSSMAN_PORTAL_PORT` (3101 in the compose file), a second listener serves only:
+- **Its own port.** The portal page is separate from your app and loads none of its code. With `BOSSMAN_PORTAL_PORT` (3101 inside the container; the NAS port is `BOSSMAN_PORTAL_HOST_PORT`, 3101 by default), a second listener serves only:
   - the portal page;
   - its assets;
   - `/api/portal`.
 
-  Your login, API, MCP and runner endpoints don't exist on that port. Expose 3101 if you need to, **never 3100**.
+  Your login, API, MCP and runner endpoints don't exist on that port. Expose the portal's port if you need to, **never the owner's** (`BOSSMAN_HOST_PORT`, 3100 by default).
 - **What visitors can do.** They vote on features you've shown, with an importance, and can add a comment or suggest an idea, optionally with a name and email. A visitor is remembered by an HttpOnly cookie, so they can change or remove their vote. They can't see anyone else's votes.
 - **Limits.**
   - 40 writes an hour per address and 600 per portal;
@@ -58,4 +58,4 @@ The portal is the only part of Boss Man meant for people other than you.
   - size caps on every field.
 - **Untrusted.** Everything visitors send is marked as coming from outside. Agents only ever see it inside `<untrusted>` blocks (R51).
 
-To share the portal beyond your network, point a reverse proxy at port 3101 only, or use [Tailscale Funnel](https://tailscale.com/kb/1223/tailscale-funnel). Funnel accepts public traffic only on ports 443, 8443 and 10000, and needs MagicDNS and HTTPS turned on for your tailnet ([Funnel CLI reference](https://tailscale.com/kb/1311/tailscale-funnel)). I couldn't reach Tailscale's docs from where this was written to check the exact command for your version, so follow their page.
+To share the portal beyond your network, point a reverse proxy at the portal's port only, or use [Tailscale Funnel](https://tailscale.com/kb/1223/tailscale-funnel). Funnel accepts public traffic only on ports 443, 8443 and 10000, and needs MagicDNS and HTTPS turned on for your tailnet ([Funnel CLI reference](https://tailscale.com/kb/1311/tailscale-funnel)). I couldn't reach Tailscale's docs from where this was written to check the exact command for your version, so follow their page.
