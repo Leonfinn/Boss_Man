@@ -206,6 +206,7 @@ export async function buildApp(opts: AppOptions) {
   const work = workService(db, {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
+    now: opts.now,
   });
   const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now });
   const review = reviewService(db, { runners, runs: runsSvc, work, loops });
