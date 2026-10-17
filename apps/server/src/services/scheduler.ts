@@ -14,6 +14,7 @@ import { issueRunToken } from "../mcp.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
+import { conversationLines } from "./ticket-chat.js";
 
 export type Limits = {
   instance: number;
@@ -106,12 +107,15 @@ export function schedulerService(
         lines.push("", planningGuidance(t.t.risk));
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", t.t.plan);
+        // The ticket's conversation with the owner (R65).
+        const talk = await conversationLines(db, t.t.id);
+        if (talk.length) lines.push("", "The ticket's conversation so far, oldest first:", ...talk);
       }
     }
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
-      "Use the bossman tools to report back: set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished; raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
+      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished; raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
       "Ending your turn does not move the ticket.",
       UNTRUSTED_NOTE,
     );

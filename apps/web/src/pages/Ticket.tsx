@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
+import { TicketConversation } from "../components/TicketConversation";
 import { TicketLinks } from "../components/TicketLinks";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
@@ -153,8 +154,6 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </p>
       </section>
 
-      <TicketLinks t={t} onChanged={ticket.reload} />
-
       <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
           <label htmlFor="t-body">Description</label>
@@ -179,6 +178,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </div>
         )}
       </section>
+
+      <TicketConversation ticketId={t.id} />
+
+      <TicketLinks t={t} onChanged={ticket.reload} />
 
       {t.plan && (
         <section className="card" aria-labelledby="plan-h" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
