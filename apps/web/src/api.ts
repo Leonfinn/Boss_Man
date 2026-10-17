@@ -106,6 +106,10 @@ export type RunRow = {
   endedAt?: string | null;
   outcome?: string | null;
   costMicros?: number;
+  /** Why it started: the wake's reason and note, and "chat" for the owner chat. */
+  purpose?: string | null;
+  reason?: string | null;
+  note?: string | null;
 };
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };

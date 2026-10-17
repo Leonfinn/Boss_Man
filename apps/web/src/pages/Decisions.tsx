@@ -27,14 +27,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // The owner's own answer to an agent's question, being written; absent while not.
+  const [ownWords, setOwnWords] = useState<Record<string, string>>({});
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
-  const answer = async (d: Decision, option: string) => {
+  const answer = async (d: Decision, option: string, custom = false) => {
     setBusy(d.id);
     try {
       const note = notes[d.id]?.trim();
-      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}) } });
+      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(custom ? { custom: true } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
@@ -109,7 +111,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? " · for the CEO" : ""}
                       </span>
                     </div>
-                    <h2>{d.question}</h2>
+                    <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question}</h2>
                     <div className="meta">
                       {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tickets`}</span>}
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
@@ -139,13 +141,50 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
                           </div>
                         )}
-                        <div className="actions">
-                          {d.options.map((o) => (
-                            <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id} onClick={() => answer(d, o)}>
-                              {o}
-                            </button>
-                          ))}
-                        </div>
+                        {ownWords[d.id] === undefined ? (
+                          <div className="actions">
+                            {d.options.map((o) => (
+                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id} onClick={() => answer(d, o)}>
+                                {o}
+                              </button>
+                            ))}
+                            {d.kind === "question" && (
+                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption ?? "" }))}>
+                                Write my own answer
+                              </button>
+                            )}
+                          </div>
+                        ) : (
+                          <form
+                            style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              const text = ownWords[d.id]!.trim();
+                              if (text) void answer(d, text, true);
+                            }}
+                          >
+                            <div className="field">
+                              <label htmlFor={`own-${d.id}`}>Your answer, in your own words. It goes to {d.agentName ?? "the agent"} exactly as you write it.</label>
+                              <textarea
+                                id={`own-${d.id}`}
+                                rows={5}
+                                maxLength={4000}
+                                autoFocus
+                                value={ownWords[d.id]}
+                                onChange={(e) => setOwnWords((w) => ({ ...w, [d.id]: e.target.value }))}
+                                style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+                              />
+                            </div>
+                            <div className="actions">
+                              <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim()}>
+                                Send my answer
+                              </button>
+                              <button type="button" className="btn" onClick={() => setOwnWords(({ [d.id]: _, ...rest }) => rest)}>
+                                Back to the options
+                              </button>
+                            </div>
+                          </form>
+                        )}
                         {errors[d.id] && (
                           <p className="error" role="alert">
                             {errors[d.id]}

@@ -54,6 +54,13 @@ describe("scheduler", () => {
     expect(cmd.prompt).toContain("set_ticket_state");
     const [tok] = await ctx.db.select().from(runTokens).where(eq(runTokens.tokenHash, hashToken(cmd.mcpToken)));
     expect(tok).toMatchObject({ runId: cmd.runId, agentId: ctx.ceo.id });
+    // The ticket being worked on leaves the backlog; the one still waiting stays put.
+    const board = (await ctx.req("GET", `/api/projects/${ctx.project.id}/board`)).json() as { columns: Array<{ systemState: string; tickets: Array<{ title: string }> }> };
+    const lane = (state: string) => board.columns.find((c) => c.systemState === state)!.tickets.map((t) => t.title);
+    expect(lane("in_progress")).toEqual(["Checkout error states"]);
+    expect(lane("backlog")).toEqual(["Load test"]);
+    // The runs list says why each run started.
+    expect((await ctx.req("GET", "/api/runs")).json()).toEqual([expect.objectContaining({ id: cmd.runId, ticket: "Checkout error states", reason: "assigned", purpose: null })]);
 
     // The second ticket waits until the first run ends; the run's end triggers a pass.
     await ctx.endRun(cmd.runId);
