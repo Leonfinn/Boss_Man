@@ -4,7 +4,8 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -33,6 +34,8 @@ export type SessionManagerOptions = {
   workspaces?: Workspaces;
   /** The company's granted secrets outside a run, e.g. a GIT_TOKEN for pushing a merge. */
   resolveCompanyEnv?: (purpose: "merge") => Promise<Record<string, string>>;
+  /** Where each run's skills are written for the agent to load (R71). */
+  skillsRoot?: string;
   /** Answers request commands such as workspace.diff. */
   reply?: (requestId: string, result: { ok: true; data: unknown } | { ok: false; error: string }) => void;
   log?: (msg: string) => void;
@@ -51,6 +54,25 @@ const textOf = (content: ToolCallContent[] | null | undefined) =>
   (content ?? [])
     .flatMap((c) => (c.type === "content" && c.content?.type === "text" && c.content.text ? [c.content.text] : []))
     .join("\n\n");
+
+/**
+ * Writes skills as <dir>/.claude/skills/<name>/<files> and returns dir. Paths are checked
+ * to stay inside each skill's folder.
+ */
+export function writeSkills(dir: string, list: NonNullable<StartCommand["skills"]>) {
+  rmSync(dir, { recursive: true, force: true });
+  const root = path.join(dir, ".claude", "skills");
+  for (const skill of list) {
+    const base = path.join(root, skill.name);
+    for (const f of skill.files) {
+      const target = path.resolve(base, f.path);
+      if (!target.startsWith(base + path.sep)) throw new Error(`skill ${skill.name} has a file outside its folder: ${f.path}`);
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, Buffer.from(f.content, "base64"));
+    }
+  }
+  return dir;
+}
 
 const CLAUDE_ALIASES = new Set(["default", "opus", "sonnet", "haiku", "fable"]);
 const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
@@ -259,11 +281,25 @@ export class SessionManager {
       }
     }
 
+    // Skills (R71) go in a folder of their own, passed to Claude as an extra directory, so its
+    // .claude/skills are loaded without touching the repo's worktree or the shared home.
+    let skillsDir: string | null = null;
+    if (cmd.skills?.length && cmd.agentKind === "claude") {
+      try {
+        skillsDir = writeSkills(path.join(this.opts.skillsRoot ?? path.join(tmpdir(), "bossman-skills"), cmd.runId), cmd.skills);
+      } catch (err) {
+        emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't set up the agent's skills: ${String((err as Error)?.message ?? err)}` });
+        return;
+      }
+    }
+    const dropSkills = () => skillsDir && rmSync(skillsDir, { recursive: true, force: true });
+
     let bin: string;
     try {
       mkdirSync(cmd.cwd, { recursive: true });
       bin = this.opts.adapterBins?.[cmd.agentKind] ?? defaultBin(cmd.agentKind);
     } catch (err) {
+      dropSkills();
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: String((err as Error)?.message ?? err) });
       return;
     }
@@ -403,6 +439,7 @@ export class SessionManager {
       emit({ type: "run.ended", runId: cmd.runId, stopReason, error, ...(usage ? { usage } : {}) });
       connection.close();
       killGroup(child);
+      dropSkills();
     };
     child.on("exit", (code) => {
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim());
@@ -422,19 +459,20 @@ export class SessionManager {
       // Board tools only (owner chat): Claude's built-in tools are switched off through the
       // adapter's session options, so only the Boss Man MCP tools remain.
       const sessionMeta = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { _meta: { claudeCode: { options: { tools: [] } } } } : {};
+      const extraDirs = skillsDir ? { additionalDirectories: [skillsDir] } : {};
       // Recovery (R42): reopen the interrupted session if the agent can, else start fresh.
       // A crash before Claude Code flushes its transcript leaves nothing to load (spike S4).
       const openSession = async (): Promise<{ sessionId: string; configOptions?: unknown[] | null; resumed: boolean }> => {
         if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
           try {
-            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...sessionMeta });
+            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta });
             emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
             return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null, resumed: true };
           } catch (err) {
             this.opts.log?.(`couldn't reopen session ${cmd.resumeSessionId}: ${String((err as Error)?.message ?? err)}; starting fresh`);
           }
         }
-        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers, ...sessionMeta });
+        const fresh = await agent.request(methods.agent.session.new, { cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta });
         if (cmd.resumeSessionId) emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "fresh" } });
         return { ...(fresh as { sessionId: string; configOptions?: unknown[] | null }), resumed: false };
       };

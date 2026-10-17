@@ -27,6 +27,7 @@ import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, type PortalLimits } from "./portal.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { dashboardService } from "./services/dashboard.js";
+import { SkillError, skillsService } from "./services/skills.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
@@ -171,6 +172,7 @@ export async function buildApp(opts: AppOptions) {
   const ticketChat = ticketChatService(db, { runs: runsSvc, wake: (w) => scheduler.wake(w) });
   const wiki = wikiService(db);
   const dashboard = dashboardService(db, { now: opts.now });
+  const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
@@ -238,7 +240,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -718,6 +720,53 @@ export async function buildApp(opts: AppOptions) {
         .ownerSays(id, text)
         .then((m) => reply.code(201).send(m))
         .catch(ticketChatErrors(reply));
+    });
+
+    // Skills (R71): the company's library, and who has what.
+    const skillErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof SkillError) return reply.code(err.status).send({ error: "skill", message: err.message });
+      throw err;
+    };
+    const SkillParams = z.object({ id: Uuid, skillId: Uuid });
+    const SkillFiles = z.array(z.object({ path: z.string().min(1).max(500), content: z.string().max(4_000_000) })).min(1).max(200);
+    owner.get("/api/companies/:id/skills", async (req) => skillsSvc.list(IdParam.parse(req.params).id));
+    owner.post("/api/companies/:id/skills", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z
+        .discriminatedUnion("from", [
+          z.object({ from: z.literal("link"), url: z.string().url().max(2000) }),
+          z.object({ from: z.literal("written"), name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }),
+          z.object({ from: z.literal("upload"), name: z.string().trim().max(64).optional(), files: SkillFiles }),
+        ])
+        .parse(req.body);
+      try {
+        const added = b.from === "link" ? await skillsSvc.fromLink(id, b.url) : b.from === "written" ? [await skillsSvc.write(id, b)] : [await skillsSvc.upload(id, b.files, b.name)];
+        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name })));
+      } catch (err) {
+        return skillErrors(reply)(err);
+      }
+    });
+    owner.get("/api/companies/:id/skills/:skillId", async (req, reply) => {
+      const { id, skillId } = SkillParams.parse(req.params);
+      return skillsSvc.get(id, skillId).catch(skillErrors(reply));
+    });
+    owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
+      const { id, skillId } = SkillParams.parse(req.params);
+      const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }).parse(req.body);
+      return skillsSvc.write(id, { ...b, replaceId: skillId }).then((s) => ({ id: s.id, name: s.name }), skillErrors(reply));
+    });
+    owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
+      const { id, skillId } = SkillParams.parse(req.params);
+      return skillsSvc.refresh(id, skillId).then((r) => ({ changed: r.changed, sourceRef: r.skill.sourceRef }), skillErrors(reply));
+    });
+    owner.delete("/api/companies/:id/skills/:skillId", async (req, reply) => {
+      const { id, skillId } = SkillParams.parse(req.params);
+      return skillsSvc.remove(id, skillId).then(() => reply.code(204).send(), skillErrors(reply));
+    });
+    owner.put("/api/companies/:id/skills/:skillId/agents", async (req, reply) => {
+      const { id, skillId } = SkillParams.parse(req.params);
+      const { agentIds } = z.object({ agentIds: z.array(Uuid).max(200) }).parse(req.body);
+      return skillsSvc.setHolders(id, skillId, agentIds).then(() => ({ agentIds }), skillErrors(reply));
     });
 
     // The home screen (R74).

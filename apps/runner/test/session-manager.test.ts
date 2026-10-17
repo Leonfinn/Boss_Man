@@ -28,7 +28,7 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null, opts: { home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
+function harness(model: string | null, opts: { skills?: Array<{ name: string; files: Array<{ path: string; content: string }> }>; skillsRoot?: string; home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
   const events: RunnerEvent[] = [];
   const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
@@ -36,6 +36,7 @@ function harness(model: string | null, opts: { home?: string; cwd?: string; resu
   const ended = new Promise<void>((r) => (done = r));
   const manager: SessionManager = new SessionManager({
     workspaces: opts.workspaces,
+    skillsRoot: opts.skillsRoot,
     mcpUrl: mcp.url,
     baseEnv: { PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: path.join(home, ".claude"), NO_PROXY: "127.0.0.1,localhost" },
     // Stands in for the company's granted secrets.
@@ -66,6 +67,7 @@ function harness(model: string | null, opts: { home?: string; cwd?: string; resu
     ...(opts.freshPrompt ? { freshPrompt: opts.freshPrompt } : {}),
     ...(opts.boardToolsOnly ? { boardToolsOnly: true } : {}),
     ...(opts.workspace ? { workspace: opts.workspace } : {}),
+    ...(opts.skills ? { skills: opts.skills } : {}),
   });
   return { events, ended, runId, cwd, home, manager };
 }
@@ -155,6 +157,27 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
     for (const builtIn of ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "WebFetch"]) expect(offered.has(builtIn)).toBe(false);
     expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ error: null });
   }, 60_000);
+
+  it("loads the agent's skills from a folder of their own, and removes it after the run (R71)", async () => {
+    const skillsRoot = mkdtempSync(path.join(tmpdir(), "bm-skills-"));
+    const md = "---\nname: release-notes\ndescription: Writes release notes in the Boss Man house style. Use when asked for a changelog.\n---\n\n# Release notes\n";
+    const h = harness(null, { skillsRoot, skills: [{ name: "release-notes", files: [{ path: "SKILL.md", content: Buffer.from(md).toString("base64") }, { path: "templates/entry.md", content: Buffer.from("- {change}").toString("base64") }] }] });
+    await sessionStarted(h.events);
+    const dir = path.join(skillsRoot, h.runId, ".claude", "skills", "release-notes");
+    expect(readFileSync(path.join(dir, "templates", "entry.md"), "utf8")).toBe("- {change}");
+    await h.ended;
+    // Claude Code told the model about the skill: its description reached the request.
+    expect(stubLog.some((l) => l.raw?.includes("Writes release notes in the Boss Man house style"))).toBe(true);
+    // Nothing was written into the agent's working folder, and the run's skills are gone.
+    expect(existsSync(path.join(h.cwd, ".claude"))).toBe(false);
+    expect(existsSync(path.join(skillsRoot, h.runId))).toBe(false);
+  }, 60_000);
+
+  it("refuses a skill file that would land outside its folder", async () => {
+    const h = harness(null, { skills: [{ name: "evil", files: [{ path: "../../escape.txt", content: "eA==" }] }] });
+    await h.ended;
+    expect(h.events.find((e) => e.type === "run.ended")).toMatchObject({ error: expect.stringContaining("Couldn't set up the agent's skills") });
+  }, 30_000);
 
   it("pins an unlisted model at launch (spike S2 finding)", async () => {
     const h = harness("claude-future-model-x");

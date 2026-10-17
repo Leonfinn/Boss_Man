@@ -12,6 +12,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   real,
   text,
   timestamp,
@@ -863,4 +864,47 @@ export const ticketArtifacts = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("ticket_artifacts_ticket").on(t.ticketId), uniqueIndex("ticket_artifacts_one_page").on(t.ticketId, t.wikiPageId)],
+);
+
+// ---------- Skills (R71) ----------
+
+export const skillSource = pgEnum("skill_source", ["written", "link", "upload"]);
+
+/**
+ * A company's skill library: Agent Skills folders (a SKILL.md and any supporting files) that
+ * agents load when relevant. Added from a GitHub link (pinned to a commit), written in Boss
+ * Man, or uploaded.
+ */
+export const skills = pgTable(
+  "skills",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** The folder name agents see: lower-case letters, digits and hyphens. */
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    source: skillSource("source").notNull(),
+    /** Where a linked skill came from, and the commit it's pinned to. */
+    sourceUrl: text("source_url"),
+    sourceRef: text("source_ref"),
+    /** The folder's files, SKILL.md first; content is base64 so scripts and images survive. */
+    files: jsonb("files").$type<Array<{ path: string; content: string }>>().notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("skills_company_name").on(t.companyId, t.name)],
+);
+
+/** Which agents have which skills, and who gave them. */
+export const agentSkills = pgTable(
+  "agent_skills",
+  {
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    skillId: uuid("skill_id").notNull().references(() => skills.id, { onDelete: "cascade" }),
+    /** The owner, or the CEO (an agent id). */
+    assignedByAgentId: uuid("assigned_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.agentId, t.skillId] })],
 );

@@ -483,3 +483,4 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
   .side .nav-groups.open { display: flex; }
   .side .switcher-menu ul { flex-direction: column; }
 }
+.skill-file { background: var(--ground); padding: 10px 12px; border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 13px; margin-top: 6px; white-space: pre; }

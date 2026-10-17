@@ -23,6 +23,7 @@ import { WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { WikiError, type wikiService } from "./services/wiki.js";
+import { SkillError, type skillsService } from "./services/skills.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -50,9 +51,10 @@ type Services = {
   feedback: ReturnType<typeof feedbackService>;
   ticketChat: ReturnType<typeof ticketChatService>;
   wiki: ReturnType<typeof wikiService>;
+  skills: ReturnType<typeof skillsService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki, skills }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -151,6 +153,32 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       return text(`Ticket ${ticketId} is now ${state}.`);
+    },
+  );
+
+  server.registerTool(
+    "skills",
+    {
+      description:
+        "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; the owner is told. Skills are added to the library by the owner.",
+      inputSchema: { action: z.enum(["list", "give", "take"]), skill: z.string().max(64).optional(), agent: z.string().max(80).optional() },
+    },
+    async ({ action, skill, agent }) => {
+      if (action === "list") return text(JSON.stringify((await skills.list(scope.companyId)).map((s) => ({ name: s.name, description: s.description, agents: s.agents.map((a) => a.name) }))));
+      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO can give or take skills.");
+      if (!skill || !agent) return fail("Give the skill's name and the agent's name.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      try {
+        if (action === "give") await skills.give(scope.companyId, skill, who.id, scope.agentId);
+        else await skills.take(scope.companyId, skill, who.id);
+      } catch (err) {
+        if (err instanceof SkillError) return fail(err.message);
+        throw err;
+      }
+      await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title: action === "give" ? `The CEO gave ${who.name} the ${skill} skill` : `The CEO took the ${skill} skill from ${who.name}`, body: null, link: "#/skills" });
+      return text(action === "give" ? `${who.name} has the ${skill} skill from their next run.` : `${who.name} no longer has the ${skill} skill.`);
     },
   );
 
