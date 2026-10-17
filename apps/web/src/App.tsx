@@ -18,6 +18,7 @@ import { Funding } from "./pages/Funding";
 import { Notifications } from "./pages/Notifications";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
+import { Dashboard } from "./pages/Dashboard";
 import { Features } from "./pages/Features";
 import { Wiki } from "./pages/Wiki";
 import { Feedback } from "./pages/Feedback";
@@ -54,9 +55,21 @@ function useFeedNotifications(feed: NoticeFeed | null) {
   }, [feed]);
 }
 
+/** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
+const COMPANY_SCREENS = new Set(["chat", "wiki", "features", "feedback", "plan", "rules", "settings"]);
+const CHOSEN = "bm-company";
+function remember(id: string, set: (id: string) => void) {
+  set(id);
+  try {
+    localStorage.setItem(CHOSEN, id);
+  } catch {
+    // Storage may be blocked; the choice lasts until the page reloads.
+  }
+}
+
 function Signed({ onLogout }: { onLogout: () => void }) {
   const [route, go] = useRoute();
-  const page = route[0] ?? "decisions";
+  const page = route[0] ?? "dashboard";
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 30_000, "companies");
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
@@ -77,11 +90,41 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   }, [expired, onLogout]);
 
   const list = companies.data ?? [];
+  // The company every screen shows (R72): the one in the address if the screen has one, else
+  // the one last picked in this browser, else the first.
+  const [chosen, setChosen] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(CHOSEN);
+    } catch {
+      return null;
+    }
+  });
+  const inRoute = COMPANY_SCREENS.has(page) && list.some((c) => c.id === route[1]) ? route[1]! : null;
+  const current = list.find((c) => c.id === (inRoute ?? chosen)) ?? list[0];
+  useEffect(() => {
+    if (inRoute && inRoute !== chosen) remember(inRoute, setChosen);
+  }, [inRoute, chosen]);
+  const pick = (id: string) => {
+    remember(id, setChosen);
+    if (COMPANY_SCREENS.has(page)) go(`${page}/${id}`);
+    else if (page === "board" || page === "tickets") go("board");
+  };
+  const createCompany = async (name: string) => {
+    const { company } = await api<{ company: Company }>("/api/companies", { method: "POST", body: { name } });
+    companies.reload();
+    remember(company.id, setChosen);
+    go("board");
+  };
+  const mine = current ? [current] : [];
+  const companyId = inRoute ?? current?.id;
   return (
     <div className="app">
       <Sidebar
         active={page}
         companies={list}
+        current={current}
+        onPickCompany={pick}
+        onCreateCompany={createCompany}
         decisions={decisions.data ?? []}
         unread={feed.data?.unread ?? 0}
         feedback={Object.values(unprocessed.data ?? {}).reduce((a, b) => a + b, 0)}
@@ -95,19 +138,19 @@ function Signed({ onLogout }: { onLogout: () => void }) {
             <p>Boss Man keeps working on the server; this page will catch up as soon as it can reach it again.</p>
           </State>
         ) : page === "board" ? (
-          <Board companies={list} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
+          <Board companies={mine} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
-          <ChatPage companies={list} companyId={route[1]} agentId={route[2]} go={go} />
+          <ChatPage companies={list} companyId={companyId} agentId={route[2]} go={go} />
         ) : page === "wiki" ? (
-          <Wiki companies={list} companyId={route[1]} slug={route.slice(2).join("/") || undefined} go={go} />
+          <Wiki companies={list} companyId={companyId} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "features" ? (
-          <Features companies={list} companyId={route[1]} featureId={route[2]} go={go} />
+          <Features companies={list} companyId={companyId} featureId={route[2]} go={go} />
         ) : page === "feedback" ? (
-          <Feedback companies={list} companyId={route[1]} noteId={route[2]} go={go} />
+          <Feedback companies={list} companyId={companyId} noteId={route[2]} go={go} />
         ) : page === "roadmap" ? (
-          <Roadmap companies={list} tab={route[1]} go={go} />
+          <Roadmap companies={mine} tab={route[1]} go={go} />
         ) : page === "plan" ? (
-          <Plan companies={list} companyId={route[1]} go={go} />
+          <Plan companies={list} companyId={companyId} go={go} />
         ) : page === "funding" ? (
           <Funding companies={list} />
         ) : page === "runs" ? (
@@ -115,17 +158,19 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "tickets" && route[1] ? (
           <Ticket key={route[1]} id={route[1]} companies={list} />
         ) : page === "rules" ? (
-          <Rules companies={list} companyId={route[1]} go={go} />
+          <Rules companies={list} companyId={companyId} go={go} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} />
         ) : page === "secrets" ? (
           <Secrets />
         ) : page === "settings" ? (
-          <Settings companies={list} companyId={route[1]} go={go} onChanged={companies.reload} />
+          <Settings companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
+        ) : page === "decisions" ? (
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} onAnswered={decisions.reload} />
         ) : (
-          <Decisions decisions={decisions.data ?? []} companies={list} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} onAnswered={decisions.reload} />
+          <Dashboard company={current} />
         )}
       </main>
     </div>

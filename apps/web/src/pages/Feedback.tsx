@@ -390,21 +390,9 @@ export function Feedback({ companies, companyId, noteId, go }: { companies: Comp
           <h1>Feedback</h1>
           <p className="sub">What people tell each company. Link the passages that ask for something to features, and how much it matters to them.</p>
         </div>
-        {companies.length > 1 && (
-          <div className="field">
-            <label htmlFor="fb-company">Company</label>
-            <select id="fb-company" value={company?.id} onChange={(e) => go(`feedback/${e.target.value}`)}>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
       </header>
       {!company ? (
-        <p>Create a company on the Board first.</p>
+        <p>Create a company on the Kanban first.</p>
       ) : (
         <>
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>

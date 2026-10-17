@@ -26,6 +26,7 @@ import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, type PortalLimits } from "./portal.js";
 import { ChatError, chatService } from "./services/chat.js";
+import { dashboardService } from "./services/dashboard.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
@@ -169,6 +170,7 @@ export async function buildApp(opts: AppOptions) {
   runsSvc.setWakeHook((w) => scheduler.wake(w));
   const ticketChat = ticketChatService(db, { runs: runsSvc, wake: (w) => scheduler.wake(w) });
   const wiki = wikiService(db);
+  const dashboard = dashboardService(db, { now: opts.now });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
@@ -717,6 +719,9 @@ export async function buildApp(opts: AppOptions) {
         .then((m) => reply.code(201).send(m))
         .catch(ticketChatErrors(reply));
     });
+
+    // The home screen (R74).
+    owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
 
     // The company wiki, and what each ticket produced (R69).
     const wikiErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {

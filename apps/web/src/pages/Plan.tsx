@@ -155,22 +155,10 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
           <h1>Plan</h1>
           <p className="sub">Open tickets that wait on something, and what they wait on. Red lines still hold work up. Tap a card to light up its chain.</p>
         </div>
-        {companies.length > 1 && (
-          <div className="field">
-            <label htmlFor="plan-company">Company</label>
-            <select id="plan-company" value={company?.id} onChange={(e) => go(`plan/${e.target.value}`)}>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
       </header>
       {plan.error && <p className="error">{plan.error.message}</p>}
       {!company ? (
-        <p>Create a company on the Board first.</p>
+        <p>Create a company on the Kanban first.</p>
       ) : p && !p.nodes.length ? (
         <p className="muted">No open ticket waits on anything. Add what a ticket waits on from its page.</p>
       ) : p ? (

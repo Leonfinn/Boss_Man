@@ -3,7 +3,7 @@ import { ApiError } from "./api";
 
 /** The part of the URL after "#", e.g. "/board/<projectId>", so the server only serves one page. */
 export function useRoute(): [string[], (to: string) => void] {
-  const read = () => (window.location.hash.replace(/^#\/?/, "") || "decisions").split("/");
+  const read = () => (window.location.hash.replace(/^#\/?/, "") || "dashboard").split("/");
   const [parts, setParts] = useState(read);
   useEffect(() => {
     const on = () => setParts(read());

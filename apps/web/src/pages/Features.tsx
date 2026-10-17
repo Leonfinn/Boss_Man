@@ -21,22 +21,6 @@ import { when } from "./Runs";
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
 
-export function CompanySelect({ companies, value, onChange, id }: { companies: Company[]; value: string | undefined; onChange: (id: string) => void; id: string }) {
-  if (companies.length < 2) return null;
-  return (
-    <div className="field">
-      <label htmlFor={id}>Company</label>
-      <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
-        {companies.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.name}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
 /** A 0 to 5 score, or unscored. */
 function ScoreSelect({ value, onChange, label }: { value: number | null | undefined; onChange: (v: number | null) => void; label: string }) {
   return (
@@ -288,10 +272,9 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
           <h1>Features</h1>
           <p className="sub">What people have asked for, how much it matters to them, and what to build next.</p>
         </div>
-        <CompanySelect companies={companies} id="features-company" value={company?.id} onChange={(id) => go(`features/${id}`)} />
       </header>
       {!company ? (
-        <p>Create a company on the Board first.</p>
+        <p>Create a company on the Kanban first.</p>
       ) : (
         <>
           <section className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -379,7 +362,7 @@ function CreateTicket({ featureId, companyId, title, go }: { featureId: string; 
   if (projects.data && !list.length)
     return (
       <p className="muted" style={{ fontSize: 14 }}>
-        Create a project on the Board to turn this into tickets.
+        Create a project on the Kanban to turn this into tickets.
       </p>
     );
   const submit = (e: FormEvent) => {
