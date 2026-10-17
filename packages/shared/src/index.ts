@@ -12,4 +12,5 @@ export * from "./notify.js";
 export * from "./plan.js";
 export * from "./roadmap.js";
 export * from "./feedback.js";
+export * from "./forecast.js";
 export * from "./git-host.js";
