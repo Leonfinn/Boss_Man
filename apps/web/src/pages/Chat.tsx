@@ -99,21 +99,9 @@ export function ChatPage({ companies, companyId, agentId, go }: { companies: Com
           <h1>Chat</h1>
           <p className="sub">Message your CEO, or any agent directly. They answer with board tools only: they turn what you ask into tickets, milestones and links, and real work happens on those tickets.</p>
         </div>
-        {companies.length > 1 && (
-          <div className="field">
-            <label htmlFor="chat-company">Company</label>
-            <select id="chat-company" value={company?.id} onChange={(e) => go(`chat/${e.target.value}`)}>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
       </header>
       {!company ? (
-        <p>Create a company on the Board first.</p>
+        <p>Create a company on the Kanban first.</p>
       ) : (
         <section className="card messenger" data-picked={agentId ? "yes" : "no"} aria-label="Chat">
           <nav className="messenger-list" aria-label="Team">

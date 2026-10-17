@@ -472,7 +472,7 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
           data.data && <HorizonView list={list} tab={tab} showDone={closed} onChanged={data.reload} />
         )}
       </div>
-      {companies.length > 0 ? <AddObjective companies={companies} onAdded={data.reload} /> : <p>Create a company on the Board first.</p>}
+      {companies.length > 0 ? <AddObjective companies={companies} onAdded={data.reload} /> : <p>Create a company on the Kanban first.</p>}
     </>
   );
 }

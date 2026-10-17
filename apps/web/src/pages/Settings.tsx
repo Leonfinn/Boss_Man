@@ -429,7 +429,7 @@ function Projects({ company }: { company: Company }) {
       <p className="muted" style={{ fontSize: 14 }}>
         With a repo, each ticket gets its own branch and worktree, approved work is checked and merged into the default branch, and the token in <span className="mono">GIT_TOKEN</span> is used to clone and push. Don't put a token in the URL.
       </p>
-      {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} />) : <p>No projects yet: create one on the Board.</p>}
+      {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} />) : <p>No projects yet: create one on the Kanban.</p>}
     </Section>
   );
 }
@@ -547,21 +547,9 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           <h1>Settings</h1>
           <p className="sub">What each company needs to run: a runner, credentials, funding and its repos.</p>
         </div>
-        {companies.length > 1 && (
-          <div className="field">
-            <label htmlFor="settings-company">Company</label>
-            <select id="settings-company" value={company?.id} onChange={(e) => go(`settings/${e.target.value}`)}>
-              {companies.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
       </header>
       {!company ? (
-        <p>Create a company on the Board first.</p>
+        <p>Create a company on the Kanban first.</p>
       ) : (
         <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <Runner company={company} />

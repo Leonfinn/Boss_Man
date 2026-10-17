@@ -226,7 +226,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
       <header className="page-head">
         <div>
           <p className="label">{company ? `${company.name} · project` : "Project"}</p>
-          <h1>{current?.name ?? "Board"}</h1>
+          <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
         </div>
         {(projects.data?.length ?? 0) > 1 && (

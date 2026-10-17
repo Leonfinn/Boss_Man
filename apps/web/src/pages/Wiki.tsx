@@ -4,7 +4,6 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
-import { CompanySelect } from "./Features";
 import { when } from "./Runs";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
@@ -271,7 +270,6 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
           <h1>Wiki</h1>
           <p className="sub">The company's shared pages: research, specs, how-tos. Agents write here too, and a page written for a ticket shows on that ticket.</p>
         </div>
-        <CompanySelect companies={companies} id="wiki-company" value={company?.id} onChange={(id) => go(`wiki/${id}`)} />
       </header>
       {company?.agents.some((a) => a.duty === "wiki" && a.paused) && (
         <p className="banner" role="status">
@@ -281,7 +279,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
         </p>
       )}
       {!company ? (
-        <p>Create a company on the Board first.</p>
+        <p>Create a company on the Kanban first.</p>
       ) : (
         <div className="wiki">
           <nav className="card wiki-list" aria-label="Pages">

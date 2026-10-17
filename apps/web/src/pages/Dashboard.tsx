@@ -1,0 +1,262 @@
+// The home screen (R74): what the company's agents are doing, the headline numbers, the last
+// 14 days at a glance, and what happened recently.
+import { api, type Company } from "../api";
+import { usePoll } from "../hooks";
+
+type Result = "running" | "succeeded" | "failed" | "other";
+type AgentCard = {
+  id: string;
+  name: string;
+  role: "ceo" | "manager" | "worker";
+  paused: boolean;
+  duty: string | null;
+  run: { id: string; ticketId: string | null; ticket: string | null; purpose: string | null; startedAt: string; endedAt: string | null; result: Result } | null;
+};
+type Day = { day: string } & Record<string, number | string>;
+type DashboardData = {
+  agents: AgentCard[];
+  stats: { agents: number; running: number; paused: number; inProgress: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number } };
+  runsByDay: Day[];
+  ticketsByDay: Day[];
+  recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
+  recentActivity: Array<{ id: string; title: string; link: string; level: string; agent: string | null; createdAt: string }>;
+};
+
+/** "just now", "5m ago", "3h ago", "2d ago". */
+export function ago(iso: string, now = Date.now()) {
+  const s = Math.max(0, Math.round((now - new Date(iso).getTime()) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86_400)}d ago`;
+}
+
+const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+const initials = (name: string) =>
+  name
+    .split(/\s+/)
+    .map((w) => w[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+
+const RESULT: Record<Result, { icon: string; label: string; tone: string }> = {
+  running: { icon: "●", label: "Running", tone: "blue" },
+  succeeded: { icon: "✓", label: "Finished", tone: "green" },
+  failed: { icon: "⊖", label: "Failed", tone: "red" },
+  other: { icon: "◻", label: "Stopped", tone: "" },
+};
+const STATE_TONE: Record<string, string> = { backlog: "grey", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
+
+function Chart({ title, days, series }: { title: string; days: Day[]; series: Array<{ key: string; label: string; tone: string }> }) {
+  const totals = days.map((d) => series.reduce((n, s) => n + Number(d[s.key] ?? 0), 0));
+  const max = Math.max(1, ...totals);
+  const label = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
+  return (
+    <figure className="card chart">
+      <figcaption>
+        <strong>{title}</strong>
+        <small className="muted">Last 14 days</small>
+      </figcaption>
+      <div className="dbars" role="img" aria-label={`${title}: ${totals.reduce((a, b) => a + b, 0)} in the last 14 days`}>
+        {days.map((d, i) => (
+          <div key={d.day} className="dbar" title={`${label(String(d.day))}: ${series.map((s) => `${s.label} ${d[s.key] ?? 0}`).join(", ")}`}>
+            {series.map((s) => {
+              const v = Number(d[s.key] ?? 0);
+              return v ? <span key={s.key} className={`seg ${s.tone}`} style={{ height: `${(v / max) * 100}%` }} /> : null;
+            })}
+            {totals[i] === 0 && <span className="seg empty" />}
+          </div>
+        ))}
+      </div>
+      <div className="axis">
+        <span>{label(String(days[0]?.day ?? ""))}</span>
+        <span>{label(String(days[Math.floor(days.length / 2)]?.day ?? ""))}</span>
+        <span>{label(String(days.at(-1)?.day ?? ""))}</span>
+      </div>
+      <ul className="legend">
+        {series.map((s) => (
+          <li key={s.key}>
+            <span className={`swatch ${s.tone}`} aria-hidden="true" /> {s.label}
+          </li>
+        ))}
+      </ul>
+    </figure>
+  );
+}
+
+function SuccessChart({ days }: { days: Day[] }) {
+  const rates = days.map((d) => {
+    const all = Number(d.succeeded ?? 0) + Number(d.failed ?? 0) + Number(d.other ?? 0);
+    return { day: d.day, rate: all ? Number(d.succeeded ?? 0) / all : null };
+  });
+  const label = (d: string) => `${Number(d.slice(8, 10))}/${Number(d.slice(5, 7))}`;
+  return (
+    <figure className="card chart">
+      <figcaption>
+        <strong>Success rate</strong>
+        <small className="muted">Runs that finished their turn, last 14 days</small>
+      </figcaption>
+      <div className="dbars" role="img" aria-label="Success rate by day">
+        {rates.map((r) => (
+          <div key={String(r.day)} className="dbar" title={`${label(String(r.day))}: ${r.rate === null ? "no runs" : `${Math.round(r.rate * 100)}%`}`}>
+            {r.rate === null ? <span className="seg empty" /> : <span className={`seg ${r.rate >= 0.8 ? "green" : r.rate >= 0.5 ? "amber" : "red"}`} style={{ height: `${Math.max(4, r.rate * 100)}%` }} />}
+          </div>
+        ))}
+      </div>
+      <div className="axis">
+        <span>{label(String(rates[0]?.day ?? ""))}</span>
+        <span>{label(String(rates[Math.floor(rates.length / 2)]?.day ?? ""))}</span>
+        <span>{label(String(rates.at(-1)?.day ?? ""))}</span>
+      </div>
+    </figure>
+  );
+}
+
+export function Dashboard({ company }: { company: Company | undefined }) {
+  const data = usePoll((signal) => (company ? api<DashboardData>(`/api/companies/${company.id}/dashboard`, { signal }) : Promise.resolve(null)), 10_000, company?.id ?? "none");
+  if (!company) return <p>Create a company on the Kanban first.</p>;
+  if (data.error) return <p className="error" role="alert">{data.error.message}</p>;
+  const d = data.data;
+  if (!d) return null;
+  const s = d.stats;
+  const tokens = s.monthSubscriptionTokens.input + s.monthSubscriptionTokens.output;
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <p className="label">{company.name}</p>
+          <h1>Dashboard</h1>
+        </div>
+      </header>
+
+      <section aria-labelledby="dash-agents">
+        <h2 id="dash-agents" className="section-label">
+          Agents
+        </h2>
+        <ul className="dash-agents">
+          {d.agents.map((a) => {
+            const r = a.run;
+            const res = a.paused ? null : r ? RESULT[r.result] : null;
+            return (
+              <li key={a.id} className={`card dash-agent${r?.result === "running" ? " live" : ""}`}>
+                <p className="who">
+                  <span className={`avatar ${a.role}`} aria-hidden="true">
+                    {initials(a.name)}
+                  </span>
+                  <a href={`#/chat/${company.id}/${a.id}`}>{a.name}</a>
+                </p>
+                <p className="what">
+                  {a.paused ? (
+                    <span className="muted">Paused{a.duty === "wiki" ? ": start it in Settings to keep the wiki tidy" : ""}</span>
+                  ) : r ? (
+                    <>
+                      <span className={`rstate ${res!.tone}`} aria-label={res!.label}>
+                        {res!.icon}
+                      </span>
+                      {r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : <a href={`#/runs/${r.id}`}>{r.purpose === "chat" ? "Answering in chat" : "Work with no ticket"}</a>}
+                    </>
+                  ) : (
+                    <span className="muted">Hasn't run yet</span>
+                  )}
+                </p>
+                {r && !a.paused && <p className="muted when">{r.endedAt ? `Finished ${ago(r.endedAt)}` : `Started ${ago(r.startedAt)}`}</p>}
+              </li>
+            );
+          })}
+        </ul>
+        <p style={{ textAlign: "right" }}>
+          <a href="#/runs">View all runs</a>
+        </p>
+      </section>
+
+      <section className="dash-stats" aria-label="Headline numbers">
+        <a className="card stat" href="#/settings">
+          <strong>{s.agents}</strong>
+          <span>Agents</span>
+          <small className="muted">
+            {s.running} running, {s.paused} paused
+          </small>
+        </a>
+        <a className="card stat" href="#/board">
+          <strong>{s.inProgress}</strong>
+          <span>Tickets in progress</span>
+          <small className="muted">
+            {s.open} open, {s.blocked} blocked
+          </small>
+        </a>
+        <a className="card stat" href="#/funding">
+          <strong>{s.monthCostMicros > 0 || tokens === 0 ? `$${(s.monthCostMicros / 1_000_000).toFixed(2)}` : compact(tokens)}</strong>
+          <span>{s.monthCostMicros > 0 || tokens === 0 ? "Spent this month" : "Subscription tokens this month"}</span>
+          <small className="muted">{tokens > 0 && s.monthCostMicros > 0 ? `plus ${compact(tokens)} subscription tokens` : tokens > 0 ? `${compact(s.monthSubscriptionTokens.input)} in, ${compact(s.monthSubscriptionTokens.output)} out` : "API credit and pay-as-you-go"}</small>
+        </a>
+        <a className="card stat" href="#/decisions">
+          <strong>{s.decisionsWaiting}</strong>
+          <span>Decisions waiting</span>
+          <small className="muted">{s.decisionsWaiting ? "Need your answer" : "Nothing needs you"}</small>
+        </a>
+      </section>
+
+      <section className="dash-charts" aria-label="Last 14 days">
+        <Chart
+          title="Run activity"
+          days={d.runsByDay}
+          series={[
+            { key: "succeeded", label: "Finished", tone: "green" },
+            { key: "failed", label: "Failed", tone: "red" },
+            { key: "other", label: "Stopped", tone: "grey" },
+          ]}
+        />
+        <Chart
+          title="New tickets by status"
+          days={d.ticketsByDay}
+          series={[
+            { key: "backlog", label: "Backlog", tone: "grey" },
+            { key: "ready", label: "Ready", tone: "amber" },
+            { key: "in_progress", label: "In progress", tone: "blue" },
+            { key: "review", label: "Review", tone: "purple" },
+            { key: "blocked", label: "Blocked", tone: "red" },
+            { key: "done", label: "Done", tone: "green" },
+          ]}
+        />
+        <SuccessChart days={d.runsByDay} />
+      </section>
+
+      <div className="dash-lists">
+        <section aria-labelledby="dash-activity">
+          <h2 id="dash-activity" className="section-label">
+            Recent activity
+          </h2>
+          <ul className="card dash-list">
+            {d.recentActivity.length === 0 && <li className="muted">Nothing yet.</li>}
+            {d.recentActivity.map((n) => (
+              <li key={n.id}>
+                <a href={n.link}>
+                  {n.agent && <strong>{n.agent} </strong>}
+                  {n.title}
+                </a>
+                <time className="muted">{ago(n.createdAt)}</time>
+              </li>
+            ))}
+          </ul>
+        </section>
+        <section aria-labelledby="dash-tickets">
+          <h2 id="dash-tickets" className="section-label">
+            Recent tickets
+          </h2>
+          <ul className="card dash-list">
+            {d.recentTickets.length === 0 && <li className="muted">No tickets yet.</li>}
+            {d.recentTickets.map((t) => (
+              <li key={t.id}>
+                <span className={`tag ${STATE_TONE[t.state] ?? ""}`}>{t.state === "done" && t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+                <a href={`#/tickets/${t.id}`}>{t.title}</a>
+                <span className="muted">{t.assignee ?? "Unassigned"}</span>
+                <time className="muted">{ago(t.lastActivityAt)}</time>
+              </li>
+            ))}
+          </ul>
+        </section>
+      </div>
+    </>
+  );
+}
