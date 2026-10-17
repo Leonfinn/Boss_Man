@@ -62,4 +62,27 @@ describe("dashboard (R74)", () => {
     expect(data.ticketsByDay.at(-1)).toMatchObject({ in_progress: 1, blocked: 1, backlog: 1 });
     expect(data.recentTickets.map((t: { id: string }) => t.id)).toContain(a.id);
   });
+  it("counts subscription use in tokens, and only API use as money spent", async () => {
+    const c = (ctx = await setup());
+    const sub = (await c.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    const payg = (await c.req("POST", "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json() as { id: string };
+    await c.req("PATCH", `/api/agents/${c.worker.id}`, { fundingSourceId: sub.id });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix login", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const run = c.starts()[0]!;
+    // A subscription run reports a list-price cost; it isn't money spent.
+    await c.emit({ type: "run.cost", runId: run.runId, fundingSourceId: sub.id, costMicrosDelta: 5_000_000, model: "claude-opus-5-5" });
+    await c.emit({ type: "run.ended", runId: run.runId, stopReason: "end_turn", error: null, usage: { inputTokens: 1200, outputTokens: 300, cachedReadTokens: 0, cachedWriteTokens: 0 } });
+    let stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ monthCostMicros: 0, monthSubscriptionTokens: { input: 1200, output: 300 }, monthSubscriptionRuns: 1, monthSubscriptionUnrecorded: 0 });
+
+    // A pay-as-you-go run is money.
+    await c.req("PATCH", `/api/agents/${c.worker.id}`, { fundingSourceId: payg.id });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Another", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const second = c.starts().at(-1)!;
+    await c.emit({ type: "run.cost", runId: second.runId, fundingSourceId: payg.id, costMicrosDelta: 2_500_000, model: "claude-opus-5-5" });
+    stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ monthCostMicros: 2_500_000, monthSubscriptionRuns: 1 });
+  });
 });

@@ -1,6 +1,6 @@
 // The dashboard (R74): what a company's agents are doing, the headline numbers, the last
 // 14 days of runs and tickets, and what happened recently. One read, for the home screen.
-import { and, desc, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runs, tickets } from "../db/schema.js";
 
@@ -56,17 +56,25 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
         .select({ n: sql<number>`count(*)::int` })
         .from(decisions)
         .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner")));
+      // Money is what API credit and pay-as-you-go cost. Subscription use isn't money spent, so
+      // it's counted in tokens instead (R67), even though its cost events carry a list price.
       const [spent] = await db
         .select({ micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
         .from(costEvents)
-        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, monthStart)));
-      // Subscription runs are counted in tokens rather than money (R67).
+        .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
+        .where(and(eq(costEvents.companyId, companyId), gte(costEvents.occurredAt, monthStart), ne(fundingSources.kind, "subscription")));
+      // A run was on the subscription if its costs went there, or its agent is paid that way.
+      const onSubscription = sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} inner join ${fundingSources} on ${fundingSources.id} = ${costEvents.fundingSourceId} where ${fundingSources.kind} = 'subscription' and ${costEvents.runId} is not null) or ${agents.fundingSourceId} in (select ${fundingSources.id} from ${fundingSources} where ${fundingSources.kind} = 'subscription'))`;
       const [tokens] = await db
-        .select({ input: sql<string>`coalesce(sum(${runs.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runs.outputTokens}), 0)` })
+        .select({
+          input: sql<string>`coalesce(sum(${runs.inputTokens}), 0)`,
+          output: sql<string>`coalesce(sum(${runs.outputTokens}), 0)`,
+          runs: sql<number>`count(*)::int`,
+          unrecorded: sql<number>`count(*) filter (where ${runs.inputTokens} is null and ${runs.endedAt} is not null)::int`,
+        })
         .from(runs)
-        .innerJoin(agents, eq(agents.id, runs.agentId))
-        .innerJoin(fundingSources, eq(fundingSources.id, agents.fundingSourceId))
-        .where(and(eq(runs.companyId, companyId), eq(fundingSources.kind, "subscription"), gte(runs.startedAt, monthStart)));
+        .leftJoin(agents, eq(agents.id, runs.agentId))
+        .where(and(eq(runs.companyId, companyId), gte(runs.startedAt, monthStart), onSubscription));
       const live = await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.companyId, companyId), isNull(runs.endedAt)));
 
       // The last 14 days, one entry per day, oldest first.
@@ -113,6 +121,9 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
           decisionsWaiting: waiting?.n ?? 0,
           monthCostMicros: Number(spent?.micros ?? 0),
           monthSubscriptionTokens: { input: Number(tokens?.input ?? 0), output: Number(tokens?.output ?? 0) },
+          // Subscription runs this month, and how many ended before tokens were recorded.
+          monthSubscriptionRuns: tokens?.runs ?? 0,
+          monthSubscriptionUnrecorded: tokens?.unrecorded ?? 0,
         },
         runsByDay,
         ticketsByDay,

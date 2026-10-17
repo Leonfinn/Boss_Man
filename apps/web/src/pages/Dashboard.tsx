@@ -15,7 +15,7 @@ type AgentCard = {
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
   agents: AgentCard[];
-  stats: { agents: number; running: number; paused: number; inProgress: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number } };
+  stats: { agents: number; running: number; paused: number; inProgress: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
@@ -186,9 +186,28 @@ export function Dashboard({ company }: { company: Company | undefined }) {
           </small>
         </a>
         <a className="card stat" href="#/funding">
-          <strong>{s.monthCostMicros > 0 || tokens === 0 ? `$${(s.monthCostMicros / 1_000_000).toFixed(2)}` : compact(tokens)}</strong>
-          <span>{s.monthCostMicros > 0 || tokens === 0 ? "Spent this month" : "Subscription tokens this month"}</span>
-          <small className="muted">{tokens > 0 && s.monthCostMicros > 0 ? `plus ${compact(tokens)} subscription tokens` : tokens > 0 ? `${compact(s.monthSubscriptionTokens.input)} in, ${compact(s.monthSubscriptionTokens.output)} out` : "API credit and pay-as-you-go"}</small>
+          {/* Subscription use is tokens, not money (R67); money is only what API use cost. */}
+          {s.monthSubscriptionRuns > 0 ? (
+            <>
+              <strong>{tokens > 0 ? compact(tokens) : "–"}</strong>
+              <span>Subscription tokens this month</span>
+              <small className="muted">
+                {[
+                  tokens > 0 ? `${compact(s.monthSubscriptionTokens.input)} in, ${compact(s.monthSubscriptionTokens.output)} out` : null,
+                  s.monthSubscriptionUnrecorded > 0 ? `${s.monthSubscriptionUnrecorded} earlier run${s.monthSubscriptionUnrecorded === 1 ? "" : "s"} not counted` : null,
+                  s.monthCostMicros > 0 ? `plus $${(s.monthCostMicros / 1_000_000).toFixed(2)} on API` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </small>
+            </>
+          ) : (
+            <>
+              <strong>${(s.monthCostMicros / 1_000_000).toFixed(2)}</strong>
+              <span>API spend this month</span>
+              <small className="muted">API credit and pay-as-you-go</small>
+            </>
+          )}
         </a>
         <a className="card stat" href="#/decisions">
           <strong>{s.decisionsWaiting}</strong>
