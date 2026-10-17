@@ -123,7 +123,8 @@ export function Funding({ companies }: { companies: Company[] }) {
   const sources = usePoll(
     async (signal) => {
       const list = await api<FundingSource[]>("/api/funding-sources", { signal });
-      return Promise.all(list.map((s) => api<FundingStatus>(`/api/funding-sources/${s.id}/status`, { signal })));
+      const tz = encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone);
+      return Promise.all(list.map((s) => api<FundingStatus>(`/api/funding-sources/${s.id}/status?tz=${tz}`, { signal })));
     },
     30_000,
     "sources",

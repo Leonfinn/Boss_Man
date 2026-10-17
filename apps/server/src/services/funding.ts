@@ -2,6 +2,7 @@ import { and, desc, eq, gte, sql, type SQL } from "drizzle-orm";
 import {
   budgetStatus,
   creditStatus,
+  dateIn,
   forecastQuota,
   parseClaudeRateLimit,
   parseCodexRateLimits,
@@ -53,7 +54,7 @@ export function fundingService(db: Db) {
       return db.select().from(fundingSources).orderBy(fundingSources.name);
     },
 
-    async status(id: string, now = new Date()) {
+    async status(id: string, now = new Date(), timeZone = "Europe/London") {
       const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
       if (!source) return null;
       const events = await spendFor(eq(costEvents.fundingSourceId, id));
@@ -70,7 +71,7 @@ export function fundingService(db: Db) {
         credit,
         quota,
         forecasts,
-        daily: await this.daily(id, now),
+        daily: await this.daily(id, now, timeZone),
         totalSpentMicros: events.reduce((s, e) => s + e.costMicros, 0),
         // Boss Man only sees its own runs (spike S3: no Admin API on individual accounts).
         coverage: "boss_man_runs_only" as const,
@@ -79,19 +80,22 @@ export function fundingService(db: Db) {
 
     /**
      * Use per day for the last 7 days, oldest first (R78): tokens for runs paid from this source
-     * (a subscription's real measure) and the money its cost events add up to. Days are UTC.
+     * (a subscription's real measure) and the money its cost events add up to. Days are the
+     * owner's local days (e.g. BST in a UK summer), since that's how Claude's limits are shown.
      */
-    async daily(id: string, now = new Date(), days = 7) {
-      const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)));
+    async daily(id: string, now = new Date(), timeZone = "Europe/London", days = 7) {
+      // Calendar dates in that zone; 8 days back covers the oldest one whatever the offset.
+      const [y, m, d] = dateIn(now, timeZone).split("-").map(Number) as [number, number, number];
+      const dates = Array.from({ length: days }, (_, i) => new Date(Date.UTC(y, m - 1, d - (days - 1 - i))).toISOString().slice(0, 10));
+      const since = new Date(now.getTime() - (days + 1) * 86_400_000);
       const runsHere = await db
         .select({ startedAt: runs.startedAt, input: runs.inputTokens, output: runs.outputTokens })
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .where(and(gte(runs.startedAt, since), sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} where ${costEvents.fundingSourceId} = ${id} and ${costEvents.runId} is not null) or ${agents.fundingSourceId} = ${id})`));
       const money = await db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since)));
-      const day = (d: Date) => d.toISOString().slice(0, 10);
-      return Array.from({ length: days }, (_, i) => {
-        const d = day(new Date(since.getTime() + i * 86_400_000));
+      const day = (at: Date) => dateIn(at, timeZone);
+      return dates.map((d) => {
         const on = runsHere.filter((r) => day(r.startedAt) === d);
         return {
           day: d,

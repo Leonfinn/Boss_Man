@@ -30,6 +30,17 @@ export function milestoneStatus(counts: MilestoneCounts, targetDate: string | nu
 }
 
 /** Today's date, YYYY-MM-DD, in the given time zone. */
+/** A timezone name Intl understands, such as "Europe/London"; otherwise the fallback. */
+export function timeZoneOr(tz: string | null | undefined, fallback = "Europe/London"): string {
+  if (!tz) return fallback;
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: tz });
+    return tz;
+  } catch {
+    return fallback;
+  }
+}
+
 export function dateIn(now: Date, timeZone: string): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 }

@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, asc, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, timeZoneOr, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -38,6 +38,9 @@ import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { NotifySettings, notificationsService } from "./services/notifications.js";
+
+/** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
+const OWNER_TZ = timeZoneOr(process.env.TZ);
 
 export type AppOptions = {
   db: Db;
@@ -191,7 +194,7 @@ export async function buildApp(opts: AppOptions) {
       const key = `quota-alert:${fundingSourceId}:${window}:${f.resetsAt?.toISOString() ?? "none"}`;
       const told = await db.insert(settings).values({ key, value: true }).onConflictDoNothing().returning();
       if (!told.length) continue;
-      const hhmm = (d: Date) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: process.env.TZ || "Europe/London" });
+      const hhmm = (d: Date) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: OWNER_TZ });
       await notes.notify({
         companyId: null,
         agentId: null,
@@ -590,7 +593,9 @@ export async function buildApp(opts: AppOptions) {
 
     owner.get("/api/funding-sources/:id/status", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      return (await funding.status(id)) ?? reply.code(404).send({ error: "not_found" });
+      // Days follow the viewer's timezone (the browser sends it), else the server's.
+      const { tz } = z.object({ tz: z.string().max(64).optional() }).parse(req.query);
+      return (await funding.status(id, new Date(), timeZoneOr(tz, OWNER_TZ))) ?? reply.code(404).send({ error: "not_found" });
     });
 
     // Runners will post these; until the runner protocol lands the owner session is required.

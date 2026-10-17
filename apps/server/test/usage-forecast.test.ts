@@ -72,7 +72,7 @@ describe("limit estimate and daily use (R78)", () => {
     const [paid] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: other.id, startedAt: now, inputTokens: 10, outputTokens: 5 }).returning();
     await c.db.insert(costEvents).values({ fundingSourceId: credit.id, companyId: c.company.id, runId: paid!.id, costMicros: 1_500_000, occurredAt: now });
 
-    const daily = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status`)).json().daily as Array<{ day: string; runs: number; inputTokens: number; outputTokens: number }>;
+    const daily = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=UTC`)).json().daily as Array<{ day: string; runs: number; inputTokens: number; outputTokens: number }>;
     expect(daily).toHaveLength(7);
     expect(daily.at(-1)!.day).toBe(now.toISOString().slice(0, 10));
     expect(daily.at(-1)).toMatchObject({ runs: 1, inputTokens: 1000, outputTokens: 200 });
@@ -80,8 +80,24 @@ describe("limit estimate and daily use (R78)", () => {
     expect(daily.slice(0, -2).every((d) => d.runs === 0)).toBe(true);
 
     // API credit counts its cost events, and the run they were charged to.
-    const api = (await c.req("GET", `/api/funding-sources/${credit.id}/status`)).json().daily as Array<{ runs: number; costMicros: number }>;
+    const api = (await c.req("GET", `/api/funding-sources/${credit.id}/status?tz=UTC`)).json().daily as Array<{ runs: number; costMicros: number }>;
     expect(api.at(-1)).toMatchObject({ runs: 2, costMicros: 1_500_000 });
+  });
+
+  it("counts days in the owner's timezone, so late evening in BST isn't put on the next UTC day", async () => {
+    const c = (ctx = await setup());
+    const agent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.sub.id })).json() as { id: string };
+    // 00:30 on 16 Oct in London (BST, UTC+1) is 23:30 on 15 Oct UTC.
+    const now = new Date("2026-10-16T12:00:00Z");
+    await c.db.insert(runs).values({ companyId: c.company.id, agentId: agent.id, startedAt: new Date("2026-10-15T23:30:00Z"), inputTokens: 100, outputTokens: 10 });
+    const london = await c.funding.daily(c.sub.id, now, "Europe/London");
+    expect(london.map((d) => d.day)).toEqual(["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16"]);
+    expect(london.at(-1)).toMatchObject({ day: "2026-10-16", runs: 1, inputTokens: 100 });
+    expect((await c.funding.daily(c.sub.id, now, "UTC")).at(-2)).toMatchObject({ day: "2026-10-15", runs: 1 });
+    // The page asks with the browser's zone.
+    const status = (await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=Europe%2FLondon`)).json();
+    expect(status.daily).toHaveLength(7);
+    expect((await c.req("GET", `/api/funding-sources/${c.sub.id}/status?tz=Not%2FAZone`)).statusCode).toBe(200);
   });
 
   it("tells the owner once per window when the limit runs out before it resets", async () => {
