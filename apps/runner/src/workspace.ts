@@ -9,7 +9,7 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -181,6 +181,35 @@ export class Workspaces {
    * The ticket's changes against its base: committed, uncommitted and untracked, honouring
    * .gitignore. A throwaway index is used, so the agent's own index is untouched.
    */
+/**
+   * One file of a ticket's work, for agents reading what another ticket produced (R77): from
+   * its worktree when it has one here (uncommitted work included), else from its branch.
+   */
+  async readFile(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, file: string, maxBytes = 256 * 1024): Promise<{ text: string; truncated: boolean; from: "worktree" | "branch" }> {
+    const rel = path.posix.normalize(file.replace(/\\/g, "/")).replace(/^\/+/, "");
+    if (!rel || rel === "." || rel.startsWith("..") || rel.startsWith("-") || rel.includes("\0")) throw new Error("That isn't a path inside the repository.");
+    const dir = this.ticketDir(spec.ticketId);
+    let data: Buffer;
+    let from: "worktree" | "branch";
+    const inTree = path.resolve(dir, rel);
+    // A symlink in the worktree mustn't lead outside it.
+    if (existsSync(path.join(dir, ".git")) && inTree.startsWith(dir + path.sep) && existsSync(inTree) && realpathSync(inTree).startsWith(realpathSync(dir) + path.sep)) {
+      data = readFileSync(inTree);
+      from = "worktree";
+    } else {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(repo)) throw new Error("This runner has no copy of that project's repo.");
+      const { stdout } = await run("git", ["show", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME } as NodeJS.ProcessEnv }).catch(() => {
+        throw new Error(`There's no ${rel} on that ticket's branch.`);
+      });
+      data = stdout as unknown as Buffer;
+      from = "branch";
+    }
+    if (data.includes(0)) throw new Error(`${rel} is a binary file.`);
+    const truncated = data.length > maxBytes;
+    return { text: data.subarray(0, maxBytes).toString("utf8"), truncated, from };
+  }
+
   async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
     const repo = this.repoDir(spec.projectId);
     const dir = this.ticketDir(spec.ticketId);

@@ -81,9 +81,9 @@ describe("owner chat", () => {
       expect.objectContaining({ type: "permission.decide", requestId: "p2", verdict: "allow" }),
     ]);
 
-    // Its MCP server has board tools only.
+    // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["board", "create_ticket", "features", "link_tickets", "log_feedback", "set_milestone"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["board", "create_ticket", "features", "link_tickets", "log_feedback", "set_milestone", "skills", "tickets", "wiki"]);
     expect(textOf(await client.callTool({ name: "log_feedback", arguments: { text: "Acme wants SSO.", from: "Acme" } }))).toMatch(/^Filed in the feedback inbox: #\/feedback\//);
     expect((await c.feedback.notes(c.company.id))[0]).toMatchObject({ source: "chat", customer: "Acme", text: "Acme wants SSO." });
     const board = JSON.parse(textOf(await client.callTool({ name: "board", arguments: {} })));
