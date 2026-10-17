@@ -670,11 +670,11 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     "skills",
     {
       description:
-        "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; the owner is told. Skills are added to the library by the owner.",
-      inputSchema: { action: z.enum(["list", "give", "take"]), skill: z.string().max(64).optional(), agent: z.string().max(80).optional() },
+        "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; giving a pack's name (e.g. obra/superpowers) gives every skill in it. The owner is told. Skills are added to the library by the owner.",
+      inputSchema: { action: z.enum(["list", "give", "take"]), skill: z.string().max(200).optional(), agent: z.string().max(80).optional() },
     },
     async ({ action, skill, agent }) => {
-      if (action === "list") return text(JSON.stringify((await skills.list(scope.companyId)).map((s) => ({ name: s.name, description: s.description, agents: s.agents.map((a) => a.name) }))));
+      if (action === "list") return text(JSON.stringify((await skills.list(scope.companyId)).map((s) => ({ name: s.name, ...(s.pack ? { pack: s.pack } : {}), description: s.description, agents: s.agents.map((a) => a.name) }))));
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
       if (me?.role !== "ceo") return fail("Only your company's CEO can give or take skills.");
       if (!skill || !agent) return fail("Give the skill's name and the agent's name.");

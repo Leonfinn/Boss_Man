@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners } from "../src/db/schema.js";
+import { runners, tickets } from "../src/db/schema.js";
 import { runResult } from "../src/services/dashboard.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -50,7 +50,7 @@ describe("dashboard (R74)", () => {
     const run = c.starts()[0]!;
     let data = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json();
     expect(data.agents[0]).toMatchObject({ name: "Engineer", run: { id: run.runId, ticket: "Fix login", result: "running" } });
-    expect(data.stats).toMatchObject({ agents: 3, running: 1, paused: 1, inProgress: 1, open: 3, blocked: 1, decisionsWaiting: 0 });
+    expect(data.stats).toMatchObject({ agents: 3, running: 1, paused: 1, inProgress: 1, inReview: 0, open: 3, blocked: 1, decisionsWaiting: 0 });
 
     await c.emit({ type: "run.ended", runId: run.runId, stopReason: "end_turn", error: null });
     await c.decisions.raise({ companyId: c.company.id, agentId: null, question: "Which?", options: ["A", "B"], recommended: "A" });
@@ -61,5 +61,38 @@ describe("dashboard (R74)", () => {
     expect(data.runsByDay.at(-1)).toMatchObject({ succeeded: 1, failed: 0 });
     expect(data.ticketsByDay.at(-1)).toMatchObject({ in_progress: 1, blocked: 1, backlog: 1 });
     expect(data.recentTickets.map((t: { id: string }) => t.id)).toContain(a.id);
+  });
+  it("counts subscription use in tokens, and only API use as money spent", async () => {
+    const c = (ctx = await setup());
+    const sub = (await c.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    const payg = (await c.req("POST", "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json() as { id: string };
+    await c.req("PATCH", `/api/agents/${c.worker.id}`, { fundingSourceId: sub.id });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix login", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const run = c.starts()[0]!;
+    // A subscription run reports a list-price cost; it isn't money spent.
+    await c.emit({ type: "run.cost", runId: run.runId, fundingSourceId: sub.id, costMicrosDelta: 5_000_000, model: "claude-opus-5-5" });
+    await c.emit({ type: "run.ended", runId: run.runId, stopReason: "end_turn", error: null, usage: { inputTokens: 1200, outputTokens: 300, cachedReadTokens: 0, cachedWriteTokens: 0 } });
+    let stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ monthCostMicros: 0, monthSubscriptionTokens: { input: 1200, output: 300 }, monthSubscriptionRuns: 1, monthSubscriptionUnrecorded: 0 });
+
+    // A pay-as-you-go run is money.
+    await c.req("PATCH", `/api/agents/${c.worker.id}`, { fundingSourceId: payg.id });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Another", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const second = c.starts().at(-1)!;
+    await c.emit({ type: "run.cost", runId: second.runId, fundingSourceId: payg.id, costMicrosDelta: 2_500_000, model: "claude-opus-5-5" });
+    stats = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats;
+    expect(stats).toMatchObject({ monthCostMicros: 2_500_000, monthSubscriptionRuns: 1 });
+  });
+  it("shows a ticket under its state, even when its column was left behind by an older move", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Research" })).json() as { id: string };
+    // Before #49, an agent's set_ticket_state changed the state but not the column.
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { columns: Array<{ systemState: string; tickets: Array<{ id: string }> }> };
+    expect(board.columns.find((col) => col.systemState === "review")!.tickets.map((x) => x.id)).toEqual([t.id]);
+    expect(board.columns.find((col) => col.systemState === "backlog")!.tickets).toEqual([]);
+    expect((await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json().stats).toMatchObject({ inProgress: 0, inReview: 1 });
   });
 });

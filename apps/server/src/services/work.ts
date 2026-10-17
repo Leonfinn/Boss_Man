@@ -141,8 +141,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         project: p,
         columns: cols.map((c) => ({
           ...c,
-          // A ticket without a column shows in the first column for its state.
-          tickets: cards.filter((t) => t.columnId === c.id || (!t.columnId && cols.find((x) => x.systemState === t.systemState)?.id === c.id)),
+          // A ticket shows in its column while that column matches its state; otherwise (no
+          // column, or one left over from an older move) in the first column for its state.
+          tickets: cards.filter((t) => {
+            const own = cols.find((x) => x.id === t.columnId);
+            return own && own.systemState === t.systemState ? own.id === c.id : cols.find((x) => x.systemState === t.systemState)?.id === c.id;
+          }),
         })),
       };
     },
