@@ -8,7 +8,7 @@ import type { Db } from "../db/client.js";
 import { agentSkills, agents, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
-export const LIMITS = { files: 200, bytes: 2 * 1024 * 1024, skillsPerLink: 20, perAgentBytes: 20 * 1024 * 1024 };
+export const LIMITS = { files: 200, bytes: 2 * 1024 * 1024, skillsPerLink: 50, perAgentBytes: 20 * 1024 * 1024 };
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export class SkillError extends Error {
@@ -109,6 +109,9 @@ export function parseGitHub(url: string): { owner: string; repo: string; ref: st
   return { owner: m[1]!, repo: m[2]!, ref: m[3] ?? null, path };
 }
 
+/** The name a fetched skill will have: its frontmatter name, else its folder. */
+const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillName(parseSkillMd(Buffer.from(f.files.find((x) => x.path === "SKILL.md")!.content, "base64").toString("utf8")).name ?? f.folder);
+
 export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   const get = deps.fetch ?? fetch;
 
@@ -125,14 +128,14 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     return as === "json" ? ((await res.json()) as unknown) : Buffer.from(await res.arrayBuffer());
   }
 
-  async function save(companyId: string, input: { files: SkillFile[]; source: "written" | "link" | "upload"; sourceUrl?: string | null; sourceRef?: string | null; name?: string | null; replaceId?: string | null }) {
+  async function save(companyId: string, input: { files: SkillFile[]; source: "written" | "link" | "upload"; sourceUrl?: string | null; sourceRef?: string | null; name?: string | null; replaceId?: string | null; pack?: string | null; packUrl?: string | null }) {
     const n = normalise(input.files);
     const md = parseSkillMd(unb64(n.files[0]!.content).toString("utf8"));
     const name = skillName(input.name ?? md.name ?? n.folder ?? "");
     if (!NAME.test(name)) throw new SkillError(400, "A skill's name can only have lower-case letters, digits and hyphens.");
     const description = (md.description ?? "").slice(0, 1024);
     if (!description) throw new SkillError(400, "SKILL.md needs a description saying what the skill does and when to use it.");
-    const values = { name, description, source: input.source, sourceUrl: input.sourceUrl ?? null, sourceRef: input.sourceRef ?? null, files: n.files, sizeBytes: n.bytes, updatedAt: new Date() };
+    const values = { name, description, source: input.source, sourceUrl: input.sourceUrl ?? null, sourceRef: input.sourceRef ?? null, ...(input.pack !== undefined ? { pack: input.pack, packUrl: input.packUrl ?? null } : {}), files: n.files, sizeBytes: n.bytes, updatedAt: new Date() };
     const [clash] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, name)));
     if (clash && clash.id !== input.replaceId) throw new SkillError(409, `There's already a skill called ${name}.`);
     if (input.replaceId) {
@@ -206,7 +209,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   return {
     async list(companyId: string) {
       const rows = await db
-        .select({ id: skills.id, name: skills.name, description: skills.description, source: skills.source, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef, sizeBytes: skills.sizeBytes, files: skills.files, updatedAt: skills.updatedAt })
+        .select({ id: skills.id, name: skills.name, description: skills.description, source: skills.source, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef, pack: skills.pack, packUrl: skills.packUrl, sizeBytes: skills.sizeBytes, files: skills.files, updatedAt: skills.updatedAt })
         .from(skills)
         .where(eq(skills.companyId, companyId))
         .orderBy(asc(skills.name));
@@ -252,8 +255,16 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
       if (!/^https:\/\//.test(url)) throw new SkillError(400, "Give an https link to a GitHub repository, folder or SKILL.md.");
       const gh = await readGitHub(url);
       if (gh) {
+        // Several skills from one link are a pack, given and updated together (e.g. obra/superpowers).
+        const p = parseGitHub(url)!;
+        const pack = gh.found.length > 1 ? `${p.owner}/${p.repo}` : null;
+        const [taken] = pack ? await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack))) : [];
+        if (taken) throw new SkillError(409, `The ${pack} pack is already in the library; check it for updates instead.`);
+        const names = gh.found.map((f) => skillNameOf(f));
+        const clashes = names.length ? await db.select({ name: skills.name }).from(skills).where(and(eq(skills.companyId, companyId), inArray(skills.name, names))) : [];
+        if (clashes.length) throw new SkillError(409, `There's already a skill called ${clashes.map((c) => c.name).join(", ")}.`);
         const added = [];
-        for (const f of gh.found) added.push(await save(companyId, { files: f.files, source: "link", sourceUrl: f.url, sourceRef: gh.commit, name: parseSkillMd(unb64(f.files.find((x) => x.path === "SKILL.md")!.content).toString("utf8")).name ?? f.folder }));
+        for (const f of gh.found) added.push(await save(companyId, { files: f.files, source: "link", sourceUrl: f.url, sourceRef: gh.commit, name: skillNameOf(f), pack, packUrl: pack ? url : null }));
         return added;
       }
       // Anything else must be a single SKILL.md file.
@@ -282,6 +293,41 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     },
 
     /** Sets exactly which agents of the company have a skill. */
+    /** Reads a pack's link again: changed skills are updated, new ones added; gone ones are listed. */
+    async refreshPack(companyId: string, pack: string) {
+      const rows = await db.select().from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack)));
+      const url = rows.find((r) => r.packUrl)?.packUrl;
+      if (!url) throw new SkillError(404, "No such pack.");
+      const gh = await readGitHub(url);
+      if (!gh) throw new SkillError(409, "That pack's link no longer points at GitHub.");
+      if (rows.every((r) => r.sourceRef === gh.commit)) return { changed: 0, added: [] as string[], gone: [] as string[] };
+      const byName = new Map(rows.map((r) => [r.name, r]));
+      let changed = 0;
+      const added: string[] = [];
+      for (const f of gh.found) {
+        const name = skillNameOf(f);
+        const had = byName.get(name);
+        const before = had ? JSON.stringify(had.files) : null;
+        const saved = await save(companyId, { files: f.files, source: "link", sourceUrl: f.url, sourceRef: gh.commit, name, replaceId: had?.id ?? null, pack, packUrl: url });
+        if (!had) added.push(saved.name);
+        else if (JSON.stringify(saved.files) !== before) changed++;
+      }
+      const found = new Set(gh.found.map(skillNameOf));
+      return { changed, added, gone: rows.filter((r) => !found.has(r.name)).map((r) => r.name) };
+    },
+
+    /** Sets exactly which agents have every skill in a pack. */
+    async setPackHolders(companyId: string, pack: string, agentIds: string[], by: string | null = null) {
+      const rows = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack)));
+      if (!rows.length) throw new SkillError(404, "No such pack.");
+      for (const r of rows) await this.setHolders(companyId, r.id, agentIds, by);
+    },
+
+    async removePack(companyId: string, pack: string) {
+      const gone = await db.delete(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack))).returning({ id: skills.id });
+      if (!gone.length) throw new SkillError(404, "No such pack.");
+    },
+
     async setHolders(companyId: string, skillId: string, agentIds: string[], by: string | null = null) {
       const [s] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.id, skillId), eq(skills.companyId, companyId)));
       if (!s) throw new SkillError(404, "No such skill.");
@@ -295,6 +341,12 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     },
 
     async give(companyId: string, skillName_: string, agentId: string, by: string | null) {
+      // A pack's name gives every skill in it.
+      const inPack = await db.select({ name: skills.name }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, skillName_)));
+      if (inPack.length) {
+        for (const p of inPack) await this.give(companyId, p.name, agentId, by);
+        return;
+      }
       const [s] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, skillName_)));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
       if (!s || !a) throw new SkillError(404, !s ? `No skill called ${skillName_}.` : "No such agent in this company.");
@@ -303,6 +355,11 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     },
 
     async take(companyId: string, skillName_: string, agentId: string) {
+      const inPack = await db.select({ name: skills.name }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, skillName_)));
+      if (inPack.length) {
+        for (const p of inPack) await this.take(companyId, p.name, agentId);
+        return;
+      }
       const [s] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, skillName_)));
       if (!s) throw new SkillError(404, `No skill called ${skillName_}.`);
       await db.delete(agentSkills).where(and(eq(agentSkills.agentId, agentId), eq(agentSkills.skillId, s.id)));

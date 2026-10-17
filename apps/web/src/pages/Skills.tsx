@@ -7,7 +7,7 @@ import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
-type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
+type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
 type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }> };
 type Upload = { path: string; content: string };
 
@@ -91,7 +91,7 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
         <div className="field">
           <label htmlFor="skill-url">GitHub link to a repository, a folder or a SKILL.md</label>
           <input id="skill-url" type="url" placeholder="https://github.com/owner/repo/tree/main/skills" value={url} onChange={(e) => setUrl(e.target.value)} />
-          <small className="muted">Every skill under the link is added, pinned to the commit it points at now. Public repositories only for now; a link straight to a SKILL.md file anywhere also works.</small>
+          <small className="muted">Every skill under the link is added, pinned to the commit it points at now; several from one link become a pack you can give in one go. Public repositories only for now; a link straight to a SKILL.md file anywhere also works.</small>
         </div>
       )}
       {tab === "written" && (
@@ -256,13 +256,138 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   );
 }
 
+/** A pack (R71): skills added together from one link, given, updated and removed as one. */
+function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company: Company; pack: string; rows: SkillRow[]; onChanged: () => void; onPick: (id: string) => void; onClose: () => void }) {
+  const [holders, setHolders] = useState<string[] | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const holds = (agentId: string) => rows.filter((r) => r.agents.some((a) => a.id === agentId)).length;
+  const chosen = holders ?? company.agents.filter((a) => holds(a.id) === rows.length).map((a) => a.id);
+  const url = rows.find((r) => r.packUrl)?.packUrl;
+  const run = async (f: () => Promise<string>) => {
+    try {
+      setNote({ ok: true, text: await f() });
+      onChanged();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
+  return (
+    <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }} aria-labelledby="pack-h">
+      <header style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <p className="label">Skill pack</p>
+          <h2 id="pack-h" className="mono" style={{ fontSize: 20, fontWeight: 600 }}>
+            {pack}
+          </h2>
+          <p className="muted" style={{ fontSize: 13 }}>
+            {rows.length} skills
+            {url && (
+              <>
+                {" from "}
+                <a href={url} target="_blank" rel="noopener noreferrer">
+                  {url.replace(/^https:\/\//, "")}
+                </a>
+              </>
+            )}
+            {rows[0]?.sourceRef && <span className="mono"> @ {rows[0].sourceRef.slice(0, 7)}</span>}
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() =>
+              void run(async () => {
+                const r = await api<{ changed: number; added: string[]; gone: string[] }>(`/api/companies/${company.id}/skill-packs/refresh`, { method: "POST", body: { pack } });
+                const parts = [r.changed ? `${r.changed} updated` : null, r.added.length ? `added ${r.added.join(", ")}` : null, r.gone.length ? `no longer in the link: ${r.gone.join(", ")}` : null].filter(Boolean);
+                return parts.length ? `${parts.join("; ")}.` : "Already up to date.";
+              })
+            }
+          >
+            Check for updates
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              if (!window.confirm(`Remove all ${rows.length} skills in ${pack}? Agents that have them lose them.`)) return;
+              void api(`/api/companies/${company.id}/skill-packs?pack=${encodeURIComponent(pack)}`, { method: "DELETE" }).then(() => (onChanged(), onClose()), (err: Error) => setNote({ ok: false, text: err.message }));
+            }}
+          >
+            Remove pack
+          </button>
+        </div>
+      </header>
+
+      <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "10px 14px" }}>
+        <legend style={{ padding: "0 6px", fontWeight: 600 }}>Who has the whole pack</legend>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
+          {company.agents.map((a) => {
+            const n = holds(a.id);
+            return (
+              <label key={a.id} style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={chosen.includes(a.id)}
+                  ref={(el) => {
+                    if (el) el.indeterminate = holders === null && n > 0 && n < rows.length;
+                  }}
+                  onChange={(e) => setHolders(e.target.checked ? [...chosen, a.id] : chosen.filter((x) => x !== a.id))}
+                />
+                {a.name}
+                {holders === null && n > 0 && n < rows.length && <span className="muted"> ({n} of {rows.length})</span>}
+              </label>
+            );
+          })}
+        </div>
+        {holders && (
+          <button type="button" className="btn primary" style={{ marginTop: 10 }} onClick={() => void run(async () => (await api(`/api/companies/${company.id}/skill-packs/agents`, { method: "PUT", body: { pack, agentIds: holders } }), setHolders(null), "Saved. Agents get the pack from their next run."))}>
+            Save
+          </button>
+        )}
+      </fieldset>
+      {note && (
+        <p className={note.ok ? "muted" : "error"} role={note.ok ? "status" : "alert"}>
+          {note.text}
+        </p>
+      )}
+      <ul className="link-list">
+        {rows.map((r) => (
+          <li key={r.id} style={{ alignItems: "baseline" }}>
+            <button type="button" className="link mono" onClick={() => onPick(r.id)}>
+              {r.name}
+            </button>
+            <span className="muted" style={{ fontSize: 13 }}>
+              {r.description}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </article>
+  );
+}
+
 export function Skills({ company }: { company: Company | undefined }) {
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
   const [picked, setPicked] = useState<string | null>(null);
+  const [pickedPack, setPickedPack] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [added, setAdded] = useState<string | null>(null);
   if (!company) return <p>Create a company on the Kanban first.</p>;
   const rows = list.data ?? [];
+  const packs = [...new Set(rows.map((r) => r.pack).filter((p): p is string => !!p))].sort();
+  const loose = rows.filter((r) => !r.pack);
+  const pick = (id: string) => (setPicked(id), setPickedPack(null), setAdding(false));
+  const item = (s: SkillRow) => (
+    <li key={s.id}>
+      <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), pick(s.id))}>
+        <span className="mono">{s.name}</span>
+        <small>
+          {SOURCE[s.source]} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
+        </small>
+      </a>
+    </li>
+  );
   return (
     <>
       <header className="page-head">
@@ -284,33 +409,47 @@ export function Skills({ company }: { company: Company | undefined }) {
         <nav className="card wiki-list" aria-label="Skills">
           {list.data && rows.length === 0 && <p className="muted">No skills yet.</p>}
           <ul>
-            {rows.map((s) => (
-              <li key={s.id}>
-                <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), setPicked(s.id), setAdding(false))}>
-                  <span className="mono">{s.name}</span>
-                  <small>
-                    {SOURCE[s.source]} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
-                  </small>
-                </a>
-              </li>
-            ))}
+            {packs.map((p) => {
+              const inPack = rows.filter((r) => r.pack === p);
+              return (
+                <li key={`pack:${p}`}>
+                  <details open={inPack.some((r) => r.id === picked) || undefined}>
+                    <summary>
+                      <button type="button" className="link mono" aria-current={pickedPack === p && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), setPickedPack(p), setPicked(null), setAdding(false))}>
+                        {p}
+                      </button>{" "}
+                      <span className="muted">({inPack.length})</span>
+                    </summary>
+                    <ul>{inPack.map(item)}</ul>
+                  </details>
+                </li>
+              );
+            })}
+            {loose.map(item)}
           </ul>
         </nav>
         <div>
-          {adding || (!picked && rows.length === 0) ? (
+          {adding || (!picked && !pickedPack && rows.length === 0) ? (
             <AddSkill
               companyId={company.id}
               onAdded={(names) => {
                 setAdding(false);
                 setAdded(names.join(", "));
                 list.reload();
-                void api<SkillRow[]>(`/api/companies/${company.id}/skills`).then((all) => setPicked(all.find((s) => s.name === names[0])?.id ?? null));
+                // Several at once were a pack: open the pack, so it can be given in one go.
+                void api<SkillRow[]>(`/api/companies/${company.id}/skills`).then((all) => {
+                  const first = all.find((s) => s.name === names[0]);
+                  if (names.length > 1 && first?.pack) setPickedPack(first.pack);
+                  else setPicked(first?.id ?? null);
+                });
               }}
             />
+          ) : pickedPack && packs.includes(pickedPack) ? (
+            <PackView key={pickedPack} company={company} pack={pickedPack} rows={rows.filter((r) => r.pack === pickedPack)} onChanged={list.reload} onPick={pick} onClose={() => setPickedPack(null)} />
           ) : picked ? (
             <SkillView key={picked} company={company} id={picked} onChanged={list.reload} onClose={() => setPicked(null)} />
           ) : (
-            <p className="muted card">Pick a skill on the left, or add one.</p>
+            <p className="muted card">Pick a skill or a pack on the left, or add one.</p>
           )}
         </div>
       </div>

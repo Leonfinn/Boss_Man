@@ -183,4 +183,46 @@ describe("skills library (R71)", () => {
       ["reference/a.md", "ref"],
     ]);
   });
+  it("keeps skills from one link together as a pack: given, updated and removed as one", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const packs = `/api/companies/${c.company.id}/skill-packs`;
+    await c.req("POST", base, { from: "link", url: "https://github.com/acme/kit/tree/main/skills" });
+    expect((await c.req("GET", base)).json().map((s: { name: string; pack: string }) => [s.name, s.pack])).toEqual([
+      ["release-notes", "acme/kit"],
+      ["triage", "acme/kit"],
+    ]);
+    expect((await c.req("POST", base, { from: "link", url: "https://github.com/acme/kit/tree/main/skills" })).json().message).toBe("The acme/kit pack is already in the library; check it for updates instead.");
+
+    // Given to an agent in one go.
+    expect((await c.req("PUT", `${packs}/agents`, { pack: "acme/kit", agentIds: [c.worker.id] })).statusCode).toBe(200);
+    expect((await c.req("GET", base)).json().every((s: { agents: Array<{ id: string }> }) => s.agents.length === 1 && s.agents[0]!.id === c.worker.id)).toBe(true);
+
+    // Updated in one go: a changed skill and a new one.
+    const before = commit;
+    commit = "4444444444444444444444444444444444444444";
+    files["skills/triage/SKILL.md"] = "---\nname: triage\ndescription: \"Sorts bug reports by severity.\"\n---\nNew steps.\n";
+    files["skills/deploy/SKILL.md"] = "---\nname: deploy\ndescription: Deploys.\n---\n";
+    const apiCalls = fetched.filter((u) => u.startsWith("https://api.github.com")).length;
+    expect((await c.req("POST", `${packs}/refresh`, { pack: "acme/kit" })).json()).toEqual({ changed: 1, added: ["deploy"], gone: [] });
+    // One read of the link for the whole pack: the branch's commit and the tree.
+    expect(fetched.filter((u) => u.startsWith("https://api.github.com")).length - apiCalls).toBe(2);
+    commit = before;
+    delete files["skills/deploy/SKILL.md"];
+
+    expect((await c.req("DELETE", `${packs}?pack=${encodeURIComponent("acme/kit")}`)).statusCode).toBe(204);
+    expect((await c.req("GET", base)).json()).toEqual([]);
+  });
+
+  it("lets the CEO give a whole pack by its name", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "link", url: "https://github.com/acme/kit" });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Anything", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const asCeo = await c.mcp(c.starts()[0]!.runId, c.ceo.id);
+    expect(textOf(await asCeo.callTool({ name: "skills", arguments: { action: "give", skill: "acme/kit", agent: "Engineer" } }))).toBe("Engineer has the acme/kit skill from their next run.");
+    await asCeo.close();
+    const all = (await c.req("GET", `/api/companies/${c.company.id}/skills`)).json();
+    expect(all.map((s: { name: string; agents: unknown[] }) => [s.name, s.agents.length])).toEqual([["release-notes", 1], ["triage", 1]]);
+  });
 });
