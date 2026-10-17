@@ -116,6 +116,9 @@ The full list:
 - Configurable CEO decision rules.
 - Secrets management screen: rotation, grants, and the access log.
 
+## v1.2
+From the owner's first install: no-faff runners through a launcher, a setup wizard, merge-check presets, check buttons for keys and tokens, Gitea with pull requests, a model picker, an Agents tab with hiring and a new ticket card. See [08-v1.2-plan.md](08-v1.2-plan.md) (R55–R64).
+
 ## Later
 - **Paperclip importer**, via Paperclip's company export (`server/src/services/company-portability.ts` upstream).
 - **More ACP agents:** Gemini CLI, OpenCode, Copilot CLI and others.
