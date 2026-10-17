@@ -52,6 +52,8 @@ export type AnswerExtra = {
   assigneeAgentId?: string;
   /** What to tell the agent, e.g. why a plan or a review went back. */
   note?: string;
+  /** The owner wrote their own answer to an agent's question instead of picking an option. */
+  custom?: boolean;
 };
 
 const ALLOW = "Allow once";
@@ -445,7 +447,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
       if (!d) return null;
       const options = d.options as string[];
-      if (options.length > 0 && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
+      // An agent's question can be answered in the owner's own words; anything that acts on the
+      // answer (a permission, a deploy, a budget) keeps to its options.
+      const ownWords = extra.custom === true && d.kind === "question";
+      if (extra.custom && !ownWords) throw new AnswerError("This decision needs one of its options; only an agent's question takes your own answer.");
+      if (options.length > 0 && !ownWords && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
       const ctx = d.context as DecisionContext;
       await db

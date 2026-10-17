@@ -3,7 +3,7 @@
 // ended wakes the agent again on the same ticket with the message instead.
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, costEvents, runnerEvents, runners, runs, tickets } from "../db/schema.js";
+import { agents, costEvents, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export class RunError extends Error {
@@ -35,10 +35,11 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     /** Runs that have finished, newest first, with what they cost. */
     async recent(limit = 50, companyId?: string) {
       const rows = await db
-        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome })
+        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome , purpose: runs.purpose, reason: wakes.reason, note: wakes.note })
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+        .leftJoin(wakes, eq(wakes.runId, runs.id))
         .where(companyId ? and(isNotNull(runs.endedAt), eq(runs.companyId, companyId)) : isNotNull(runs.endedAt))
         .orderBy(desc(runs.endedAt))
         .limit(limit);
@@ -86,10 +87,11 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     /** Runs still going, newest first, with agent and ticket names. */
     async active(companyId?: string) {
       return db
-        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, lastEventAt: runs.lastEventAt })
+        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, lastEventAt: runs.lastEventAt , purpose: runs.purpose, reason: wakes.reason, note: wakes.note })
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+        .leftJoin(wakes, eq(wakes.runId, runs.id))
         .where(companyId ? and(isNull(runs.endedAt), eq(runs.companyId, companyId)) : isNull(runs.endedAt))
         .orderBy(desc(runs.startedAt));
     },

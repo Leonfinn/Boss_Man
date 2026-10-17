@@ -235,6 +235,28 @@ describe("Boss Man MCP server", () => {
     await c.close();
   });
 
+  it("lets the owner answer an agent's question in their own words, and only a question", async () => {
+    const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
+    await c.callTool({ name: "raise_decision", arguments: { question: "Which of C1-C6 should become tickets?", options: ["C1, C2 and C4", "All six"], recommended: "C1, C2 and C4" } });
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
+    const answer = (payload: object) => ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload });
+    // Without saying it's the owner's own answer, the options still rule.
+    expect((await answer({ answer: "C2 only, and write C5 up as a note" })).statusCode).toBe(422);
+    expect((await answer({ answer: "C2 only, and write C5 up as a note", custom: true })).statusCode).toBe(200);
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id));
+    expect(after).toMatchObject({ status: "answered", answer: "C2 only, and write C5 up as a note" });
+    expect(await ctx.db.select({ note: wakes.note }).from(wakes).where(eq(wakes.reason, "decision answered"))).toEqual([{ note: expect.stringContaining("C2 only, and write C5 up as a note") }]);
+
+    // A decision that acts on its answer (here a permission) never takes free text.
+    const [perm] = await ctx.db
+      .insert(decisions)
+      .values({ companyId: ctx.appCo.company.id, kind: "permission", question: "CEO wants to run: rm -rf /", options: ["Allow", "Deny"], recommendedOption: "Deny", tier: "owner", context: { type: "permission", runnerId: crypto.randomUUID(), runId: crypto.randomUUID(), requestId: "r9" } })
+      .returning();
+    const res = await ctx.app.inject({ method: "POST", url: `/api/decisions/${perm!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Allow it this once", custom: true } });
+    expect(res.statusCode).toBe(422);
+    await c.close();
+  });
+
   it("request_engagement wakes the other company's CEO, whose acceptance the owner approves", async () => {
     await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" });
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);

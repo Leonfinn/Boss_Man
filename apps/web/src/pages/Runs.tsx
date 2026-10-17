@@ -3,6 +3,33 @@ import { usePoll } from "../hooks";
 
 export const when = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 
+/** Why a run started, in words, from the wake that launched it. */
+const WHY: Record<string, string> = {
+  assigned: "Was given the ticket",
+  "woken by owner": "You woke it",
+  message: "Your message",
+  chat: "Chat with you",
+  owner_chat: "Chat with you",
+  decision: "A decision put to it",
+  "decision answered": "Your answer to its question",
+  feedback: "New feedback to triage",
+  chased: "Chased: something is waiting on it",
+  unblocked: "Its ticket was unblocked",
+  resume: "Picking up after a restart",
+  engagement: "Another company's request",
+  "deploy rejected": "You rejected its deploy",
+  review: "Review feedback",
+  reviewer: "Asked to review",
+  "changes requested": "Changes requested",
+  "verify failed": "Its merge check failed",
+  "deploy approved": "You approved its deploy",
+};
+export function whyRun(r: RunRow) {
+  if (r.purpose === "chat") return WHY.chat!;
+  if (!r.reason) return "";
+  return WHY[r.reason] ?? r.reason[0]!.toUpperCase() + r.reason.slice(1);
+}
+
 /** A run's result in a few words: errors and interruptions stand out. */
 export function outcomeTag(outcome: string | null | undefined) {
   if (!outcome) return <span className="tag blue">Running</span>;
@@ -20,7 +47,7 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
           <tr>
             <th scope="col">{finished ? "Ended" : "Started"}</th>
             <th scope="col">Agent</th>
-            <th scope="col">Ticket</th>
+            <th scope="col">What for</th>
             <th scope="col">Model</th>
             <th scope="col">Result</th>
             {finished && <th scope="col" style={{ textAlign: "right" }}>Cost</th>}
@@ -36,7 +63,12 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
                 {r.agent ?? "An agent"}
                 <span className="muted"> · {companies.find((c) => c.id === r.companyId)?.name}</span>
               </td>
-              <td>{r.ticket ?? <span className="muted">No ticket</span>}</td>
+              <td>
+                {r.ticket && r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : null}
+                <div className="muted" style={{ fontSize: 13 }} title={r.note ?? undefined}>
+                  {whyRun(r) || (r.ticket ? "" : "No ticket")}
+                </div>
+              </td>
               <td className="mono">{r.model ?? "default"}</td>
               <td>{outcomeTag(finished ? r.outcome : null)}</td>
               {finished && <td className="mono" style={{ textAlign: "right" }}>{usd(r.costMicros ?? 0)}</td>}
@@ -56,7 +88,7 @@ export function Runs({ companies }: { companies: Company[] }) {
       <header className="page-head">
         <div>
           <h1>Runs</h1>
-          <p className="sub">Every agent session: open one to read along, send it a message or stop it.</p>
+          <p className="sub">Each time an agent is started, why, and what it cost. Open one to read along, send it a message or stop it.</p>
         </div>
       </header>
       <section aria-labelledby="running-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>

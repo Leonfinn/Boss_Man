@@ -9,7 +9,7 @@ import { planningGuidance, UNTRUSTED_NOTE } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
-import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET } from "./decisions.js";
 import type { fundingService } from "./funding.js";
@@ -67,6 +67,21 @@ export function schedulerService(
   let lane: Promise<unknown> = Promise.resolve();
   const now = deps.now ?? (() => new Date());
   const workspaceRoot = deps.workspaceRoot ?? "/home/node/workspaces";
+
+  async function startTicket(ticketId: string) {
+    const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, ticketId));
+    if (t?.state !== "backlog" && t?.state !== "ready") return;
+    const [col] = await db
+      .select({ id: workflowColumns.id })
+      .from(workflowColumns)
+      .where(and(eq(workflowColumns.projectId, t.projectId), eq(workflowColumns.systemState, "in_progress")))
+      .orderBy(asc(workflowColumns.position))
+      .limit(1);
+    await db
+      .update(tickets)
+      .set({ systemState: "in_progress", columnId: col?.id ?? null, lastActivityAt: now() })
+      .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "ready"])));
+  }
 
   async function globallyPaused() {
     const [row] = await db.select().from(settings).where(eq(settings.key, "paused"));
@@ -127,6 +142,8 @@ export function schedulerService(
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, runId);
+    // An agent starting on a waiting ticket moves it to in progress, so the board shows what's being worked on.
+    if (w.ticketId) await startTicket(w.ticketId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
