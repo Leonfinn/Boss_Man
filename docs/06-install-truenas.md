@@ -24,15 +24,29 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
 - A GitHub account that can create a fine-grained token for the repos the agents will work on.
 
-In the commands below, replace `<pool>` with the name of your SSD pool, the mirrored pair that holds apps. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
+The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
 
 ## 1. Create a dataset
 
-In the TrueNAS UI, go to Datasets, select your SSD pool, and Add Dataset:
-- **Name:** `apps/boss-man`. Create the `apps` dataset first if you don't have one.
-- **Dataset preset:** Generic. With Generic, ordinary `chown` and `chmod` behave as expected, whereas an NFSv4 ACL can override them.
+Boss Man gets its own dataset under `Container_files`, so you can snapshot and roll it back on its own.
 
-Everything Boss Man keeps goes under this dataset, so snapshots and replication cover it.
+First check that `Container_files` is a dataset and not a plain folder. Over SSH (step 2 shows how to connect):
+
+```sh
+sudo zfs list -o name,mountpoint -r NVME_Apps
+```
+
+If `NVME_Apps/Container_files` is in the list, it's a dataset. In the TrueNAS UI, go to Datasets, select `NVME_Apps/Container_files`, and Add Dataset:
+- **Name:** `boss-man`.
+- **Dataset preset:** Generic. Generic datasets use a POSIX ACL, so ordinary `chown` and `chmod` behave as expected ([TrueNAS docs](https://www.truenas.com/docs/scale/25.10/scaletutorials/datasets/permissionsscale/)). Pick Generic even if `Container_files` itself was made with the Apps preset, which uses an NFSv4 ACL that can override them.
+
+If `Container_files` isn't in the list, it's a plain folder, and TrueNAS can't create a dataset inside it. Then just make the folder; snapshots of the dataset that holds `Container_files` still cover it:
+
+```sh
+sudo mkdir -p /mnt/NVME_Apps/Container_files/boss-man
+```
+
+Everything Boss Man keeps goes in this folder.
 
 ## 2. Get the code
 
@@ -45,7 +59,7 @@ ssh admin@<nas-ip>
 Go to the dataset:
 
 ```sh
-cd /mnt/<pool>/apps/boss-man
+cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
 Check whether git is on the host:
@@ -80,10 +94,10 @@ sudo chown -R 1000:1000 data/app-co src/secrets && sudo chmod 700 src/secrets
 
 ## 4. Settings and the master key
 
-Go to the repo folder. Run everything from here from `/mnt/<pool>/apps/boss-man/src`.
+Go to the repo folder. Run everything from here from `/mnt/NVME_Apps/Container_files/boss-man/src`.
 
 ```sh
-cd /mnt/<pool>/apps/boss-man/src
+cd /mnt/NVME_Apps/Container_files/boss-man/src
 ```
 
 The master key encrypts every stored secret. Back it up somewhere safe outside the NAS. Without it, stored secrets can't be read.
@@ -104,7 +118,7 @@ Create `.env`. Compose reads it automatically. Its first two lines add the TrueN
 sudo tee .env > /dev/null <<EOF
 COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml
 COMPOSE_PROFILES=runners
-BOSSMAN_DATA=/mnt/<pool>/apps/boss-man/data
+BOSSMAN_DATA=/mnt/NVME_Apps/Container_files/boss-man/data
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 BOSSMAN_BIND=<nas-ip>
 BOSSMAN_INSECURE_COOKIES=1
@@ -234,10 +248,10 @@ sudo scripts/update-runner.sh --rollback
 
 **After a TrueNAS update,** check `sudo docker compose ps`. Images and containers live on the apps pool and survive OS updates. TrueNAS doesn't document how its own app actions treat containers started from the shell. Running Boss Man as its own `boss-man` project is what keeps it out of their way.
 
-**Backups.** Snapshot `apps/boss-man` and keep a copy of `src/secrets/master.key` off the NAS. A Postgres data folder copied while the database is running may not restore cleanly. For a consistent backup, also dump it:
+**Backups.** Snapshot the `boss-man` dataset (or the one that holds it) and keep a copy of `src/secrets/master.key` off the NAS. A Postgres data folder copied while the database is running may not restore cleanly. For a consistent backup, also dump it:
 
 ```sh
-sudo docker compose exec -T db pg_dump -U bossman bossman | gzip | sudo tee /mnt/<pool>/apps/boss-man/bossman-$(date +%F).sql.gz > /dev/null
+sudo docker compose exec -T db pg_dump -U bossman bossman | gzip | sudo tee /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz > /dev/null
 ```
 
 ## 10. Phone notifications (optional)
