@@ -98,19 +98,19 @@ If the clone hangs, outbound port 22 is probably blocked, for example on your ro
 
 ## 3. Folders and ownership
 
-The server and runners run as uid 1000. Postgres (the Alpine image) runs as uid 70 and sets the ownership of its own data folder on first start, so you only create that folder.
+The server and runners run as uid 1000. Postgres (the Alpine image) runs as uid 70 and sets the ownership of its own data folder on first start, so you only create that folder. These commands use full paths, so they work from any folder.
 
 ```sh
-sudo mkdir -p data/postgres data/app-co/workspaces data/app-co/runner-data data/app-co/claude src/secrets
+sudo mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/postgres /mnt/NVME_Apps/Container_files/boss-man/data/app-co/workspaces /mnt/NVME_Apps/Container_files/boss-man/data/app-co/runner-data /mnt/NVME_Apps/Container_files/boss-man/data/app-co/claude /mnt/NVME_Apps/Container_files/boss-man/src/secrets
 ```
 
 ```sh
-sudo chown -R 1000:1000 data/app-co src/secrets && sudo chmod 700 src/secrets
+sudo chown -R 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/app-co /mnt/NVME_Apps/Container_files/boss-man/src/secrets && sudo chmod 700 /mnt/NVME_Apps/Container_files/boss-man/src/secrets
 ```
 
 ## 4. Settings and the master key
 
-Go to the repo folder. Run everything from here from `/mnt/NVME_Apps/Container_files/boss-man/src`.
+Go to the repo folder. The `docker compose` commands from here on must run from `/mnt/NVME_Apps/Container_files/boss-man/src`.
 
 ```sh
 cd /mnt/NVME_Apps/Container_files/boss-man/src
@@ -119,19 +119,19 @@ cd /mnt/NVME_Apps/Container_files/boss-man/src
 The master key encrypts every stored secret. Back it up somewhere safe outside the NAS. Without it, stored secrets can't be read.
 
 ```sh
-sudo sh -c 'openssl rand -base64 32 > secrets/master.key' && sudo chown 1000:1000 secrets/master.key && sudo chmod 600 secrets/master.key
+sudo sh -c 'openssl rand -base64 32 > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key' && sudo chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key && sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key
 ```
 
 Compose won't start anything while a secret file is missing, so create the runner's token file now, empty. You fill it in at step 7.
 
 ```sh
-sudo touch secrets/runner-app-co.token && sudo chown 1000:1000 secrets/runner-app-co.token && sudo chmod 600 secrets/runner-app-co.token
+sudo touch /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && sudo chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token
 ```
 
 Create `.env`. Compose reads it automatically. Its first two lines add the TrueNAS file and start the runners, so plain `docker compose` commands and the update script both use them.
 
 ```sh
-sudo tee .env > /dev/null <<EOF
+sudo tee /mnt/NVME_Apps/Container_files/boss-man/src/.env > /dev/null <<EOF
 COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml
 COMPOSE_PROFILES=runners
 BOSSMAN_DATA=/mnt/NVME_Apps/Container_files/boss-man/data
@@ -144,7 +144,7 @@ EOF
 ```
 
 ```sh
-sudo chmod 600 .env
+sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 ```
 
 - `BOSSMAN_BIND` publishes the web UI on the NAS's LAN address only. The TrueNAS UI keeps 80 and 443.
@@ -193,7 +193,7 @@ Open `http://<nas-ip>:3101` on your Mac and create the owner account. Then:
 In **Settings > Runner**, choose **Register a runner**. The token is shown once. Write it into the token file without it landing in your shell history: run the command, paste the token, press Return, then Ctrl-D.
 
 ```sh
-sudo sh -c 'cat > secrets/runner-app-co.token'
+sudo sh -c 'cat > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token'
 ```
 
 The token file must hold only the token. A trailing newline is fine, because the runner trims it.
@@ -278,6 +278,20 @@ sudo scripts/update-runner.sh --rollback
 
 ```sh
 sudo docker compose exec -T db pg_dump -U bossman bossman | gzip | sudo tee /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz > /dev/null
+```
+
+**Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps the deploy key and `known_hosts`, so GitHub needs nothing new. Check what's there first:
+
+```sh
+ls -la /mnt/NVME_Apps/Container_files/boss-man
+```
+
+```sh
+cd /mnt/NVME_Apps/Container_files/boss-man/src && sudo docker compose down; cd /mnt/NVME_Apps/Container_files/boss-man
+```
+
+```sh
+sudo rm -rf /mnt/NVME_Apps/Container_files/boss-man/src /mnt/NVME_Apps/Container_files/boss-man/data
 ```
 
 ## 10. Phone notifications (optional)
