@@ -38,9 +38,11 @@ type TicketPatch = {
 export type WorkHooks = {
   onAssigned?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   onDone?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
+  now?: () => Date;
 };
 
 export function workService(db: Db, hooks: WorkHooks = {}) {
+  const now = hooks.now ?? (() => new Date());
   async function project(id: string) {
     const [p] = await db.select().from(projects).where(eq(projects.id, id));
     if (!p) throw new WorkError(404, "No such project.");
@@ -168,6 +170,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           keyResultId: input.keyResultId ?? null,
           dueDate: input.dueDate ?? null,
           customFields: input.customFields ?? {},
+          lastActivityAt: now(),
           risk: input.risk ?? null,
           // Graded planning: high and critical work is planned first unless the creator says otherwise.
           planFirst: input.planFirst ?? (input.risk ? planFirstByDefault(input.risk) : false),
@@ -193,7 +196,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         .set({
           ...fields,
           ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? "completed") : null } : {}),
-          lastActivityAt: new Date(),
+          lastActivityAt: now(),
         })
         .where(eq(tickets.id, ticketId))
         .returning();
