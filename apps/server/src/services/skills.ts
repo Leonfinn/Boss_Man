@@ -153,13 +153,33 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     const commit = ((await fetchOk(`${api}/commits/${encodeURIComponent(ref)}`, "json")) as { sha: string }).sha;
     const tree = (await fetchOk(`${api}/git/trees/${commit}?recursive=1`, "json")) as { tree: Array<{ path: string; type: string; size?: number }>; truncated?: boolean };
     const under = (p: string) => !gh.path || p === gh.path || p.startsWith(`${gh.path}/`);
-    const dirs = tree.tree.filter((e) => e.type === "blob" && e.path.endsWith("SKILL.md") && (e.path === "SKILL.md" || e.path.endsWith("/SKILL.md")) && under(e.path)).map((e) => e.path.slice(0, -"SKILL.md".length).replace(/\/$/, ""));
-    if (!dirs.length) throw new SkillError(404, "There's no SKILL.md at that link.");
+    const all = tree.tree.filter((e) => e.type === "blob" && (e.path === "SKILL.md" || e.path.endsWith("/SKILL.md"))).map((e) => e.path.slice(0, -"SKILL.md".length).replace(/\/$/, ""));
+    const isClaude = (d: string) => /(^|\/)\.claude\/skills\/[^/]+$/.test(d);
+    let dirs = all.filter((d) => under(`${d ? `${d}/` : ""}SKILL.md`));
+    if (!dirs.length) {
+      // Point at where the repository's skills really are, Claude Code's copies first.
+      const elsewhere = [...all.filter(isClaude), ...all.filter((d) => !isClaude(d))].slice(0, 5);
+      throw new SkillError(
+        404,
+        elsewhere.length
+          ? `There's no SKILL.md ${gh.path ? `in ${gh.path}/` : "in that repository"}. This repository has skills in: ${elsewhere.map((d) => d || "the top folder").join(", ")}. Link to one of those, e.g. https://github.com/${gh.owner}/${gh.repo}/tree/${ref}/${elsewhere[0]}`
+          : "There's no SKILL.md in that repository.",
+      );
+    }
+    // Repositories that ship a copy of each skill per tool (.claude, .cursor, .codex, …): take
+    // Claude Code's copies when there are any, and one skill per folder name.
+    const claude = dirs.filter(isClaude);
+    if (claude.length && claude.length < dirs.length) dirs = claude;
+    const seen = new Set<string>();
+    dirs = dirs.filter((d) => {
+      const name = d.split("/").at(-1) || gh.repo;
+      return seen.has(name) ? false : (seen.add(name), true);
+    });
     if (dirs.length > LIMITS.skillsPerLink) throw new SkillError(400, `That link holds ${dirs.length} skills; link to a folder with at most ${LIMITS.skillsPerLink}.`);
     const found: Array<{ folder: string; files: SkillFile[]; url: string }> = [];
     for (const dir of dirs) {
       // A skill's files are everything in its folder, except other skills nested inside it.
-      const nested = dirs.filter((d) => d !== dir && (dir === "" || d.startsWith(`${dir}/`)));
+      const nested = all.filter((d) => d !== dir && (dir === "" || d.startsWith(`${dir}/`)));
       const blobs = tree.tree.filter((e) => e.type === "blob" && (dir === "" || e.path.startsWith(`${dir}/`)) && !nested.some((d) => e.path.startsWith(`${d}/`)));
       if (blobs.length > LIMITS.files) throw new SkillError(400, `${dir || "The repository"} has more than ${LIMITS.files} files; link to the skill's own folder.`);
       if (blobs.reduce((n, b) => n + (b.size ?? 0), 0) > LIMITS.bytes) throw new SkillError(400, `${dir || "That skill"} is over ${LIMITS.bytes / 1024 / 1024} MB.`);
