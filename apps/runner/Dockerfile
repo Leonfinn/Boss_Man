@@ -43,9 +43,10 @@ WORKDIR /home/node/app
 COPY --chown=node pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY --chown=node packages/shared/package.json packages/shared/
 COPY --chown=node apps/runner/package.json apps/runner/
+# Hard links, not copies: pnpm's copy can fail with EAGAIN on ZFS-backed Docker (TrueNAS).
 RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
- && pnpm install --frozen-lockfile --prod --filter "@boss-man/runner..."
+ && pnpm install --frozen-lockfile --package-import-method=hardlink --prod --filter "@boss-man/runner..."
 COPY --chown=node packages/shared/src packages/shared/src
 COPY --chown=node apps/runner/src apps/runner/src
 
