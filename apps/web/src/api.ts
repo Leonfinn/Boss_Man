@@ -83,6 +83,10 @@ export type FundingStatus = {
   source: FundingSource;
   credit: { grantMicros: number; spentMicros: number; remainingMicros: number; fractionUsed: number; cycleStart: string; cycleEnd: string } | null;
   quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean }>;
+  /** Per window: when it runs out at the recent rate (R78); null with no readings. */
+  forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
+  /** The last 7 days, oldest first (UTC days). */
+  daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
   totalSpentMicros: number;
   coverage: string;
 };

@@ -1,14 +1,15 @@
-import { and, desc, eq, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, sql, type SQL } from "drizzle-orm";
 import {
   budgetStatus,
   creditStatus,
+  forecastQuota,
   parseClaudeRateLimit,
   parseCodexRateLimits,
   type BudgetWindow,
   type QuotaSample,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { budgetPolicies, costEvents, fundingSources, quotaSamples } from "../db/schema.js";
+import { agents, budgetPolicies, costEvents, fundingSources, quotaSamples, runs } from "../db/schema.js";
 
 type FundingRow = typeof fundingSources.$inferSelect;
 type PolicyRow = typeof budgetPolicies.$inferSelect;
@@ -61,14 +62,45 @@ export function fundingService(db: Db) {
           ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, events, now)
           : null;
       const quota = source.kind === "subscription" ? await latestQuota(id) : [];
+      // When each window runs out at the recent rate (R78).
+      const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, id), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
+      const forecasts = Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)]));
       return {
         source,
         credit,
         quota,
+        forecasts,
+        daily: await this.daily(id, now),
         totalSpentMicros: events.reduce((s, e) => s + e.costMicros, 0),
         // Boss Man only sees its own runs (spike S3: no Admin API on individual accounts).
         coverage: "boss_man_runs_only" as const,
       };
+    },
+
+    /**
+     * Use per day for the last 7 days, oldest first (R78): tokens for runs paid from this source
+     * (a subscription's real measure) and the money its cost events add up to. Days are UTC.
+     */
+    async daily(id: string, now = new Date(), days = 7) {
+      const since = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - (days - 1)));
+      const runsHere = await db
+        .select({ startedAt: runs.startedAt, input: runs.inputTokens, output: runs.outputTokens })
+        .from(runs)
+        .leftJoin(agents, eq(agents.id, runs.agentId))
+        .where(and(gte(runs.startedAt, since), sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} where ${costEvents.fundingSourceId} = ${id} and ${costEvents.runId} is not null) or ${agents.fundingSourceId} = ${id})`));
+      const money = await db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since)));
+      const day = (d: Date) => d.toISOString().slice(0, 10);
+      return Array.from({ length: days }, (_, i) => {
+        const d = day(new Date(since.getTime() + i * 86_400_000));
+        const on = runsHere.filter((r) => day(r.startedAt) === d);
+        return {
+          day: d,
+          runs: on.length,
+          inputTokens: on.reduce((n, r) => n + (r.input ?? 0), 0),
+          outputTokens: on.reduce((n, r) => n + (r.output ?? 0), 0),
+          costMicros: money.filter((m) => day(m.occurredAt) === d).reduce((n, m) => n + m.costMicros, 0),
+        };
+      });
     },
 
     async recordCost(input: typeof costEvents.$inferInsert) {

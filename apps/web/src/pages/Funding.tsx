@@ -4,6 +4,52 @@ import { State } from "../components/State";
 import { usePoll } from "../hooks";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
+const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+
+/** The limit estimate under a quota bar (R78): how fast it's going, and whether it lasts until the reset. */
+function Forecast({ f }: { f: FundingStatus["forecasts"][string] | undefined }) {
+  if (!f || f.perHour === null) return null;
+  const rate = `about ${pct(f.perHour)} an hour`;
+  const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out at about ${clock(f.runsOutAt)} at the recent rate (${rate})`] : [false, `Lasts until it resets at the recent rate (${rate})`];
+  return (
+    <span className={warn ? undefined : "muted"} style={{ fontSize: 12, color: warn ? "var(--amber-ink)" : undefined }}>
+      {text}
+    </span>
+  );
+}
+
+/** Use per day over the last week (R78): tokens on a subscription, money otherwise. */
+function Daily({ s }: { s: FundingStatus }) {
+  if (!s.daily.some((d) => d.runs > 0 || d.costMicros > 0)) return null;
+  const sub = s.source.kind === "subscription";
+  const value = (d: FundingStatus["daily"][number]) => (sub ? d.inputTokens + d.outputTokens : d.costMicros);
+  const top = Math.max(1, ...s.daily.map(value));
+  return (
+    <figure style={{ margin: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+      <figcaption className="muted" style={{ fontSize: 12 }}>
+        Last 7 days, {sub ? "tokens" : "spend"} per day
+      </figcaption>
+      <ul className="day-bars">
+        {s.daily.map((d) => {
+          const amount = `${sub ? `${compact(value(d))} tokens` : usd(d.costMicros)}, ${d.runs} run${d.runs === 1 ? "" : "s"}`;
+          return (
+            <li key={d.day} className="day-bar" title={`${d.day}: ${amount}`}>
+              <span className="sr-only">
+                {d.day}: {amount}
+              </span>
+              <span className="fill" aria-hidden="true" style={{ height: `${Math.round((value(d) / top) * 100)}%` }} />
+              <span className="lbl" aria-hidden="true">
+                {new Date(`${d.day}T12:00:00Z`).toLocaleDateString(undefined, { weekday: "short" })}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </figure>
+  );
+}
+
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 
 function SourceCard({ s }: { s: FundingStatus }) {
@@ -48,6 +94,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
                 {q.overageInUse ? " · using usage credits" : ""}
               </span>
             )}
+            <Forecast f={s.forecasts[q.window]} />
           </div>
         ))
       ) : s.source.kind === "subscription" ? (
@@ -58,6 +105,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
           {usd(s.totalSpentMicros)} <small>spent through Boss Man</small>
         </span>
       )}
+      <Daily s={s} />
       {s.coverage === "boss_man_runs_only" && s.source.kind !== "subscription" && (
         <span className="muted" style={{ fontSize: 12 }}>
           Counted from Boss Man's own runs. Spend outside Boss Man isn't included: see the{" "}
