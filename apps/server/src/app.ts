@@ -26,6 +26,7 @@ import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, type PortalLimits } from "./portal.js";
 import { ChatError, chatService } from "./services/chat.js";
+import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
@@ -165,6 +166,7 @@ export async function buildApp(opts: AppOptions) {
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
   const runsSvc = runsService(db, { runners });
   runsSvc.setWakeHook((w) => scheduler.wake(w));
+  const ticketChat = ticketChatService(db, { runs: runsSvc, wake: (w) => scheduler.wake(w) });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
@@ -180,6 +182,7 @@ export async function buildApp(opts: AppOptions) {
     // The owner chat's answers.
     if (event.type === "run.update" && (event.update as { kind?: string } | null)?.kind === "agent_message") {
       void chat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "chat reply failed"));
+      void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "ticket reply failed"));
     }
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "chat end failed"));
     if (event.type === "runner.disk") {
@@ -231,7 +234,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -694,6 +697,21 @@ export async function buildApp(opts: AppOptions) {
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
       return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, assignee: row.assignee };
+    });
+
+    // A ticket's conversation with the agents working it (R65).
+    const ticketChatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof TicketChatError) return reply.code(err.status).send({ error: "ticket_chat", message: err.message });
+      throw err;
+    };
+    owner.get("/api/tickets/:id/messages", async (req, reply) => ticketChat.list(IdParam.parse(req.params).id).catch(ticketChatErrors(reply)));
+    owner.post("/api/tickets/:id/messages", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).parse(req.body);
+      return ticketChat
+        .ownerSays(id, text)
+        .then((m) => reply.code(201).send(m))
+        .catch(ticketChatErrors(reply));
     });
 
     owner.patch("/api/tickets/:id", async (req) => {

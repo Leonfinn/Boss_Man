@@ -11,7 +11,7 @@ import { z } from "zod";
 import { IMPORTANCE, planFirstByDefault, RISK_TIERS, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, workflowColumns } from "./db/schema.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -21,6 +21,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
+import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -46,9 +47,10 @@ type Services = {
   chapters: ReturnType<typeof chaptersService>;
   work: ReturnType<typeof workService>;
   feedback: ReturnType<typeof feedbackService>;
+  ticketChat: ReturnType<typeof ticketChatService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -130,15 +132,42 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
         if (t?.repoUrl && outcome !== "cancelled") return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
       }
+      // The card moves to the project's first column for the new state, so the board matches.
+      const [col] = await db
+        .select({ id: workflowColumns.id })
+        .from(workflowColumns)
+        .innerJoin(tickets, eq(tickets.projectId, workflowColumns.projectId))
+        .where(and(eq(tickets.id, ticketId), eq(workflowColumns.systemState, state)))
+        .orderBy(asc(workflowColumns.position))
+        .limit(1);
       const rows = await db
         .update(tickets)
-        .set({ systemState: state, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: new Date() })
+        .set({ systemState: state, columnId: col?.id ?? null, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: new Date() })
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)))
         .returning({ id: tickets.id });
       if (!rows.length) return fail("No ticket with that ID in your company.");
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       return text(`Ticket ${ticketId} is now ${state}.`);
+    },
+  );
+
+  server.registerTool(
+    "ticket_reply",
+    {
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. For a decision you need from them, use raise_decision instead.",
+      inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000) },
+    },
+    async ({ ticketId, text: body }) => {
+      try {
+        await ticketChat.agentSays({ companyId: scope.companyId, ticketId, agentId: scope.agentId, runId: scope.runId, text: body });
+      } catch (err) {
+        if (err instanceof TicketChatError) return fail(err.message);
+        throw err;
+      }
+      const [t] = await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
+      await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title: `Reply on "${t?.title ?? "a ticket"}"`, body: body.slice(0, 300), link: `#/tickets/${ticketId}` });
+      return text("Posted on the ticket's conversation.");
     },
   );
 

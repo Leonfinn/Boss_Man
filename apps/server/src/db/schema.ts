@@ -662,6 +662,27 @@ export const ownerChatMessages = pgTable(
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt)],
 );
 
+export const ticketMessageAuthor = pgEnum("ticket_message_author", ["owner", "agent", "system"]);
+
+/** A ticket's conversation (R65): the owner and the agents working it talk on the ticket. */
+export const ticketMessages = pgTable(
+  "ticket_messages",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    author: ticketMessageAuthor("author").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The run that wrote it (agent), or that it was sent into or woke (owner). */
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    text: text("text").notNull(),
+    /** How an owner message reached an agent: into a live run, as a new run, or not yet. */
+    delivery: text("delivery"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("ticket_messages_ticket_time").on(t.ticketId, t.createdAt)],
+);
+
 // ---------- Feature requests ----------
 
 export const featureStatus = pgEnum("feature_status", ["idea", "considering", "planned", "in_progress", "released", "declined"]);

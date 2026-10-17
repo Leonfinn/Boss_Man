@@ -7,7 +7,7 @@ type Message = { id: string; role: "owner" | "assistant" | "system"; text: strin
 type Chat = { items: Message[]; state: string };
 
 /** Plain text with in-app links (#/tickets/<id> and the like) made clickable. */
-function linked(text: string): ReactNode {
+export function linked(text: string): ReactNode {
   const parts = text.split(/`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?/g);
   return parts.map((p, i) => (p.startsWith("#/") ? <a key={i} href={p}>{p.startsWith("#/tickets/") ? "ticket" : p.slice(2)}</a> : <Fragment key={i}>{p}</Fragment>));
 }
