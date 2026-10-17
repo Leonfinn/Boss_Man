@@ -6,7 +6,7 @@ type Tree = Array<{ id: string; title: string; status: string; milestones: Array
 type OpenTicket = { id: string; title: string; state: string; project: string };
 
 /** A ticket's milestone, what it waits on and what waits on it. */
-export function TicketLinks({ t, onChanged }: { t: TicketDetail; onChanged: () => void }) {
+export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; onChanged: () => void; bare?: boolean }) {
   const links = usePoll((signal) => api<Links>(`/api/tickets/${t.id}/links`, { signal }), 30_000, `links-${t.id}`);
   const feats = usePoll((signal) => api<ScoredFeatures>(`/api/companies/${t.companyId}/features`, { signal }), 120_000, `feats-${t.companyId}`);
   const tree = usePoll((signal) => api<Tree>(`/api/companies/${t.companyId}/objectives`, { signal }), 120_000, `tree-${t.companyId}`);
@@ -30,10 +30,12 @@ export function TicketLinks({ t, onChanged }: { t: TicketDetail; onChanged: () =
   const objectives = (tree.data ?? []).filter((o) => o.milestones.length);
 
   return (
-    <section className="card" aria-labelledby="links-h" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <h2 id="links-h" style={{ fontSize: 17, fontWeight: 600 }}>
-        Roadmap, feature and dependencies
-      </h2>
+    <section className={bare ? undefined : "card"} aria-labelledby={bare ? undefined : "links-h"} aria-label={bare ? "Roadmap, feature and dependencies" : undefined} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {!bare && (
+        <h2 id="links-h" style={{ fontSize: 17, fontWeight: 600 }}>
+          Roadmap, feature and dependencies
+        </h2>
+      )}
       <div className="field" style={{ maxWidth: 420 }}>
         <label htmlFor="t-feature">Delivers the feature</label>
         <select id="t-feature" value={t.featureId ?? ""} onChange={(e) => void api(`/api/tickets/${t.id}`, { method: "PATCH", body: { featureId: e.target.value || null } }).then(() => (setError(null), onChanged()), fail)}>

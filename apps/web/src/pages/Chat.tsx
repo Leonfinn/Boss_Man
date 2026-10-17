@@ -97,7 +97,7 @@ export function ChatPage({ companies, companyId, agentId, go }: { companies: Com
       <header className="page-head">
         <div>
           <h1>Chat</h1>
-          <p className="sub">Message your CEO, or any agent directly. They answer with board tools only: they turn what you ask into tickets, milestones and links, and real work happens on those tickets.</p>
+          <p className="sub">Message your CEO, or any agent directly. In chat they can look up and change the board, tickets, the wiki and skills, but not code: work that needs code goes on a ticket.</p>
         </div>
       </header>
       {!company ? (

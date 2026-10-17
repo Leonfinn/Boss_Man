@@ -97,6 +97,9 @@ function SourceCard({ s }: { s: FundingStatus }) {
             <Forecast f={s.forecasts[q.window]} />
           </div>
         ))
+      ) : s.source.kind === "subscription" ? (
+        // A subscription isn't paid per run, so there's no money to show; its quota appears after its first run.
+        <span className="muted">No quota reported yet. It shows here after the first run on this subscription.</span>
       ) : (
         <span className="big">
           {usd(s.totalSpentMicros)} <small>spent through Boss Man</small>

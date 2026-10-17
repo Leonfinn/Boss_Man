@@ -183,6 +183,18 @@ export class SessionManager {
           ?.release({ projectId: command.projectId, ticketId: command.ticketId })
           .catch((err) => this.opts.emit({ type: "runner.log", level: "warn", message: `Couldn't release the workspace for ticket ${command.ticketId}: ${String((err as Error)?.message ?? err)}` }));
         return;
+      case "workspace.file": {
+        const reply = this.opts.reply ?? (() => {});
+        if (!this.opts.workspaces) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        this.opts.workspaces.readFile({ projectId: command.projectId, ticketId: command.ticketId }, command.path).then(
+          (data) => reply(command.requestId, { ok: true, data }),
+          (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) }),
+        );
+        return;
+      }
       case "workspace.diff": {
         const reply = this.opts.reply ?? (() => {});
         if (!this.opts.workspaces) {

@@ -66,6 +66,10 @@ describe("ticket conversation (R65)", () => {
     expect((await c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Use the brand blue" })).json()).toMatchObject({ delivery: "live", runId: first!.runId });
     expect(c.sent.at(-1)).toMatchObject({ type: "run.message", runId: first!.runId, interrupt: false, text: expect.stringContaining("Message from the owner: Use the brand blue") });
 
+    // Interrupting stops the current turn first; the ticket lists its runs.
+    await c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Stop, use navy instead", interrupt: true });
+    expect(c.sent.at(-1)).toMatchObject({ type: "run.message", runId: first!.runId, interrupt: true });
+    expect((await c.req("GET", `/api/tickets/${t.id}/runs`)).json()).toEqual([expect.objectContaining({ id: first!.runId, agent: "Engineer", endedAt: null })]);
     await c.emit({ type: "run.update", runId: first!.runId, update: { kind: "agent_message", text: "Done, footer is brand blue now." } });
     await c.emit({ type: "run.ended", runId: first!.runId, stopReason: "end_turn", error: null });
     await c.db.delete(wakes);
@@ -87,11 +91,12 @@ describe("ticket conversation (R65)", () => {
     const list = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json() as { items: Array<{ author: string; agent: string | null; delivery: string | null }>; live: { id: string } | null };
     expect(list.items.map((m) => [m.author, m.delivery])).toEqual([
       ["owner", "live"],
+      ["owner", "live"],
       ["agent", "end_of_run"],
       ["owner", "woken"],
       ["owner", "woken"],
     ]);
-    expect(list.items[1]!.agent).toBe("Engineer");
+    expect(list.items[2]!.agent).toBe("Engineer");
     expect(list.live?.id).toBe(second.runId);
   });
 

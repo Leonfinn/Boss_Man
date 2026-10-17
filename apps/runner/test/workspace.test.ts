@@ -1,7 +1,7 @@
 // R38 against a real local "remote" repo: worktree per ticket, pinned base, patch save and
 // restore, serialised creation, and credentials that never touch disk.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -115,6 +115,29 @@ describe("git workspaces (R38)", () => {
     // The agent's own staging area is exactly as it was.
     expect(git(w.path, "diff", "--cached", "--name-only")).toBe(stagedBefore);
     expect((await ws.diff(spec, 50)).truncated).toBe(true);
+  });
+});
+
+describe("reading another ticket's files (R77)", () => {
+  it("reads from the worktree while it's there, from the branch once it's released, and refuses paths outside the repo", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    mkdirSync(path.join(w.path, "docs"), { recursive: true });
+    writeFileSync(path.join(w.path, "docs", "research.md"), "# Findings\n");
+    expect(await ws.readFile(spec, "docs/research.md")).toEqual({ text: "# Findings\n", truncated: false, from: "worktree" });
+    // A symlink out of the worktree isn't followed; there's no such file on the branch either.
+    symlinkSync("/etc/hostname", path.join(w.path, "escape.txt"));
+    await expect(ws.readFile(spec, "escape.txt")).rejects.toThrow("There's no escape.txt on that ticket's branch.");
+    rmSync(path.join(w.path, "escape.txt"));
+    git(w.path, "add", ".");
+    git(w.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "research");
+    await ws.release(spec);
+    expect(await ws.readFile(spec, "docs/research.md")).toEqual({ text: "# Findings\n", truncated: false, from: "branch" });
+    await expect(ws.readFile(spec, "docs/missing.md")).rejects.toThrow("There's no docs/missing.md on that ticket's branch.");
+    await expect(ws.readFile(spec, "../../etc/passwd")).rejects.toThrow("isn't a path inside the repository");
+    await expect(ws.readFile(spec, "--output=x")).rejects.toThrow("isn't a path inside the repository");
   });
 });
 

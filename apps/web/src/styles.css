@@ -488,3 +488,41 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
   .side .switcher-menu ul { flex-direction: column; }
 }
 .skill-file { background: var(--ground); padding: 10px 12px; border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 13px; margin-top: 6px; white-space: pre; }
+
+/* Ticket page: folding sections, properties column and activity (R76) */
+.ticket-layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 20px; align-items: start; }
+.ticket-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.ticket-props { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 8px; padding: 16px 18px; }
+.ticket-props .section-label { margin: 6px 0 0; }
+.ticket-props dl { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px 10px; margin: 0; align-items: start; font-size: 14px; }
+.ticket-props dt { color: var(--muted); padding-top: 6px; }
+.ticket-props dd { margin: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; padding-top: 4px; }
+.ticket-props dd select { align-self: stretch; }
+.ticket-props select { width: 100%; min-height: 36px; }
+.ticket-props small { font-size: 12px; }
+.fold { padding: 0; }
+.fold > summary { display: flex; gap: 10px; align-items: baseline; padding: 14px 18px; cursor: pointer; list-style: none; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before { content: "▸"; color: var(--muted); width: 12px; flex: none; }
+.fold[open] > summary::before { content: "▾"; }
+.fold-title { font-size: 16px; font-weight: 600; }
+.fold-body { padding: 0 18px 18px; display: flex; flex-direction: column; gap: 12px; }
+.activity { padding: 0; display: flex; flex-direction: column; }
+.activity > h2 { font-size: 17px; font-weight: 600; padding: 16px 18px 0; }
+.activity-feed { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px; max-height: 70vh; overflow-y: auto; }
+.run-block { border: 1px solid var(--line); border-radius: 10px; background: var(--ground); }
+.run-block.live { border-color: var(--accent); }
+.run-head { width: 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: none; border: 0; text-align: left; font: inherit; font-size: 14px; color: var(--ink); cursor: pointer; }
+.run-body { padding: 0 12px 10px; display: flex; flex-direction: column; gap: 6px; }
+.run-steps { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.run-steps li { display: flex; gap: 8px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
+.run-steps li time { flex: none; font-size: 11px; }
+.run-steps li .tag { margin-left: 6px; }
+.run-steps li.bad { color: var(--red-ink); }
+.activity-compose { display: flex; flex-direction: column; gap: 8px; padding: 12px 18px 16px; border-top: 1px solid var(--line); }
+.activity-compose textarea { width: 100%; min-height: 64px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font: inherit; resize: vertical; background: var(--card); color: var(--ink); }
+.compose-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 900px) {
+  .ticket-layout { grid-template-columns: minmax(0, 1fr); }
+  .ticket-props { position: static; order: -1; }
+}
