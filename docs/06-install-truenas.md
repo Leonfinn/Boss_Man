@@ -22,7 +22,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
 - SSH access as your admin user, who can use `sudo`.
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
-- A GitHub account that can create a fine-grained token for the repos the agents will work on.
+- A GitHub account that can create a fine-grained token for the repos the agents will work on, and admin access to `Leonfinn/Boss_Man` to add a deploy key (the repo is private).
 
 The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
 
@@ -62,23 +62,39 @@ Go to the dataset:
 cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
-Check whether git is on the host:
+The repo is private, and GitHub doesn't accept account passwords for git. The NAS reads it with a **deploy key**: an SSH key for this one repo, read-only unless you tick "Allow write access" ([GitHub blog](https://github.blog/engineering/read-only-deploy-keys)). The key and GitHub's host key are kept in the dataset, so snapshots cover them.
+
+Make the key. It has no passphrase, so updates can run unattended:
 
 ```sh
-git --version
+sudo ssh-keygen -t ed25519 -N "" -C "truenas-boss-man" -f /mnt/NVME_Apps/Container_files/boss-man/deploy_key
 ```
 
-If that prints a version, clone the repo with it:
+Show the public half. It's safe to copy; never copy the file without `.pub`.
 
 ```sh
-sudo git clone https://github.com/Leonfinn/Boss_Man.git src
+sudo cat /mnt/NVME_Apps/Container_files/boss-man/deploy_key.pub
 ```
 
-If git isn't there, clone the repo with a throwaway git container instead:
+On your Mac, open `https://github.com/Leonfinn/Boss_Man/settings/keys`, choose **Add deploy key**, call it `TrueNAS`, paste the line, and leave **Allow write access** unticked.
+
+Clone with that key:
 
 ```sh
-sudo docker run --rm -v "$PWD":/w -w /w alpine/git clone https://github.com/Leonfinn/Boss_Man.git src
+sudo env GIT_SSH_COMMAND='ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts' git clone git@github.com:Leonfinn/Boss_Man.git src
 ```
+
+The first time, ssh asks whether to trust github.com. Type `yes` only if the ED25519 fingerprint matches the one on [GitHub's SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) page, `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU` when this was written.
+
+Make later `git pull`s use the same key:
+
+```sh
+sudo git -C /mnt/NVME_Apps/Container_files/boss-man/src config core.sshCommand 'ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts'
+```
+
+If git isn't on the host (`git --version` fails), let me know: the throwaway-container route needs the key mounted in, which this guide doesn't cover yet.
+
+If the clone hangs, outbound port 22 is probably blocked, for example on your router.
 
 ## 3. Folders and ownership
 
@@ -121,6 +137,8 @@ COMPOSE_PROFILES=runners
 BOSSMAN_DATA=/mnt/NVME_Apps/Container_files/boss-man/data
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 BOSSMAN_BIND=<nas-ip>
+BOSSMAN_HOST_PORT=3101
+BOSSMAN_PORTAL_HOST_PORT=3102
 BOSSMAN_INSECURE_COOKIES=1
 EOF
 ```
@@ -129,7 +147,15 @@ EOF
 sudo chmod 600 .env
 ```
 
-- `BOSSMAN_BIND` publishes the web UI on the NAS's LAN address only, on port 3100. The TrueNAS UI keeps 80 and 443. Don't forward port 3100 on the router.
+- `BOSSMAN_BIND` publishes the web UI on the NAS's LAN address only. The TrueNAS UI keeps 80 and 443.
+- `BOSSMAN_HOST_PORT` is the NAS port for the web UI. Paperclip already uses 3100 on your NAS, so this guide uses 3101. `BOSSMAN_PORTAL_HOST_PORT` (3102) is the feedback portal's port (step 11). Inside the containers they stay 3100 and 3101, so nothing else changes. Don't forward either port on the router.
+- Check both ports are free before you start. This prints nothing if they are:
+
+  ```sh
+  sudo ss -tlnp | grep -E ':(3101|3102)\b'
+  ```
+
+  If either is taken, pick other free ports and use them in `.env` and in the addresses below.
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain HTTP on your LAN.
   - With HTTPS in front of Boss Man, remove this line. That could be Tailscale Serve, or a reverse proxy on your OPNsense box.
   - Browsers only allow notifications (R44) on HTTPS pages, so you need HTTPS for those anyway.
@@ -156,7 +182,7 @@ The script also runs `docker compose up -d` at the end. Until its token file hol
 
 ## 6. First login and the company
 
-Open `http://<nas-ip>:3100` on your Mac and create the owner account. Then:
+Open `http://<nas-ip>:3101` on your Mac and create the owner account. Then:
 1. On **Board**, create the company, for example "Boss Man Co", and a project, for example "Boss Man".
 2. In **Settings**, under **Projects**, set:
    - **Git repo:** `https://github.com/Leonfinn/Boss_Man.git`
@@ -228,7 +254,7 @@ sudo docker compose ps
 sudo docker compose logs --tail 100 server
 ```
 
-**Update to the latest code:**
+**Update to the latest code** (it uses the deploy key from step 2):
 
 ```sh
 sudo git pull && sudo docker compose build server && sudo docker compose up -d db server
@@ -276,7 +302,7 @@ ntfy's docs site wasn't reachable when this was written, so these links point at
 
 Each company can have a public feedback portal (see `docs/07-feature-requests.md`). Turn it on under **Feedback > Feedback portal**, and tick **Show on the feedback portal** on the features people may vote on.
 
-The server also listens on port 3101, which serves only the portal. By default it's bound to the NAS itself. To let people on your LAN or tailnet reach it, add this line to `.env`:
+The server also has a port that serves only the portal: 3102 on the NAS (`BOSSMAN_PORTAL_HOST_PORT`). By default it's bound to the NAS itself. To let people on your LAN or tailnet reach it, add this line to `.env`:
 
 ```sh
 BOSSMAN_PORTAL_BIND=<nas-ip>
@@ -288,4 +314,4 @@ Then restart the server:
 sudo docker compose up -d server
 ```
 
-The portal link is `http://<nas-ip>:3101/portal.html#` followed by the secret from the link on the Feedback page. To share it more widely, expose port 3101 only, never 3100, through a reverse proxy or Tailscale Funnel; `docs/07-feature-requests.md` explains what the portal does and doesn't let people do.
+The portal link is `http://<nas-ip>:3102/portal.html#` followed by the secret from the link on the Feedback page; the link the Feedback page shows uses the owner's port, 3101, so swap the port before you share it. To share it more widely, expose port 3102 only, never 3101 (your login), through a reverse proxy or Tailscale Funnel; `docs/07-feature-requests.md` explains what the portal does and doesn't let people do.

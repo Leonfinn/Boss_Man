@@ -80,9 +80,10 @@ services:
       - master_key
     ports:
       # Bound to localhost by default; set BOSSMAN_BIND=0.0.0.0 to reach it from the LAN.
-      - "${BOSSMAN_BIND:-127.0.0.1}:3100:3100"
+      # BOSSMAN_HOST_PORT picks the host's port when 3100 is taken; the container keeps 3100.
+      - "${BOSSMAN_BIND:-127.0.0.1}:${BOSSMAN_HOST_PORT:-3100}:3100"
       # The portal; bound to localhost unless BOSSMAN_PORTAL_BIND says otherwise.
-      - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:3101:3101"
+      - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:${BOSSMAN_PORTAL_HOST_PORT:-3101}:3101"
 
   runner-app-co:
     <<: *runner
