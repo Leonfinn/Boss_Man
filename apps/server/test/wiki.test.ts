@@ -6,7 +6,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { notifications, runners } from "../src/db/schema.js";
+import { agents, notifications, runners, wakes } from "../src/db/schema.js";
+import { and, eq as eqq } from "drizzle-orm";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -110,5 +111,37 @@ describe("wiki and ticket outputs (R69)", () => {
     expect((await c.req("PUT", `${base}/ideas/paperclip`, { title: "Paperclip", body: "Notes.", folder: "Research/Done" })).statusCode).toBe(409);
     expect((await c.req("POST", base, { title: "Deep", body: "", folder: "a/b/c/d/e/f/g" })).statusCode).toBe(400);
     expect((await c.req("GET", base)).json().map((p: { folder: string }) => p.folder).sort()).toEqual(["Ideas", "Research/Done"]);
+  });
+  it("has a wiki maintainer that starts paused, needs a model, and files finished work (R73)", async () => {
+    const c = (ctx = await setup());
+    const [keeper] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.duty, "wiki")));
+    expect(keeper).toMatchObject({ name: "Wiki Maintainer", paused: true, model: null });
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Research the landscape" })).json() as { id: string };
+    await c.wiki.write(c.company.id, { folder: "Research", title: "Landscape", body: "25 products.", ticketId: t.id, agentId: c.worker.id, runId: null });
+    const t2 = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Pick a licence" })).json() as { id: string };
+    await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    await c.req("PATCH", `/api/tickets/${t2.id}`, { state: "done" });
+    // One waiting run covers both tickets; while paused it waits.
+    const upkeep = () => c.db.select().from(wakes).where(and(eqq(wakes.agentId, keeper!.id), eqq(wakes.reason, "wiki upkeep")));
+    expect(await upkeep()).toHaveLength(1);
+    await c.scheduler.tick();
+    expect(c.starts()).toEqual([]);
+    expect((await upkeep())[0]).toMatchObject({ status: "queued", statusReason: "agent paused" });
+
+    const refused = await c.req("PATCH", `/api/agents/${keeper!.id}`, { paused: false });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().message).toBe("Choose a model for Wiki Maintainer before starting it.");
+    expect((await c.req("PATCH", `/api/agents/${keeper!.id}`, { paused: false, model: "claude-sonnet-5-5" })).json()).toMatchObject({ paused: false, model: "claude-sonnet-5-5" });
+    await c.scheduler.tick();
+    const start = c.starts().find((s) => s.agentId === keeper!.id)!;
+    expect(start.prompt).toContain("You are the company's wiki maintainer.");
+    expect(start.prompt).toContain(`- ${t.id} "Research the landscape" (completed): produced wiki page research/landscape`);
+    expect(start.prompt).toContain(`- ${t2.id} "Pick a licence" (completed): nothing attached`);
+
+    // Any agent can be paused; its work waits.
+    await c.req("PATCH", `/api/agents/${c.worker.id}`, { paused: true });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "More", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    expect(c.starts().some((s) => s.agentId === c.worker.id)).toBe(false);
   });
 });

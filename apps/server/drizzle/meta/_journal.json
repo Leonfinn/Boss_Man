@@ -162,6 +162,13 @@
       "when": 1792262166240,
       "tag": "0022_chat_per_agent",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1792262711428,
+      "tag": "0023_wiki_maintainer",
+      "breakpoints": true
     }
   ]
 }

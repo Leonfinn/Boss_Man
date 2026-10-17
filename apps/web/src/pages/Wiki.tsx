@@ -273,6 +273,13 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
         </div>
         <CompanySelect companies={companies} id="wiki-company" value={company?.id} onChange={(id) => go(`wiki/${id}`)} />
       </header>
+      {company?.agents.some((a) => a.duty === "wiki" && a.paused) && (
+        <p className="banner" role="status">
+          <span>
+            The Wiki Maintainer is paused. To have it file finished work and keep an Index page, choose its model and press Start in <a href={`#/settings/${company.id}`}>Settings</a>.
+          </span>
+        </p>
+      )}
       {!company ? (
         <p>Create a company on the Board first.</p>
       ) : (
