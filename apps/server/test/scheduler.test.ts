@@ -69,6 +69,23 @@ describe("scheduler", () => {
     expect(ctx.commands[1]!.prompt).toContain("Load test");
   });
 
+  it("records a run's tokens and says how it's paid for, so subscriptions show tokens (R67)", async () => {
+    ctx = await setup();
+    const source = (await ctx.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: source.id });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "woken by owner" });
+    await ctx.scheduler.tick();
+    const runId = ctx.commands[0]!.runId;
+    const [runnerRow] = await ctx.db.select().from(runners);
+    await ctx.runners.ingest(runnerRow!, {
+      seq: 1,
+      at: new Date().toISOString(),
+      event: { type: "run.ended", runId, stopReason: "end_turn", error: null, usage: { inputTokens: 1_234_567, outputTokens: 45_600, cachedReadTokens: 900_000, cachedWriteTokens: 12_000 } },
+    });
+    const [row] = (await ctx.req("GET", "/api/runs/recent")).json() as Array<Record<string, unknown>>;
+    expect(row).toMatchObject({ id: runId, inputTokens: 1_234_567, outputTokens: 45_600, cachedReadTokens: 900_000, cachedWriteTokens: 12_000, fundingKind: "subscription" });
+  });
+
   it("respects the global and company kill switches", async () => {
     ctx = await setup();
     await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, {});
@@ -114,6 +131,21 @@ describe("scheduler", () => {
     const results = [];
     for (let i = 0; i < 3; i++) results.push(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "self", causedByRunId: run }));
     expect(results.map((r) => r.status)).toEqual(["queued", "queued", "dropped"]);
+  });
+
+  it("caps an agent's runs with no ticket, but never the owner's own (R68)", async () => {
+    ctx = await setup();
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: `d${i}` });
+    const seventh = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d6" });
+    expect(seventh).toMatchObject({ status: "dropped", statusReason: "more than 6 wakes with no ticket in an hour" });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d7" });
+    // The owner hears once, not for every dropped wake.
+    const alerts = (await ctx.db.select().from(decisions)).filter((d) => /with no ticket/.test(d.question));
+    expect(alerts).toHaveLength(1);
+    // The owner's own wake and ticket work still go through.
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "woken by owner" })).toMatchObject({ status: "queued" });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Real work" })).json();
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "assigned", ticketId: t.id })).toMatchObject({ status: "queued" });
   });
 
   it("defers when a pausing budget is exceeded, failing closed", async () => {

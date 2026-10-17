@@ -23,13 +23,19 @@ export type Limits = {
   maxDepth: number;
   /** Wakes an agent may cause for itself in ten minutes. */
   selfWakesPer10Min: number;
+  /** Wakes with no ticket an agent may get in an hour, not counting the owner's own (R68). */
+  ticketlessPerHour: number;
   /** Subscription utilisation at which low-priority work waits for the reset. */
   quotaHoldAt: number;
   /** Wakes at or above this priority ignore the quota hold. */
   highPriority: number;
 };
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, quotaHoldAt: 0.95, highPriority: 3 };
+/** Wakes the owner asked for; never limited. A message counts only when no run sent it. */
+const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
+const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
+
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3 };
 
 export type WakeInput = {
   agentId: string;
@@ -247,6 +253,35 @@ export function schedulerService(
         if ((recent[0]?.n ?? 0) >= limits.selfWakesPer10Min) {
           const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `woke itself more than ${limits.selfWakesPer10Min} times in 10 minutes` }).returning();
           await deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are being dropped.`);
+          return row!;
+        }
+      }
+      // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
+      // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
+      // always go through (R68).
+      if (!base.ticketId && !fromOwner(input)) {
+        const since = new Date(now().getTime() - 3_600_000);
+        const [recent] = await db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(wakes)
+          .where(
+            and(eq(wakes.agentId, agent.id), isNull(wakes.ticketId), gt(wakes.createdAt, since), sql`${wakes.status} <> 'dropped'`, sql`not (${wakes.reason} in (${sql.join([...OWNER_REASONS].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`),
+          );
+        if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
+          const statusReason = `more than ${limits.ticketlessPerHour} wakes with no ticket in an hour`;
+          // Tell the owner once an hour, not for every wake dropped.
+          const [told] = await db
+            .select({ id: wakes.id })
+            .from(wakes)
+            .where(and(eq(wakes.agentId, agent.id), eq(wakes.status, "dropped"), eq(wakes.statusReason, statusReason), gt(wakes.createdAt, since)))
+            .limit(1);
+          const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason }).returning();
+          if (!told) {
+            await deps.alert(
+              agent.companyId,
+              `${agent.name} has been started ${limits.ticketlessPerHour} times in the last hour with no ticket (the latest for "${input.reason}"). Further wakes like that are being dropped for the rest of the hour. See Runs for why each one started.`,
+            );
+          }
           return row!;
         }
       }

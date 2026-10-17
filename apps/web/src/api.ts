@@ -110,6 +110,13 @@ export type RunRow = {
   purpose?: string | null;
   reason?: string | null;
   note?: string | null;
+  /** Tokens over the run, when the agent reported them (R67). */
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
+  /** "subscription" or "api_credit": subscriptions show tokens, API credit shows money. */
+  fundingKind?: string | null;
 };
 export type TranscriptItem = { seq: number; type: string; at: string; event: Record<string, unknown> & { update?: Record<string, unknown> } };
 export type Transcript = { run: RunRow & { endedAt: string | null; outcome: string | null; costMicros: number }; items: TranscriptItem[]; next: number; more: boolean };

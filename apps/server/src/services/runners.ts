@@ -38,7 +38,13 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       case "run.ended":
         await db
           .update(runs)
-          .set({ endedAt: at, outcome: event.interrupted ? "interrupted" : event.error ? `error: ${event.error}` : event.stopReason })
+          .set({
+            endedAt: at,
+            outcome: event.interrupted ? "interrupted" : event.error ? `error: ${event.error}` : event.stopReason,
+            ...(event.usage
+              ? { inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens, cachedReadTokens: event.usage.cachedReadTokens, cachedWriteTokens: event.usage.cachedWriteTokens }
+              : {}),
+          })
           .where(eq(runs.id, event.runId));
         return;
       case "run.cost": {
