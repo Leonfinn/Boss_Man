@@ -15,7 +15,7 @@ type AgentCard = {
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
   agents: AgentCard[];
-  stats: { agents: number; running: number; paused: number; inProgress: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
+  stats: { agents: number; running: number; paused: number; inProgress: number; inReview: number; open: number; blocked: number; decisionsWaiting: number; monthCostMicros: number; monthSubscriptionTokens: { input: number; output: number }; monthSubscriptionRuns: number; monthSubscriptionUnrecorded: number };
   runsByDay: Day[];
   ticketsByDay: Day[];
   recentTickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null; lastActivityAt: string }>;
@@ -182,7 +182,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
           <strong>{s.inProgress}</strong>
           <span>Tickets in progress</span>
           <small className="muted">
-            {s.open} open, {s.blocked} blocked
+            {s.inReview} in review, {s.open} open, {s.blocked} blocked
           </small>
         </a>
         <a className="card stat" href="#/funding">
