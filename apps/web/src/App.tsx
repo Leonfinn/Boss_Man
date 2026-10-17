@@ -110,7 +110,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
         ) : page === "tickets" && route[1] ? (
-          <Ticket key={route[1]} id={route[1]} />
+          <Ticket key={route[1]} id={route[1]} companies={list} />
         ) : page === "rules" ? (
           <Rules companies={list} companyId={route[1]} go={go} />
         ) : page === "notifications" ? (

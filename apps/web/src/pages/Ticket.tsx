@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, ApiError, RISKS, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
+import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { TicketLinks } from "../components/TicketLinks";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
@@ -38,14 +38,17 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
   );
 }
 
-export function Ticket({ id }: { id: string }) {
+export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
   const ticket = usePoll((signal) => api<TicketDetail>(`/api/tickets/${id}`, { signal }), 15_000, id);
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // The description being edited; null while it isn't, so polling doesn't overwrite typing.
+  const [draft, setDraft] = useState<string | null>(null);
   const t = ticket.data;
+  const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
   const patch = async (body: Record<string, unknown>) => {
     try {
@@ -55,6 +58,13 @@ export function Ticket({ id }: { id: string }) {
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  const saveDraft = async () => {
+    if (draft === null) return;
+    await patch({ body: draft.trim() || null });
+    setDraft(null);
+  };
+  const assign = (value: string) =>
+    patch(value === "owner" ? { assigneeAgentId: null, assignedToOwner: true } : { assigneeAgentId: value || null, assignedToOwner: false });
   const [range, setRange] = useState<"base" | "last_turn">("base");
   const loadDiff = async (which: "base" | "last_turn" = range) => {
     setDiffError(null);
@@ -110,6 +120,18 @@ export function Ticket({ id }: { id: string }) {
 
       <section className="card" style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-end" }} aria-label="Settings">
         <div className="field">
+          <label htmlFor="t-assignee">Assigned to</label>
+          <select id="t-assignee" value={t.assigneeAgentId ?? (t.assignedToOwner ? "owner" : "")} disabled={t.systemState === "done"} onChange={(e) => void assign(e.target.value)}>
+            <option value="">Nobody</option>
+            <option value="owner">You</option>
+            {agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
           <label htmlFor="t-risk">Risk</label>
           <select id="t-risk" value={t.risk ?? "medium"} onChange={(e) => void patch({ risk: e.target.value as Risk })}>
             {RISKS.map((r) => (
@@ -126,17 +148,37 @@ export function Ticket({ id }: { id: string }) {
         <p className="muted" style={{ fontSize: 13, flex: "1 1 260px" }}>
           {t.risk === "high" || t.risk === "critical"
             ? "You review it, the project's deeper check runs before it merges, and it deploys to staging before production."
-            : "The CEO reviews it and it merges once the project's check passes."}
+            : "The CEO reviews it and it merges once the project's check passes."}{" "}
+          Assigning an agent starts it straight away.
         </p>
       </section>
 
       <TicketLinks t={t} onChanged={ticket.reload} />
 
-      {t.body && (
-        <section className="card">
-          <p style={{ whiteSpace: "pre-wrap" }}>{t.body}</p>
-        </section>
-      )}
+      <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
+          <label htmlFor="t-body">Description</label>
+        </h2>
+        <textarea
+          id="t-body"
+          rows={draft === null && !t.body ? 3 : 10}
+          maxLength={20_000}
+          placeholder="What should be done, and what counts as finished."
+          value={draft ?? t.body ?? ""}
+          onChange={(e) => setDraft(e.target.value)}
+          style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
+        />
+        {draft !== null && draft !== (t.body ?? "") && (
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="btn primary" onClick={() => void saveDraft()}>
+              Save description
+            </button>
+            <button type="button" className="btn" onClick={() => setDraft(null)}>
+              Cancel
+            </button>
+          </div>
+        )}
+      </section>
 
       {t.plan && (
         <section className="card" aria-labelledby="plan-h" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
