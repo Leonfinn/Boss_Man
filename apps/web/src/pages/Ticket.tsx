@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
-import { TicketConversation } from "../components/TicketConversation";
+import { Markdown } from "../components/Markdown";
+import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
-import { TicketOutputs } from "../components/TicketOutputs";
+import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
@@ -41,6 +42,22 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
   );
 }
 
+/** A section that folds away behind an arrow (R76); closed unless it's asked to start open. */
+function Fold({ title, hint, open, children }: { title: string; hint?: string; open?: boolean; children: React.ReactNode }) {
+  return (
+    <details className="card fold" open={open || undefined}>
+      <summary>
+        <span className="fold-title">{title}</span>
+        {hint && <small className="muted">{hint}</small>}
+      </summary>
+      <div className="fold-body">{children}</div>
+    </details>
+  );
+}
+
+const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
+const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
+
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
   const ticket = usePoll((signal) => api<TicketDetail>(`/api/tickets/${id}`, { signal }), 15_000, id);
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
@@ -51,6 +68,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
   const [draft, setDraft] = useState<string | null>(null);
   const tiers = useRiskTiers();
+  const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
   const t = ticket.data;
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
@@ -104,6 +122,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
   if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such ticket." : ticket.error.message}</p>;
   if (!t) return null;
+  const made = outputs.data ?? [];
+  // Plan first only matters before anyone starts; once work has begun it's history (R76).
+  const notStarted = t.systemState === "backlog" || t.systemState === "ready";
   return (
     <>
       <header className="page-head">
@@ -112,146 +133,188 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <a href={`#/board/${t.projectId}`}>{t.project}</a> · ticket
           </p>
           <h1>{t.title}</h1>
-          <p className="sub" style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", alignItems: "center" }}>
-            <span className="tag">{t.systemState.replace(/_/g, " ")}</span>
-            {t.outcome && <span>{t.outcome}</span>}
-            <span>{t.assignee ? `Assigned to ${t.assignee}` : t.assignedToOwner ? "Assigned to you" : "Unassigned"}</span>
-            {t.branch && <span className="mono">{t.branch}</span>}
-            <span>Last activity {when(t.lastActivityAt)}</span>
-          </p>
         </div>
       </header>
 
-      <section className="card" style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }} aria-label="Settings">
-        <div className="field">
-          <label htmlFor="t-assignee">Assigned to</label>
-          <select id="t-assignee" value={t.assigneeAgentId ?? (t.assignedToOwner ? "owner" : "")} disabled={t.systemState === "done"} onChange={(e) => void assign(e.target.value)}>
-            <option value="">Nobody</option>
-            <option value="owner">You</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
+      <div className="ticket-layout">
+        <div className="ticket-main">
+          <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
+                Description
+              </h2>
+              {draft === null && (
+                <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={() => setDraft(t.body ?? "")}>
+                  Edit
+                </button>
+              )}
+            </div>
+            {draft === null ? (
+              t.body ? <Markdown text={t.body} /> : <p className="muted">No description yet. Say what should be done and what counts as finished.</p>
+            ) : (
+              <>
+                <label htmlFor="t-body" className="sr-only">
+                  Description, in Markdown
+                </label>
+                <textarea
+                  id="t-body"
+                  rows={12}
+                  maxLength={20_000}
+                  autoFocus
+                  placeholder="What should be done, and what counts as finished."
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
+                />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className="btn primary" disabled={draft === (t.body ?? "")} onClick={() => void saveDraft()}>
+                    Save description
+                  </button>
+                  <button type="button" className="btn" onClick={() => setDraft(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+
+          <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : "nothing yet"}>
+            <TicketOutputs items={made} companyId={t.companyId} onChanged={outputs.reload} />
+          </Fold>
+
+          {t.plan && (
+            <Fold title="Plan" hint={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"}>
+              <Markdown text={t.plan} />
+              {!t.planApprovedAt && (
+                <p className="muted" style={{ fontSize: 14 }}>
+                  Approve or send it back from <a href="#/decisions">Decisions</a>.
+                </p>
+              )}
+            </Fold>
+          )}
+
+          <Fold title="Roadmap, feature and dependencies">
+            <TicketLinks t={t} onChanged={ticket.reload} bare />
+          </Fold>
+
+          {t.repoUrl && (
+            <Fold title="Changes" hint={t.mergeCommit ? `merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? `on ${t.branch}` : undefined}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
+                <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
+                  {diff && range === "base" ? "Refresh all changes" : "All changes"}
+                </button>
+                <button type="button" className="btn" aria-pressed={!!diff && range === "last_turn"} onClick={() => void loadDiff("last_turn")}>
+                  {diff && range === "last_turn" ? "Refresh the last turn" : "The last turn"}
+                </button>
+              </div>
+              {diff && range === "last_turn" && diff.turn && <p className="muted" style={{ fontSize: 14 }}>What the agent's last turn that changed anything did: checkpoint {diff.turn.number}, {when(diff.turn.at)}.</p>}
+              {diff && <DiffView diff={diff} />}
+              {diffError && (
+                <p className="error" role="alert">
+                  {diffError}
+                </p>
+              )}
+              {t.mergeCommit && (
+                <p className="muted">
+                  Merged into {t.defaultBranch} as <span className="mono">{t.mergeCommit.slice(0, 7)}</span>.
+                </p>
+              )}
+            </Fold>
+          )}
+
+          {t.systemState === "review" && (
+            <Fold title="Review" hint="waiting for you">
+              <div className="field">
+                <label htmlFor="review-summary">Comments for the agent (needed to send it back)</label>
+                <textarea id="review-summary" rows={3} value={summary} onChange={(e) => setSummary(e.target.value)} />
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button type="button" className="btn primary" disabled={busy} onClick={() => void review("approved")}>
+                  {t.repoUrl ? "Approve and merge" : "Approve"}
+                </button>
+                <button type="button" className="btn" disabled={busy || !summary.trim()} onClick={() => void review("changes_requested")}>
+                  Request changes
+                </button>
+              </div>
+            </Fold>
+          )}
+          {note && (
+            <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>
+              {note.text}
+            </p>
+          )}
+
+          <TicketActivity ticketId={t.id} assignee={t.assignee} />
         </div>
-        <div className="field" style={{ flex: "1 1 280px" }}>
-          <label htmlFor="t-risk">Risk</label>
-          <select id="t-risk" value={t.risk ?? "medium"} style={{ maxWidth: 200 }} onChange={(e) => void patch({ risk: e.target.value as Risk })}>
-            {RISKS.map((r) => (
-              <option key={r} value={r}>
-                {r[0]!.toUpperCase() + r.slice(1)}
-              </option>
-            ))}
-          </select>
-          <RiskHelp tiers={tiers} current={t.risk ?? "medium"} />
-        </div>
-        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14, marginTop: 22 }}>
-          <input type="checkbox" checked={t.planFirst} disabled={!!t.planApprovedAt} onChange={(e) => void patch({ planFirst: e.target.checked })} />
-          Plan first
-        </label>
-        <p className="muted" style={{ fontSize: 13, flex: "1 1 200px", marginTop: 34 }}>
-          Assigning an agent starts it straight away.
-        </p>
-      </section>
 
-      <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
-          <label htmlFor="t-body">Description</label>
-        </h2>
-        <textarea
-          id="t-body"
-          rows={draft === null && !t.body ? 3 : 10}
-          maxLength={20_000}
-          placeholder="What should be done, and what counts as finished."
-          value={draft ?? t.body ?? ""}
-          onChange={(e) => setDraft(e.target.value)}
-          style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
-        />
-        {draft !== null && draft !== (t.body ?? "") && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" className="btn primary" onClick={() => void saveDraft()}>
-              Save description
-            </button>
-            <button type="button" className="btn" onClick={() => setDraft(null)}>
-              Cancel
-            </button>
-          </div>
-        )}
-      </section>
-
-      <TicketOutputs ticketId={t.id} companyId={t.companyId} />
-
-      <TicketConversation ticketId={t.id} />
-
-      <TicketLinks t={t} onChanged={ticket.reload} />
-
-      {t.plan && (
-        <section className="card" aria-labelledby="plan-h" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <h2 id="plan-h" style={{ fontSize: 17, fontWeight: 600, display: "flex", gap: 10, alignItems: "center" }}>
-            Plan {t.planApprovedAt ? <span className="tag green">Approved {when(t.planApprovedAt)}</span> : <span className="tag amber">Waiting for approval</span>}
-          </h2>
-          <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontFamily: "var(--sans)", overflowWrap: "anywhere" }}>{t.plan}</pre>
-          {!t.planApprovedAt && (
-            <p className="muted" style={{ fontSize: 14 }}>
-              Approve or send it back from <a href="#/decisions">Decisions</a>.
-            </p>
-          )}
-        </section>
-      )}
-
-      {t.repoUrl && (
-        <section className="card" aria-labelledby="changes-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <h2 id="changes-h" style={{ fontSize: 17, fontWeight: 600 }}>
-            Changes
-          </h2>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Which changes">
-            <button type="button" className="btn" aria-pressed={!!diff && range === "base"} onClick={() => void loadDiff("base")}>
-              {diff && range === "base" ? "Refresh all changes" : "All changes"}
-            </button>
-            <button type="button" className="btn" aria-pressed={!!diff && range === "last_turn"} onClick={() => void loadDiff("last_turn")}>
-              {diff && range === "last_turn" ? "Refresh the last turn" : "The last turn"}
-            </button>
-          </div>
-          {diff && range === "last_turn" && diff.turn && <p className="muted" style={{ fontSize: 14 }}>What the agent's last turn that changed anything did: checkpoint {diff.turn.number}, {when(diff.turn.at)}.</p>}
-          {diff && <DiffView diff={diff} />}
-          {diffError && (
-            <p className="error" role="alert">
-              {diffError}
-            </p>
-          )}
-          {t.mergeCommit && (
-            <p className="muted">
-              Merged into {t.defaultBranch} as <span className="mono">{t.mergeCommit.slice(0, 7)}</span>.
-            </p>
-          )}
-        </section>
-      )}
-
-      {t.systemState === "review" && (
-        <section className="card" aria-labelledby="review-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <h2 id="review-h" style={{ fontSize: 17, fontWeight: 600 }}>
-            Review
-          </h2>
-          <div className="field">
-            <label htmlFor="review-summary">Comments for the agent (needed to send it back)</label>
-            <textarea id="review-summary" rows={3} value={summary} onChange={(e) => setSummary(e.target.value)} />
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button type="button" className="btn primary" disabled={busy} onClick={() => void review("approved")}>
-              {t.repoUrl ? "Approve and merge" : "Approve"}
-            </button>
-            <button type="button" className="btn" disabled={busy || !summary.trim()} onClick={() => void review("changes_requested")}>
-              Request changes
-            </button>
-          </div>
-        </section>
-      )}
-      {note && (
-        <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>
-          {note.text}
-        </p>
-      )}
+        <aside className="card ticket-props" aria-label="Properties">
+          <h2 className="section-label">Work</h2>
+          <dl>
+            <dt>Status</dt>
+            <dd>
+              <span className={`tag ${STATE_TONE[t.systemState] ?? ""}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
+            </dd>
+            <dt>
+              <label htmlFor="t-assignee">Assigned to</label>
+            </dt>
+            <dd>
+              <select id="t-assignee" value={t.assigneeAgentId ?? (t.assignedToOwner ? "owner" : "")} disabled={t.systemState === "done"} onChange={(e) => void assign(e.target.value)}>
+                <option value="">Nobody</option>
+                <option value="owner">You</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+              {notStarted && <small className="muted">Assigning an agent starts it straight away.</small>}
+            </dd>
+            <dt>
+              <label htmlFor="t-risk">Risk</label>
+            </dt>
+            <dd>
+              <select id="t-risk" value={t.risk ?? "medium"} onChange={(e) => void patch({ risk: e.target.value as Risk })}>
+                {RISKS.map((r) => (
+                  <option key={r} value={r}>
+                    {r[0]!.toUpperCase() + r.slice(1)}
+                  </option>
+                ))}
+              </select>
+              <RiskHelp tiers={tiers} current={t.risk ?? "medium"} />
+            </dd>
+            {notStarted && !t.planApprovedAt && (
+              <>
+                <dt>Plan first</dt>
+                <dd>
+                  <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 14 }}>
+                    <input type="checkbox" checked={t.planFirst} onChange={(e) => void patch({ planFirst: e.target.checked })} style={{ marginTop: 3 }} />
+                    <span>The agent writes a plan and waits for your approval in Decisions before it changes anything.</span>
+                  </label>
+                </dd>
+              </>
+            )}
+            <dt>Project</dt>
+            <dd>
+              <a href={`#/board/${t.projectId}`}>{t.project}</a>
+            </dd>
+            {t.branch && (
+              <>
+                <dt>Branch</dt>
+                <dd className="mono" style={{ fontSize: 12, overflowWrap: "anywhere" }}>
+                  {t.branch}
+                </dd>
+              </>
+            )}
+          </dl>
+          <h2 className="section-label">About</h2>
+          <dl>
+            <dt>Created</dt>
+            <dd>{when(t.createdAt)}</dd>
+            <dt>Last activity</dt>
+            <dd>{when(t.lastActivityAt)}</dd>
+          </dl>
+        </aside>
+      </div>
     </>
   );
 }
