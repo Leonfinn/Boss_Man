@@ -100,6 +100,10 @@ p { margin: 0; }
 .bar { height: 8px; border-radius: 4px; background: #e3e8ef; overflow: hidden; }
 .bar > span { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
 .bar.warn > span { background: var(--amber); }
+.day-bars { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; height: 72px; }
+.day-bar { position: relative; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; padding-bottom: 16px; }
+.day-bar .fill { display: block; min-height: 2px; border-radius: 3px 3px 0 0; background: var(--accent); }
+.day-bar .lbl { position: absolute; bottom: 0; left: 0; right: 0; text-align: center; font-size: 11px; color: var(--muted); }
 
 /* ---------- Forms ---------- */
 .field { display: flex; flex-direction: column; gap: 6px; }

@@ -9,7 +9,7 @@ import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRE
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, tickets, wakes } from "./db/schema.js";
+import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { runnersService } from "./services/runners.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -180,6 +180,28 @@ export async function buildApp(opts: AppOptions) {
   runners.onResume((runner, pending) => decisionsSvc.resume(runner, pending));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
+  const WINDOW_NAME: Record<string, string> = { five_hour: "5-hour", seven_day: "weekly" };
+  async function quotaWatch(fundingSourceId: string) {
+    const t = (opts.now ?? (() => new Date()))();
+    const status = await funding.status(fundingSourceId, t);
+    if (!status) return;
+    for (const [window, f] of Object.entries(status.forecasts)) {
+      if (!f?.beforeReset || !f.runsOutAt || f.utilization < 0.5) continue;
+      // Once per window: the key carries the reset time, so the next window can alert again.
+      const key = `quota-alert:${fundingSourceId}:${window}:${f.resetsAt?.toISOString() ?? "none"}`;
+      const told = await db.insert(settings).values({ key, value: true }).onConflictDoNothing().returning();
+      if (!told.length) continue;
+      const hhmm = (d: Date) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: process.env.TZ || "Europe/London" });
+      await notes.notify({
+        companyId: null,
+        agentId: null,
+        level: "flag",
+        title: `${status.source.name}: the ${WINDOW_NAME[window] ?? window.replace(/_/g, " ")} limit runs out at about ${hhmm(f.runsOutAt)}`,
+        body: `It's at ${Math.round(f.utilization * 100)}% and rising about ${Math.round((f.perHour ?? 0) * 100)}% an hour${f.resetsAt ? `, and resets at ${hhmm(f.resetsAt)}` : ""}. Boss Man holds new runs on it once it's nearly used up, until it resets; pause less urgent work, or move agents to another funding source, to keep the important work going.`,
+        link: "#/funding",
+      });
+    }
+  }
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
     if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err }, "chapter update failed"));
@@ -191,6 +213,8 @@ export async function buildApp(opts: AppOptions) {
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "ticket reply failed"));
     }
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "chat end failed"));
+    // A subscription window set to run out before it resets: tell the owner once (R78).
+    if (event.type === "run.quota") void quotaWatch(event.fundingSourceId).catch((err) => app.log.error({ err }, "quota forecast failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
