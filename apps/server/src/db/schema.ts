@@ -653,13 +653,15 @@ export const ownerChatMessages = pgTable(
   {
     id: id(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** Whose conversation it is in (R70): the CEO, or any agent the owner messages directly. */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "cascade" }),
     role: chatRole("role").notNull(),
     text: text("text").notNull(),
     /** The run that answered (assistant) or was asked (owner). */
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
     createdAt: createdAt(),
   },
-  (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt)],
+  (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],
 );
 
 export const ticketMessageAuthor = pgEnum("ticket_message_author", ["owner", "agent", "system"]);

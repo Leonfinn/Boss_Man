@@ -97,7 +97,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "board" ? (
           <Board companies={list} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
-          <ChatPage companies={list} companyId={route[1]} go={go} />
+          <ChatPage companies={list} companyId={route[1]} agentId={route[2]} go={go} />
         ) : page === "wiki" ? (
           <Wiki companies={list} companyId={route[1]} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "features" ? (

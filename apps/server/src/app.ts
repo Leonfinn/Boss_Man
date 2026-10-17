@@ -875,17 +875,21 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.delete("/api/insights/:id", async (req, reply) => (await feedback.unlink(IdParam.parse(req.params).id), reply.code(204).send()));
 
-    // The owner chat (v1.1): plain language in, tickets and links out.
-    owner.get("/api/companies/:id/chat", async (req) => chat.list(IdParam.parse(req.params).id));
+    // The owner chat (v1.1, R70): the CEO or any agent, in plain language; tickets and links out.
+    const chatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof ChatError) return reply.code(err.status).send({ error: "rejected", message: err.message });
+      throw err;
+    };
+    owner.get("/api/companies/:id/chat/threads", async (req) => chat.threads(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/chat", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { agentId } = z.object({ agentId: Uuid.optional() }).parse(req.query);
+      return chat.list(id, agentId).catch(chatErrors(reply));
+    });
     owner.post("/api/companies/:id/chat", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).parse(req.body);
-      try {
-        return reply.code(201).send(await chat.send(id, text));
-      } catch (err) {
-        if (err instanceof ChatError) return reply.code(err.status).send({ error: "rejected", message: err.message });
-        throw err;
-      }
+      const { text, agentId } = z.object({ text: z.string().trim().min(1).max(4000), agentId: Uuid.optional() }).parse(req.body);
+      return chat.send(id, text, agentId).then((m) => reply.code(201).send(m), chatErrors(reply));
     });
 
     // CEO continuity: the CEO's chapters, and asking for a new one.
