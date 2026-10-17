@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, usdToMicros } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -365,6 +365,9 @@ export async function buildApp(opts: AppOptions) {
       return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id) }));
     });
 
+    /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
+    owner.get("/api/risk-tiers", async () => RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) })));
+
     // Secrets: values go in, never come out over the API.
     const SecretInput = z.object({
       name: z.string().trim().min(1).max(80),
@@ -379,6 +382,17 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/secrets", async (req, reply) => {
       const result = await secretsSvc.create(SecretInput.parse(req.body));
       return reply.code(201).send(result);
+    });
+
+    // Checks a value without saving it, for the Check button (R58).
+    owner.post("/api/secrets/check", async (req) => {
+      const { kind, value } = SecretInput.pick({ kind: true, value: true }).parse(req.body);
+      return secretsSvc.check(kind, value);
+    });
+
+    owner.post("/api/secrets/:id/check", async (req, reply) => {
+      const result = await secretsSvc.checkStored(IdParam.parse(req.params).id);
+      return result ?? reply.code(404).send({ error: "not_found" });
     });
 
     owner.put("/api/secrets/:id/value", async (req, reply) => {

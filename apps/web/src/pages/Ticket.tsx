@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
+import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { TicketLinks } from "../components/TicketLinks";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
@@ -47,6 +48,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [busy, setBusy] = useState(false);
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
   const [draft, setDraft] = useState<string | null>(null);
+  const tiers = useRiskTiers();
   const t = ticket.data;
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
@@ -118,7 +120,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
-      <section className="card" style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-end" }} aria-label="Settings">
+      <section className="card" style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }} aria-label="Settings">
         <div className="field">
           <label htmlFor="t-assignee">Assigned to</label>
           <select id="t-assignee" value={t.assigneeAgentId ?? (t.assignedToOwner ? "owner" : "")} disabled={t.systemState === "done"} onChange={(e) => void assign(e.target.value)}>
@@ -131,24 +133,22 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             ))}
           </select>
         </div>
-        <div className="field">
+        <div className="field" style={{ flex: "1 1 280px" }}>
           <label htmlFor="t-risk">Risk</label>
-          <select id="t-risk" value={t.risk ?? "medium"} onChange={(e) => void patch({ risk: e.target.value as Risk })}>
+          <select id="t-risk" value={t.risk ?? "medium"} style={{ maxWidth: 200 }} onChange={(e) => void patch({ risk: e.target.value as Risk })}>
             {RISKS.map((r) => (
               <option key={r} value={r}>
                 {r[0]!.toUpperCase() + r.slice(1)}
               </option>
             ))}
           </select>
+          <RiskHelp tiers={tiers} current={t.risk ?? "medium"} />
         </div>
-        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
+        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14, marginTop: 22 }}>
           <input type="checkbox" checked={t.planFirst} disabled={!!t.planApprovedAt} onChange={(e) => void patch({ planFirst: e.target.checked })} />
           Plan first
         </label>
-        <p className="muted" style={{ fontSize: 13, flex: "1 1 260px" }}>
-          {t.risk === "high" || t.risk === "critical"
-            ? "You review it, the project's deeper check runs before it merges, and it deploys to staging before production."
-            : "The CEO reviews it and it merges once the project's check passes."}{" "}
+        <p className="muted" style={{ fontSize: 13, flex: "1 1 200px", marginTop: 34 }}>
           Assigning an agent starts it straight away.
         </p>
       </section>

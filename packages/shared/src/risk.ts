@@ -16,6 +16,20 @@ export const stagingFirst = serious;
 /** High and critical tickets are plan-first unless set otherwise when they're created. */
 export const planFirstByDefault = serious;
 
+/** What a tier means for the owner, in one line, built from the same rules the server applies (R61). */
+export function riskSummary(risk: RiskTier | null | undefined): string {
+  const tier = riskOf(risk);
+  const plan = { trivial: "no plan needed", low: "a one-line approach first", medium: "a short plan first", high: "a full plan first", critical: "a full plan first" }[tier];
+  const parts = [
+    ownerReviews(tier) ? "you review it, not the CEO" : "the CEO reviews it",
+    deepChecks(tier) ? "the project's check and its deeper check run before it merges" : "the project's check runs before it merges",
+    ...(stagingFirst(tier) ? ["it goes to staging before production"] : []),
+    plan,
+  ];
+  const line = parts.join("; ");
+  return line[0]!.toUpperCase() + line.slice(1) + ".";
+}
+
 /** How much planning a ticket's tier asks for, as a line for the agent's prompt. */
 export function planningGuidance(risk: RiskTier | null | undefined): string {
   switch (riskOf(risk)) {

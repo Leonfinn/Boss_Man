@@ -67,6 +67,20 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
       return { secret: row!, warnings, verified };
     },
 
+    /** Checks a value without saving it: its format, then the provider when Boss Man can ask one (R58). */
+    async check(kind: SecretKind, raw: string) {
+      const value = normaliseSecret(kind, raw);
+      const format = checkSecretFormat(kind, value);
+      return { problems: format.problems, live: live ? await live(kind, value) : null };
+    },
+
+    /** Asks the provider about a saved value again, e.g. after it may have been revoked. */
+    async checkStored(id: string) {
+      const [row] = await db.select().from(secrets).where(eq(secrets.id, id));
+      if (!row) return null;
+      return { live: live ? await live(row.kind as SecretKind, decryptSecret(master, row)) : null };
+    },
+
     async remove(id: string) {
       const rows = await db.delete(secrets).where(eq(secrets.id, id)).returning({ id: secrets.id });
       return rows.length > 0;
