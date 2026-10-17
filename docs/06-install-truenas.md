@@ -208,6 +208,58 @@ The example service is called `runner-app-co`. For a second company:
 1. Copy its block in `docker-compose.yml` and its volumes in `deploy/truenas.yml` under a new name.
 2. Give the copy its own token file and its own `data/<company>/` folders.
 
+## 7b. Let the launcher run the runners (recommended)
+
+With the launcher (R55), each company's runner starts by itself when you create the company, and **Settings > Runner** gets **Start**, **Reconnect**, **Restart** and **Stop** buttons. There are no token files to copy and no compose blocks to duplicate per company.
+- **How it stays safe.** The launcher is the only container that can reach Docker. It joins the socket's group (`docker`, group 999 on your NAS, from `stat -c '%U:%G %g %a %n' /var/run/docker.sock`) instead of running as root.
+- **What it accepts.** It publishes no ports, and only the server can reach it, over an internal network with a key. It accepts only "start, stop or restart company X's runner".
+- **What it builds.** It builds the container itself: uid 1000, all capabilities dropped, `no-new-privileges`, not privileged, the 4 GB memory limit, and only that company's folders under `data/companies/<slug>`.
+
+These steps move an existing install, including the compose runner from step 7, over to the launcher. Run them from the repo folder.
+
+```sh
+cd /mnt/NVME_Apps/Container_files/boss-man/src && sudo git pull
+```
+
+The launcher keeps company data under `data/companies`, owned by uid 1000:
+
+```sh
+sudo mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/companies && sudo chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/companies
+```
+
+In `.env`, replace `COMPOSE_PROFILES=runners` with the launcher profile and turn it on. The first command shows the file so you can check it before changing it.
+
+```sh
+sudo cat /mnt/NVME_Apps/Container_files/boss-man/src/.env
+```
+
+```sh
+sudo sed -i 's/^COMPOSE_PROFILES=runners$/COMPOSE_PROFILES=launcher/' /mnt/NVME_Apps/Container_files/boss-man/src/.env && printf 'BOSSMAN_LAUNCHER=1\nBOSSMAN_DOCKER_GID=999\n' | sudo tee -a /mnt/NVME_Apps/Container_files/boss-man/src/.env > /dev/null
+```
+
+Stop and remove the old compose runner. Its folders in `data/app-co` stay where they are.
+
+```sh
+sudo docker compose --profile runners rm -sf runner-app-co
+```
+
+Build the launcher and the server, then start everything:
+
+```sh
+sudo docker compose build server launcher && sudo docker compose up -d
+```
+
+Open **Settings > Runner** and choose **Start runner**. It shows **Starting…**, then **Connected** within a minute. A new company's runner starts by itself.
+
+- **The old runner's work.** The new runner starts with empty folders under `data/companies/<slug>`, where `<slug>` comes from the company's name (e.g. `boss-man-co`) and is shown in Settings > Runner. To bring over unfinished work and Claude sessions, choose **Stop**, then copy the old folders, then choose **Start runner** again:
+
+  ```sh
+  sudo cp -a /mnt/NVME_Apps/Container_files/boss-man/data/app-co/. /mnt/NVME_Apps/Container_files/boss-man/data/companies/boss-man-co/
+  ```
+
+- **Updates.** `sudo scripts/update-runner.sh` now asks the launcher to recreate its runners on the new image, and `--rollback` does the same on the previous one.
+- **Going back.** Choose **Stop** in Settings > Runner, put `COMPOSE_PROFILES=runners` back in `.env`, remove the two lines you added, and follow step 7.
+
 ## 8. Credentials and funding
 
 Make both credentials on your Mac, then paste them into **Settings > Credentials**. Values are encrypted on the server and never shown again.

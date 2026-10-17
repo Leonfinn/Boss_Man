@@ -34,6 +34,10 @@ COPY apps/server/src apps/server/src
 COPY apps/server/drizzle apps/server/drizzle
 COPY --from=web /app/apps/web/dist /app/web
 
+# Where the launcher's key volume is mounted (R55). Owned by uid 1000 here too, so the volume
+# is created writable for the launcher whichever container starts first.
+RUN mkdir -p /run/launcher && chown node:node /run/launcher
+
 USER node
 WORKDIR /app/apps/server
 ENV NODE_ENV=production PORT=3100 BOSSMAN_WEB_DIR=/app/web

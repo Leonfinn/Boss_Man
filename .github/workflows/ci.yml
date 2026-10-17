@@ -35,6 +35,8 @@ jobs:
         run: docker build -f apps/server/Dockerfile -t boss-man-server:ci .
       - name: Build the runner image
         run: docker build -f apps/runner/Dockerfile --build-arg BOSSMAN_IMAGE_VERSION=ci -t boss-man-runner:ci .
+      - name: Build the launcher image
+        run: docker build -f apps/launcher/Dockerfile -t boss-man-launcher:current .
       - name: Runner image has Claude Code, git and the runner
         run: |
           docker run --rm --entrypoint claude boss-man-runner:ci --version
@@ -53,6 +55,12 @@ jobs:
         run: |
           mkdir -p secrets && touch secrets/master.key secrets/runner-app-co.token
           POSTGRES_PASSWORD=ci docker compose --profile runners config -q
+          POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm docker compose --profile launcher config -q
+      - name: Launcher - a new company's runner starts and connects by itself (R55)
+        run: |
+          docker tag boss-man-server:ci boss-man-server:latest
+          docker tag boss-man-runner:ci boss-man-runner:current
+          scripts/ci-launcher.sh
       - name: TrueNAS override merges cleanly (docs/06-install-truenas.md)
         run: |
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/mnt/tank/apps/boss-man/data docker compose -f docker-compose.yml -f deploy/truenas.yml --profile runners config > merged.yml
