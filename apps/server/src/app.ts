@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, count, eq, gt, inArray } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray } from "drizzle-orm";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
@@ -707,6 +707,18 @@ export async function buildApp(opts: AppOptions) {
       return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, assignee: row.assignee };
     });
 
+    // The runs on a ticket, oldest first, for its activity feed (R76).
+    owner.get("/api/tickets/:id/runs", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      return db
+        .select({ id: runsTable.id, agent: agents.name, agentId: runsTable.agentId, startedAt: runsTable.startedAt, endedAt: runsTable.endedAt, outcome: runsTable.outcome, purpose: runsTable.purpose })
+        .from(runsTable)
+        .leftJoin(agents, eq(agents.id, runsTable.agentId))
+        .where(eq(runsTable.ticketId, id))
+        .orderBy(asc(runsTable.startedAt))
+        .limit(200);
+    });
+
     // A ticket's conversation with the agents working it (R65).
     const ticketChatErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof TicketChatError) return reply.code(err.status).send({ error: "ticket_chat", message: err.message });
@@ -715,9 +727,9 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/tickets/:id/messages", async (req, reply) => ticketChat.list(IdParam.parse(req.params).id).catch(ticketChatErrors(reply)));
     owner.post("/api/tickets/:id/messages", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { text } = z.object({ text: z.string().trim().min(1).max(4000) }).parse(req.body);
+      const { text, interrupt } = z.object({ text: z.string().trim().min(1).max(4000), interrupt: z.boolean().optional() }).parse(req.body);
       return ticketChat
-        .ownerSays(id, text)
+        .ownerSays(id, text, { interrupt })
         .then((m) => reply.code(201).send(m))
         .catch(ticketChatErrors(reply));
     });

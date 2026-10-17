@@ -47,7 +47,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
     },
 
     /** The owner writes on the ticket; it's stored once it has reached someone (or no one is assigned). */
-    async ownerSays(ticketId: string, text: string) {
+    async ownerSays(ticketId: string, text: string, opts: { interrupt?: boolean } = {}) {
       const t = await ticket(ticketId);
       const [live] = await db
         .select({ id: runs.id, agentId: runs.agentId })
@@ -60,7 +60,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       let agentId: string | null = null;
       if (live) {
         try {
-          await deps.runs.message(live.id, { text: `${text}\n\n(Sent on the ticket's conversation. Answer with ticket_reply if a reply is needed before you finish.)`, from: "the owner" });
+          await deps.runs.message(live.id, { text: `${text}\n\n(Sent on the ticket's conversation. Answer with ticket_reply if a reply is needed before you finish.)`, from: "the owner", interrupt: opts.interrupt ?? false });
           delivery = "live";
           runId = live.id;
           agentId = live.agentId;
