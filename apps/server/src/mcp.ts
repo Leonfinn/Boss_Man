@@ -22,6 +22,7 @@ import type { chaptersService } from "./services/chapters.js";
 import { WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
+import { WikiError, type wikiService } from "./services/wiki.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -48,9 +49,10 @@ type Services = {
   work: ReturnType<typeof workService>;
   feedback: ReturnType<typeof feedbackService>;
   ticketChat: ReturnType<typeof ticketChatService>;
+  wiki: ReturnType<typeof wikiService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -149,6 +151,54 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       return text(`Ticket ${ticketId} is now ${state}.`);
+    },
+  );
+
+  server.registerTool(
+    "wiki",
+    {
+      description:
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; gives each page's slug and folder), read (slug), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. Writing to an existing slug updates it; older versions are kept.",
+      inputSchema: {
+        action: z.enum(["list", "read", "write", "attach"]),
+        q: z.string().max(200).optional(),
+        slug: z.string().max(500).optional(),
+        folder: z.string().max(400).optional(),
+        title: z.string().max(200).optional(),
+        body: z.string().max(200_000).optional(),
+        ticketId: z.string().uuid().optional(),
+        path: z.string().max(500).optional(),
+        ref: z.string().max(200).optional(),
+        url: z.string().max(2000).optional(),
+      },
+    },
+    async (input) => {
+      const by = { agentId: scope.agentId, runId: scope.runId };
+      try {
+        switch (input.action) {
+          case "list":
+            return text(JSON.stringify((await wiki.list(scope.companyId, input.q)).map((p) => ({ slug: p.slug, folder: p.folder, title: p.title, updatedAt: p.updatedAt }))));
+          case "read": {
+            if (!input.slug) return fail("Give the page's slug.");
+            const p = await wiki.get(scope.companyId, input.slug);
+            return text(`# ${p.title}\n\n${p.body}`);
+          }
+          case "write": {
+            if (!input.title || input.body === undefined) return fail("Give a title and a body.");
+            const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
+            const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
+            return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
+          }
+          case "attach": {
+            if (!input.ticketId) return fail("Give the ticketId it belongs to.");
+            await wiki.attach(scope.companyId, { ticketId: input.ticketId, title: input.title ?? "", path: input.path ?? null, ref: input.ref ?? null, url: input.url ?? null, ...by });
+            return text("Linked to the ticket.");
+          }
+        }
+      } catch (err) {
+        if (err instanceof WikiError) return fail(err.message);
+        throw err;
+      }
     },
   );
 
@@ -364,12 +414,17 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "notify_owner",
     {
       description:
-        "Tell the owner something they should know without needing to answer: note (the feed only), flag (a browser notification) or page (also their phone; for something urgent). For a question, use raise_decision instead. Pass the ticket it's about, if any; otherwise this run is the evidence. Each agent has an hourly cap, past which notifications become notes, and quiet hours lower the level.",
+        "Tell the owner something they should know without needing to answer: note (the feed only), flag (a browser notification) or page (also their phone; for something urgent). For a question, use raise_decision instead. Pass the ticket it's about, if any, and link to what you made (a wiki page, say) so the owner sees the work itself. Each agent has an hourly cap, past which notifications become notes, and quiet hours lower the level.",
       inputSchema: {
         level: z.enum(["note", "flag", "page"]),
         title: z.string().min(1).max(200),
         body: z.string().max(4000).optional(),
         ticketId: z.string().uuid().optional(),
+        link: z
+          .string()
+          .regex(/^#\/(wiki|tickets|runs|features|roadmap|plan)(\/[\w-]+)*$/)
+          .optional()
+          .describe("The page that shows what you're telling them about, e.g. the #/wiki/... link the wiki tool gave you. Defaults to the ticket, else this run."),
       },
     },
     async (input) => {
@@ -377,7 +432,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
       }
-      const link = input.ticketId ? `#/tickets/${input.ticketId}` : `#/runs/${scope.runId}`;
+      const link = input.link ?? (input.ticketId ? `#/tickets/${input.ticketId}` : `#/runs/${scope.runId}`);
       const n = await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: input.level, title: input.title, body: input.body ?? null, link });
       if (!n) return fail("Couldn't record that notification.");
       return text(n.level === input.level ? `Sent as a ${n.level}.` : `Sent as a ${n.level} instead of a ${input.level} (${n.demotedBy}).`);

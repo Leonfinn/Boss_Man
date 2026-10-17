@@ -19,6 +19,7 @@ import { Notifications } from "./pages/Notifications";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
 import { Features } from "./pages/Features";
+import { Wiki } from "./pages/Wiki";
 import { Feedback } from "./pages/Feedback";
 import { Roadmap } from "./pages/Roadmap";
 
@@ -97,6 +98,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Board companies={list} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={route[1]} go={go} />
+        ) : page === "wiki" ? (
+          <Wiki companies={list} companyId={route[1]} slug={route.slice(2).join("/") || undefined} go={go} />
         ) : page === "features" ? (
           <Features companies={list} companyId={route[1]} featureId={route[2]} go={go} />
         ) : page === "feedback" ? (

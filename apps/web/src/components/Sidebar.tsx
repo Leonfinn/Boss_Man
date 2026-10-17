@@ -8,6 +8,7 @@ const NAV = [
   { id: "board", label: "Board" },
   { id: "roadmap", label: "Roadmap" },
   { id: "plan", label: "Plan" },
+  { id: "wiki", label: "Wiki" },
   { id: "features", label: "Features" },
   { id: "feedback", label: "Feedback" },
   { id: "runs", label: "Runs" },

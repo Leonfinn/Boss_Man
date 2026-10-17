@@ -348,3 +348,36 @@ blockquote.selected { background: #fff6d6; border-left-color: #e2b13c; display: 
 .portal-card h3 { font-size: 17px; font-weight: 600; }
 a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Markdown pages (R69) */
+.md { line-height: 1.6; overflow-wrap: anywhere; }
+.md > * + * { margin-top: 0.75em; }
+.md h1 { font-size: 24px; } .md h2 { font-size: 20px; margin-top: 1.2em; } .md h3 { font-size: 17px; margin-top: 1em; }
+.md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.3; }
+.md ul, .md ol { padding-left: 1.4em; } .md ul { list-style: disc; } .md ol { list-style: decimal; }
+.md li + li { margin-top: 0.25em; }
+.md code { font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 0.9em; background: var(--ground); padding: 1px 5px; border-radius: 4px; }
+.md pre { background: var(--ground); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { border-left: 3px solid var(--line-strong); padding-left: 12px; color: var(--muted); }
+.md a { color: var(--accent); }
+.md hr { border: 0; border-top: 1px solid var(--line); }
+.md-table { overflow-x: auto; }
+.md table { border-collapse: collapse; font-size: 14px; }
+.md th, .md td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+.md th { background: var(--ground); font-weight: 600; }
+
+.wiki { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
+.wiki-list { display: flex; flex-direction: column; gap: 10px; }
+.wiki-list ul { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: 0; padding: 0; }
+.wiki-list li a { display: block; padding: 7px 10px; border-radius: 6px; color: var(--ink); text-decoration: none; }
+.wiki-list li a[aria-current="page"] { background: var(--ground); font-weight: 600; }
+.wiki-list li small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+.wiki-editor textarea { width: 100%; min-height: 420px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 14px; background: var(--card); color: var(--ink); }
+@media (max-width: 760px) {
+  .wiki { grid-template-columns: minmax(0, 1fr); }
+}
+button.link { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; font: inherit; cursor: pointer; }
+.wiki-list details > summary { cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
+.wiki-list details > summary:hover { background: var(--ground); }
+.wiki-list details > ul { padding-left: 14px; border-left: 1px solid var(--line); margin-left: 12px; }

@@ -3,6 +3,7 @@ import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type 
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { TicketConversation } from "../components/TicketConversation";
 import { TicketLinks } from "../components/TicketLinks";
+import { TicketOutputs } from "../components/TicketOutputs";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
@@ -178,6 +179,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           </div>
         )}
       </section>
+
+      <TicketOutputs ticketId={t.id} companyId={t.companyId} />
 
       <TicketConversation ticketId={t.id} />
 

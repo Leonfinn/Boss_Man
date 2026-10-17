@@ -115,7 +115,7 @@ export function schedulerService(
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
-      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished; raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
+      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished; raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
       "Ending your turn does not move the ticket.",
       UNTRUSTED_NOTE,
     );
