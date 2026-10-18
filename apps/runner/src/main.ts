@@ -2,6 +2,7 @@
 // on its commands, and journals every event until the server has it (R31).
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { checkClaude } from "./claude-check.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
@@ -32,6 +33,7 @@ const sessions = new SessionManager({
   stateFile: path.join(dataDir, "active-runs.json"),
   workspaces,
   reply: (requestId, result) => connection.reply(requestId, result),
+  checkClaude: (credentials) => checkClaude(credentials),
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

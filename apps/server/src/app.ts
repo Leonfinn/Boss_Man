@@ -17,6 +17,7 @@ import { AgentError, agentsService } from "./services/agents.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
+import { secretGrants } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -778,6 +779,23 @@ export async function buildApp(opts: AppOptions) {
         return await gitHosts.checkAccess({ kind: p.gitHost, apiBase: p.gitApiBase, owner: a.owner, repo: a.repo }, token);
       } catch (err) {
         return { ok: false, canPush: false, message: `Couldn't reach the host: ${(err as Error).message}` };
+      }
+    });
+
+    // Does the company's Claude setup-token work (R58)? Only Claude Code can tell, so the runner
+    // runs one tiny prompt with it, which uses a little of the subscription allowance.
+    owner.post("/api/companies/:id/check-claude", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+      if (!c) return reply.code(404).send({ error: "not_found" });
+      const [grant] = await db.select({ id: secretGrants.id }).from(secretGrants).where(and(eq(secretGrants.companyId, id), eq(secretGrants.envName, "CLAUDE_CODE_OAUTH_TOKEN")));
+      if (!grant) return { ok: false, message: "The company has no Claude setup-token yet." };
+      const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, id));
+      if (!runner || !runners.isConnected(runner.id)) return { ok: false, message: "The company's runner isn't connected, and the check runs there." };
+      try {
+        return await runners.request<{ ok: boolean; message: string }>(runner.id, (requestId) => ({ type: "credential.check", requestId }), 2 * 60_000);
+      } catch (err) {
+        return { ok: false, message: `The runner couldn't run the check: ${(err as Error).message}` };
       }
     });
 

@@ -147,7 +147,8 @@ p { margin: 0; }
 .grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
 .big { font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1; }
 .big small { font-family: var(--sans); font-size: 15px; font-weight: 500; color: var(--muted); }
-.table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+/* Visually hidden text in a scrolling table is placed inside it, not against the page, so it can't widen the page. */
+.table-wrap { position: relative; overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 600px; }
 th, td { padding: 12px 16px; text-align: left; }
 thead th { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; font-weight: 500; color: var(--muted); text-transform: uppercase; }

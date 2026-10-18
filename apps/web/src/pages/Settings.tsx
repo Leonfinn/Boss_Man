@@ -160,6 +160,9 @@ export function Runner({ company }: { company: Company }) {
   );
 }
 
+/** A setup-token can only be proved by Claude Code, so its check runs on the runner (R58). */
+const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
+
 export function Credentials({ company }: { company: Company }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
@@ -177,12 +180,17 @@ export function Credentials({ company }: { company: Company }) {
       return `${r.live.message}${problems}`;
     }
     if (problems) throw new Error(problems.trim());
-    return c.kind === "claude_oauth_token" ? "The format looks right. A setup-token can only be fully checked by Claude Code itself, which a later check will do through the runner." : "The format looks right. Boss Man can't ask a provider about this kind of value.";
+    return c.kind === "claude_oauth_token" ? "The format looks right. A setup-token can only be fully checked by Claude Code itself: save it, then choose Check with Claude." : "The format looks right. Boss Man can't ask a provider about this kind of value.";
   };
   const check = () =>
     void act.run(async () => describe(await api<{ problems: string[]; live: { ok: boolean; message: string } | null }>("/api/secrets/check", { method: "POST", body: { kind: c.kind, value } })));
   const checkSaved = (g: Grant) =>
     void act.run(async () => {
+      if (g.envName === CLAUDE_TOKEN_ENV) {
+        const r = await api<{ ok: boolean; message: string }>(`/api/companies/${company.id}/check-claude`, { method: "POST" });
+        if (!r.ok) throw new Error(`${g.secretName}: ${r.message}`);
+        return `${g.secretName}: ${r.message}`;
+      }
       const r = await api<{ live: { ok: boolean; message: string } | null }>(`/api/secrets/${g.secretId}/check`, { method: "POST" });
       if (!r.live) return `${g.secretName}: Boss Man can't ask a provider about this kind of value.`;
       if (!r.live.ok) throw new Error(`${g.secretName}: ${r.live.message}`);
@@ -236,8 +244,8 @@ export function Credentials({ company }: { company: Company }) {
                   <td className="mono muted">{g.hint ?? ""}</td>
                   <td>{g.deployTargetId ? "One deploy target" : "Every run"}</td>
                   <td>
-                    <button type="button" className="btn small" disabled={act.busy} onClick={() => checkSaved(g)}>
-                      Check
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => checkSaved(g)} style={{ whiteSpace: "nowrap" }} title={g.envName === CLAUDE_TOKEN_ENV ? "Runs one tiny prompt on the company's runner, using a little of the subscription allowance" : undefined}>
+                      {g.envName === CLAUDE_TOKEN_ENV ? "Check with Claude" : "Check"}
                     </button>
                   </td>
                 </tr>
@@ -247,6 +255,11 @@ export function Credentials({ company }: { company: Company }) {
         </div>
       ) : (
         <p>No credentials yet. Agents need at least a Claude setup-token or an API key to run.</p>
+      )}
+      {grants.data?.some((g) => g.envName === CLAUDE_TOKEN_ENV) && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          <strong>Check with Claude</strong> runs one tiny prompt on the company's runner, so it uses a little of the subscription allowance and can take a minute.
+        </p>
       )}
       <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", alignItems: "end" }}>
         <div className="field">

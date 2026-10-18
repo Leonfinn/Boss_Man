@@ -33,11 +33,13 @@ export type SessionManagerOptions = {
   /** Git worktrees per ticket (R38). Without it, runs use the cwd they're given. */
   workspaces?: Workspaces;
   /** The company's granted secrets outside a run, e.g. a GIT_TOKEN for pushing a merge. */
-  resolveCompanyEnv?: (purpose: "merge") => Promise<Record<string, string>>;
+  resolveCompanyEnv?: (purpose: "merge" | "check") => Promise<Record<string, string>>;
   /** Where each run's skills are written for the agent to load (R71). */
   skillsRoot?: string;
   /** Answers request commands such as workspace.diff. */
   reply?: (requestId: string, result: { ok: true; data: unknown } | { ok: false; error: string }) => void;
+  /** Runs the setup-token check (R58), given only the token. */
+  checkClaude?: (credentials: Record<string, string>) => Promise<{ ok: boolean; message: string }>;
   log?: (msg: string) => void;
 };
 
@@ -232,6 +234,22 @@ export class SessionManager {
           (data) => reply(command.requestId, { ok: true, data }),
           (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
         );
+        return;
+      }
+      case "credential.check": {
+        // Only the setup-token goes to the check, so an API key granted alongside it can't stand in for it (R58).
+        const reply = this.opts.reply ?? (() => {});
+        const check = this.opts.checkClaude;
+        if (!check) {
+          reply(command.requestId, { ok: false, error: "This runner can't run credential checks." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("check") ?? Promise.resolve({} as Record<string, string>))
+          .then((env) => check(env.CLAUDE_CODE_OAUTH_TOKEN ? { CLAUDE_CODE_OAUTH_TOKEN: env.CLAUDE_CODE_OAUTH_TOKEN } : {}))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
         return;
       }
       case "run.message": {
