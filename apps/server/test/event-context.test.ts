@@ -119,22 +119,38 @@ describe("unblocked wakes (R85)", () => {
 });
 
 describe("review requests (R85)", () => {
-  it("wake the CEO once, quoting the note, and not when the CEO moves it", async () => {
-    const t = await ctx.ticket("Add rate limiting", { assigneeAgentId: ctx.dev.id });
+  const reviews = () => ctx.db.select().from(wakes).where(eq(wakes.reason, "review requested"));
+
+  it("are gathered into one deferred CEO wake, each ticket listed once, and not when the CEO moves it", async () => {
+    const a = await ctx.ticket("Add rate limiting", { assigneeAgentId: ctx.dev.id });
+    const b = await ctx.ticket("Add caching", { assigneeAgentId: ctx.dev.id });
     const dev = await agent(ctx.dev.id);
-    await dev.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Limiter added; tests pass." } });
-    const reviews = () => ctx.db.select().from(wakes).where(eq(wakes.reason, "review requested"));
+    const move = (id: string, summary: string) => dev.callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "review", summary } });
+    await move(a.id, "Limiter added; tests pass.");
+    await move(b.id, "Cache added.");
+    await move(a.id, "Limiter added again.");
     const [w, ...rest] = await reviews();
     expect(rest).toEqual([]);
-    expect(w).toMatchObject({ agentId: ctx.co.ceo.id, ticketId: t.id });
-    expect(w!.note).toContain("Limiter added; tests pass.");
+    expect(w).toMatchObject({ agentId: ctx.co.ceo.id, ticketId: null, status: "deferred" });
+    expect(w!.note).toContain(`- ${a.id} "Add rate limiting": Limiter added; tests pass.`);
+    expect(w!.note).toContain(`- ${b.id} "Add caching": Cache added.`);
+    expect(w!.note!.split(a.id)).toHaveLength(2);
 
     const own = await ctx.ticket("CEO's own", { assigneeAgentId: ctx.co.ceo.id });
     const ceo = await agent(ctx.co.ceo.id);
     await ceo.callTool({ name: "set_ticket_state", arguments: { ticketId: own.id, state: "review", summary: "Done by me." } });
-    expect(await reviews()).toHaveLength(1);
+    expect((await reviews())[0]!.note).not.toContain(own.id);
     await dev.close();
     await ceo.close();
+  });
+
+  it("are never dropped by the no-ticket limit", async () => {
+    await ctx.db.insert(wakes).values(Array.from({ length: 8 }, () => ({ companyId: ctx.co.company.id, agentId: ctx.co.ceo.id, reason: "chasing", status: "launched" as const })));
+    const t = await ctx.ticket("Add rate limiting", { assigneeAgentId: ctx.dev.id });
+    const dev = await agent(ctx.dev.id);
+    await dev.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Ready." } });
+    expect((await reviews())[0]!.status).toBe("deferred");
+    await dev.close();
   });
 });
 

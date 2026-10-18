@@ -49,6 +49,8 @@ export const WATCH_REASON = "ticket watch";
 export const MISSED_REASON = "missed work";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
+/** Tickets moved to review, gathered into one CEO run (R85). */
+export const REVIEW_REASON = "review requested";
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
@@ -272,6 +274,7 @@ export function schedulerService(
     }
     if (agent.duty === "wiki" && !w.ticketId) lines.push("", ...(await wikiDuty(agent)));
     if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
+    if (w.reason === REVIEW_REASON) lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
@@ -409,7 +412,8 @@ export function schedulerService(
 
       // Answers to an agent's questions are gathered for a short while, then given to it in one
       // run: the owner often answers several in a row, and each run costs as much as the next (R68).
-      if (input.reason === ANSWER_REASON && limits.answerBatchMs > 0) {
+      // Review requests are gathered the same way, so five reviews are one CEO run (R85).
+      if ((input.reason === ANSWER_REASON || input.reason === REVIEW_REASON) && limits.answerBatchMs > 0) {
         const t = now();
         const [waiting] = await db
           .select()
@@ -417,7 +421,7 @@ export function schedulerService(
           .where(
             and(
               eq(wakes.agentId, agent.id),
-              eq(wakes.reason, ANSWER_REASON),
+              eq(wakes.reason, input.reason),
               base.ticketId ? eq(wakes.ticketId, base.ticketId) : isNull(wakes.ticketId),
               inArray(wakes.status, ["queued", "deferred"]),
               isNull(wakes.runId),
@@ -428,14 +432,16 @@ export function schedulerService(
         if (waiting) {
           const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + limits.answerBatchMs);
           const notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
+          // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.
+          const listed = input.reason === REVIEW_REASON && waiting.note?.includes(base.note?.split(" ")[1] ?? "\0");
           const [row] = await db
             .update(wakes)
-            .set({ note: [waiting.note, base.note].filter(Boolean).join("\n\n"), priority: Math.max(waiting.priority, base.priority), notBefore })
+            .set({ note: listed ? waiting.note : [waiting.note, base.note].filter(Boolean).join(input.reason === REVIEW_REASON ? "\n" : "\n\n"), priority: Math.max(waiting.priority, base.priority), notBefore })
             .where(eq(wakes.id, waiting.id))
             .returning();
           return row!;
         }
-        const [row] = await db.insert(wakes).values({ ...base, status: "deferred", statusReason: "waiting briefly for more answers", notBefore: new Date(t.getTime() + limits.answerBatchMs) }).returning();
+        const [row] = await db.insert(wakes).values({ ...base, status: "deferred", statusReason: `waiting briefly for more ${input.reason === REVIEW_REASON ? "reviews" : "answers"}`, notBefore: new Date(t.getTime() + limits.answerBatchMs) }).returning();
         return row!;
       }
 
@@ -459,7 +465,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== REVIEW_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -472,6 +478,7 @@ export function schedulerService(
               sql`${wakes.status} <> 'dropped'`,
               sql`not (${wakes.reason} in (${sql.join([...OWNER_REASONS].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`,
               sql`${wakes.reason} <> ${WATCH_REASON}`,
+              sql`${wakes.reason} <> ${REVIEW_REASON}`,
             ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
@@ -680,7 +687,7 @@ export function schedulerService(
       if (!t) return;
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
       if (!ceo || ceo.id === byAgentId || ceo.id === t.assigneeAgentId) return;
-      await this.wake({ agentId: ceo.id, ticketId, reason: "review requested", priority: 3, causedByRunId, note: `"${t.title}" is ready for review.${t.stateNote ? ` The agent said: "${t.stateNote}"` : ""} Use the review tool.` });
+      await this.wake({ agentId: ceo.id, reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
     },
 
     /**
