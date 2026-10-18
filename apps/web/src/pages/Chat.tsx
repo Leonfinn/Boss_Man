@@ -10,10 +10,17 @@ type Message = { id: string; role: "owner" | "assistant" | "system"; text: strin
 type Chat = { agentId: string; items: Message[]; state: string };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
-/** Plain text with in-app links (#/tickets/<id> and the like) made clickable. */
+/** Plain text with in-app links (#/tickets/<id> and the like, or [title](#/tickets/<id>)) made clickable. */
 export function linked(text: string): ReactNode {
-  const parts = text.split(/`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?/g);
-  return parts.map((p, i) => (p.startsWith("#/") ? <a key={i} href={p}>{p.startsWith("#/tickets/") ? "ticket" : p.slice(2)}</a> : <Fragment key={i}>{p}</Fragment>));
+  const out: ReactNode[] = [];
+  let at = 0;
+  for (const m of text.matchAll(/\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?/g)) {
+    const href = (m[2] ?? m[3])!;
+    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[1] ?? (href.startsWith("#/tickets/") ? "ticket" : href.slice(2))}</a>);
+    at = m.index + m[0].length;
+  }
+  out.push(<Fragment key="end">{text.slice(at)}</Fragment>);
+  return out;
 }
 
 const ROLE: Record<Thread["role"], string> = { ceo: "CEO", manager: "Manager", worker: "Worker" };

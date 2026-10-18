@@ -340,7 +340,8 @@ export function schedulerService(
       model: agent.model,
       fundingSourceId: agent.fundingSourceId,
       cwd: chat ? chat.cwd(w.companyId, w.agentId) : path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
-      ...(chat ? { boardToolsOnly: true } : {}),
+      // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
+      ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
       // A plan-first ticket starts in plan mode until its plan is approved (R40).
       ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),

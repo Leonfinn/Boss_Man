@@ -91,7 +91,10 @@ export function paService(
       const [me] = await db.select({ model: agents.model }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
       const zone = (await deps.timeZone?.()) ?? "UTC";
       const at = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now());
-      const ids = input.cites.map((c) => (c.kind === "ticket" ? `#/tickets/${c.id}` : `${c.kind} ${c.id.slice(0, 8)}`)).join(", ");
+      const ticketIds = input.cites.filter((c) => c.kind === "ticket").map((c) => c.id);
+      const titles = ticketIds.length ? await db.select({ id: tickets.id, title: tickets.title }).from(tickets).where(inArray(tickets.id, ticketIds)) : [];
+      // A ticket shows as its title (the web page links it); brackets and parentheses would break the link.
+      const ids = input.cites.map((c) => (c.kind === "ticket" ? `[${(titles.find((t) => t.id === c.id)?.title ?? "ticket").replace(/[[\]()]/g, " ").trim().slice(0, 40)}](#/tickets/${c.id})` : `${c.kind} ${c.id.slice(0, 8)}`)).join(", ");
       const label = `— Answered by your PA (${me?.model ?? "default model"}) from ${ids} as of ${at}${zone === "UTC" ? " UTC" : ""} · ${ASK_CEO}`;
       const posted = `${input.text}\n\n${label}`;
       await db.insert(ownerChatMessages).values({ companyId: msg.companyId, agentId: msg.agentId, role: "assistant", text: posted, runId });

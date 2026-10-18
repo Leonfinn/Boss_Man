@@ -88,7 +88,7 @@ export const agents = pgTable(
   (t) => [
     // One CEO per company (R18).
     uniqueIndex("agents_one_ceo_per_company").on(t.companyId).where(sql`${t.role} = 'ceo'`),
-    uniqueIndex("agents_one_duty_per_company").on(t.companyId, t.duty).where(sql`${t.duty} is not null`),
+    uniqueIndex("agents_one_duty_per_company").on(t.companyId, t.duty).where(sql`${t.duty} is not null and ${t.retiredAt} is null`),
   ],
 );
 

@@ -1,5 +1,5 @@
 {
-  "id": "bdcec81d-d8b2-4fcb-8ec2-ba47ffe169a6",
+  "id": "1721141e-4475-400b-a237-58ee164d334c",
   "prevId": "cf2fe8da-ae91-4707-a78e-e497004c9f5d",
   "version": "7",
   "dialect": "postgresql",
@@ -479,7 +479,7 @@
             }
           ],
           "isUnique": true,
-          "where": "\"agents\".\"duty\" is not null",
+          "where": "\"agents\".\"duty\" is not null and \"agents\".\"retired_at\" is null",
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, ownerChatMessages, paAnswers, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { agentChanges, agents, ownerChatMessages, paAnswers, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { JUDGEMENT } from "../src/services/pa.js";
 
@@ -107,7 +107,7 @@ describe("the CEO's PA (R87)", () => {
     expect(textOf(await reply(client, "Add checkout is in backlog.", [{ kind: "ticket", id }]))).toBe("Posted to the owner.");
     const last = (await c.thread(c.pa.id)).at(-1)!;
     expect(last.role).toBe("assistant");
-    expect(last.text).toMatch(new RegExp(`^Add checkout is in backlog\\.\\n\\n— Answered by your PA \\(haiku-test\\) from #/tickets/${id} as of \\d\\d:\\d\\d UTC · \\[Ask the CEO\\]$`));
+    expect(last.text).toMatch(new RegExp(`^Add checkout is in backlog\\.\\n\\n— Answered by your PA \\(haiku-test\\) from \\[Add checkout\\]\\(#/tickets/${id}\\) as of \\d\\d:\\d\\d UTC · \\[Ask the CEO\\]$`));
     expect(await c.outcomes()).toEqual(["posted"]);
     // The PA's own closing text never reaches the owner, and nothing woke the CEO.
     await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "Unchecked closing text." } });
@@ -241,6 +241,38 @@ describe("the CEO's PA (R87)", () => {
     expect(list.find((a) => a.id === c.pa.id)!.pa).toEqual({ posted: 1, escalated: 0, wrong: 1 });
     expect(list.find((a) => a.id === c.ceo.id)!.pa).toBeNull();
     expect((await c.db.select().from(agents).where(eq(agents.id, c.pa.id)))[0]).toMatchObject({ duty: "assistant", title: "Assistant" });
+  });
+
+  it("always sandboxes the PA, even when it isn't woken by chat", async () => {
+    const c = await setup();
+    c.sent.length = 0;
+    await c.req("POST", `/api/agents/${c.pa.id}/wake`, { note: "Look around." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.pa.id)!;
+    expect(start.boardToolsOnly).toBe(true);
+    expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]!.purpose).toBeNull();
+  });
+
+  it("cuts a long cited ticket title in the label", async () => {
+    const c = await setup();
+    const id = await c.ticket("A very long ticket title that goes on and on well past forty characters");
+    const { client } = await c.ask("What is the state of that ticket?");
+    await read(client, id);
+    await reply(client, "In backlog.", [{ kind: "ticket", id }]);
+    expect((await c.thread(c.pa.id)).at(-1)!.text).toContain("[A very long ticket title that goes on an](#/tickets/");
+  });
+
+  it("lets a retired assistant be replaced, and refuses rehiring it beside an active one", async () => {
+    const c = await setup();
+    const base = `/api/companies/${c.company.id}/agents`;
+    expect((await c.req("POST", base, { name: "Second", template: "assistant" })).statusCode).toBe(409);
+    await c.req("POST", `/api/agents/${c.pa.id}/retire`);
+    const second = await c.req("POST", base, { name: "Second", template: "assistant" });
+    expect(second.statusCode).toBe(201);
+    const change = (await c.db.select().from(agentChanges).where(and(eq(agentChanges.agentId, c.pa.id), eq(agentChanges.field, "retired"))))[0]!;
+    const undo = await c.req("POST", `/api/agent-changes/${change.id}/undo`);
+    expect(undo.statusCode).toBe(409);
+    expect(undo.json().message ?? undo.body).toContain("already has an active Assistant");
   });
 
   it("allows one assistant per company", async () => {

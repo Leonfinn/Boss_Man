@@ -190,7 +190,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
       const tpl = input.template ? AGENT_TEMPLATES.find((x) => x.id === input.template) : undefined;
       if (input.template && !tpl) throw new AgentError(422, `There's no template called ${input.template}.`);
       // One assistant per company (R87); it starts paused so the owner picks its (cheap) model first.
-      if (tpl?.duty && (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, tpl.duty)))).length) throw new AgentError(409, `This company already has an ${tpl.title}; rehire it if it was retired.`);
+      if (tpl?.duty && (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, tpl.duty), isNull(agents.retiredAt)))).length) throw new AgentError(409, `This company already has an active ${tpl.title}; retire it first.`);
       const [a] = await db
         .insert(agents)
         .values({
@@ -257,6 +257,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
       if (c.undoneAt) throw new AgentError(409, "That change was already undone.");
       const a = await agent(c.agentId);
       if (c.field === "retired") {
+        if (a.duty && (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, a.companyId), eq(agents.duty, a.duty), isNull(agents.retiredAt)))).length) throw new AgentError(409, `This company already has an active ${a.title ?? a.duty}; retire it before rehiring ${a.name}.`);
         const was = (c.before ?? {}) as { paused?: boolean; tickets?: string[]; watching?: string[] };
         await db.update(agents).set({ retiredAt: null, paused: was.paused ?? true }).where(eq(agents.id, a.id));
         if (was.tickets?.length) await db.update(tickets).set({ assigneeAgentId: a.id }).where(and(inArray(tickets.id, was.tickets), isNull(tickets.assigneeAgentId)));
