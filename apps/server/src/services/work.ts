@@ -54,8 +54,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
   }
 
   async function assertAgentInCompany(agentId: string, companyId: string) {
-    const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+    const [a] = await db.select({ id: agents.id, name: agents.name, retiredAt: agents.retiredAt }).from(agents).where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
     if (!a) throw new WorkError(422, "That agent isn't in this company.");
+    if (a.retiredAt) throw new WorkError(422, `${a.name} is retired.`);
   }
 
   async function assertLinkInCompany(kind: "milestone" | "keyResult", id: string, companyId: string) {

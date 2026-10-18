@@ -75,6 +75,12 @@ export const agents = pgTable(
     paused: boolean("paused").notNull().default(false),
     /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
     duty: text("duty"),
+    /** Job title (e.g. "Scrum Master"), the template it was hired from, and its standing instructions (R62). */
+    title: text("title"),
+    template: text("template"),
+    instructions: text("instructions"),
+    /** A retired agent no longer works; its history and runs stay. */
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -82,6 +88,25 @@ export const agents = pgTable(
     uniqueIndex("agents_one_ceo_per_company").on(t.companyId).where(sql`${t.role} = 'ceo'`),
     uniqueIndex("agents_one_duty_per_company").on(t.companyId, t.duty).where(sql`${t.duty} is not null`),
   ],
+);
+
+/** Every change to an agent, by the owner or by the CEO, with what it was before (R62). */
+export const agentChanges = pgTable(
+  "agent_changes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    /** Who made it: null for the owner, else the agent (the CEO). */
+    byAgentId: uuid("by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** hired, retired, rehired, name, title, instructions, model, funding, paused, or undo. */
+    field: text("field").notNull(),
+    before: jsonb("before"),
+    after: jsonb("after"),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("agent_changes_agent_time").on(t.agentId, t.createdAt)],
 );
 
 export const runners = pgTable("runners", {

@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import { planningGuidance, UNTRUSTED_NOTE } from "@boss-man/shared";
+import { agentIdentity, planningGuidance, UNTRUSTED_NOTE } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -211,7 +211,8 @@ export function schedulerService(
   }
 
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string) {
-    const lines = [`You are ${agent.name}, the ${agent.role === "ceo" ? "CEO" : agent.role} of ${companyName}, working through Boss Man.`];
+    const me = agentIdentity(agent, companyName);
+    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions];
     if (w.ticketId) {
       const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {

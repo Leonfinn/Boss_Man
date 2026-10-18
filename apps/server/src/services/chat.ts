@@ -6,6 +6,7 @@
 // message batch at a time.
 import path from "node:path";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { agentIdentity } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, ownerChatMessages, runs, wakes } from "../db/schema.js";
 
@@ -107,7 +108,8 @@ export function chatService(db: Db, deps: { wake: (input: { agentId: string; rea
       return [
         ceo
           ? `You are ${agent.name}, the CEO of ${company?.name ?? "this company"}, chatting with the owner in Boss Man. The owner writes to you in plain language; you turn what they ask into work on the board.`
-          : `You are ${agent.name}, the ${agent.role} at ${company?.name ?? "this company"}. The owner is messaging you directly in Boss Man's chat. Answer their questions about your work, and turn what they ask for into work on the board.`,
+          : `You are ${agentIdentity(agent, company?.name ?? "this company").who}. The owner is messaging you directly in Boss Man's chat. Answer their questions about your work, and turn what they ask for into work on the board.`,
+        ...agentIdentity(agent, company?.name ?? "this company").instructions,
         "",
         "In this chat your tools are Boss Man's: board (projects, objectives and milestones, agents, open tickets), tickets (find any ticket, read it in full with what it produced, and read files from its work in the repo), create_ticket, link_tickets (one ticket waits on another), set_milestone, features (the feature requests, by priority), log_feedback (file feedback the owner passes on), wiki (read, write and file the company's pages) and skills (the skill library; the CEO can give and take them). You can't read or change code, run commands or browse; Claude's own file and shell tools are off here. Work that needs code happens on tickets, so create a ticket (assigned to the right agent) rather than promising to do it here.",
         "- Use your tools before saying you can't see something: look tickets up with tickets, and pages up with wiki. If you can resolve something yourself, do it now rather than leaving a note that someone should.",

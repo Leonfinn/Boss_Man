@@ -5,7 +5,7 @@
 // it one last time to write a handoff, and the run after that starts the next chapter with it.
 // The CEO also keeps notes and a journal in files in its own folder, which outlive chapters.
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
-import { CHAPTER_CONTEXT_LIMIT, CHAPTER_MAX_DAYS, chapterDue } from "@boss-man/shared";
+import { agentIdentity, CHAPTER_CONTEXT_LIMIT, CHAPTER_MAX_DAYS, chapterDue } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, ceoChapters, companies, decisions, keyResults, milestones, objectives, runs, tickets } from "../db/schema.js";
 
@@ -32,6 +32,8 @@ export function chaptersService(db: Db, deps: { now?: () => Date } = {}) {
     const ms = ids.length ? await db.select().from(milestones).where(inArray(milestones.objectiveId, ids)).orderBy(asc(milestones.targetDate)) : [];
     const lines = [
       `You are ${agent.name}, the CEO of ${company?.name ?? "this company"}, working through Boss Man. This is chapter ${number} of your work.`,
+      // The owner's standing instructions (R62), as they are when the chapter starts.
+      ...agentIdentity(agent, company?.name ?? "this company").instructions,
       "",
       company?.mission ? `Mission: ${company.mission}` : "The owner hasn't written a mission yet; ask them for one with raise_decision if you need it.",
     ];

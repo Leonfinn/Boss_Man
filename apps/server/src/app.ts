@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, eq, gt, inArray } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, isNull } from "drizzle-orm";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
@@ -12,6 +12,7 @@ import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
+import { AgentError, agentsService } from "./services/agents.js";
 import { repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { runnersService } from "./services/runners.js";
@@ -132,6 +133,7 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
+  const agentsSvc = agentsService(db, { now: opts.now });
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
@@ -420,7 +422,8 @@ export async function buildApp(opts: AppOptions) {
 
     owner.get("/api/companies", async () => {
       const rows = await db.select().from(companies).orderBy(companies.name);
-      const allAgents = await db.select().from(agents);
+      // Retired agents (R62) only show on the Agents page, so they can't be given new work.
+      const allAgents = await db.select().from(agents).where(isNull(agents.retiredAt));
       return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id) }));
     });
 
@@ -1094,28 +1097,53 @@ export async function buildApp(opts: AppOptions) {
       return reply.code(204).send();
     });
 
-    // Agents: hire, and change model or funding source.
+    // Agents (R62): hire from a template, change them, retire them, and undo any change.
+    const agentErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof AgentError) return reply.code(err.status).send({ error: "agent", message: err.message });
+      throw err;
+    };
+    const Instructions = z.string().trim().max(20_000).nullable();
+    owner.get("/api/agent-templates", async () => agentsSvc.templates());
+    owner.get("/api/companies/:id/agents", async (req) => agentsSvc.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/agents", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), role: z.enum(["manager", "worker"]).default("worker"), agentKind: z.string().min(1).default("claude"), model: z.string().optional(), fundingSourceId: Uuid.optional(), reportsTo: Uuid.optional() }).parse(req.body);
-      const [a] = await db.insert(agents).values({ companyId: id, ...b }).returning();
-      return reply.code(201).send(a);
+      const b = z
+        .object({
+          name: z.string().trim().min(1).max(80),
+          template: z.string().max(40).optional(),
+          title: z.string().trim().max(80).nullable().optional(),
+          instructions: Instructions.optional(),
+          role: z.enum(["manager", "worker"]).optional(),
+          agentKind: z.string().min(1).optional(),
+          model: z.string().nullable().optional(),
+          fundingSourceId: Uuid.nullable().optional(),
+          reportsTo: Uuid.optional(),
+        })
+        .parse(req.body);
+      return agentsSvc.hire(id, b).then((a) => reply.code(201).send(a), agentErrors(reply));
     });
 
     owner.patch("/api/agents/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean() }).partial().parse(req.body);
+      const b = z
+        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean() })
+        .partial()
+        .parse(req.body);
       const [before] = await db.select().from(agents).where(eq(agents.id, id));
       if (!before) return reply.code(404).send({ error: "not_found" });
       // An agent with a standing job starts with no model; it needs one before it can run (R73).
       if (b.paused === false && before.duty && !(b.model !== undefined ? b.model : before.model)) {
         return reply.code(409).send({ error: "needs_model", message: `Choose a model for ${before.name} before starting it.` });
       }
-      const [a] = await db.update(agents).set(b).where(eq(agents.id, id)).returning();
-      // Unpausing lets its waiting work start now rather than at the next tick.
-      if (b.paused === false && before.paused) void scheduler.tick().catch((err) => app.log.error({ err }, "tick after unpause failed"));
-      return a;
+      return agentsSvc.update(id, b).then((a) => {
+        // Unpausing lets its waiting work start now rather than at the next tick.
+        if (b.paused === false && before.paused) void scheduler.tick().catch((err) => app.log.error({ err }, "tick after unpause failed"));
+        return a;
+      }, agentErrors(reply));
     });
+    owner.post("/api/agents/:id/retire", async (req, reply) => agentsSvc.retire(IdParam.parse(req.params).id).catch(agentErrors(reply)));
+    owner.get("/api/agents/:id/history", async (req, reply) => agentsSvc.history(IdParam.parse(req.params).id).catch(agentErrors(reply)));
+    owner.post("/api/agent-changes/:id/undo", async (req, reply) => agentsSvc.undo(IdParam.parse(req.params).id).catch(agentErrors(reply)));
 
     // Scheduling and kill switches (R30).
     owner.post("/api/agents/:id/wake", async (req, reply) => {
