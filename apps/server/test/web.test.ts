@@ -14,7 +14,7 @@ afterEach(async () => {
 
 async function setup(opts: Partial<Parameters<typeof buildApp>[0]> = {}) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, ...opts });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, ...opts });
   ctx = { close: async () => (await built.app.close(), await close()) };
   return built;
 }

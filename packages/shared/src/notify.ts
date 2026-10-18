@@ -20,15 +20,27 @@ export function minutesOf(hhmm: string): number | null {
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
 }
 
+/** Minutes since midnight at `now`, read in a time zone. */
+function minuteOfDay(now: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+  return Number(parts.find((p) => p.type === "hour")!.value) * 60 + Number(parts.find((p) => p.type === "minute")!.value);
+}
+
 /** Whether `now` falls in the quiet hours, read in their own time zone. Overnight ranges wrap. */
 export function inQuietHours(now: Date, quiet: QuietHours | null | undefined): boolean {
   if (!quiet) return false;
   const start = minutesOf(quiet.start);
   const end = minutesOf(quiet.end);
   if (start === null || end === null || start === end) return false;
-  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: quiet.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
-  const at = Number(parts.find((p) => p.type === "hour")!.value) * 60 + Number(parts.find((p) => p.type === "minute")!.value);
+  const at = minuteOfDay(now, quiet.timeZone);
   return start < end ? at >= start && at < end : at >= start || at < end;
+}
+
+/** When the quiet hours `now` is in end, or null outside them (R86). */
+export function quietHoursEnd(now: Date, quiet: QuietHours | null | undefined): Date | null {
+  if (!quiet || !inQuietHours(now, quiet)) return null;
+  const left = (minutesOf(quiet.end)! - minuteOfDay(now, quiet.timeZone) + 1440) % 1440;
+  return new Date(Math.floor(now.getTime() / 60_000) * 60_000 + left * 60_000);
 }
 
 /**

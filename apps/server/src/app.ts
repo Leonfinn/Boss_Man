@@ -157,10 +157,7 @@ export async function buildApp(opts: AppOptions) {
       if (!(await feedback.settings(n.companyId)).ceoTriage) return;
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, n.companyId), eq(agents.role, "ceo")));
       if (!ceo || n.createdByAgentId === ceo.id) return;
-      const [waiting] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, ceo.id), eq(wakes.reason, "feedback"), inArray(wakes.status, ["queued", "deferred"])));
-      if (waiting) return;
-      await scheduler.wake({
-        agentId: ceo.id,
+      await scheduler.notify(ceo.id, {
         reason: "feedback",
         priority: 1,
         note: "New feedback is waiting. Use the feedback tool: read the inbox, link each request to a feature (create one if none fits) with how much it matters to them, and mark each note processed. Don't build anything yet; just triage.",
@@ -169,7 +166,7 @@ export async function buildApp(opts: AppOptions) {
     onReleased: (f) => notes.notify({ companyId: f.companyId, level: "note", title: `Released: ${f.title}`, body: "Every ticket delivering it is done.", link: `#/features/${f.companyId}/${f.id}` }),
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
-  const chat = chatService(db, { wake: (input) => scheduler.wake(input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
   const scheduler = schedulerService(db, {
     runners,
     chapters,
@@ -179,19 +176,20 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
+    quietHours: async () => (await notes.getSettings()).quietHours,
     tickOnWake: opts.tickOnWake,
     log: (m) => app.log.error(m),
     // Loop and runaway alerts land in the owner's decision queue.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
   });
-  decisionsSvc.setWakeHook((w) => scheduler.wake(w));
+  decisionsSvc.setWakeHook((w) => scheduler.notify(w.agentId, w));
   const engagementsSvc = engagementsService(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now });
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
   const runsSvc = runsService(db, { runners });
   runsSvc.setWakeHook((w) => scheduler.wake(w));
-  const ticketChat = ticketChatService(db, { runs: runsSvc, wake: (w) => scheduler.wake(w) });
+  const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w) });
   const wiki = wikiService(db);
   const dashboard = dashboardService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
@@ -260,9 +258,9 @@ export async function buildApp(opts: AppOptions) {
         .catch((err) => app.log.error({ err }, "run-ended handling failed"));
     }
   });
-  const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now, wake: (input) => scheduler.wake(input) });
+  const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now, wake: (input) => scheduler.notify(input.agentId, input) });
   const work = workService(db, {
-    onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
+    onAssigned: (t) => scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
     now: opts.now,
   });
@@ -271,14 +269,13 @@ export async function buildApp(opts: AppOptions) {
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
     runners,
-    runs: runsSvc,
     work,
     loops,
     gitHosts,
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
     notes,
   });
-  review.setWakeHook((w) => scheduler.wake(w));
+  review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
     // A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
@@ -299,7 +296,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 

@@ -24,7 +24,7 @@ export class ChatError extends Error {
 
 type Agent = typeof agents.$inferSelect;
 
-export function chatService(db: Db, deps: { wake: (input: { agentId: string; reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string }) {
+export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string }) {
   /** The agent the conversation is with: the one named, or the company's CEO. */
   async function who(companyId: string, agentId?: string | null): Promise<Agent> {
     const [a] = await db
@@ -49,12 +49,8 @@ export function chatService(db: Db, deps: { wake: (input: { agentId: string; rea
     async send(companyId: string, text: string, agentId?: string | null) {
       const agent = await who(companyId, agentId);
       const [m] = await db.insert(ownerChatMessages).values({ companyId, agentId: agent.id, role: "owner", text }).returning();
-      // One chat run at a time per agent picks up everything sent to it so far.
-      const [waiting] = await db
-        .select({ id: wakes.id })
-        .from(wakes)
-        .where(and(eq(wakes.agentId, agent.id), eq(wakes.reason, CHAT_REASON), inArray(wakes.status, ["queued", "deferred"])));
-      if (!waiting) await deps.wake({ agentId: agent.id, reason: CHAT_REASON, priority: 4 });
+      // One chat run at a time per agent picks up everything sent to it so far: notify joins a waiting wake.
+      await deps.notify(agent.id, { reason: CHAT_REASON, priority: 4 });
       return m!;
     },
 

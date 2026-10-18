@@ -245,6 +245,8 @@ export const tickets = pgTable(
     pullRequestNote: text("pull_request_note"),
     /** The commit that was reviewed: the host merges only this head, never later pushes. */
     pullRequestHead: text("pull_request_head"),
+    /** The head commit and check result the agent was last told about ("sha:failed"), so each is told once (R86). */
+    pullRequestCi: text("pull_request_ci"),
     /** A watcher (R80): an agent that reports this ticket's progress to the owner every so often. Off when null. */
     watcherAgentId: uuid("watcher_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
     watchEveryMinutes: integer("watch_every_minutes"),
@@ -367,7 +369,7 @@ export const settings = pgTable("settings", {
   value: jsonb("value").notNull(),
 });
 
-export const wakeStatus = pgEnum("wake_status", ["queued", "deferred", "launched", "dropped"]);
+export const wakeStatus = pgEnum("wake_status", ["queued", "deferred", "launched", "dropped", "steered"]);
 
 /** Requests to start an agent. Durable, so a restart doesn't lose queued work. */
 export const wakes = pgTable(
@@ -635,6 +637,21 @@ export const failureSignatures = pgTable(
   (t) => [index("failure_signatures_lookup").on(t.ticketId, t.signature, t.createdAt)],
 );
 
+/** Agent-to-agent nudges (R86), kept for the pair rate limit and ping-pong detection. */
+export const nudges = pgTable(
+  "nudges",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    fromAgentId: uuid("from_agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    toAgentId: uuid("to_agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
+    /** Dropped as a ping-pong: not delivered, and not counted again. */
+    dropped: boolean("dropped").notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [index("nudges_pair").on(t.fromAgentId, t.toAgentId, t.createdAt)],
+);
 
 // ---------- Notifications (R44) ----------
 

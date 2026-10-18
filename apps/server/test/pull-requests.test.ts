@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { notifications, projects, tickets, wakes } from "../src/db/schema.js";
+import { agents, notifications, projects, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -21,6 +21,7 @@ function fakeGitea() {
   const calls: Array<{ method: string; url: string; auth: string | null; body: unknown }> = [];
   const pr = { number: 7, html_url: `${GITEA}/leon/site/pulls/7`, state: "open", merged: false, merge_commit_sha: null as string | null };
   const mergeAnswers: Array<{ status: number; body?: unknown }> = [];
+  const checks = { state: "pending", statuses: [] as Array<{ context: string; status: string }> };
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -37,15 +38,16 @@ function fakeGitea() {
       return json(a.status, a.body);
     }
     if (method === "GET" && url === `${base}/7`) return json(200, pr);
+    if (method === "GET" && url === `${GITEA}/api/v1/repos/leon/site/commits/${HEAD}/status`) return json(200, checks);
     return json(404, { message: `no fake for ${method} ${url}` });
   }) as typeof globalThis.fetch;
-  return { fetch, calls, pr, mergeAnswers };
+  return { fetch, calls, pr, mergeAnswers, checks };
 }
 
 async function setup(opts: { token?: boolean } = {}) {
   const gitea = fakeGitea();
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", fetch: gitea.fetch });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: gitea.fetch });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -68,7 +70,7 @@ async function setup(opts: { token?: boolean } = {}) {
   await db.delete(wakes);
   const approve = () => req("POST", `/api/tickets/${ticket.id}/review`, { verdict: "approved" });
   const state = async () => (await db.select().from(tickets).where(eq(tickets.id, ticket.id)))[0]!;
-  return { ...built, db, close, req, company, project, ticket, sent, gitea, approve, state };
+  return { ...built, db, close, req, company, worker, project, ticket, sent, gitea, approve, state };
 }
 
 describe("pull requests on Gitea (R59)", () => {
@@ -123,5 +125,39 @@ describe("pull requests on Gitea (R59)", () => {
     expect((await c.approve()).json().message).toContain("git host");
     expect(c.sent.some((x) => x.type === "workspace.push" || x.type === "workspace.merge")).toBe(false);
     expect(await c.state()).toMatchObject({ systemState: "review" });
+  });
+});
+
+describe("check results wake the right agent (R86)", () => {
+  it("tells the assignee once per commit when checks fail, and the CEO when they pass", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    const note = { status: 405, body: { message: "Required status check is not passing" } };
+    c.gitea.mergeAnswers.push(note, note, note, note, note, note);
+    await c.approve();
+    await c.db.delete(wakes);
+
+    // Pending says nothing.
+    await c.review.syncPullRequests();
+    expect(await c.db.select().from(wakes)).toHaveLength(0);
+
+    Object.assign(c.gitea.checks, { state: "failure", statuses: [{ context: "ci/build", status: "failure" }, { context: "ci/lint", status: "success" }] });
+    await c.review.syncPullRequests();
+    const failed = await c.db.select().from(wakes);
+    expect(failed).toEqual([expect.objectContaining({ agentId: c.worker.id, ticketId: c.ticket.id, reason: "ci failed", priority: 3, note: expect.stringContaining("ci/build") })]);
+    expect(failed[0]!.note).not.toContain("ci/lint");
+    expect(await c.state()).toMatchObject({ systemState: "in_progress", pullRequestCi: `${HEAD}:failed` });
+
+    // Back in review on the same commit: the same result isn't told again.
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, c.ticket.id));
+    await c.review.syncPullRequests();
+    expect(await c.db.select().from(wakes)).toHaveLength(1);
+
+    Object.assign(c.gitea.checks, { state: "success", statuses: [{ context: "ci/build", status: "success" }] });
+    await c.review.syncPullRequests();
+    await c.review.syncPullRequests();
+    const [ceo] = await c.db.select().from(agents).where(eq(agents.role, "ceo"));
+    const passed = (await c.db.select().from(wakes)).filter((w) => w.reason === "ci passed");
+    expect(passed).toEqual([expect.objectContaining({ agentId: ceo!.id, ticketId: c.ticket.id, note: expect.stringContaining("Required status check is not passing") })]);
   });
 });

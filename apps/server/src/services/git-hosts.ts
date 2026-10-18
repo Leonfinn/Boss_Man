@@ -7,6 +7,8 @@ import { apiBaseFor, parseRepoUrl, type GitHostKind } from "@boss-man/shared";
 
 export type GitHostConfig = { kind: GitHostKind; apiBase: string; owner: string; repo: string };
 export type PullRequest = { number: number; url: string; merged: boolean; closed: boolean; mergeCommit: string | null };
+/** What a commit's checks say (R86). GitHub's older commit statuses (not Actions check runs) aren't read. */
+export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[] };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
 
 export class GitHostError extends Error {
@@ -115,6 +117,20 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const perms = (res.json.permissions ?? {}) as { push?: boolean; admin?: boolean };
       const canPush = perms.push === true || perms.admin === true;
       return { ok: true, canPush, message: canPush ? "The token can read and push to the repo." : "The token can read the repo but not push to it, so merges and pull requests would fail." };
+    },
+
+    /** The checks on a commit: GitHub check runs, or Gitea's commit statuses. */
+    async checks(cfg: GitHostConfig, token: string, sha: string): Promise<CommitChecks> {
+      const gh = cfg.kind === "github";
+      const res = await call(cfg, token, "GET", gh ? `/commits/${encodeURIComponent(sha)}/check-runs?per_page=100` : `/commits/${encodeURIComponent(sha)}/status`);
+      const body = res.json && !Array.isArray(res.json) ? res.json : null;
+      const rows = ((gh ? body?.check_runs : body?.statuses) ?? null) as Array<Record<string, unknown>> | null;
+      if (!res.ok || !Array.isArray(rows)) throw new GitHostError(res.status, `Couldn't read the checks on ${sha.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
+      const failing = rows
+        .filter((r) => (gh ? ["failure", "timed_out", "cancelled", "startup_failure"].includes(String(r.conclusion)) : ["failure", "error"].includes(String(r.status))))
+        .map((r) => String(gh ? r.name : r.context));
+      const waiting = rows.some((r) => (gh ? r.status !== "completed" : r.status === "pending"));
+      return { state: failing.length ? "failed" : !rows.length ? "none" : waiting ? "pending" : "passed", failing };
     },
 
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {

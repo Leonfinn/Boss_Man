@@ -16,7 +16,7 @@ afterEach(async () => {
 
 async function setup(limits: Partial<Limits> = {}) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits, workspaceRoot: "/ws" });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, ...limits }, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -203,7 +203,7 @@ describe("scheduler", () => {
     await ctx.req("POST", "/api/scheduler/tick");
     expect(ctx.commands).toEqual([]);
     const [first] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "decision answered"));
-    expect(first).toMatchObject({ status: "deferred", statusReason: "waiting briefly for more answers" });
+    expect(first).toMatchObject({ status: "deferred", statusReason: "waiting briefly for more \"decision answered\"" });
     expect(first!.notBefore!.getTime() - Date.now()).toBeGreaterThan(100_000);
 
     // Each answer waits again, but never more than five minutes after the first.

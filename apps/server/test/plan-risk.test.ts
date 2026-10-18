@@ -17,7 +17,7 @@ afterEach(async () => {
 
 async function setup(opts: { listen?: boolean; answers?: { verify?: (command: string) => unknown } } = {}) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws" });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   let base = "";
   if (opts.listen) {
     await built.app.listen({ host: "127.0.0.1", port: 0 });
