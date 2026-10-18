@@ -259,7 +259,7 @@ export async function buildApp(opts: AppOptions) {
         .catch((err) => app.log.error({ err }, "run-ended handling failed"));
     }
   });
-  const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now });
+  const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now, wake: (input) => scheduler.wake(input) });
   const work = workService(db, {
     onAssigned: (t) => scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
@@ -1385,7 +1385,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.post("/api/runs/:id/cancel", async (req, reply) => runsSvc.cancel(IdParam.parse(req.params).id).catch(runErrors(reply)));
 
-    // Stale-blocker and stalled-run sweeps (R21, R32); also run on a timer.
+    // Stale-blocker, stalled-run and missed-work sweeps (R21, R32, R82); also run on a timer.
     owner.post("/api/sweep", async () => sweeps.run());
   });
 

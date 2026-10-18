@@ -29,7 +29,7 @@ const tick = setInterval(() => void scheduler.tick().catch((err) => app.log.erro
 const notify = setInterval(() => void notes.syncDecisions().catch((err) => app.log.error({ err }, "notification sync failed")), Number(env.BOSSMAN_NOTIFY_MS ?? 5000));
 // Features follow the tickets that deliver them.
 const featureSync = setInterval(() => void feedback.syncStatuses().catch((err) => app.log.error({ err }, "feature status sync failed")), Number(env.BOSSMAN_FEATURE_SYNC_MS ?? 30_000));
-// Stale-blocker and stalled-run sweeps.
+// Stale-blocker, stalled-run and missed-work sweeps.
 const sweep = setInterval(() => void sweeps.run().catch((err) => app.log.error({ err }, "sweep failed")), Number(env.BOSSMAN_SWEEP_MS ?? 60_000));
 // Pull requests waiting on the git host: merged there, or mergeable now (R59).
 const prSync = setInterval(() => void review.syncPullRequests().catch((err) => app.log.error({ err }, "pull request sync failed")), Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000));
