@@ -75,6 +75,20 @@ export function writeSkills(dir: string, list: NonNullable<StartCommand["skills"
 }
 
 const CLAUDE_ALIASES = new Set(["default", "opus", "sonnet", "haiku", "fable"]);
+
+/** The choices in an ACP session's model option, groups flattened (R60). */
+export function modelChoices(configOptions: unknown[] | null | undefined) {
+  const opt = (configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { options?: unknown[] } | undefined;
+  const out: Array<{ value: string; name: string; description: string | null }> = [];
+  for (const o of opt?.options ?? []) {
+    const group = o as { options?: unknown[] };
+    for (const c of Array.isArray(group.options) ? group.options : [o]) {
+      const { value, name, description } = c as { value?: unknown; name?: unknown; description?: unknown };
+      if (typeof value === "string" && value) out.push({ value, name: typeof name === "string" ? name : value, description: typeof description === "string" ? description : null });
+    }
+  }
+  return out.slice(0, 200);
+}
 const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
 
 const require = createRequire(import.meta.url);
@@ -112,6 +126,8 @@ function killGroup(child: ChildProcess, graceMs = 5000) {
 
 export class SessionManager {
   private readonly runs = new Map<string, RunState>();
+  /** The model list last reported per agent kind, so it's sent only when it changes. */
+  private readonly reportedModels = new Map<string, string>();
 
   constructor(private readonly opts: SessionManagerOptions) {}
 
@@ -508,6 +524,13 @@ export class SessionManager {
       if (!model) {
         const opt = (session.configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { currentValue?: string } | undefined;
         model = opt?.currentValue ?? null;
+      }
+      // Tell the server what this agent kind offers, when it's new or has changed (R60).
+      const choices = modelChoices(session.configOptions);
+      const seen = JSON.stringify(choices);
+      if (choices.length && this.reportedModels.get(cmd.agentKind) !== seen) {
+        this.reportedModels.set(cmd.agentKind, seen);
+        emit({ type: "runner.models", agentKind: cmd.agentKind, models: choices });
       }
       emit({ type: "run.started", runId: cmd.runId, agentId: cmd.agentId, acpSessionId: session.sessionId, model, resumed: session.resumed });
 

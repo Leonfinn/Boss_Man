@@ -28,6 +28,67 @@ type AgentRow = {
 };
 type Change = { c: { id: string; field: string; before: unknown; after: unknown; undoneAt: string | null; createdAt: string; byAgentId: string | null }; by: string | null };
 
+type ModelChoice = { value: string; name: string; description?: string | null };
+type ModelLists = { runner: Record<string, { models: ModelChoice[]; observedAt: string }>; api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }> };
+const OTHER = "__other__";
+
+/**
+ * The model field (R60): Default, then what the agent's kind offers on the runner and what its
+ * funding source's API key can use, then Other… for a typed ID.
+ */
+function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists }: { id: string; value: string; onChange: (v: string) => void; agentKind: string; fundingSourceId: string; lists: ModelLists | null }) {
+  // The adapter's own "default" is the same as leaving the model blank.
+  const fromRunner = (lists?.runner[agentKind]?.models ?? []).filter((m) => m.value !== "default");
+  const fromApi = lists?.api.find((a) => a.fundingSourceId === fundingSourceId);
+  const known = [...fromRunner, ...(fromApi?.models ?? [])].some((m) => m.value === value);
+  const [typing, setTyping] = useState(false);
+  const offered = fromRunner.length + (fromApi?.models.length ?? 0) > 0;
+  if (!offered || typing)
+    return (
+      <>
+        <input id={id} className="mono" placeholder="default" value={value} onChange={(e) => onChange(e.target.value)} />
+        <small className="muted">
+          {offered ? (
+            <button type="button" className="linkish" onClick={() => setTyping(false)}>
+              Choose from the list
+            </button>
+          ) : (
+            `No list yet: ${agentKind} reports its models the first time it runs.`
+          )}
+        </small>
+      </>
+    );
+  return (
+    <>
+      <select id={id} value={value} onChange={(e) => (e.target.value === OTHER ? setTyping(true) : onChange(e.target.value))}>
+        <option value="">Default</option>
+        {/* A full ID still works on Claude (the runner pins it to the opus alias), so it's shown as typed, not refused. */}
+        {value && !known && <option value={value}>{value} (typed ID)</option>}
+        {fromRunner.length > 0 && (
+          <optgroup label={`Offered by the runner (${agentKind})`}>
+            {fromRunner.map((m) => (
+              <option key={`r-${m.value}`} value={m.value}>
+                {m.name === m.value ? m.value : `${m.name} (${m.value})`}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        {fromApi && fromApi.models.length > 0 && (
+          <optgroup label={`On ${fromApi.name}'s API key`}>
+            {fromApi.models.map((m) => (
+              <option key={`a-${m.value}`} value={m.value}>
+                {m.name === m.value ? m.value : `${m.name} (${m.value})`}
+              </option>
+            ))}
+          </optgroup>
+        )}
+        <option value={OTHER}>Other…</option>
+      </select>
+      {fromApi?.error && <small className="error">{fromApi.error}</small>}
+    </>
+  );
+}
+
 const STATUS: Record<AgentRow["status"], [string, string]> = { working: ["Working", "green"], idle: ["Idle", ""], paused: ["Paused", "amber"], retired: ["Retired", ""] };
 const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", funding: "Paid from", kind: "Agent kind", paused: "Paused" };
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
@@ -35,7 +96,7 @@ const jobOf = (a: Pick<AgentRow, "role" | "title" | "duty">) => (a.role === "ceo
 const show = (v: unknown, sources: FundingSource[]) =>
   v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
 
-function Hire({ companyId, templates, sources, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; onDone: (name: string) => void }) {
+function Hire({ companyId, templates, sources, lists, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; onDone: (name: string) => void }) {
   const [tpl, setTpl] = useState<Template | null>(null);
   const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", fundingSourceId: "" });
   const [error, setError] = useState<string | null>(null);
@@ -103,7 +164,7 @@ function Hire({ companyId, templates, sources, onDone }: { companyId: string; te
         </div>
         <div className="field">
           <label htmlFor="hire-model">Model</label>
-          <input id="hire-model" className="mono" placeholder="default" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+          <ModelPicker id="hire-model" value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind="claude" fundingSourceId={form.fundingSourceId} lists={lists} />
           <small className="muted">{tpl ? `Suggested: a ${tpl.modelTier} model. ` : ""}Blank uses the agent's default.</small>
         </div>
         <div className="field">
@@ -135,7 +196,7 @@ function Hire({ companyId, templates, sources, onDone }: { companyId: string; te
   );
 }
 
-function Edit({ a, sources, onSaved }: { a: AgentRow; sources: FundingSource[]; onSaved: () => void }) {
+function Edit({ a, sources, lists, onSaved }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; onSaved: () => void }) {
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "" });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -172,7 +233,7 @@ function Edit({ a, sources, onSaved }: { a: AgentRow; sources: FundingSource[]; 
             )}
             <div className="field">
               <label htmlFor={`model-${a.id}`}>Model</label>
-              <input id={`model-${a.id}`} className="mono" placeholder="default" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+              <ModelPicker id={`model-${a.id}`} value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={a.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} />
             </div>
             <div className="field">
               <label htmlFor={`funding-${a.id}`}>Paid from</label>
@@ -285,6 +346,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
   const list = usePoll((signal) => (company ? api<AgentRow[]>(`/api/companies/${company.id}/agents`, { signal }) : Promise.resolve([])), 15_000, `agents-${company?.id ?? "none"}`);
   const templates = usePoll((signal) => api<{ templates: Template[] }>("/api/agent-templates", { signal }), 3_600_000, "agent-templates");
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, "sources");
+  const models = usePoll((signal) => (company ? api<ModelLists>(`/api/companies/${company.id}/models`, { signal }) : Promise.resolve(null)), 300_000, `models-${company?.id ?? "none"}`);
   const [hiring, setHiring] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -353,7 +415,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             )}
           </div>
         </div>
-        {open === a.id && <Edit a={a} sources={srcs} onSaved={() => changed()} />}
+        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} onSaved={() => changed()} />}
       </li>
     );
   };
@@ -369,12 +431,21 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           {hiring ? "Close" : "Hire"}
         </button>
       </header>
-      <CeoApprovals companyId={company.id} />
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <CeoApprovals companyId={company.id} />
+        <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+          Model lists come from the runner when agents run{models.data?.api.length ? ", and from your API keys" : ""}.{" "}
+          <button type="button" className="linkish" onClick={() => void api<ModelLists>(`/api/companies/${company.id}/models?refresh=1`).then(() => models.reload())}>
+            Refresh
+          </button>
+        </p>
+      </div>
       {hiring && templates.data && (
         <Hire
           companyId={company.id}
           templates={templates.data.templates}
           sources={srcs}
+          lists={models.data}
           onDone={(name) => {
             setHiring(false);
             changed(`${name} hired. Give them a ticket on the Kanban, or make them a ticket's watcher.`);
