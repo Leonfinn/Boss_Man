@@ -36,6 +36,9 @@ export type Limits = {
 /** Wakes the owner asked for; never limited. A message counts only when no run sent it. */
 /** Why the wiki maintainer is woken (R73). */
 export const WIKI_REASON = "wiki upkeep";
+/** A watcher's report on the tickets it watches (R80). Scheduled by Boss Man, so not counted as ticketless churn. */
+export const WATCH_REASON = "ticket watch";
+const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
@@ -130,6 +133,83 @@ export function schedulerService(
     ];
   }
 
+  const ago = (d: Date | null) => {
+    if (!d) return "never";
+    const m = Math.round((now().getTime() - d.getTime()) / 60_000);
+    return m < 60 ? `${m} min ago` : m < 48 * 60 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+  };
+
+  /** What a watcher needs for its report (R80): each watched ticket, its latest run, and what it waits on. */
+  async function watchDuty(w: typeof wakes.$inferSelect) {
+    const ids = [...new Set([...(w.note ?? "").matchAll(WATCH_LINE)].map((m) => m[1]!))];
+    const lines = [
+      "You are watching these tickets for the owner, like a scrum master. For each one, check how it's going (the facts below, plus tickets read for more), then post ONE short status update on that ticket with ticket_reply, at most four short lines:",
+      "- where it is now and what changed since your last update on it (your earlier updates are in its conversation);",
+      "- what it's waiting on, including the tickets and decisions it depends on;",
+      "- anything that looks stuck or off track, and what the owner could do about it.",
+      "If nothing has changed, say so in one line and say whether it looks stuck. Don't change tickets, code or assignments, and don't wake other agents: only report.",
+    ];
+    if (!ids.length) return lines;
+    const watched = await db
+      .select({ t: tickets, assignee: agents.name })
+      .from(tickets)
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(inArray(tickets.id, ids), eq(tickets.watcherAgentId, w.agentId)));
+    for (const { t, assignee } of watched) {
+      const [last] = await db.select().from(runs).where(eq(runs.ticketId, t.id)).orderBy(desc(runs.startedAt)).limit(1);
+      const deps = await db
+        .select({ ticket: tickets.title, ticketId: ticketDependencies.blockerTicketId, state: tickets.systemState, activity: tickets.lastActivityAt, decision: decisions.question, decisionStatus: decisions.status, engagement: ticketDependencies.blockerEngagementId })
+        .from(ticketDependencies)
+        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+        .where(eq(ticketDependencies.blockedTicketId, t.id));
+      const talk = await conversationLines(db, t.id);
+      lines.push(
+        "",
+        `Ticket ${t.id} "${t.title}"${t.systemState === "done" ? " (now done: give a final update)" : ""}`,
+        `- State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}; assigned to ${assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}; last activity ${ago(t.lastActivityAt)}.`,
+        last ? `- Latest run: started ${ago(last.startedAt)}, ${last.endedAt ? `ended ${ago(last.endedAt)}${last.outcome ? ` (${last.outcome})` : ""}` : "still running"}.` : "- No runs yet.",
+        ...(t.pullRequestUrl ? [`- Pull request: ${t.pullRequestUrl}${t.pullRequestNote ? `, waiting: ${t.pullRequestNote}` : ""}.`] : []),
+        ...(deps.length
+          ? deps.map((d) =>
+              d.ticketId
+                ? `- Depends on ticket ${d.ticketId} "${d.ticket}": ${d.state}, last activity ${ago(d.activity)}.`
+                : d.decision
+                  ? `- Waits on the owner's decision "${d.decision}" (${d.decisionStatus}).`
+                  : `- Waits on engagement ${d.engagement}.`,
+            )
+          : ["- Depends on nothing."]),
+        ...(talk.length ? ["- Recent conversation:", ...talk.slice(-4).map((l) => `  ${l}`)] : []),
+      );
+    }
+    return lines;
+  }
+
+  /**
+   * Asks each watcher for a report on the tickets that are due (R80): every N minutes while a
+   * ticket is open, and once more when it's done. One waiting run per watcher covers them all.
+   */
+  async function watchDue() {
+    const t = now();
+    const watched = await db.select().from(tickets).where(sql`${tickets.watcherAgentId} is not null`);
+    const due = watched.filter((x) =>
+      x.systemState === "done" ? !!x.watchedAt && x.lastActivityAt > x.watchedAt : !x.watchedAt || t.getTime() - x.watchedAt.getTime() >= (x.watchEveryMinutes ?? 30) * 60_000,
+    );
+    if (!due.length) return;
+    await db.update(tickets).set({ watchedAt: t }).where(inArray(tickets.id, due.map((x) => x.id)));
+    const byWatcher = new Map<string, string[]>();
+    for (const x of due) byWatcher.set(x.watcherAgentId!, [...(byWatcher.get(x.watcherAgentId!) ?? []), x.id]);
+    for (const [agentId, ids] of byWatcher) {
+      const add = ids.map((id) => `Watch ticket ${id}`).join("\n");
+      const [waiting] = await db
+        .select({ id: wakes.id, note: wakes.note })
+        .from(wakes)
+        .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, WATCH_REASON), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
+      if (waiting) await db.update(wakes).set({ note: `${waiting.note ?? ""}\n${add}` }).where(eq(wakes.id, waiting.id));
+      else await self.wake({ agentId, reason: WATCH_REASON, note: add, priority: 1 });
+    }
+  }
+
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string) {
     const lines = [`You are ${agent.name}, the ${agent.role === "ceo" ? "CEO" : agent.role} of ${companyName}, working through Boss Man.`];
     if (w.ticketId) {
@@ -148,6 +228,7 @@ export function schedulerService(
       }
     }
     if (agent.duty === "wiki" && !w.ticketId) lines.push("", ...(await wikiDuty(agent)));
+    if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
@@ -254,7 +335,7 @@ export function schedulerService(
       .onConflictDoNothing();
   }
 
-  return {
+  const self = {
     limits,
 
     /** Queues a wake, or drops it (and tells the owner) if it looks like a loop. */
@@ -303,13 +384,20 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input)) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
           .from(wakes)
           .where(
-            and(eq(wakes.agentId, agent.id), isNull(wakes.ticketId), gt(wakes.createdAt, since), sql`${wakes.status} <> 'dropped'`, sql`not (${wakes.reason} in (${sql.join([...OWNER_REASONS].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`),
+            and(
+              eq(wakes.agentId, agent.id),
+              isNull(wakes.ticketId),
+              gt(wakes.createdAt, since),
+              sql`${wakes.status} <> 'dropped'`,
+              sql`not (${wakes.reason} in (${sql.join([...OWNER_REASONS].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`,
+              sql`${wakes.reason} <> ${WATCH_REASON}`,
+            ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
           const statusReason = `more than ${limits.ticketlessPerHour} wakes with no ticket in an hour`;
@@ -346,6 +434,7 @@ export function schedulerService(
     async tickOnce() {
       const result = { launched: 0, deferred: 0, waiting: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
+      await watchDue();
 
       const t = now();
       const queue = await db
@@ -538,4 +627,5 @@ export function schedulerService(
       }
     },
   };
+  return self;
 }

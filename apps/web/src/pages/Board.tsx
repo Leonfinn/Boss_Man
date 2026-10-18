@@ -56,13 +56,13 @@ type NewTicketInput = { title: string; body: string | null; risk: Risk | null; p
 
 /** New ticket (R63): a button that opens a card with everything a ticket needs to start well. */
 function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers: RiskTiers; onAdd: (t: NewTicketInput) => Promise<unknown> }) {
-  const blank = { title: "", body: "", risk: "medium" as Risk, planFirst: null as boolean | null, assignee: "" };
+  const blank = { title: "", body: "", risk: "medium" as Risk, assignee: "" };
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Plan first follows the risk level until the owner ticks or unticks it.
-  const planFirst = form.planFirst ?? (form.risk === "high" || form.risk === "critical");
+  // Plan first follows the risk level: high and critical work is planned and approved first.
+  const planFirst = form.risk === "high" || form.risk === "critical";
   const close = () => {
     setForm(blank);
     setError(null);
@@ -147,10 +147,6 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
           </select>
           <RiskHelp tiers={tiers} current={form.risk} />
         </div>
-        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14, marginTop: 22 }}>
-          <input type="checkbox" checked={planFirst} onChange={(e) => setForm({ ...form, planFirst: e.target.checked })} />
-          Plan first
-        </label>
       </div>
       {agentChosen && (
         <p role="note" style={{ fontSize: 14, margin: 0 }}>

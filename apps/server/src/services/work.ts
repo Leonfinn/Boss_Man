@@ -185,6 +185,26 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return t!;
     },
 
+    /**
+     * Turns the ticket's watcher on or off (R80). Turning it on asks for a first report straight
+     * away; after that it reports every `everyMinutes`, and once more when the ticket is done.
+     */
+    async setWatcher(ticketId: string, watcher: { agentId: string | null; everyMinutes?: number }) {
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!t) throw new WorkError(404, "No such ticket.");
+      if (watcher.agentId) await assertAgentInCompany(watcher.agentId, t.companyId);
+      const [row] = await db
+        .update(tickets)
+        .set(
+          watcher.agentId
+            ? { watcherAgentId: watcher.agentId, watchEveryMinutes: watcher.everyMinutes ?? t.watchEveryMinutes ?? 30, ...(watcher.agentId !== t.watcherAgentId ? { watchedAt: null } : {}) }
+            : { watcherAgentId: null, watchedAt: null },
+        )
+        .where(eq(tickets.id, ticketId))
+        .returning({ watcherAgentId: tickets.watcherAgentId, watchEveryMinutes: tickets.watchEveryMinutes, watchedAt: tickets.watchedAt });
+      return row!;
+    },
+
     async updateTicket(ticketId: string, patch: TicketPatch) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
@@ -195,6 +215,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const moves = patch.columnId !== undefined || patch.state !== undefined;
       const col = moves ? await placement(t.projectId, { columnId: patch.columnId, state: patch.state }, { ticketId, overLimit: patch.overLimit }) : null;
       const { overLimit: _ignored, state: _s, columnId: _c, ...fields } = patch;
+      // Plan first follows the risk level (there's no checkbox): changing the risk before work
+      // starts and before a plan is approved turns it on for high and critical, off otherwise.
+      if (patch.risk !== undefined && patch.planFirst === undefined && !t.planApprovedAt && (t.systemState === "backlog" || t.systemState === "ready"))
+        fields.planFirst = patch.risk ? planFirstByDefault(patch.risk) : false;
       const [updated] = await db
         .update(tickets)
         .set({

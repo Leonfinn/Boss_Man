@@ -58,6 +58,16 @@ function Fold({ title, hint, open, children }: { title: string; hint?: string; o
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
 const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
 
+/** How often a watcher reports (R80). */
+const WATCH_EVERY: Array<[number, string]> = [
+  [15, "Every 15 minutes"],
+  [30, "Every 30 minutes"],
+  [60, "Every hour"],
+  [120, "Every 2 hours"],
+  [240, "Every 4 hours"],
+  [1440, "Once a day"],
+];
+
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
   const ticket = usePoll((signal) => api<TicketDetail>(`/api/tickets/${id}`, { signal }), 15_000, id);
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
@@ -75,6 +85,15 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const patch = async (body: Record<string, unknown>) => {
     try {
       await api(`/api/tickets/${id}`, { method: "PATCH", body });
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
+  /** The watcher (R80): an agent that posts a short status update every so often. */
+  const watch = async (agentId: string | null, everyMinutes?: number) => {
+    try {
+      await api(`/api/tickets/${id}/watcher`, { method: "PUT", body: { agentId, ...(everyMinutes ? { everyMinutes } : {}) } });
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -315,17 +334,33 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </select>
               <RiskHelp tiers={tiers} current={t.risk ?? "medium"} />
             </dd>
-            {notStarted && !t.planApprovedAt && (
-              <>
-                <dt>Plan first</dt>
-                <dd>
-                  <label style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 14 }}>
-                    <input type="checkbox" checked={t.planFirst} onChange={(e) => void patch({ planFirst: e.target.checked })} style={{ marginTop: 3 }} />
-                    <span>The agent writes a plan and waits for your approval in Decisions before it changes anything.</span>
-                  </label>
-                </dd>
-              </>
-            )}
+            <dt>
+              <label htmlFor="t-watcher">Watcher</label>
+            </dt>
+            <dd>
+              <select id="t-watcher" value={t.watcherAgentId ?? ""} onChange={(e) => void watch(e.target.value || null, t.watchEveryMinutes ?? 30)}>
+                <option value="">Off</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+              {t.watcherAgentId ? (
+                <>
+                  <select aria-label="How often the watcher reports" value={t.watchEveryMinutes ?? 30} onChange={(e) => void watch(t.watcherAgentId, Number(e.target.value))} style={{ marginTop: 6 }}>
+                    {WATCH_EVERY.map(([m, label]) => (
+                      <option key={m} value={m}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                  <small className="muted">{t.watchedAt ? `Last asked for a report ${when(t.watchedAt)}.` : "A first report is on its way."} Updates appear in Activity and your notifications.</small>
+                </>
+              ) : (
+                <small className="muted">An agent, such as a scrum master, that posts a short status update on this ticket and what it depends on.</small>
+              )}
+            </dd>
             <dt>Project</dt>
             <dd>
               <a href={`#/board/${t.projectId}`}>{t.project}</a>

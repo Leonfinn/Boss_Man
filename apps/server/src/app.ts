@@ -924,6 +924,13 @@ export async function buildApp(opts: AppOptions) {
       return work.updateTicket(id, fields);
     });
 
+    // A watcher agent that reports the ticket's progress every so often (R80); agentId null turns it off.
+    owner.put("/api/tickets/:id/watcher", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ agentId: Uuid.nullable(), everyMinutes: z.number().int().min(10).max(7 * 24 * 60).optional() }).parse(req.body);
+      return work.setWatcher(id, b);
+    });
+
     owner.post("/api/tickets/:id/dependencies", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const body = z.object({ ticketId: Uuid.optional(), engagementId: Uuid.optional() }).parse(req.body);
