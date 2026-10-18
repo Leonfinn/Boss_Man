@@ -242,6 +242,45 @@ function Edit({ a, sources, onSaved }: { a: AgentRow; sources: FundingSource[]; 
   );
 }
 
+/** What the CEO may change about the team without asking (R62). */
+const APPROVALS: Array<[string, string]> = [
+  ["hires", "Hires wait for you"],
+  ["hires_and_edits", "Hires and instruction changes wait"],
+  ["nothing", "Nothing waits; you're told"],
+];
+
+function CeoApprovals({ companyId }: { companyId: string }) {
+  const current = usePoll((signal) => api<{ approvals: string }>(`/api/companies/${companyId}/agent-approvals`, { signal }), 300_000, `approvals-${companyId}`);
+  const [error, setError] = useState<string | null>(null);
+  const set = async (approvals: string) => {
+    try {
+      await api(`/api/companies/${companyId}/agent-approvals`, { method: "PUT", body: { approvals } });
+      current.reload();
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  return (
+    <div className="field" style={{ maxWidth: 560 }}>
+      <label htmlFor="ceo-approvals">When the CEO builds the team</label>
+      <select id="ceo-approvals" value={current.data?.approvals ?? "hires"} onChange={(e) => void set(e.target.value)}>
+        {APPROVALS.map(([v, label]) => (
+          <option key={v} value={v}>
+            {label}
+          </option>
+        ))}
+      </select>
+      <small className="muted">The CEO can propose hires from the templates and tailor agents' instructions. What waits for you shows in Decisions; anything else you're told about, and can undo from the agent's history.</small>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function Agents({ company, onChanged }: { company: Company | undefined; onChanged: () => void }) {
   const list = usePoll((signal) => (company ? api<AgentRow[]>(`/api/companies/${company.id}/agents`, { signal }) : Promise.resolve([])), 15_000, `agents-${company?.id ?? "none"}`);
   const templates = usePoll((signal) => api<{ templates: Template[] }>("/api/agent-templates", { signal }), 3_600_000, "agent-templates");
@@ -330,6 +369,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           {hiring ? "Close" : "Hire"}
         </button>
       </header>
+      <CeoApprovals companyId={company.id} />
       {hiring && templates.data && (
         <Hire
           companyId={company.id}

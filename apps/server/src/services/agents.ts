@@ -3,7 +3,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { AGENT_TEMPLATES, CEO_TEMPLATE } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentChanges, agents, costEvents, fundingSources, runs, tickets } from "../db/schema.js";
+import { agentChanges, agents, costEvents, decisions, fundingSources, runs, settings, tickets } from "../db/schema.js";
 
 export class AgentError extends Error {
   constructor(
@@ -29,8 +29,20 @@ const TRACKED: Array<[keyof AgentPatch, string]> = [
 const FIELD_COLUMN = Object.fromEntries(TRACKED.map(([col, field]) => [field, col])) as Record<string, keyof AgentPatch>;
 const OPEN = ["backlog", "ready", "in_progress", "blocked", "review"] as const;
 
-export function agentsService(db: Db, opts: { now?: () => Date } = {}) {
+/** What the CEO may do to the team without asking the owner (R62). */
+export const AGENT_APPROVALS = ["hires", "hires_and_edits", "nothing"] as const;
+export type AgentApprovals = (typeof AGENT_APPROVALS)[number];
+export const HIRE = "Hire";
+export const DONT_HIRE = "Don't hire";
+export const APPLY = "Apply the change";
+export const KEEP = "Keep them as they are";
+export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string };
+
+type Notify = (n: { companyId: string; agentId: string | null; level: "note" | "flag"; title: string; body: string | null; link: string }) => Promise<unknown>;
+
+export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify } = {}) {
   const now = opts.now ?? (() => new Date());
+  const notify: Notify = opts.notify ?? (async () => undefined);
 
   async function agent(id: string) {
     const [a] = await db.select().from(agents).where(eq(agents.id, id));
@@ -42,8 +54,85 @@ export function agentsService(db: Db, opts: { now?: () => Date } = {}) {
     await db.insert(agentChanges).values({ companyId: a.companyId, agentId: a.id, byAgentId, field, before: before ?? null, after: after ?? null });
   }
 
+  async function approvals(companyId: string): Promise<AgentApprovals> {
+    const [row] = await db.select().from(settings).where(eq(settings.key, `agent_approvals:${companyId}`));
+    return AGENT_APPROVALS.includes(row?.value as AgentApprovals) ? (row!.value as AgentApprovals) : "hires";
+  }
+
   return {
     templates: () => ({ templates: AGENT_TEMPLATES, ceo: CEO_TEMPLATE }),
+
+    approvals,
+    async setApprovals(companyId: string, value: AgentApprovals) {
+      await db.insert(settings).values({ key: `agent_approvals:${companyId}`, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      return value;
+    },
+
+    /**
+     * The CEO proposes a hire. Unless the owner has said hires need nobody's approval, it waits
+     * in Decisions; either way the owner hears about it.
+     */
+    async proposeHire(companyId: string, ceoId: string, p: HireProposal): Promise<{ hired: AgentRow } | { decisionId: string }> {
+      const tpl = p.template ? AGENT_TEMPLATES.find((x) => x.id === p.template) : undefined;
+      if (p.template && !tpl) throw new AgentError(422, `There's no template called ${p.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
+      if (p.fundingSourceId && !(await db.select({ id: fundingSources.id }).from(fundingSources).where(eq(fundingSources.id, p.fundingSourceId))).length) throw new AgentError(422, "No funding source with that ID.");
+      const job = p.title ?? tpl?.title ?? "agent";
+      if ((await approvals(companyId)) === "nothing") {
+        const hired = await this.hire(companyId, p, ceoId);
+        await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO hired ${hired.name} (${job})`, body: p.reason ?? null, link: "#/agents" });
+        return { hired };
+      }
+      const instructions = p.instructions !== undefined ? p.instructions : (tpl?.instructions ?? null);
+      const [d] = await db
+        .insert(decisions)
+        .values({
+          companyId,
+          raisedByAgentId: ceoId,
+          kind: "approval",
+          tier: "owner",
+          question: [`The CEO wants to hire ${p.name} as ${job}${p.model ? ` on ${p.model}` : ""}.`, p.reason ? `Why: ${p.reason}` : null, instructions ? `Their instructions:\n${instructions.slice(0, 3000)}` : null].filter(Boolean).join("\n\n"),
+          options: [HIRE, DONT_HIRE],
+          recommendedOption: HIRE,
+          context: { type: "hire", proposal: { ...p, instructions }, byAgentId: ceoId },
+        })
+        .returning({ id: decisions.id });
+      return { decisionId: d!.id };
+    },
+
+    /**
+     * The CEO changes an agent's instructions. Applied at once with a notification and Undo in
+     * its history, unless the owner wants to approve edits too.
+     */
+    async proposeInstructions(agentId: string, ceoId: string, instructions: string, reason?: string): Promise<{ applied: AgentRow } | { decisionId: string }> {
+      const a = await agent(agentId);
+      if (a.retiredAt) throw new AgentError(409, `${a.name} is retired.`);
+      if ((await approvals(a.companyId)) === "hires_and_edits") {
+        const [d] = await db
+          .insert(decisions)
+          .values({
+            companyId: a.companyId,
+            raisedByAgentId: ceoId,
+            kind: "approval",
+            tier: "owner",
+            question: [`The CEO wants to change ${a.name}'s instructions.`, reason ? `Why: ${reason}` : null, `New instructions:\n${instructions.slice(0, 3000)}`].filter(Boolean).join("\n\n"),
+            options: [APPLY, KEEP],
+            recommendedOption: APPLY,
+            context: { type: "instructions", agentId, instructions, byAgentId: ceoId },
+          })
+          .returning({ id: decisions.id });
+        return { decisionId: d!.id };
+      }
+      const applied = await this.update(agentId, { instructions }, ceoId);
+      await notify({ companyId: a.companyId, agentId: ceoId, level: "note", title: `The CEO changed ${a.name}'s instructions`, body: `${reason ? `${reason}\n` : ""}See the change, or undo it, in Agents › ${a.name} › History.`, link: "#/agents" });
+      return { applied };
+    },
+
+    /** The owner's answer to a hire or instructions decision. */
+    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }, companyId: string, approved: boolean) {
+      if (!approved) return null;
+      if (ctx.type === "hire") return this.hire(companyId, ctx.proposal, ctx.byAgentId);
+      return this.update(ctx.agentId, { instructions: ctx.instructions }, ctx.byAgentId);
+    },
 
     /** Each agent with what it's doing and what it has used this month. Retired agents come last. */
     async list(companyId: string) {
