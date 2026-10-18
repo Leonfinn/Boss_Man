@@ -98,6 +98,24 @@ describe("pushing a ticket's branch for a pull request (R59)", () => {
   });
 });
 
+describe("proposing merge checks (R57)", () => {
+  it("reads the default branch's files from the clone, without a worktree, and reports the runner's tools", async () => {
+    const o = origin();
+    const seed = mkdtempSync(path.join(tmpdir(), "bm-detect-"));
+    git(seed, "clone", "-q", o.url, ".");
+    writeFileSync(path.join(seed, "package.json"), JSON.stringify({ scripts: { typecheck: "tsc", test: "vitest run" } }));
+    writeFileSync(path.join(seed, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    git(seed, "add", ".");
+    git(seed, "commit", "-qm", "node project");
+    git(seed, "push", "-q", "origin", "HEAD:main");
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const r = await ws.detect({ projectId: ids.project, repoUrl: o.url, baseRef: "main" });
+    expect(r.checks.map((c) => c.command)).toEqual(["pnpm install --frozen-lockfile && pnpm typecheck && pnpm test"]);
+    expect(r.tools.node).toBe(true);
+    expect(typeof r.tools.cargo).toBe("boolean");
+  });
+});
+
 describe("verify before done (R47)", () => {
   it("passes or fails on the command's exit code, with the tail of its output", async () => {
     const o = origin();
