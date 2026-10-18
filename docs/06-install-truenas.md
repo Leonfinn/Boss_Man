@@ -180,13 +180,23 @@ sudo scripts/update-runner.sh
 
 The script also runs `docker compose up -d` at the end. Until its token file holds a token (step 7), the runner stops at start-up with "Set BOSSMAN_RUNNER_TOKEN_FILE..." and Docker keeps restarting it. That's expected.
 
-## 6. First login and the company
+## 6. First login and the setup wizard
 
-Open `http://<nas-ip>:3101` on your Mac and create the owner account. Then:
-1. On **Board**, create the company, for example "Boss Man Co", and a project, for example "Boss Man".
-2. In **Settings**, under **Projects**, set:
-   - **Git repo:** `https://github.com/Leonfinn/Boss_Man.git`
-   - **Check before merging:** `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test`
+Open `http://<nas-ip>:3101` on your Mac and create the owner account. The **setup wizard** opens. It has seven steps; each can be skipped and done later, and it remembers where you were. Anything left over shows as **Finish setting up** on Decisions until it's done or you dismiss it. **Settings > Run the setup wizard** brings it back.
+
+1. **Your company:** a name, for example "Boss Man Co", and what it's for. The CEO plans from this.
+2. **A project:** a name, for example "Boss Man", and its **Git repo**:
+   - GitHub: `https://github.com/Leonfinn/Boss_Man.git`
+   - your Gitea: `http://192.168.68.67:3003/<owner>/<repo>.git` (plain http is allowed for private LAN addresses)
+
+   **Before merging, Boss Man will** proposes a check from the repo once a runner is connected. For Boss Man itself that's **Run the tests (detected)**: `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test`. Until then it offers the standard list; choose **Re-detect** after step 7 or 7b.
+3. **The runner:** set it up with step 7b (the launcher, recommended) or step 7, then come back. It shows **Connected** when it's up.
+4. **Claude:** a setup-token or API key (step 8).
+5. **A git token** (step 8). **Check the token against <project>** reads the repo once and says whether the token can push. It changes nothing.
+6. **What pays for the CEO:** add a funding source and pick it for the CEO (step 8).
+7. **A first ticket:** optional.
+
+If you'd rather use the screens directly, **"I know what I'm doing, let me get on with it"** on the first step closes the wizard. Everything it does is also in **Settings** and **Agents**.
 
 ## 7. The runner token
 
@@ -278,19 +288,26 @@ claude setup-token
 
 In Settings, choose **Claude setup-token** and paste the token. Agents get it as `CLAUDE_CODE_OAUTH_TOKEN`. Boss Man refuses a token with stray spaces or quotes and says why.
 
-**GitHub token.** Create a [fine-grained personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token):
+**Git token, for GitHub.** Create a [fine-grained personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token):
 - **Repository access:** only the repos the company works on.
 - **Permissions:** Contents and Pull requests, both read and write.
 
-In Settings, choose **GitHub token**. Agents get it as `GIT_TOKEN`, and it's used for clone, fetch and push. It's never written into a URL or onto disk.
+**Git token, for Gitea.** In Gitea 28, open your avatar menu > **Settings > Applications**, then under **Manage Access Tokens > Generate New Token**:
+- **Token Name:** for example "boss-man".
+- **Repository and Organization Access:** **All (public, private, and limited)**.
+- **repository:** **Read and Write** (the `write:repository` scope, which the pull-request routes need). Leave the rest at **No Access**.
 
-Boss Man merges approved work by pushing to the default branch (R46). If that branch is protected so that only pull requests can change it, the push is refused and the ticket goes back to the agent with the error. In that case, allow the token to push, or ask the agents for pull requests through the git templates instead.
+Choose **Generate Token** and copy it; Gitea shows it only once. The token can do what your Gitea user can, so a user with write access to the repo is enough. (Labels from Gitea 28.0.0's [`access_tokens.tmpl`](https://github.com/go-gitea/gitea/blob/v28.0.0/templates/shared/user/access_tokens.tmpl); see also Gitea's [scopes documentation](https://docs.gitea.com/development/oauth2-provider#scopes).)
 
-**Funding.** Under **Agents and what pays for them**, add a funding source:
+In Settings, choose **Git token (GitHub or Gitea)** and paste it. Agents get it as `GIT_TOKEN`, and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check under Settings > Projects, tells you whether it can push.
+
+**When work is approved** (Settings > Projects) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
+
+**Funding.** Under **Settings > Funding sources**, add one:
 - "Subscription (setup-token)" for a Claude subscription;
 - "API credit" with your monthly grant for an API key.
 
-Then set each agent's **Paid from** to that source, so cost and quota are tracked.
+Then, on the **Agents** page, set each agent's **Paid from** to that source, so cost and quota are tracked. The same page sets each agent's **Model** from what the runner and your API keys offer.
 
 ## 9. Updates and checks
 
@@ -306,10 +323,16 @@ sudo docker compose ps
 sudo docker compose logs --tail 100 server
 ```
 
-**Update to the latest code** (it uses the deploy key from step 2):
+**Update to the latest code** (it uses the deploy key from step 2). Database changes apply by themselves when the server starts.
 
 ```sh
 sudo git pull && sudo docker compose build server && sudo docker compose up -d db server
+```
+
+With the launcher (step 7b), rebuild it too and start everything:
+
+```sh
+sudo git pull && sudo docker compose build server launcher && sudo docker compose up -d
 ```
 
 **New Claude Code release, roughly weekly (R9):** this checks a new runner image with the canary and keeps the old one for rollback.
@@ -345,6 +368,41 @@ cd /mnt/NVME_Apps/Container_files/boss-man/src && sudo docker compose down; cd /
 ```sh
 sudo rm -rf /mnt/NVME_Apps/Container_files/boss-man/src /mnt/NVME_Apps/Container_files/boss-man/data
 ```
+
+## 9b. Upgrading to v1.2
+
+v1.2 adds the launcher, the setup wizard, merge check presets, Gitea and pull requests, the Agents page, the model picker and ticket watchers. The server applies any database changes when it starts. Run these from the repo folder:
+
+```sh
+cd /mnt/NVME_Apps/Container_files/boss-man/src
+```
+
+1. **Back up the database** first:
+
+   ```sh
+   sudo docker compose exec -T db pg_dump -U bossman bossman | gzip | sudo tee /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz > /dev/null
+   ```
+
+2. **Update the code and the server:**
+
+   ```sh
+   sudo git pull && sudo docker compose build server && sudo docker compose up -d db server
+   ```
+
+3. **Rebuild the runner.** The v1.2 server asks runners for things v1.1 runners don't know (detecting checks, pushing branches for pull requests, listing models), so the runner image has to match:
+
+   ```sh
+   sudo scripts/update-runner.sh
+   ```
+
+4. **Move to the launcher** (recommended): step 7b. If you stay on the compose runner, step 3 is enough.
+
+5. **Check in the UI:**
+   - **Settings > Projects:** your existing check command shows as the preset it matches (Boss Man's own matches **Run the tests (detected)** once the runner is connected), otherwise as **Custom command…**. Either is fine.
+   - **Agents:** model and funding for each agent now live here.
+   - The setup wizard doesn't open by itself on an install that already has a company. Open it from **Settings > Run the setup wizard** if you want its checklist.
+
+Keep the dump from step 1 until you're happy with v1.2. Going back means restoring it and checking out the older code, which hasn't been tried here, so ask before doing it.
 
 ## 10. Phone notifications (optional)
 
