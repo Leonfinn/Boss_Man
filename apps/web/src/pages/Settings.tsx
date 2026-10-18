@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, type Company, type FundingSource, type Project } from "../api";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
@@ -394,10 +394,70 @@ function Funding({ company, onChanged }: { company: Company; onChanged: () => vo
   );
 }
 
+type CheckPreset = { id: string; label: string; command: string | null; plain: string; needs: string[] };
+type Presets = { detected: CheckPreset[]; standard: CheckPreset[]; none: CheckPreset; tools: Record<string, boolean> | null; error: string | null };
+const CUSTOM = "custom";
+
+/**
+ * "Before merging, Boss Man will…" (R57): the check as a choice in plain words, with the
+ * command underneath. Custom keeps today's text box for anything else.
+ */
+function CheckPicker({ id, label, value, onChange, presets }: { id: string; label: string; value: string; onChange: (v: string) => void; presets: Presets | null }) {
+  const all = presets ? [...presets.detected, ...presets.standard] : [];
+  const match = !value ? "none" : (all.find((x) => x.command === value)?.id ?? CUSTOM);
+  // Only an explicit "Custom command…" sticks; otherwise the saved command finds its preset once the list loads.
+  const [custom, setCustom] = useState(false);
+  const chosen = custom ? CUSTOM : match;
+  const preset = chosen === "none" ? presets?.none : all.find((x) => x.id === chosen);
+  const missing = preset?.needs.filter((t) => presets?.tools && presets.tools[t] === false) ?? [];
+  return (
+    <div className="field" style={{ gridColumn: "1 / -1", maxWidth: 720 }}>
+      <label htmlFor={id}>{label}</label>
+      <select
+        id={id}
+        value={chosen}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === CUSTOM) return setCustom(true);
+          setCustom(false);
+          onChange(v === "none" ? "" : (all.find((x) => x.id === v)?.command ?? ""));
+        }}
+      >
+        {presets?.detected.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.label}: {x.plain}
+          </option>
+        ))}
+        {presets?.standard.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.label}
+          </option>
+        ))}
+        <option value="none">Nothing: merge after review only</option>
+        <option value={CUSTOM}>Custom command…</option>
+      </select>
+      {chosen === CUSTOM ? (
+        <input aria-label={`${label}: custom command`} className="mono" placeholder="pnpm install && pnpm test" value={value} onChange={(e) => onChange(e.target.value)} />
+      ) : (
+        preset?.command && (
+          <small className="muted">
+            {preset.plain}: <code className="mono">{preset.command}</code>
+          </small>
+        )
+      )}
+      {missing.length > 0 && <small className="error">The runner doesn't have {missing.join(" or ")}, so this check would fail there. Add it to the runner image, or pick another check.</small>}
+    </div>
+  );
+}
+
 function ProjectRow({ p }: { p: Project }) {
   const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
   const [host, setHost] = useState(p.gitHost);
   const act = useAction();
+  const [presets, setPresets] = useState<Presets | null>(null);
+  const detect = async () => setPresets(await api<Presets>(`/api/projects/${p.id}/check-presets`, { method: "POST" }).catch(() => null));
+  // Detected once per project; Re-detect asks again.
+  useEffect(() => void detect(), [p.id]);
   const save = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
@@ -425,20 +485,22 @@ function ProjectRow({ p }: { p: Project }) {
         <input id={`branch-${p.id}`} className="mono" required value={form.defaultBranch} onChange={(e) => setForm({ ...form, defaultBranch: e.target.value })} />
       </div>
       <div className="field">
-        <label htmlFor={`verify-${p.id}`}>Check before merging</label>
-        <input id={`verify-${p.id}`} className="mono" placeholder="pnpm install && pnpm test" value={form.verifyCommand} onChange={(e) => setForm({ ...form, verifyCommand: e.target.value })} />
-      </div>
-      <div className="field">
         <label htmlFor={`landing-${p.id}`}>When work is approved</label>
         <select id={`landing-${p.id}`} value={form.landing} onChange={(e) => setForm({ ...form, landing: e.target.value as Project["landing"] })}>
           <option value="merge">Merge into the default branch</option>
           <option value="pull_request">Open a pull request</option>
         </select>
       </div>
-      <div className="field">
-        <label htmlFor={`deep-${p.id}`}>Deeper check for high-risk work</label>
-        <input id={`deep-${p.id}`} className="mono" placeholder="pnpm test:e2e" value={form.deepVerifyCommand} onChange={(e) => setForm({ ...form, deepVerifyCommand: e.target.value })} />
-      </div>
+      <CheckPicker id={`verify-${p.id}`} label="Before merging, Boss Man will" value={form.verifyCommand} onChange={(verifyCommand) => setForm({ ...form, verifyCommand })} presets={presets} />
+      <CheckPicker id={`deep-${p.id}`} label="For high-risk work, also" value={form.deepVerifyCommand} onChange={(deepVerifyCommand) => setForm({ ...form, deepVerifyCommand })} presets={presets} />
+      <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
+        {presets?.error ?? (presets ? "The runner looked at the repo's default branch for these." : "Looking at the repo…")}{" "}
+        {form.repoUrl && (
+          <button type="button" className="linkish" onClick={() => void detect()}>
+            Re-detect
+          </button>
+        )}
+      </p>
       <button className="btn" type="submit" disabled={act.busy}>
         Save
       </button>

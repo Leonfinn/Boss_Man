@@ -112,6 +112,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
   /** Merges the ticket's branch into a named target (R46). */
   z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
+  /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
+  z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
   z.object({ type: z.literal("workspace.push"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
@@ -171,6 +173,9 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+
+/** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
+export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };
 
 /** The outcome of merging a ticket's branch (R46). */
 export type MergeResult =

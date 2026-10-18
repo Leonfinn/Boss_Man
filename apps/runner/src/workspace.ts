@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { DiskReport, MergeResult, PushResult, VerifyResult, WorkspaceDiff } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 
 const run = promisify(execFile);
 
@@ -411,6 +411,38 @@ export class Workspaces {
       if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
       return { status: "pushed", branch: name, commit: tried.branchSha };
     });
+  }
+
+  /**
+   * Proposes merge checks from the repo's top-level files on its default branch (R57), read
+   * from the bare clone, so nothing is checked out and nothing in the repo runs. Also says
+   * which tools this runner has, since a check can only pass with its tools installed.
+   */
+  async detect(spec: { projectId: string; repoUrl: string; baseRef: string }, secrets: Record<string, string | undefined> = {}): Promise<DetectResult> {
+    const auth = gitAuthEnv(secrets);
+    const checks = await this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) {
+        mkdirSync(path.dirname(repo), { recursive: true });
+        await this.git(["clone", "--bare", "--quiet", spec.repoUrl, repo], { env: auth });
+        await this.git(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
+      }
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      const ref = `refs/remotes/origin/${spec.baseRef}`;
+      const files = (await this.git(["ls-tree", "--name-only", ref], { cwd: repo })).split("\n").filter(Boolean);
+      const texts = new Map<string, string | null>();
+      for (const name of ["package.json", "Makefile", "makefile"].filter((n) => files.includes(n))) {
+        const r = await this.gitCode(["show", `${ref}:${name}`], { cwd: repo });
+        texts.set(name, r.code === 0 ? r.stdout.slice(0, 256 * 1024) : null);
+      }
+      return detectChecks(files, (n) => texts.get(n) ?? null);
+    });
+    const tools: Record<string, boolean> = {};
+    for (const t of CHECK_TOOLS) tools[t] = await run("sh", ["-c", `command -v ${t}`]).then(
+      () => true,
+      () => false,
+    );
+    return { checks, tools };
   }
 
   /**

@@ -15,3 +15,4 @@ export * from "./feedback.js";
 export * from "./forecast.js";
 export * from "./git-host.js";
 export * from "./agent-templates.js";
+export * from "./checks.js";

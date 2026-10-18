@@ -7,6 +7,7 @@ import { and, asc, count, eq, gt, inArray, isNull } from "drizzle-orm";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
+import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -760,6 +761,23 @@ export async function buildApp(opts: AppOptions) {
         .where(eq(projects.id, id))
         .returning();
       return p ?? reply.code(404).send({ error: "not_found" });
+    });
+
+    // Merge check presets (R57): the runner proposes checks from the repo, alongside the standard ones.
+    owner.post("/api/projects/:id/check-presets", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [p] = await db.select().from(projects).where(eq(projects.id, id));
+      if (!p) return reply.code(404).send({ error: "not_found" });
+      const base = { standard: STANDARD_CHECKS, none: NO_CHECK };
+      if (!p.repoUrl) return { ...base, detected: [], tools: null, error: "Set the project's git repo first." };
+      const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, p.companyId));
+      if (!runner || !runners.isConnected(runner.id)) return { ...base, detected: [], tools: null, error: "The company's runner isn't connected, so it can't look at the repo." };
+      try {
+        const r = await runners.request<DetectResult>(runner.id, (requestId) => ({ type: "workspace.detect", requestId, projectId: p.id, repoUrl: p.repoUrl!, baseRef: p.defaultBranch }), 2 * 60_000);
+        return { ...base, detected: r.checks, tools: r.tools, error: null };
+      } catch (err) {
+        return { ...base, detected: [], tools: null, error: `The runner couldn't read the repo: ${(err as Error).message}` };
+      }
     });
 
     owner.put("/api/projects/:id/columns", async (req) => {
