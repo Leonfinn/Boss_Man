@@ -103,6 +103,20 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       return { merged: false, note: messageOf(res.json, res.status) };
     },
 
+    /**
+     * Whether a token can reach the repo and push to it (R58, R56): one read of the repo, whose
+     * answer carries the token's permissions on both hosts. Gitea needs the write:repository scope.
+     */
+    async checkAccess(cfg: GitHostConfig, token: string): Promise<{ ok: boolean; canPush: boolean; message: string }> {
+      const res = await call(cfg, token, "GET", "");
+      if (res.status === 401 || res.status === 403) return { ok: false, canPush: false, message: `The host refused the token (HTTP ${res.status}).` };
+      if (res.status === 404) return { ok: false, canPush: false, message: "The token can't see the repo: check its owner and name, and that the token has access to it." };
+      if (!res.ok || !res.json || Array.isArray(res.json)) return { ok: false, canPush: false, message: `The host answered ${res.status}.` };
+      const perms = (res.json.permissions ?? {}) as { push?: boolean; admin?: boolean };
+      const canPush = perms.push === true || perms.admin === true;
+      return { ok: true, canPush, message: canPush ? "The token can read and push to the repo." : "The token can read the repo but not push to it, so merges and pull requests would fail." };
+    },
+
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {
       const res = await call(cfg, token, "GET", `/pulls/${number}`);
       if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't read pull request ${number}: ${messageOf(res.json, res.status)}`);

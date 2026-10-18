@@ -25,6 +25,7 @@ import { Features } from "./pages/Features";
 import { Wiki } from "./pages/Wiki";
 import { Feedback } from "./pages/Feedback";
 import { Roadmap } from "./pages/Roadmap";
+import { Setup, SetupChecklist } from "./pages/Setup";
 
 type Session = { state: "loading" } | { state: "setup" } | { state: "login" } | { state: "in"; username: string } | { state: "offline" };
 
@@ -119,6 +120,16 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   };
   const mine = current ? [current] : [];
   const companyId = inRoute ?? current?.id;
+  // A fresh install opens on the setup wizard (R56) until the owner finishes or dismisses it.
+  const firstLoad = useRef(true);
+  useEffect(() => {
+    if (!firstLoad.current || companies.data === null) return;
+    firstLoad.current = false;
+    if (companies.data.length || page !== "dashboard") return;
+    void api<{ dismissed: boolean }>("/api/setup-progress").then((p) => {
+      if (!p.dismissed) go("setup");
+    }, () => {});
+  }, [companies.data, page, go]);
   return (
     <div className="app">
       <Sidebar
@@ -173,8 +184,10 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Settings companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
+        ) : page === "setup" ? (
+          <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} onAnswered={decisions.reload} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
         ) : (
           <Dashboard company={current} />
         )}
