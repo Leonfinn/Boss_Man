@@ -541,3 +541,4 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
 .diff-pair { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 6px; }
 .diff-pair .before { border-left: 3px solid var(--red-ink); }
 .diff-pair .after { border-left: 3px solid var(--green-ink); }
+.linkish { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }

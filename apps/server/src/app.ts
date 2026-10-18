@@ -13,6 +13,7 @@ import type { Db } from "./db/client.js";
 import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
+import { modelsService } from "./services/models.js";
 import { repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { runnersService } from "./services/runners.js";
@@ -134,6 +135,7 @@ export async function buildApp(opts: AppOptions) {
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
   const agentsSvc = agentsService(db, { now: opts.now, notify: (n) => notes.notify(n) });
+  const models = modelsService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
@@ -228,6 +230,8 @@ export async function buildApp(opts: AppOptions) {
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "chat end failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
     if (event.type === "run.quota") void quotaWatch(event.fundingSourceId).catch((err) => app.log.error({ err }, "quota forecast failed"));
+    // What each agent kind offers, for the model picker (R60).
+    if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err }, "model list failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
@@ -1105,6 +1109,8 @@ export async function buildApp(opts: AppOptions) {
     };
     const Instructions = z.string().trim().max(20_000).nullable();
     owner.get("/api/agent-templates", async () => agentsSvc.templates());
+    // Model lists for the picker (R60); refresh=1 asks API providers again.
+    owner.get("/api/companies/:id/models", async (req) => models.forCompany(IdParam.parse(req.params).id, { refresh: z.object({ refresh: z.string().optional() }).parse(req.query).refresh === "1" }));
     // What the CEO may change about the team without asking (R62).
     owner.get("/api/companies/:id/agent-approvals", async (req) => ({ approvals: await agentsSvc.approvals(IdParam.parse(req.params).id) }));
     owner.put("/api/companies/:id/agent-approvals", async (req) => {

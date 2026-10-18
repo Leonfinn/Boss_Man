@@ -52,6 +52,12 @@ export const RunnerEvent = z.discriminatedUnion("type", [
       .optional(),
   }),
   z.object({ type: z.literal("runner.log"), level: z.enum(["info", "warn", "error"]), message: z.string() }),
+  // The models an agent kind offers, from its ACP session's model option (R60).
+  z.object({
+    type: z.literal("runner.models"),
+    agentKind: z.string().min(1).max(40),
+    models: z.array(z.object({ value: z.string().min(1).max(200), name: z.string().max(200), description: z.string().max(500).nullable().optional() })).max(200),
+  }),
   // Disk use of the runner's workspaces after its clean-up pass (R54).
   z.object({
     type: z.literal("runner.disk"),
