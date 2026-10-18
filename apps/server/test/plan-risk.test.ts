@@ -98,6 +98,18 @@ describe("plan-first tickets (R40)", () => {
     expect(next.prompt).toContain("3. Burst case.");
   });
 
+  it("follows the risk level, with no checkbox: changing the risk before work starts turns it on or off", async () => {
+    const c = await setup();
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Rework billing" })).json() as { id: string; planFirst: boolean };
+    expect(t.planFirst).toBe(false);
+    expect((await c.req("PATCH", `/api/tickets/${t.id}`, { risk: "high" })).json()).toMatchObject({ planFirst: true });
+    expect((await c.req("PATCH", `/api/tickets/${t.id}`, { risk: null })).json()).toMatchObject({ planFirst: false });
+    expect((await c.req("PATCH", `/api/tickets/${t.id}`, { risk: "critical" })).json()).toMatchObject({ planFirst: true });
+    // Once work has started, a new risk level leaves plan mode as it is.
+    await c.req("PATCH", `/api/tickets/${t.id}`, { state: "in_progress" });
+    expect((await c.req("PATCH", `/api/tickets/${t.id}`, { risk: "low" })).json()).toMatchObject({ planFirst: true });
+  });
+
   it("puts high-risk plans, and the CEO's own, to the owner", async () => {
     const c = await setup();
     const high = await c.ticket({ planFirst: true, risk: "high" });

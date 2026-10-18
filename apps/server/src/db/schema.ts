@@ -218,6 +218,11 @@ export const tickets = pgTable(
     pullRequestNote: text("pull_request_note"),
     /** The commit that was reviewed: the host merges only this head, never later pushes. */
     pullRequestHead: text("pull_request_head"),
+    /** A watcher (R80): an agent that reports this ticket's progress to the owner every so often. Off when null. */
+    watcherAgentId: uuid("watcher_agent_id").references((): AnyPgColumn => agents.id, { onDelete: "set null" }),
+    watchEveryMinutes: integer("watch_every_minutes"),
+    /** When the watcher was last asked for a report on this ticket. */
+    watchedAt: timestamp("watched_at", { withTimezone: true }),
     /** Spend ceiling across all of this ticket's runs (R53); falls back to the project's default. */
     costCapMicros: micros("cost_cap_micros"),
     /** Risk tier (R48): who reviews it, how deep the checks go, staging first. Null is medium. */
