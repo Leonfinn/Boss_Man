@@ -32,7 +32,7 @@ describe("the Agents tab (R62)", () => {
   it("hires from a template, whose title and instructions reach the agent's prompt", async () => {
     const c = (ctx = await setup());
     const { templates } = (await c.req("GET", "/api/agent-templates")).json() as { templates: typeof AGENT_TEMPLATES };
-    expect(templates.map((t) => t.title)).toEqual(["Engineer", "Researcher", "Designer", "QA", "Writer", "Scrum Master"]);
+    expect(templates.map((t) => t.title)).toEqual(["Engineer", "Researcher", "Designer", "QA", "Writer", "Scrum Master", "Assistant"]);
     const hired = await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Sam", template: "scrum-master" });
     expect(hired.statusCode).toBe(201);
     const sam = hired.json() as { id: string; title: string; instructions: string; template: string };

@@ -3,7 +3,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { AGENT_TEMPLATES, CEO_TEMPLATE } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentChanges, agents, costEvents, decisions, fundingSources, runs, settings, tickets } from "../db/schema.js";
+import { agentChanges, agents, costEvents, decisions, fundingSources, paAnswers, runs, settings, tickets } from "../db/schema.js";
 
 export class AgentError extends Error {
   constructor(
@@ -160,6 +160,10 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
         .from(tickets)
         .where(and(eq(tickets.companyId, companyId), inArray(tickets.systemState, [...OPEN])))
         .groupBy(tickets.assigneeAgentId);
+      const [pa] = await db
+        .select({ total: sql<number>`count(*)::int`, posted: sql<number>`(count(*) filter (where ${paAnswers.outcome} = 'posted'))::int`, wrong: sql<number>`(count(*) filter (where ${paAnswers.verdict} = 'wrong'))::int` })
+        .from(paAnswers)
+        .where(eq(paAnswers.companyId, companyId));
       return rows
         .map(({ a, funding, fundingKind }) => {
           const working = live.find((r) => r.agentId === a.id && r.purpose !== "chat");
@@ -169,6 +173,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
             fundingKind,
             status: a.retiredAt ? "retired" : working ? "working" : a.paused ? "paused" : "idle",
             current: working?.ticketId ? { ticketId: working.ticketId, title: working.ticket } : null,
+            pa: a.duty === "assistant" ? { posted: pa!.posted, escalated: pa!.total - pa!.posted, wrong: pa!.wrong } : null,
             openTickets: assigned.find((r) => r.agentId === a.id)?.n ?? 0,
             month: {
               costMicros: Number(money.find((m) => m.agentId === a.id)?.micros ?? 0),
@@ -184,10 +189,14 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
     async hire(companyId: string, input: { name: string; template?: string; title?: string | null; instructions?: string | null; role?: "manager" | "worker"; agentKind?: string; model?: string | null; fundingSourceId?: string | null; reportsTo?: string | null }, byAgentId: string | null = null) {
       const tpl = input.template ? AGENT_TEMPLATES.find((x) => x.id === input.template) : undefined;
       if (input.template && !tpl) throw new AgentError(422, `There's no template called ${input.template}.`);
+      // One assistant per company (R87); it starts paused so the owner picks its (cheap) model first.
+      if (tpl?.duty && (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, tpl.duty)))).length) throw new AgentError(409, `This company already has an ${tpl.title}; rehire it if it was retired.`);
       const [a] = await db
         .insert(agents)
         .values({
           companyId,
+          duty: tpl?.duty ?? null,
+          paused: !!tpl?.duty,
           name: input.name,
           role: input.role ?? tpl?.role ?? "worker",
           agentKind: input.agentKind ?? "claude",

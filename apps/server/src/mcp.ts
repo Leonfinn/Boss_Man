@@ -28,6 +28,7 @@ import { WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import { AgentError, type agentsService } from "./services/agents.js";
+import { remember, type paService } from "./services/pa.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -67,9 +68,10 @@ type Services = {
   wiki: ReturnType<typeof wikiService>;
   skills: ReturnType<typeof skillsService>;
   agents: ReturnType<typeof agentsService>;
+  pa: ReturnType<typeof paService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki, skills, agents: team }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki, skills, agents: team, pa }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -631,16 +633,18 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
+  registerListMyWork(server, db, scope);
+
   server.registerTool(
-    "list_my_work",
-    { description: "List the open tickets assigned to you.", inputSchema: {} },
-    async () => {
-      if (!scope.agentId) return text("[]");
-      const rows = await db
-        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, lastActivityAt: tickets.lastActivityAt })
-        .from(tickets)
-        .where(and(eq(tickets.assigneeAgentId, scope.agentId), ne(tickets.systemState, "done")));
-      return text(JSON.stringify(rows.map(withNote)));
+    "pa_verdict",
+    {
+      description: "For CEOs: mark one of your PA's answers correct or wrong, with a note on what was off. The ids are in the \"PA answers to check\" part of your brief. This only keeps score; it changes nothing else.",
+      inputSchema: { answerId: z.string().uuid(), verdict: z.enum(["correct", "wrong"]), note: z.string().max(1000).optional() },
+    },
+    async ({ answerId, verdict, note }) => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (me?.role !== "ceo") return fail("Only your company's CEO marks the PA's answers.");
+      return (await pa.verdict(scope.companyId, answerId, verdict, note)) ? text(`Marked ${verdict}.`) : fail("No PA answer with that id in your company.");
     },
   );
 
@@ -852,19 +856,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
 
 }
 
-/**
- * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
- * not an agent's, and go through the same checks as the board's own forms.
- */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team }: Services, scope: Scope) {
-  const server = new McpServer({ name: "bossman", version: "0.1.0" });
-  registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
-  const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
-  const workFail = (err: unknown) => {
-    if (err instanceof WorkError) return fail(err.message);
-    throw err;
-  };
-
+function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
   server.registerTool(
     "board",
     { description: "See the company's board: projects, objectives with their milestones, agents, and open tickets with their ids.", inputSchema: {} },
@@ -882,6 +874,100 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
       return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as, openTickets: ts }));
     },
   );
+}
+
+function registerListMyWork(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
+  server.registerTool(
+    "list_my_work",
+    { description: "List the open tickets assigned to you.", inputSchema: {} },
+    async () => {
+      if (!scope.agentId) return text("[]");
+      const rows = await db
+        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, lastActivityAt: tickets.lastActivityAt })
+        .from(tickets)
+        .where(and(eq(tickets.assigneeAgentId, scope.agentId), ne(tickets.systemState, "done")));
+      return text(JSON.stringify(rows.map(withNote)));
+    },
+  );
+}
+
+/** The tools a PA may have (R87): all reads. Anything else is never registered for it. */
+const PA_READS = new Set(["tickets", "decisions", "list_my_work", "wiki", "whats_new", "board"]);
+
+/**
+ * A view of the server that registers only the PA's read tools. What they return is remembered
+ * for the run, since pa_reply may cite only that; a wiki write is refused.
+ */
+function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTool"> {
+  return {
+    registerTool: ((name: string, config: never, cb: (input: { action?: string }, extra: never) => Promise<unknown>) => {
+      if (!PA_READS.has(name)) return undefined;
+      return server.registerTool(name, config, (async (input: { action?: string }, extra: never) => {
+        if (name === "wiki" && input.action !== "list" && input.action !== "read") return fail("You can only read the wiki.");
+        const r = await cb(input, extra);
+        if (name !== "wiki" && input.action !== "file") remember(runId, JSON.stringify(r));
+        return r;
+      }) as never);
+    }) as never,
+  };
+}
+
+/** The PA's server: the read tools plus pa_reply and pa_escalate, and nothing that writes (R87). */
+function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa }: Services, scope: Scope) {
+  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  const reads = readOnly(server, scope.runId);
+  registerSharedTools(reads as McpServer, db, { notes, wiki, skills, review, agents: team }, scope);
+  registerBoard(reads, db, scope);
+  registerListMyWork(reads, db, scope);
+  reads.registerTool(
+    "decisions",
+    { description: "Decisions that are waiting on the owner or the CEO: id, question, options and who raised it.", inputSchema: { action: z.literal("list") } },
+    async () => {
+      const open = await db.select().from(decisionsTable).where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"))).orderBy(decisionsTable.createdAt).limit(40);
+      return text(open.length ? JSON.stringify(open.map((d) => ({ id: d.id, question: d.question, options: d.options, recommended: d.recommendedOption, waitingOn: d.tier, raisedAt: d.createdAt }))) : "No decisions are waiting.");
+    },
+  );
+
+  server.registerTool(
+    "pa_reply",
+    {
+      description:
+        "Answer the owner's last message. The only way you answer them. text is the answer, in plain words, from what your tools returned. cites lists every ticket or decision it rests on, each with its id (ids your tools returned in this run only). confidence is high only when the tools show the answer plainly. Boss Man checks the reply and may hand the question to the CEO instead; the result says so.",
+      inputSchema: {
+        text: z.string().min(1).max(4000),
+        cites: z.array(z.object({ kind: z.enum(["ticket", "decision", "run"]), id: z.string().uuid() })).max(20),
+        confidence: z.enum(["high", "low"]),
+      },
+    },
+    async (input) => {
+      const r = await pa.reply(scope.runId, input);
+      return r.posted ? text(r.note) : fail(r.note);
+    },
+  );
+
+  server.registerTool(
+    "pa_escalate",
+    { description: "Pass the owner's last message to the CEO when you can't answer it from your tools or it needs judgement. summary is what you found, for the CEO. The owner is told it's with the CEO.", inputSchema: { summary: z.string().min(1).max(2000) } },
+    async ({ summary }) => ((await pa.escalate(scope.runId, summary)).ok ? text("Passed to the CEO; the owner was told. Don't answer it yourself.") : fail("There's no unanswered owner message to pass on.")),
+  );
+
+  return server;
+}
+
+/**
+ * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
+ * not an agent's, and go through the same checks as the board's own forms.
+ */
+function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team }: Services, scope: Scope) {
+  const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
+  const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
+  const workFail = (err: unknown) => {
+    if (err instanceof WorkError) return fail(err.message);
+    throw err;
+  };
+
+  registerBoard(server, db, scope);
 
   server.registerTool(
     "create_ticket",
@@ -987,7 +1073,9 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
 
     // Stateless: a fresh server and transport per request. Owner chat runs get board tools only.
     const [run] = await db.select({ purpose: runsTable.purpose }).from(runsTable).where(eq(runsTable.id, scope.runId));
-    const server = run?.purpose === "chat" ? buildChatServer(db, services, scope) : buildServer(db, services, scope, hooks);
+    // A PA gets its read-only server whatever woke it (R87).
+    const [me] = scope.agentId ? await db.select({ duty: agents.duty }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+    const server = me?.duty === "assistant" ? buildPaServer(db, services, scope) : run?.purpose === "chat" ? buildChatServer(db, services, scope) : buildServer(db, services, scope, hooks);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {

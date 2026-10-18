@@ -24,6 +24,7 @@ type AgentRow = {
   status: "working" | "idle" | "paused" | "retired";
   current: { ticketId: string; title: string | null } | null;
   openTickets: number;
+  pa: { posted: number; escalated: number; wrong: number } | null;
   month: { costMicros: number; runs: number; tokens: number };
 };
 type Change = { c: { id: string; field: string; before: unknown; after: unknown; undoneAt: string | null; createdAt: string; byAgentId: string | null }; by: string | null };
@@ -391,6 +392,12 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
               {" · "}
               <span className="mono">{a.model ?? "default model"}</span> · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
             </div>
+            {a.pa && (
+              <div className="muted" style={{ fontSize: 13 }}>
+                Answers: {a.pa.posted} posted, {a.pa.escalated} passed to the CEO
+                {a.pa.posted + a.pa.escalated > 0 && ` (${Math.round((a.pa.escalated / (a.pa.posted + a.pa.escalated)) * 100)}%)`}, {a.pa.wrong} marked wrong
+              </div>
+            )}
           </div>
           <div className="agent-actions">
             <span className={`tag ${tone}`}>{label}</span>
