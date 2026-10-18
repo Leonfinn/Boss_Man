@@ -81,6 +81,8 @@ export const agents = pgTable(
     instructions: text("instructions"),
     /** A retired agent no longer works; its history and runs stay. */
     retiredAt: timestamp("retired_at", { withTimezone: true }),
+    /** How far this agent's brief has been delivered (R83): advances when a run is launched, not when the brief is built. */
+    briefSeenAt: timestamp("brief_seen_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -912,6 +914,22 @@ export const ticketArtifacts = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("ticket_artifacts_ticket").on(t.ticketId), uniqueIndex("ticket_artifacts_one_page").on(t.ticketId, t.wikiPageId)],
+);
+
+/** A short log of what changed in a company, for the brief every agent gets at a wake (R83). */
+export const activity = pgTable(
+  "activity",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /** Who did it; null for the owner or Boss Man. */
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    summary: text("summary").notNull(),
+  },
+  (t) => [index("activity_company_at").on(t.companyId, t.at)],
 );
 
 // ---------- Skills (R71) ----------

@@ -1,0 +1,134 @@
+// The brief an agent gets at every wake (R84): built by code from live tables, no model call.
+// Every section is capped, and says how many more there are.
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { untrusted } from "@boss-man/shared";
+import type { Db } from "../db/client.js";
+import { activity, agents, decisions, engagements, runs, ticketDependencies, tickets } from "../db/schema.js";
+
+const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
+const one = (s: string, n = 160) => {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, n)}…` : t;
+};
+const capped = (lines: string[], max: number) => (lines.length > max ? [...lines.slice(0, max), MORE(lines.length - max)] : lines);
+const section = (title: string, lines: string[]) => (lines.length ? ["", `## ${title}`, ...lines] : []);
+
+type BriefInput = {
+  companyId: string;
+  agentId: string | null;
+  role: string;
+  /** The agent's cursor (R83); null means the last day. */
+  since: Date | null;
+  now: Date;
+  /** For the owner's page: no untrusted framing. */
+  plain?: boolean;
+};
+
+export async function buildBrief(db: Db, { companyId, agentId, role, since, now, plain }: BriefInput): Promise<string> {
+  const age = (d: Date) => {
+    const m = Math.max(0, Math.round((now.getTime() - d.getTime()) / 60_000));
+    return m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+  };
+  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null }) => (t.stateNote && t.stateNoteAt ? ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}` : "");
+  const from = since ?? new Date(now.getTime() - 24 * 3_600_000);
+  const notMe = agentId ? sql`${activity.agentId} is distinct from ${agentId}` : undefined;
+
+  const changeLine = (c: { at: Date; agent: string | null; summary: string; title: string | null }) =>
+    `- ${age(c.at)} ${c.agent ?? "owner"}${c.title ? `, "${one(c.title, 40)}"` : ""}: ${one(c.summary, 100)}`;
+  const changes = (relevant: string[] | null) =>
+    relevant && !relevant.length
+      ? Promise.resolve([])
+      : db
+          .select({ at: activity.at, agent: agents.name, summary: activity.summary, title: tickets.title })
+          .from(activity)
+          .leftJoin(agents, eq(agents.id, activity.agentId))
+          .leftJoin(tickets, eq(tickets.id, activity.ticketId))
+          .where(and(eq(activity.companyId, companyId), gt(activity.at, from), notMe, relevant ? inArray(activity.ticketId, relevant) : undefined))
+          .orderBy(desc(activity.at));
+
+  /** Other agents' live runs that aren't owner chat. */
+  const flightLines = async () => {
+    const rows = await db
+      .select({ agent: agents.name, ticket: tickets.title, state: tickets.systemState })
+      .from(runs)
+      .innerJoin(agents, eq(agents.id, runs.agentId))
+      .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+      .where(and(eq(runs.companyId, companyId), isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, agentId ? ne(runs.agentId, agentId) : undefined))
+      .orderBy(asc(runs.startedAt));
+    return rows.map((r) => `- ${r.agent}: ${r.ticket ? `"${one(r.ticket, 40)}" (${r.state})` : "no ticket"}`);
+  };
+
+  let body: string[];
+  if (role === "ceo") {
+    const counts = await db.select({ state: tickets.systemState, n: sql<number>`count(*)::int` }).from(tickets).where(eq(tickets.companyId, companyId)).groupBy(tickets.systemState);
+    const n = (s: string) => counts.find((c) => c.state === s)?.n ?? 0;
+    const needs = await db
+      .select({ t: tickets, who: agents.name })
+      .from(tickets)
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(
+        and(
+          eq(tickets.companyId, companyId),
+          or(inArray(tickets.systemState, ["review", "blocked"]), and(inArray(tickets.systemState, ["ready", "in_progress"]), lt(tickets.lastActivityAt, new Date(now.getTime() - 24 * 3_600_000)))),
+        ),
+      )
+      .orderBy(asc(tickets.lastActivityAt));
+    const open = await db.select().from(decisions).where(and(eq(decisions.companyId, companyId), eq(decisions.tier, "ceo"), eq(decisions.status, "open"))).orderBy(asc(decisions.createdAt));
+    const needLines = [
+      ...open.map((d) => `- Decision: "${one(d.question, 120)}" (recommended: ${one(d.recommendedOption, 80)})`),
+      ...needs
+        .sort((a, b) => Number(b.t.systemState === "review") - Number(a.t.systemState === "review"))
+        .map(({ t, who }) => `- ${t.systemState === "review" ? "In review" : t.systemState === "blocked" ? "Blocked" : `Silent ${age(t.lastActivityAt)}`}: "${one(t.title, 60)}" (${who ?? "unassigned"}).${noteOf(t)}`),
+    ];
+    const done = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt)).limit(10);
+    const unassigned = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), isNull(tickets.assigneeAgentId), eq(tickets.assignedToOwner, false))).orderBy(asc(tickets.createdAt));
+    const recent = await changes(null);
+    body = [
+      `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
+      ...section("Needs you", capped(needLines, 8)),
+      ...section("In flight", capped(await flightLines(), 8)),
+      ...section("Last done", [...done.map((t) => `- "${one(t.title, 60)}" (${t.outcome ?? "done"}, ${age(t.lastActivityAt)} ago).${noteOf(t)}`), ...(n("done") > done.length ? [MORE(n("done") - done.length)] : [])]),
+      ...section("Ready but unassigned", capped(unassigned.map((t) => `- "${one(t.title, 60)}" (${t.id})`), 5)),
+      ...section("Changes since the last brief", capped(recent.map(changeLine), 25)),
+    ];
+  } else {
+    const mine = agentId ? await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.assigneeAgentId, agentId), ne(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt)) : [];
+    const ids = mine.map((t) => t.id);
+    const deps = ids.length
+      ? await db
+          .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId, ticket: tickets.title, ticketState: tickets.systemState, eng: engagements.title, engStatus: engagements.status, dec: decisions.question, decId: decisions.id, decStatus: decisions.status })
+          .from(ticketDependencies)
+          .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+          .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+          .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+          .where(or(inArray(ticketDependencies.blockedTicketId, ids), inArray(ticketDependencies.blockerTicketId, ids)))
+      : [];
+    const waitsOn = (id: string) =>
+      deps
+        .filter((d) => d.blocked === id)
+        .flatMap((d) => (d.blocker ? (d.ticketState !== "done" ? [`"${one(d.ticket ?? "", 60)}"`] : []) : d.eng ? (d.engStatus !== "signed_off" ? [`engagement "${one(d.eng, 60)}"`] : []) : d.decStatus === "open" ? [`decision "${one(d.dec ?? "", 60)}"`] : []));
+    const myLines = mine.map((t) => {
+      const w = waitsOn(t.id);
+      return `- "${one(t.title, 60)}" (${t.id}), ${t.systemState}, v${t.version}${w.length ? `, blocked by ${w.join(", ")}` : ""}.${noteOf(t)}`;
+    });
+    const decIds = deps.flatMap((d) => (d.decId && d.blocked && ids.includes(d.blocked) ? [d.decId] : []));
+    const asked = agentId
+      ? await db
+          .select()
+          .from(decisions)
+          .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), or(eq(decisions.raisedByAgentId, agentId), decIds.length ? inArray(decisions.id, decIds) : undefined)))
+          .orderBy(asc(decisions.createdAt))
+      : [];
+    // My tickets, what they wait on and what waits on them; a decision counts through the ticket it blocks.
+    const relevant = [...new Set([...ids, ...deps.flatMap((d) => [d.blocked, d.blocker])])].filter((x): x is string => !!x);
+    body = [
+      ...section("My open tickets", capped(myLines, 5)),
+      ...section("Open decisions on my tickets", capped(asked.map((d) => `- "${one(d.question, 120)}" (recommended: ${one(d.recommendedOption, 80)})`), 3)),
+      ...section("Changed since my last run", capped((await changes(relevant)).map(changeLine), 10)),
+      ...section("In flight elsewhere", capped(await flightLines(), 8)),
+    ];
+  }
+  const head = `Company brief as of ${now.toISOString().slice(0, 16).replace("T", " ")} UTC. This supersedes any earlier brief in this conversation.`;
+  const text = (body.join("\n") || "Nothing open and nothing changed.").trim();
+  return `${head}\n\n${plain ? text : untrusted("brief: notes written by agents and the owner", text)}`;
+}

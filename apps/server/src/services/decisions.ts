@@ -15,6 +15,7 @@ import {
   type RunnerEvent,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { record } from "./activity.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runs, ticketArtifacts, ticketDependencies, tickets, wikiPages } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -287,7 +288,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string }) {
-      return db.transaction(async (tx) => {
+      const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
           .values({
@@ -306,6 +307,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         return row!;
       });
+      await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.blocksTicketId, kind: "decision_raised", summary: `Asked the owner: ${input.question}`, at: now() });
+      return raised;
     },
 
     /** Re-sends permission verdicts that couldn't be delivered, once the runner is back. */
@@ -559,6 +562,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: `Owner answered "${d.question}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));

@@ -38,6 +38,7 @@ import { ChatError, chatService } from "./services/chat.js";
 import { dashboardService } from "./services/dashboard.js";
 import { SkillError, skillsService } from "./services/skills.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
+import { buildBrief } from "./services/brief.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -954,6 +955,13 @@ export async function buildApp(opts: AppOptions) {
     // A page's address can hold folders ("research/agent-landscape"), so it's the rest of the path.
     const SlugParams = z.object({ id: Uuid, "*": z.string().min(1).max(500) }).transform((p) => ({ id: p.id, slug: p["*"] }));
     const PageBody = z.object({ title: z.string().trim().min(1).max(200), body: z.string().max(MAX_BODY), folder: z.string().max(400).optional() });
+    // The CEO-style brief, built when asked and never stored as a page (R84).
+    owner.get("/api/companies/:id/brief", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+      if (!c) return reply.code(404).send({ error: "not_found" });
+      return { markdown: await buildBrief(db, { companyId: id, agentId: null, role: "ceo", since: null, now: opts.now?.() ?? new Date(), plain: true }) };
+    });
     owner.get("/api/companies/:id/wiki", async (req) => wiki.list(IdParam.parse(req.params).id, z.object({ q: z.string().max(200).optional() }).parse(req.query).q));
     owner.post("/api/companies/:id/wiki", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

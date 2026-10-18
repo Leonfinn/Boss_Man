@@ -5,6 +5,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, runs, ticketMessages, tickets, wakes } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
+import { record } from "./activity.js";
 
 /** How many recent messages a run's prompt carries. */
 export const PROMPT_HISTORY = 12;
@@ -75,6 +76,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       }
       // Stored before the wake, so the new run's prompt already carries it.
       const [m] = await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "owner", agentId, runId, text, delivery }).returning();
+      await record(db, { companyId: t.companyId, ticketId, kind: "message", summary: `Owner wrote: ${text}` });
       // One waiting run picks up every message sent before it starts.
       const [waiting] =
         delivery === "woken"
@@ -99,6 +101,7 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
         .insert(ticketMessages)
         .values({ companyId: input.companyId, ticketId: input.ticketId, author: "agent", agentId: input.agentId, runId: input.runId, text: input.text.slice(0, MAX_TEXT) })
         .returning();
+      await record(db, { companyId: input.companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "message", summary: `Replied: ${input.text}` });
       return m!;
     },
 
