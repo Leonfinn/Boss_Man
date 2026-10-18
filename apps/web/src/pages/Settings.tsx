@@ -338,70 +338,19 @@ function Funding({ company, onChanged }: { company: Company; onChanged: () => vo
       return "Added.";
     });
   };
-  const setAgent = (agentId: string, patch: Record<string, unknown>) =>
-    void act.run(async () => {
-      await api(`/api/agents/${agentId}`, { method: "PATCH", body: patch });
-      onChanged();
-      return "Saved.";
-    });
   return (
-    <Section id="funding-h" title="Agents and what pays for them">
-      {sources.data?.length ? (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Agent</th>
-                <th scope="col">Kind</th>
-                <th scope="col">Model</th>
-                <th scope="col">Paid from</th>
-                <th scope="col">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {company.agents.map((a) => (
-                <tr key={a.id}>
-                  <th scope="row" style={{ fontWeight: 500 }}>
-                    {a.name}
-                    {a.role === "ceo" && <span className="muted"> · CEO</span>}
-                    {a.duty === "wiki" && <span className="muted"> · keeps the wiki tidy</span>}
-                  </th>
-                  <td>{a.agentKind}</td>
-                  <td>
-                    <input
-                      aria-label={`Model for ${a.name}`}
-                      className="mono"
-                      defaultValue={a.model ?? ""}
-                      placeholder="default"
-                      style={{ minHeight: 36, padding: "4px 8px", border: "1px solid var(--line-strong)", borderRadius: 6, width: "100%" }}
-                      onBlur={(e) => e.target.value !== (a.model ?? "") && setAgent(a.id, { model: e.target.value || null })}
-                    />
-                  </td>
-                  <td>
-                    <select aria-label={`Funding for ${a.name}`} value={a.fundingSourceId ?? ""} onChange={(e) => setAgent(a.id, { fundingSourceId: e.target.value || null })} style={{ minHeight: 36 }}>
-                      <option value="">Not set</option>
-                      {sources.data!.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <span style={{ display: "inline-flex", gap: 8, alignItems: "center" }}>
-                      <span className={`tag${a.paused ? " amber" : " green"}`}>{a.paused ? "Paused" : "Running"}</span>
-                      <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} onClick={() => setAgent(a.id, { paused: !a.paused })} aria-label={`${a.paused ? "Start" : "Pause"} ${a.name}`}>
-                        {a.paused ? "Start" : "Pause"}
-                      </button>
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <p>No funding sources yet. Add the subscription or API account agents run on, so their cost and quota are tracked.</p>
+    <Section id="funding-h" title="Funding sources">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The subscriptions and API accounts agents run on, so their cost and quota are tracked. Choose each agent's model and funding source on the <a href="#/agents">Agents</a> page.
+      </p>
+      {sources.data && sources.data.length > 0 && (
+        <ul style={{ margin: 0, paddingLeft: 18 }}>
+          {sources.data.map((s) => (
+            <li key={s.id}>
+              {s.name} <span className="muted">· {s.kind.replace(/_/g, " ")} · {s.provider}</span>
+            </li>
+          ))}
+        </ul>
       )}
       <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", alignItems: "end" }}>
         <div className="field">

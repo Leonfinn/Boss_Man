@@ -156,7 +156,7 @@ describe("owner chat", () => {
     expect(starts.map((x) => x.agentId).sort()).toEqual([c.ceo.id, c.worker.id].sort());
     const workerStart = starts.find((x) => x.agentId === c.worker.id)!;
     expect(workerStart).toMatchObject({ boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.worker.id}` });
-    expect(workerStart.prompt).toContain("You are Engineer, the worker at App Co. The owner is messaging you directly");
+    expect(workerStart.prompt).toContain("You are Engineer, the worker of App Co. The owner is messaging you directly");
     expect(workerStart.prompt).toContain("Owner: What are you working on?");
     expect(workerStart.prompt).not.toContain("How is the beta going?");
 

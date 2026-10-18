@@ -526,3 +526,18 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
   .ticket-layout { grid-template-columns: minmax(0, 1fr); }
   .ticket-props { position: static; order: -1; }
 }
+
+/* ---------- Agents (R62) ---------- */
+.agent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.agent-card { display: flex; flex-direction: column; gap: 12px; }
+.agent-line { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+.agent-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.agent-edit { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.template-grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+.template { display: flex; flex-direction: column; gap: 4px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 8px; cursor: pointer; font-size: 14px; }
+.template.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.template:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.diff-pair { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 6px; }
+.diff-pair .before { border-left: 3px solid var(--red-ink); }
+.diff-pair .after { border-left: 3px solid var(--green-ink); }

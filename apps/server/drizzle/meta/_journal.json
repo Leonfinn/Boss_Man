@@ -197,6 +197,13 @@
       "when": 1792324525627,
       "tag": "0027_ticket_watchers",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1792325673606,
+      "tag": "0028_agents_tab",
+      "breakpoints": true
     }
   ]
 }
