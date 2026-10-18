@@ -103,7 +103,8 @@ function Hire({ companyId, templates, sources, lists, onDone }: { companyId: str
   const [busy, setBusy] = useState(false);
   const choose = (t: Template | null) => {
     setTpl(t);
-    setForm({ ...form, name: form.name || t?.title || "", title: t?.title ?? "", instructions: t?.instructions ?? "" });
+    // Swap the name along with the template unless the owner typed their own.
+    setForm({ ...form, name: form.name === (tpl?.title ?? "") ? (t?.title ?? "") : form.name, title: t?.title ?? "", instructions: t?.instructions ?? "" });
   };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
