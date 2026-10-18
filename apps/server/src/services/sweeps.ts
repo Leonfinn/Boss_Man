@@ -3,9 +3,10 @@
 // - stalled runs (R32): a running agent that has gone quiet. Advisory only: nothing is cancelled;
 // - missed work (R82): an assigned ticket that is ready to go but that nobody is working on.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
-import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, REASSIGN, type DecisionContext } from "./decisions.js";
 import { MISSED_REASON, type WakeInput } from "./scheduler.js";
 
@@ -156,14 +157,20 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   /**
    * Assigned tickets that are ready to work on but that nothing is working on (R82): a wake was
    * lost, a runner was down, or the agent ended its run early. Tickets in review, plan-first
-   * tickets awaiting approval, and unassigned tickets are left alone.
+   * tickets awaiting approval, and unassigned tickets are left alone. An agent runs one ticket at
+   * a time, so only idle agents are considered, and each is woken about one ticket per pass.
    */
   async function missedWork(t: Date) {
-    const candidates = await db
-      .select({ ticket: tickets, agent: agents.name })
+    const msObjective = alias(objectives, "ms_objective");
+    const rows = await db
+      .select({ ticket: tickets, agent: agents.name, krPriority: objectives.priority, msPriority: msObjective.priority })
       .from(tickets)
       .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
       .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
+      .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
+      .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
+      .leftJoin(msObjective, eq(msObjective.id, milestones.objectiveId))
       .where(
         and(
           inArray(tickets.systemState, ["ready", "in_progress"]),
@@ -174,9 +181,19 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs)),
         ),
       );
+    // An agent with a live run (chat aside) or any waiting wake is busy: its other tickets are just queued behind that.
+    const busy = new Set([
+      ...(await db.select({ id: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), or(isNull(runs.purpose), sql`${runs.purpose} <> 'chat'`)))).map((r) => r.id),
+      ...(await db.select({ id: wakes.agentId }).from(wakes).where(inArray(wakes.status, ["queued", "deferred"]))).map((w) => w.id),
+    ]);
+    // Most important objective first (a lower number is more important; no objective goes last), then idle longest.
+    const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
+    const candidates = rows.filter((c) => !busy.has(c.ticket.assigneeAgentId!)).sort((a, b) => rank(a) - rank(b) || a.ticket.lastActivityAt.getTime() - b.ticket.lastActivityAt.getTime());
     const result = { woken: 0, gaveUp: 0 };
+    const done = new Set<string>();
     for (const { ticket, agent } of candidates) {
       const agentId = ticket.assigneeAgentId!;
+      if (done.has(agentId)) continue;
       // Blocked the way decisions.ts decides it: any dependency not yet resolved.
       const deps = await db
         .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
@@ -191,12 +208,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (ticketRuns.some((r) => !r.endedAt)) continue;
       const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
       if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
-      const [queued] = await db
-        .select({ id: wakes.id })
-        .from(wakes)
-        .where(and(eq(wakes.agentId, agentId), eq(wakes.ticketId, ticket.id), inArray(wakes.status, ["queued", "deferred"])))
-        .limit(1);
-      if (queued) continue;
 
       // Every wake counts, dropped ones too, so a dropped wake isn't retried every minute.
       const recent = await db
@@ -235,6 +246,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         reason: MISSED_REASON,
         note: `Nothing is running on this ticket, and it was last active at ${lastActive.toISOString().slice(0, 16).replace("T", " ")} UTC (${ago(t.getTime() - lastActive.getTime())} ago). Pick it up, or say why it's stuck.`,
       });
+      done.add(agentId);
       result.woken++;
     }
     return result;
