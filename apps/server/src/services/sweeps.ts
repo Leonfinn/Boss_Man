@@ -1,19 +1,30 @@
 // Periodic sweeps that put forgotten work in front of the owner:
 // - stale blockers (R21): a dependency whose blocker has had no activity for too long;
-// - stalled runs (R32): a running agent that has gone quiet. Advisory only: nothing is cancelled.
+// - stalled runs (R32): a running agent that has gone quiet. Advisory only: nothing is cancelled;
+// - missed work (R82): an assigned ticket that is ready to go but that nobody is working on.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
-import { and, eq, inArray, isNotNull, isNull, max } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, decisions, engagementMessages, engagements, runners, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, REASSIGN, type DecisionContext } from "./decisions.js";
+import { MISSED_REASON, type WakeInput } from "./scheduler.js";
 
-export type SweepLimits = { staleAfterMs: number; stallAfterMs: number };
-export const DEFAULT_SWEEP_LIMITS: SweepLimits = { staleAfterMs: 24 * 3_600_000, stallAfterMs: 5 * 60_000 };
+export type SweepLimits = {
+  staleAfterMs: number;
+  stallAfterMs: number;
+  /** A ready, assigned ticket with no activity for this long counts as forgotten (R82). */
+  missedAfterMs: number;
+  /** An agent is nudged about the same ticket at most once per this long (R82). */
+  missedEveryMs: number;
+};
+export const DEFAULT_SWEEP_LIMITS: SweepLimits = { staleAfterMs: 24 * 3_600_000, stallAfterMs: 5 * 60_000, missedAfterMs: 30 * 60_000, missedEveryMs: 4 * 3_600_000 };
+// After this many nudges in a day the owner is told instead (R82).
+const MISSED_NUDGES_PER_DAY = 2;
 
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date } = {}) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -142,12 +153,99 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return { open: stalled.size, raised };
   }
 
+  /**
+   * Assigned tickets that are ready to work on but that nothing is working on (R82): a wake was
+   * lost, a runner was down, or the agent ended its run early. Tickets in review, plan-first
+   * tickets awaiting approval, and unassigned tickets are left alone.
+   */
+  async function missedWork(t: Date) {
+    const candidates = await db
+      .select({ ticket: tickets, agent: agents.name })
+      .from(tickets)
+      .innerJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(
+        and(
+          inArray(tickets.systemState, ["ready", "in_progress"]),
+          eq(agents.paused, false),
+          isNull(agents.retiredAt),
+          eq(companies.paused, false),
+          or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
+          lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs)),
+        ),
+      );
+    const result = { woken: 0, gaveUp: 0 };
+    for (const { ticket, agent } of candidates) {
+      const agentId = ticket.assigneeAgentId!;
+      // Blocked the way decisions.ts decides it: any dependency not yet resolved.
+      const deps = await db
+        .select({ ticketState: tickets.systemState, engagementStatus: engagements.status, decisionStatus: decisions.status })
+        .from(ticketDependencies)
+        .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+        .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+        .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+        .where(eq(ticketDependencies.blockedTicketId, ticket.id));
+      if (deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open")) continue;
+      // Active means a run on this ticket that hasn't ended; the last run's end counts as activity.
+      const ticketRuns = await db.select({ lastEventAt: runs.lastEventAt, endedAt: runs.endedAt }).from(runs).where(eq(runs.ticketId, ticket.id));
+      if (ticketRuns.some((r) => !r.endedAt)) continue;
+      const lastActive = ticketRuns.reduce<Date>((m, r) => later(later(m, r.lastEventAt), r.endedAt)!, ticket.lastActivityAt);
+      if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
+      const [queued] = await db
+        .select({ id: wakes.id })
+        .from(wakes)
+        .where(and(eq(wakes.agentId, agentId), eq(wakes.ticketId, ticket.id), inArray(wakes.status, ["queued", "deferred"])))
+        .limit(1);
+      if (queued) continue;
+
+      // Every wake counts, dropped ones too, so a dropped wake isn't retried every minute.
+      const recent = await db
+        .select({ id: wakes.id, createdAt: wakes.createdAt })
+        .from(wakes)
+        .where(and(eq(wakes.agentId, agentId), eq(wakes.ticketId, ticket.id), eq(wakes.reason, MISSED_REASON), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+        .orderBy(desc(wakes.createdAt));
+      if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedEveryMs) continue;
+
+      // The owner's note about this ticket holds off further wakes until it's answered.
+      const [open] = await db.select({ id: decisions.id }).from(decisions).where(and(like(decisions.dedupeKey, `missed:${ticket.id}:%`), eq(decisions.status, "open"))).limit(1);
+      if (open) continue;
+
+      if (recent.length >= MISSED_NUDGES_PER_DAY) {
+        // One decision per round of nudges: the key names the latest wake.
+        const key = `missed:${ticket.id}:${recent[0]!.id}`;
+        const rows = await db
+          .insert(decisions)
+          .values({
+            companyId: ticket.companyId,
+            kind: "question",
+            question: `"${ticket.title}" looks stuck. ${agent} was woken about it ${recent.length} times in the last day and nothing is running on it; it was last active ${ago(t.getTime() - lastActive.getTime())} ago. Look into it, or reassign it.`,
+            options: ["Got it"],
+            recommendedOption: "Got it",
+            dedupeKey: key,
+            context: { type: "question" },
+          })
+          .onConflictDoNothing()
+          .returning({ id: decisions.id });
+        result.gaveUp += rows.length;
+        continue;
+      }
+      await opts.wake({
+        agentId,
+        ticketId: ticket.id,
+        reason: MISSED_REASON,
+        note: `Nothing is running on this ticket, and it was last active at ${lastActive.toISOString().slice(0, 16).replace("T", " ")} UTC (${ago(t.getTime() - lastActive.getTime())} ago). Pick it up, or say why it's stuck.`,
+      });
+      result.woken++;
+    }
+    return result;
+  }
+
   return {
     limits,
-    /** One pass of both sweeps. Safe to call often. */
+    /** One pass of every sweep. Safe to call often. */
     async run() {
       const t = now();
-      return { staleBlockers: await staleBlockers(t), stalledRuns: await stalledRuns(t) };
+      return { staleBlockers: await staleBlockers(t), stalledRuns: await stalledRuns(t), missedWork: await missedWork(t) };
     },
   };
 }

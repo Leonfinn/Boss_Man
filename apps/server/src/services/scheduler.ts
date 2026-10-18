@@ -45,6 +45,8 @@ export type Limits = {
 export const WIKI_REASON = "wiki upkeep";
 /** A watcher's report on the tickets it watches (R80). Scheduled by Boss Man, so not counted as ticketless churn. */
 export const WATCH_REASON = "ticket watch";
+/** An assigned ticket nobody is working on, found by the sweep (R82). */
+export const MISSED_REASON = "missed work";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
