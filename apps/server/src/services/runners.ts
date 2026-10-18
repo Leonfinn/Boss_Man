@@ -4,6 +4,7 @@ import { and, eq, isNotNull, max, sql } from "drizzle-orm";
 import type { JournalEntry, RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
+import { record } from "./activity.js";
 import { costEvents, decisions, engagements, runnerEvents, runners, runs, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
@@ -36,7 +37,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           .onConflictDoUpdate({ target: runs.id, set: { acpSessionId: event.acpSessionId, model: event.model, lastEventAt: at } });
         return;
       case "run.ended":
-        await db
+        const [ended] = await db
           .update(runs)
           .set({
             endedAt: at,
@@ -45,7 +46,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
               ? { inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens, cachedReadTokens: event.usage.cachedReadTokens, cachedWriteTokens: event.usage.cachedWriteTokens }
               : {}),
           })
-          .where(eq(runs.id, event.runId));
+          .where(eq(runs.id, event.runId))
+          .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+        if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
         return;
       case "run.cost": {
         if (event.costMicrosDelta === 0) return;

@@ -2,6 +2,7 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { record } from "./activity.js";
 import { agents, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export class WorkError extends Error {
@@ -182,6 +183,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           featureId: input.featureId ?? null,
         })
         .returning();
+      await record(db, { companyId: p.companyId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${t!.title}" in ${t!.systemState}${t!.assigneeAgentId ? ", assigned" : ""}`, at: now() });
       if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);
       return t!;
     },
@@ -229,6 +231,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         })
         .where(eq(tickets.id, ticketId))
         .returning();
+      if (updated!.systemState !== t.systemState) await record(db, { companyId: t.companyId, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${updated!.systemState}`, at: now() });
+      if (updated!.assigneeAgentId !== t.assigneeAgentId) {
+        const [to] = updated!.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, updated!.assigneeAgentId)) : [];
+        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
+      }
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
       if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);
       return updated!;
@@ -252,6 +259,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         .insert(ticketDependencies)
         .values({ blockedTicketId: ticketId, blockerTicketId: blocker.ticketId ?? null, blockerEngagementId: blocker.engagementId ?? null })
         .returning();
+      await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: blocker.ticketId ? `Now waits on ticket ${blocker.ticketId}` : `Now waits on engagement ${blocker.engagementId}`, at: now() });
       return dep!;
     },
 

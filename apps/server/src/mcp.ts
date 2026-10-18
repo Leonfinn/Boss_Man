@@ -12,6 +12,8 @@ import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, RISK_TIERS, stateNoteL
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, workflowColumns } from "./db/schema.js";
+import { record } from "./services/activity.js";
+import { buildBrief } from "./services/brief.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -128,6 +130,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         .insert(tickets)
         .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId: featureId ?? null })
         .returning({ id: tickets.id });
+      await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       return text(`Created ticket ${t!.id} in ${p.name}.`);
     },
   );
@@ -174,6 +177,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         if (!now) return fail("No ticket with that ID in your company.");
         return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
       }
+      await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}`, at });
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
@@ -691,6 +695,16 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
           ...(talk.length ? talk : ["(none)"]),
         ].join("\n"),
       );
+    },
+  );
+
+  server.registerTool(
+    "whats_new",
+    { description: "What changed in your company since your last run, as of now: your open tickets and decisions, changes that touch them, and what other agents are running. The CEO gets the whole company. The same brief you got at the start of this run; it doesn't mark anything as seen.", inputSchema: {} },
+    async () => {
+      const [me] = scope.agentId ? await db.select({ role: agents.role, since: agents.briefSeenAt }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (!me) return fail("Only agents have a brief.");
+      return text(await buildBrief(db, { companyId: scope.companyId, agentId: scope.agentId, role: me.role, since: me.since, now: new Date() }));
     },
   );
 

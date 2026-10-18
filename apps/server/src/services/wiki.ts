@@ -5,6 +5,7 @@
 import { and, asc, desc, eq, ilike, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, ticketArtifacts, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
+import { record } from "./activity.js";
 
 export const MAX_BODY = 200_000;
 
@@ -145,6 +146,7 @@ export function wikiService(db: Db) {
           .insert(ticketArtifacts)
           .values({ companyId, ticketId: input.ticketId, kind: "wiki_page", title, wikiPageId: p!.id, agentId: input.agentId, runId: input.runId })
           .onConflictDoNothing();
+        await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Wrote wiki page "${title}"` });
       }
       return { page: p!, created: !existing };
     },
@@ -173,6 +175,7 @@ export function wikiService(db: Db) {
           runId: input.runId,
         })
         .returning();
+      await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Attached ${a!.title}` });
       return a!;
     },
 

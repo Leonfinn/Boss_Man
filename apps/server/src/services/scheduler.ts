@@ -11,6 +11,8 @@ import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, decisions, engagements, fundingSources, projects, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
+import { record } from "./activity.js";
+import { buildBrief } from "./brief.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
@@ -252,9 +254,9 @@ export function schedulerService(
     }
   }
 
-  async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string) {
+  async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date) {
     const me = agentIdentity(agent, companyName);
-    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions];
+    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
     if (w.ticketId) {
       const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {
@@ -313,7 +315,8 @@ export function schedulerService(
       : [];
     // The owner chat runs with board tools only, in its own folder, outside the CEO's chapters.
     const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
-    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name);
+    const briefAt = now();
+    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt);
     // A CEO's run belongs to its current chapter (CEO continuity).
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, model: agent.model, startedAt: now() });
@@ -351,6 +354,11 @@ export function schedulerService(
       return { ok: false, reason: "runner offline" };
     }
     await db.update(wakes).set({ status: "launched", runId, launchedAt: now(), statusReason: null }).where(eq(wakes.id, w.id));
+    if (!chat) {
+      // The cursor moves only now the run is sent, so a failed launch loses no changes (R83).
+      await db.update(agents).set({ briefSeenAt: briefAt }).where(eq(agents.id, agent.id));
+      await record(db, { companyId: w.companyId, agentId: agent.id, ticketId: w.ticketId, kind: "run_started", summary: `Started (${w.reason})`, at: now() });
+    }
     return { ok: true };
   }
 

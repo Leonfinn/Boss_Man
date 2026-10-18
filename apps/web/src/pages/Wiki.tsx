@@ -191,6 +191,21 @@ function PageView({ companyId, slug, folders, go, onChanged, onNewHere }: { comp
   );
 }
 
+/** Not a stored page: the server builds it when asked (R84). "~" can't appear in a page address. */
+const BRIEF = "~brief";
+
+function BriefView({ companyId }: { companyId: string }) {
+  const brief = usePoll((signal) => api<{ markdown: string }>(`/api/companies/${companyId}/brief`, { signal }), 30_000, companyId);
+  if (brief.error) return <p className="error" role="alert">{brief.error.message}</p>;
+  if (!brief.data) return null;
+  return (
+    <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <h2 style={{ fontSize: 22, fontWeight: 600 }}>Company brief</h2>
+      <Markdown text={brief.data.markdown} />
+    </article>
+  );
+}
+
 type Folder = { key: string; name: string; path: string; folders: Folder[]; pages: PageRow[] };
 
 /** Pages arranged by folder; folders that differ only in case are one folder. */
@@ -290,6 +305,16 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               <label htmlFor="wiki-q">Search</label>
               <input id="wiki-q" type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Titles and text" />
             </div>
+            {!q.trim() && (
+              <ul>
+                <li>
+                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={slug === BRIEF && creating === null ? "page" : undefined} onClick={() => setCreating(null)}>
+                    Company brief
+                    <small>read-only, as of now</small>
+                  </a>
+                </li>
+              </ul>
+            )}
             {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "No pages yet."}</p>}
             <TreeList
               folder={tree(pages)}
@@ -303,6 +328,8 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
           <div>
             {creating !== null ? (
               <Editor key={creating} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
+            ) : slug === BRIEF ? (
+              <BriefView companyId={company.id} />
             ) : slug ? (
               <PageView companyId={company.id} slug={slug} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
             ) : (
