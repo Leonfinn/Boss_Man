@@ -8,7 +8,7 @@ const env = process.env;
 const master = loadMasterKey(env);
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
-const { app, scheduler, sweeps, notes, feedback } = await buildApp({
+const { app, scheduler, sweeps, notes, feedback, review } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -29,10 +29,13 @@ const notify = setInterval(() => void notes.syncDecisions().catch((err) => app.l
 const featureSync = setInterval(() => void feedback.syncStatuses().catch((err) => app.log.error({ err }, "feature status sync failed")), Number(env.BOSSMAN_FEATURE_SYNC_MS ?? 30_000));
 // Stale-blocker and stalled-run sweeps.
 const sweep = setInterval(() => void sweeps.run().catch((err) => app.log.error({ err }, "sweep failed")), Number(env.BOSSMAN_SWEEP_MS ?? 60_000));
+// Pull requests waiting on the git host: merged there, or mergeable now (R59).
+const prSync = setInterval(() => void review.syncPullRequests().catch((err) => app.log.error({ err }, "pull request sync failed")), Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000));
 
 const shutdown = async () => {
   clearInterval(tick);
   clearInterval(sweep);
+  clearInterval(prSync);
   clearInterval(featureSync);
   clearInterval(notify);
   await app.close();

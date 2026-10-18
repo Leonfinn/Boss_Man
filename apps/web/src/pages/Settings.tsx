@@ -386,21 +386,30 @@ function Funding({ company, onChanged }: { company: Company; onChanged: () => vo
 }
 
 function ProjectRow({ p }: { p: Project }) {
-  const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "" });
+  const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
+  const [host, setHost] = useState(p.gitHost);
   const act = useAction();
   const save = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
-      await api(`/api/projects/${p.id}`, { method: "PATCH", body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null } });
-      return "Saved.";
+      const saved = await api<Project>(`/api/projects/${p.id}`, {
+        method: "PATCH",
+        body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
+      });
+      setHost(saved.gitHost);
+      if (form.landing === "pull_request" && form.repoUrl && !saved.gitHost) return "Saved, but Boss Man couldn't tell which git host this is, so pull requests won't open. Check the address, and that the host is reachable from the Boss Man server.";
+      return saved.gitHost ? `Saved. Git host: ${saved.gitHost === "gitea" ? "Gitea" : "GitHub"} (${saved.gitApiBase}).` : "Saved.";
     });
   };
   return (
     <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
       <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>{p.name}</p>
-      <div className="field">
-        <label htmlFor={`repo-${p.id}`}>Git repo (HTTPS)</label>
+      <div className="field" style={{ gridColumn: "1 / -1" }}>
+        <label htmlFor={`repo-${p.id}`}>Git repo</label>
         <input id={`repo-${p.id}`} className="mono" placeholder="https://github.com/you/repo.git" value={form.repoUrl} onChange={(e) => setForm({ ...form, repoUrl: e.target.value })} />
+        <small className="muted">
+          https, or http:// for a LAN host such as a Gitea on 192.168.x.x.{host ? ` Host: ${host === "gitea" ? "Gitea" : "GitHub"}.` : ""}
+        </small>
       </div>
       <div className="field">
         <label htmlFor={`branch-${p.id}`}>Default branch</label>
@@ -409,6 +418,13 @@ function ProjectRow({ p }: { p: Project }) {
       <div className="field">
         <label htmlFor={`verify-${p.id}`}>Check before merging</label>
         <input id={`verify-${p.id}`} className="mono" placeholder="pnpm install && pnpm test" value={form.verifyCommand} onChange={(e) => setForm({ ...form, verifyCommand: e.target.value })} />
+      </div>
+      <div className="field">
+        <label htmlFor={`landing-${p.id}`}>When work is approved</label>
+        <select id={`landing-${p.id}`} value={form.landing} onChange={(e) => setForm({ ...form, landing: e.target.value as Project["landing"] })}>
+          <option value="merge">Merge into the default branch</option>
+          <option value="pull_request">Open a pull request</option>
+        </select>
       </div>
       <div className="field">
         <label htmlFor={`deep-${p.id}`}>Deeper check for high-risk work</label>
@@ -427,7 +443,7 @@ function Projects({ company }: { company: Company }) {
   return (
     <Section id="projects-h" title="Projects">
       <p className="muted" style={{ fontSize: 14 }}>
-        With a repo, each ticket gets its own branch and worktree, approved work is checked and merged into the default branch, and the token in <span className="mono">GIT_TOKEN</span> is used to clone and push. Don't put a token in the URL.
+        With a repo, each ticket gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
       </p>
       {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} />) : <p>No projects yet: create one on the Kanban.</p>}
     </Section>

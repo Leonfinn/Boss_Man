@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { DiskReport, MergeResult, VerifyResult, WorkspaceDiff } from "@boss-man/shared";
+import type { DiskReport, MergeResult, PushResult, VerifyResult, WorkspaceDiff } from "@boss-man/shared";
 
 const run = promisify(execFile);
 
@@ -361,20 +361,9 @@ export class Workspaces {
         if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
       }
       for (let attempt = 0; attempt < 2; attempt++) {
-        await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
-        const targetRef = `refs/remotes/origin/${target}`;
-        const targetSha = await this.git(["rev-parse", "--verify", `${targetRef}^{commit}`], { cwd: repo });
-        const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
-        const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
-        if (ancestor.code === 0) return { status: "already_merged", commit: targetSha };
-        const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", targetSha, branchSha], { cwd: repo });
-        if (tried.code === 1) {
-          const lines = tried.stdout.split("\n");
-          const files = lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean);
-          return { status: "conflicts", files };
-        }
-        if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
-        const tree = tried.stdout.split("\n")[0]!;
+        const tried = await this.tryMerge(repo, branch, target, auth);
+        if (tried.status !== "clean") return tried;
+        const { tree, targetSha, branchSha } = tried;
         const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
         const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
@@ -382,6 +371,45 @@ export class Workspaces {
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
       throw new Error("unreachable");
+    });
+  }
+
+  /** Fetches, then tries the ticket's branch on top of origin's target with merge-tree. */
+  private async tryMerge(repo: string, branch: string, target: string, auth: Record<string, string>) {
+    await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+    const targetSha = await this.git(["rev-parse", "--verify", `refs/remotes/origin/${target}^{commit}`], { cwd: repo });
+    const branchSha = await this.git(["rev-parse", "--verify", `${branch}^{commit}`], { cwd: repo });
+    const ancestor = await this.gitCode(["merge-base", "--is-ancestor", branchSha, targetSha], { cwd: repo });
+    if (ancestor.code === 0) return { status: "already_merged" as const, commit: targetSha };
+    const tried = await this.gitCode(["merge-tree", "--write-tree", "--name-only", "--messages", targetSha, branchSha], { cwd: repo });
+    if (tried.code === 1) {
+      const lines = tried.stdout.split("\n");
+      const files = lines.slice(1, lines.indexOf("") === -1 ? undefined : lines.indexOf("")).filter(Boolean);
+      return { status: "conflicts" as const, files };
+    }
+    if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
+    return { status: "clean" as const, tree: tried.stdout.split("\n")[0]!, targetSha, branchSha };
+  }
+
+  /**
+   * Pushes the ticket's branch to origin for a pull request into target (R59), after the same
+   * checks as a merge: nothing uncommitted, no conflicts with target. The host merges it.
+   */
+  async pushForReview(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, secrets: Record<string, string | undefined> = {}): Promise<PushResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      const dir = this.ticketDir(spec.ticketId);
+      const name = branchFor(spec.ticketId);
+      if (existsSync(path.join(dir, ".git"))) {
+        const dirty = await this.git(["status", "--porcelain"], { cwd: dir });
+        if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+      }
+      const tried = await this.tryMerge(repo, `refs/heads/${name}`, target, auth);
+      if (tried.status !== "clean") return tried;
+      const pushed = await this.gitCode(["push", "--quiet", "origin", `${tried.branchSha}:refs/heads/${name}`], { cwd: repo, env: auth });
+      if (pushed.code !== 0) throw new Error(`Couldn't push ${name}: ${pushed.stderr.slice(0, 500)}`);
+      return { status: "pushed", branch: name, commit: tried.branchSha };
     });
   }
 

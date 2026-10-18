@@ -183,6 +183,13 @@
       "when": 1792273360592,
       "tag": "0025_skill_packs",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1792276933774,
+      "tag": "0026_pull_requests",
+      "breakpoints": true
     }
   ]
 }

@@ -36,7 +36,19 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; duty: string | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[] };
-export type Project = { id: string; companyId: string; name: string; repoUrl: string | null; defaultBranch: string; verifyCommand: string | null; deepVerifyCommand: string | null };
+export type Project = {
+  id: string;
+  companyId: string;
+  name: string;
+  repoUrl: string | null;
+  defaultBranch: string;
+  verifyCommand: string | null;
+  deepVerifyCommand: string | null;
+  /** How approved work lands (R59), and the git host found for the repo. */
+  landing: "merge" | "pull_request";
+  gitHost: "github" | "gitea" | null;
+  gitApiBase: string | null;
+};
 export type Risk = "trivial" | "low" | "medium" | "high" | "critical";
 export const RISKS: Risk[] = ["trivial", "low", "medium", "high", "critical"];
 
@@ -74,7 +86,7 @@ export type Ticket = {
   plan: string | null;
   planApprovedAt: string | null;
 };
-export type TicketDetail = Ticket & { milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string };
+export type TicketDetail = Ticket & { milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
 export type Board = { project: Project; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 

@@ -127,6 +127,11 @@ export const projects = pgTable("projects", {
   repoUrl: text("repo_url"),
   /** The branch new tickets start from, and that approved tickets merge into (R46). */
   defaultBranch: text("default_branch").notNull().default("main"),
+  /** How approved work lands (R59): "merge" straight into the default branch, or "pull_request" on the host. */
+  landing: text("landing").notNull().default("merge"),
+  /** The git host ("github" or "gitea") and its API base, detected from the repo address (R59). */
+  gitHost: text("git_host"),
+  gitApiBase: text("git_api_base"),
   /** A check that must pass in a ticket's worktree before it can be merged and done (R47). */
   verifyCommand: text("verify_command"),
   /** An extra, slower check run before merging high and critical risk tickets (R48). */
@@ -207,6 +212,12 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
+    pullRequestUrl: text("pull_request_url"),
+    pullRequestNumber: integer("pull_request_number"),
+    pullRequestNote: text("pull_request_note"),
+    /** The commit that was reviewed: the host merges only this head, never later pushes. */
+    pullRequestHead: text("pull_request_head"),
     /** Spend ceiling across all of this ticket's runs (R53); falls back to the project's default. */
     costCapMicros: micros("cost_cap_micros"),
     /** Risk tier (R48): who reviews it, how deep the checks go, staging first. Null is medium. */
