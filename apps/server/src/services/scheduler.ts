@@ -227,7 +227,7 @@ export function schedulerService(
     if (w.ticketId) {
       const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {
-        lines.push("", `Ticket ${t.t.id} in project "${t.project}": ${t.t.title}`);
+        lines.push("", `Ticket ${t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", t.t.body);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
@@ -245,7 +245,7 @@ export function schedulerService(
     lines.push(
       "",
       "Look things up before saying you can't: tickets finds and reads any ticket in your company (what it produced, and files from its branch), and wiki reads the company's pages. If you can resolve something with your tools, do it rather than leaving a follow-up note.",
-      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished; raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
+      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
       "Ending your turn does not move the ticket.",
       UNTRUSTED_NOTE,
     );
@@ -267,6 +267,8 @@ export function schedulerService(
       .where(and(eq(wakes.id, w.id), isNull(wakes.runId), inArray(wakes.status, ["queued", "deferred"])))
       .returning({ id: wakes.id });
     if (!claimed.length) return { ok: false, claimed: true };
+    // An agent starting on a waiting ticket moves it to in progress, so the board shows what is being worked on; first, so the prompt quotes the bumped version (R81).
+    if (w.ticketId) await startTicket(w.ticketId);
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
     const [ticket] = w.ticketId
       ? await db
@@ -282,8 +284,6 @@ export function schedulerService(
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
-    // An agent starting on a waiting ticket moves it to in progress, so the board shows what's being worked on.
-    if (w.ticketId) await startTicket(w.ticketId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.

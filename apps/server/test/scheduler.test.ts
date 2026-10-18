@@ -52,6 +52,8 @@ describe("scheduler", () => {
     expect(cmd).toMatchObject({ agentId: ctx.ceo.id, agentKind: "claude", cwd: `/ws/${t1.id}` });
     expect(cmd.prompt).toContain("Checkout error states");
     expect(cmd.prompt).toContain("set_ticket_state");
+    expect(cmd.prompt).toMatch(/version 2\)[^\n]*Checkout error states/); // started by the launch, so the version it quotes is current (R81)
+    expect(cmd.prompt).toContain("expected_version");
     const [tok] = await ctx.db.select().from(runTokens).where(eq(runTokens.tokenHash, hashToken(cmd.mcpToken)));
     expect(tok).toMatchObject({ runId: cmd.runId, agentId: ctx.ceo.id });
     // The ticket being worked on leaves the backlog; the one still waiting stays put.
