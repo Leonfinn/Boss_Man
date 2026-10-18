@@ -75,6 +75,20 @@ export class Journal {
     renameSync(tmp, this.statePath);
   }
 
+  /**
+   * The server already holds this runner's events up to serverSeq, but this journal never got
+   * that far: it's new (a recreated container, lost runner data), so its numbers start again
+   * at 1 and the server would take every event for a duplicate. Renumber what's unsent to
+   * follow on from the server's, and carry on from there.
+   */
+  rebase(serverSeq: number) {
+    if (serverSeq <= this.state.lastSeq) return;
+    this.entries = this.entries.map((e, i) => ({ ...e, seq: serverSeq + 1 + i }));
+    this.state = { lastSeq: serverSeq + this.entries.length, ackedUpTo: serverSeq };
+    this.compact();
+    this.saveState();
+  }
+
   /** Rewrites the journal with only unacked entries. */
   private compact() {
     const tmp = `${this.path}.tmp`;

@@ -49,6 +49,26 @@ describe("Journal", () => {
     expect(j2.append(log("b")).seq).toBe(2);
   });
 
+  it("renumbers a new journal's events after what the server already holds", () => {
+    const file = tmpJournal();
+    const j = new Journal(file);
+    j.append(log("a"));
+    j.append(log("b"));
+    j.rebase(5000);
+    expect(j.pending(5000).map((e) => [e.seq, (e.event as { message: string }).message])).toEqual([
+      [5001, "a"],
+      [5002, "b"],
+    ]);
+    expect(j.append(log("c")).seq).toBe(5003);
+    // It survives a restart with the new numbers.
+    const again = new Journal(file);
+    expect(again.pending(5000).map((e) => e.seq)).toEqual([5001, 5002, 5003]);
+    expect(again.append(log("d")).seq).toBe(5004);
+    // A journal that's ahead of the server is left alone.
+    again.rebase(10);
+    expect(again.lastSeq).toBe(5004);
+  });
+
   it("never acks past what it has written", () => {
     const j = new Journal(tmpJournal());
     j.append(log("a"));

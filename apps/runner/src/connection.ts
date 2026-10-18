@@ -98,7 +98,12 @@ export class RunnerConnection {
       }
       switch (msg.type) {
         case "welcome": {
-          // The server already holds everything up to lastSeq.
+          // The server already holds everything up to lastSeq. If that's beyond anything this
+          // journal wrote, the journal is new, so its events are renumbered after the server's.
+          if (msg.lastSeq > this.opts.journal.lastSeq) {
+            this.opts.log?.(`server has seq ${msg.lastSeq}, beyond this runner's journal (${this.opts.journal.lastSeq}); numbering on from the server's`);
+            this.opts.journal.rebase(msg.lastSeq);
+          }
           this.opts.journal.ack(msg.lastSeq);
           if (msg.lastSeq < this.opts.journal.ackedUpTo) {
             this.opts.log?.(`server has seq ${msg.lastSeq} but this runner compacted up to ${this.opts.journal.ackedUpTo}; some events can't be replayed`);
