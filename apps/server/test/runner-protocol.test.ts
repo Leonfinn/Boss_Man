@@ -108,6 +108,33 @@ describe("runner protocol (R31)", () => {
     second.conn.stop();
   });
 
+  it("takes events from a recreated runner whose journal starts again at 1", async () => {
+    const first = runner();
+    first.conn.start();
+    await waitFor(async () => first.conn.isLive, Boolean);
+    for (const message of ["one", "two", "three"]) first.conn.emit({ type: "runner.log", level: "info", message });
+    await waitFor(() => ctx.db.select().from(runnerEvents), (r) => r.length === 3);
+    first.conn.stop();
+
+    // A new container with empty runner data: its first event is written before it connects.
+    const fresh = runner();
+    const runId = randomUUID();
+    fresh.journal.append({ type: "run.ended", runId, stopReason: null, error: "The runner restarted while this run was going.", interrupted: true });
+    fresh.conn.start();
+    await waitFor(() => ctx.db.select().from(runnerEvents), (r) => r.length === 4);
+    fresh.conn.emit({ type: "runner.log", level: "info", message: "after" });
+    await waitFor(() => ctx.db.select().from(runnerEvents), (r) => r.length === 5);
+    const rows = (await ctx.db.select().from(runnerEvents)).sort((a, b) => a.seq - b.seq);
+    expect(rows.map((r) => [r.seq, r.type])).toEqual([
+      [1, "runner.log"],
+      [2, "runner.log"],
+      [3, "runner.log"],
+      [4, "run.ended"],
+      [5, "runner.log"],
+    ]);
+    fresh.conn.stop();
+  });
+
   it("delivers commands to the connected runner", async () => {
     const commands: RunnerCommand[] = [];
     const { conn } = runner(commands);
