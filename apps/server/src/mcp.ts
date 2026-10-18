@@ -126,10 +126,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket.",
-      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional() },
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional() },
     },
-    async ({ ticketId, state, outcome }) => {
+    async ({ ticketId, state, outcome, expected_version }) => {
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
       if (state === "done") {
         const [t] = await db
@@ -150,9 +150,18 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const rows = await db
         .update(tickets)
         .set({ systemState: state, columnId: col?.id ?? null, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: new Date() })
-        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)))
+        // The version is checked in the same statement, so a change between read and write can't slip through (R81).
+        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
-      if (!rows.length) return fail("No ticket with that ID in your company.");
+      if (!rows.length) {
+        const [now] = await db
+          .select({ state: tickets.systemState, version: tickets.version, changed: tickets.lastActivityAt, assignee: agents.name })
+          .from(tickets)
+          .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+          .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        if (!now) return fail("No ticket with that ID in your company.");
+        return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
+      }
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       return text(`Ticket ${ticketId} is now ${state}.`);
@@ -596,7 +605,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     async () => {
       if (!scope.agentId) return text("[]");
       const rows = await db
-        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, due: tickets.dueDate })
+        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate })
         .from(tickets)
         .where(and(eq(tickets.assigneeAgentId, scope.agentId), ne(tickets.systemState, "done")));
       return text(JSON.stringify(rows));
@@ -632,7 +641,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
       if (action === "find") {
         const like = q?.trim() ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
         const rows = await db
-          .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt })
+          .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like)) : undefined))
@@ -654,7 +663,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
       return text(
         [
           `# ${t.title}`,
-          `Ticket ${t.id} in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+          `Ticket ${t.id} in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
           t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
           "",
           "## Description",
