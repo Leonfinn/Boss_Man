@@ -5,13 +5,13 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import { agentIdentity, planningGuidance, UNTRUSTED_NOTE } from "@boss-man/shared";
+import { agentIdentity, planningGuidance, stateNoteLine, UNTRUSTED_NOTE } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
-import { agents, companies, costEvents, decisions, fundingSources, projects, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, engagements, fundingSources, projects, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
-import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET } from "./decisions.js";
+import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { skillsForRun } from "./skills.js";
@@ -83,6 +83,9 @@ export function schedulerService(
     workspaceRoot?: string;
     limits?: Partial<Limits>;
     now?: () => Date;
+    /** Start a pass as soon as a wake is queued (R85); tests that drive ticks themselves turn it off. */
+    tickOnWake?: boolean;
+    log?: (msg: string) => void;
   },
 ) {
   const limits = { ...DEFAULT_LIMITS, ...deps.limits };
@@ -194,6 +197,24 @@ export function schedulerService(
     return lines;
   }
 
+  /** What a watcher's report would be about, as one string to compare with the last report's (R85). */
+  async function watchFacts(x: typeof tickets.$inferSelect) {
+    const [last] = await db.select({ id: runs.id, endedAt: runs.endedAt, outcome: runs.outcome }).from(runs).where(eq(runs.ticketId, x.id)).orderBy(desc(runs.startedAt)).limit(1);
+    const deps = await db
+      .select({ ticket: tickets.systemState, decision: decisions.status, engagement: engagements.status })
+      .from(ticketDependencies)
+      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+      .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+      .where(eq(ticketDependencies.blockedTicketId, x.id));
+    // The watcher's own updates are left out, or each report would cause the next.
+    const [talk] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(ticketMessages)
+      .where(and(eq(ticketMessages.ticketId, x.id), sql`${ticketMessages.agentId} is distinct from ${x.watcherAgentId}`));
+    return [x.systemState, x.version, x.assigneeAgentId, last ? `${last.id} ${last.endedAt ? (last.outcome ?? "ended") : "running"}` : "no runs", deps.map((d) => d.ticket ?? d.decision ?? d.engagement).join(","), talk?.n].join("|");
+  }
+
   /**
    * Asks each watcher for a report on the tickets that are due (R80): every N minutes while a
    * ticket is open, and once more when it's done. One waiting run per watcher covers them all.
@@ -201,11 +222,19 @@ export function schedulerService(
   async function watchDue() {
     const t = now();
     const watched = await db.select().from(tickets).where(sql`${tickets.watcherAgentId} is not null`);
-    const due = watched.filter((x) =>
+    const dueByTime = watched.filter((x) =>
       x.systemState === "done" ? !!x.watchedAt && x.lastActivityAt > x.watchedAt : !x.watchedAt || t.getTime() - x.watchedAt.getTime() >= (x.watchEveryMinutes ?? 30) * 60_000,
     );
+    // A report is asked for only if the ticket's facts changed since the last one, or three checks in a row found nothing new (R85).
+    const due: typeof dueByTime = [];
+    for (const x of dueByTime) {
+      const facts = await watchFacts(x);
+      const [skips, last] = (x.watchFingerprint ?? "").split(/:(.*)/s);
+      const unchanged = x.systemState !== "done" && !!x.watchedAt && last === facts && Number(skips) < 3;
+      await db.update(tickets).set({ watchedAt: t, watchFingerprint: `${unchanged ? Number(skips) + 1 : 0}:${facts}` }).where(eq(tickets.id, x.id));
+      if (!unchanged) due.push(x);
+    }
     if (!due.length) return;
-    await db.update(tickets).set({ watchedAt: t }).where(inArray(tickets.id, due.map((x) => x.id)));
     const byWatcher = new Map<string, string[]>();
     for (const x of due) byWatcher.set(x.watcherAgentId!, [...(byWatcher.get(x.watcherAgentId!) ?? []), x.id]);
     for (const [agentId, ids] of byWatcher) {
@@ -227,6 +256,8 @@ export function schedulerService(
       if (t) {
         lines.push("", `Ticket ${t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", t.t.body);
+        const note = stateNoteLine(t.t, now());
+        if (note) lines.push("", note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
         lines.push("", planningGuidance(t.t.risk));
@@ -243,7 +274,7 @@ export function schedulerService(
     lines.push(
       "",
       "Look things up before saying you can't: tickets finds and reads any ticket in your company (what it produced, and files from its branch), and wiki reads the company's pages. If you can resolve something with your tools, do it rather than leaving a follow-up note.",
-      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
+      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it; a move to review, done or blocked needs a summary of up to 240 characters, which stays on the ticket for whoever reads it next); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
       "Ending your turn does not move the ticket.",
       UNTRUSTED_NOTE,
     );
@@ -460,6 +491,8 @@ export function schedulerService(
         }
       }
       const [row] = await db.insert(wakes).values(base).returning();
+      // Start it now rather than at the next timer pass (R85).
+      if (deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
       return row!;
     },
 
@@ -639,6 +672,15 @@ export function schedulerService(
       return runner ? deps.runners.send(runner.id, { type: "workspace.release", projectId: t.projectId, ticketId }) : false;
     },
 
+    /** A ticket went to review: the CEO is woken to review it, unless it moved it or has it itself (R85). */
+    async onTicketReview(ticketId: string, byAgentId: string | null, causedByRunId?: string | null) {
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (!t) return;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+      if (!ceo || ceo.id === byAgentId || ceo.id === t.assigneeAgentId) return;
+      await this.wake({ agentId: ceo.id, ticketId, reason: "review requested", priority: 3, causedByRunId, note: `"${t.title}" is ready for review.${t.stateNote ? ` The agent said: "${t.stateNote}"` : ""} Use the review tool.` });
+    },
+
     /**
      * After a ticket is done: dependents whose blockers are all resolved move to ready,
      * and their assignees are woken. Wakes caused by an agent's run carry the chain depth.
@@ -654,7 +696,7 @@ export function schedulerService(
           .where(eq(ticketDependencies.blockedTicketId, id));
         if (blockers.some((b) => b.state !== "done")) continue;
         const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, id), eq(tickets.systemState, "blocked"))).returning();
-        if (t?.assigneeAgentId) await this.wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", causedByRunId });
+        if (t?.assigneeAgentId) await this.wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
       }
       // The wiki maintainer files what finished work produced (R73). One waiting run covers
       // every ticket finished before it starts, and a paused maintainer's run waits.

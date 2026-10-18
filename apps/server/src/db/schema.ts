@@ -248,6 +248,8 @@ export const tickets = pgTable(
     watchEveryMinutes: integer("watch_every_minutes"),
     /** When the watcher was last asked for a report on this ticket. */
     watchedAt: timestamp("watched_at", { withTimezone: true }),
+    /** The ticket's facts as of the last report, so the watcher runs only when something changed (R85). */
+    watchFingerprint: text("watch_fingerprint"),
     /** Spend ceiling across all of this ticket's runs (R53); falls back to the project's default. */
     costCapMicros: micros("cost_cap_micros"),
     /** Risk tier (R48): who reviews it, how deep the checks go, staging first. Null is medium. */
@@ -261,6 +263,9 @@ export const tickets = pgTable(
     customFields: jsonb("custom_fields").notNull().default({}),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
+    /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
+    stateNote: text("state_note"),
+    stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },

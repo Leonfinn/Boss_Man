@@ -20,7 +20,7 @@ type Start = Extract<RunnerCommand, { type: "run.start" }>;
 async function setup() {
   const { db, close } = await openPglite();
   let clock = new Date("2026-10-16T09:00:00Z");
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", now: () => clock });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: () => clock });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   ctx = { close: async () => (await built.app.close(), await close()) };

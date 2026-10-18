@@ -62,6 +62,8 @@ export type AppOptions = {
   heartbeatMs?: number;
   /** Launch-safety limits (R30); defaults in DEFAULT_LIMITS. */
   limits?: Partial<Limits>;
+  /** Start a scheduler pass as soon as a wake is queued; on unless a test turns it off (R85). */
+  tickOnWake?: boolean;
   /** Where runners put each ticket's workspace. */
   workspaceRoot?: string;
   /** Stale-blocker and stalled-run thresholds (R21, R32). */
@@ -176,6 +178,8 @@ export async function buildApp(opts: AppOptions) {
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
+    tickOnWake: opts.tickOnWake,
+    log: (m) => app.log.error(m),
     // Loop and runaway alerts land in the owner's decision queue.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
   });
@@ -294,7 +298,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 

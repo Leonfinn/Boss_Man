@@ -55,7 +55,7 @@ describe("ticket versions (R81)", () => {
   it("refuses a stale expected_version, changes nothing, and says what the ticket is now", async () => {
     const c = await agent();
     await ctx.db.update(tickets).set({ assigneeAgentId: ctx.co.ceo.id }).where(eq(tickets.id, ctx.ticketId));
-    const res = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "review", expected_version: 1 } });
+    const res = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "review", expected_version: 1, summary: "Ready." } });
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/changed since you last saw it/);
     expect(textOf(res)).toMatch(/in_progress.*version 2/);
@@ -67,16 +67,16 @@ describe("ticket versions (R81)", () => {
 
   it("moves the ticket and bumps its version when expected_version matches", async () => {
     const c = await agent();
-    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "review", expected_version: 1 } }))).toMatch(/now review/);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "review", expected_version: 1, summary: "Ready." } }))).toMatch(/now review/);
     expect(await row()).toMatchObject({ systemState: "review", version: 2 });
     // The version the agent had is now stale.
-    expect((await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "done", expected_version: 1 } })).isError).toBe(true);
+    expect((await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "done", expected_version: 1, summary: "Finished." } })).isError).toBe(true);
     await c.close();
   });
 
   it("still works without expected_version, and agents are shown the version", async () => {
     const c = await agent();
-    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "blocked" } }))).toMatch(/now blocked/);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "blocked", summary: "Waiting on a key." } }))).toMatch(/now blocked/);
     expect((await row()).version).toBe(2);
     expect(textOf(await c.callTool({ name: "tickets", arguments: { action: "read", ticketId: ctx.ticketId } }))).toContain("Version: 2");
     expect(textOf(await c.callTool({ name: "tickets", arguments: { action: "find" } }))).toContain('"version":2');

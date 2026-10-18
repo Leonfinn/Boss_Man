@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, RISK_TIERS, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, RISK_TIERS, stateNoteLine, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, workflowColumns } from "./db/schema.js";
@@ -39,7 +39,16 @@ const STATES = ["backlog", "ready", "in_progress", "blocked", "review", "done"] 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], isError: true });
 
-export type McpHooks = { onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown> };
+export type McpHooks = {
+  onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown>;
+  onTicketReview?: (ticketId: string, byAgentId: string | null, causedByRunId: string) => Promise<unknown>;
+};
+
+/** The ticket row for an agent, with its state note shown with its age (R85). */
+const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date }>({ stateNote, stateNoteAt, ...r }: T) => {
+  const note = stateNoteLine({ stateNote, stateNoteAt, lastActivityAt: r.lastActivityAt }, new Date());
+  return note ? { ...r, stateNote: note } : r;
+};
 
 type Services = {
   decisions: ReturnType<typeof decisionsService>;
@@ -126,10 +135,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
-      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional() },
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
     },
-    async ({ ticketId, state, outcome, expected_version }) => {
+    async ({ ticketId, state, outcome, expected_version, summary }) => {
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
       if (state === "done") {
         const [t] = await db
@@ -139,6 +148,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
         if (t?.repoUrl && outcome !== "cancelled") return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
       }
+      if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
       // The card moves to the project's first column for the new state, so the board matches.
       const [col] = await db
         .select({ id: workflowColumns.id })
@@ -147,9 +157,11 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         .where(and(eq(tickets.id, ticketId), eq(workflowColumns.systemState, state)))
         .orderBy(asc(workflowColumns.position))
         .limit(1);
+      const at = new Date();
       const rows = await db
         .update(tickets)
-        .set({ systemState: state, columnId: col?.id ?? null, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: new Date() })
+        // One timestamp for both, so a fresh note isn't called out of date.
+        .set({ systemState: state, columnId: col?.id ?? null, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
@@ -164,6 +176,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
+      if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
       return text(`Ticket ${ticketId} is now ${state}.`);
     },
   );
@@ -605,10 +618,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     async () => {
       if (!scope.agentId) return text("[]");
       const rows = await db
-        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate })
+        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, lastActivityAt: tickets.lastActivityAt })
         .from(tickets)
         .where(and(eq(tickets.assigneeAgentId, scope.agentId), ne(tickets.systemState, "done")));
-      return text(JSON.stringify(rows));
+      return text(JSON.stringify(rows.map(withNote)));
     },
   );
 
@@ -641,13 +654,13 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
       if (action === "find") {
         const like = q?.trim() ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
         const rows = await db
-          .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt })
+          .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like)) : undefined))
           .orderBy(desc(tickets.lastActivityAt))
           .limit(40);
-        return text(JSON.stringify(rows));
+        return text(JSON.stringify(rows.map(withNote)));
       }
       if (!ticketId) return fail("Give the ticketId to read.");
       const [row] = await db
@@ -660,10 +673,12 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
       const made = await wiki.artifacts(ticketId);
       const talk = await conversationLines(db, ticketId);
       const t = row.t;
+      const note = stateNoteLine(t, new Date());
       return text(
         [
           `# ${t.title}`,
           `Ticket ${t.id} in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+          ...(note ? [note] : []),
           t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
           "",
           "## Description",
