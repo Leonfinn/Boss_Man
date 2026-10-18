@@ -23,8 +23,9 @@ export async function runnerSocketRoutes(
     const runId = (req.query as { runId?: string }).runId;
     const validRunId = runId && /^[0-9a-f-]{36}$/i.test(runId) ? runId : undefined;
     reply.header("cache-control", "no-store");
-    // Outside a run, the only purpose a runner has for secrets is pushing a merge (R46).
-    const purpose = (req.query as { purpose?: string }).purpose === "merge" && !validRunId ? "merge" : "run";
+    // Outside a run, a runner needs secrets only to push a merge (R46) or check the setup-token (R58).
+    const asked = (req.query as { purpose?: string }).purpose;
+    const purpose = !validRunId && (asked === "merge" || asked === "check") ? asked : "run";
     return { env: await secrets.resolveCompanyEnv(runner.companyId, purpose, validRunId) };
   });
 
