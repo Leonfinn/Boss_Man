@@ -15,7 +15,7 @@ import {
   type RunnerEvent,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runs, ticketArtifacts, ticketDependencies, tickets, wikiPages } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -76,6 +76,36 @@ export type LoopHooks = {
 
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
 
+/**
+ * What the blockers that just resolved produced, for the "unblocked" wake (R85). An answered
+ * decision's dependency row is already gone by then, so its question and answer come in as `answered`.
+ */
+export async function unblockedNote(db: Db, ticketId: string, answered?: { question: string; answer: string }) {
+  const blockers = await db
+    .select({ id: tickets.id, title: tickets.title, note: tickets.stateNote, question: decisions.question, answer: decisions.answer })
+    .from(ticketDependencies)
+    .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+    .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+    .where(eq(ticketDependencies.blockedTicketId, ticketId));
+  const ids = blockers.flatMap((b) => (b.id ? [b.id] : []));
+  const made = ids.length
+    ? await db
+        .select({ ticketId: ticketArtifacts.ticketId, title: ticketArtifacts.title, slug: wikiPages.slug })
+        .from(ticketArtifacts)
+        .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
+        .where(inArray(ticketArtifacts.ticketId, ids))
+    : [];
+  const lines = blockers.flatMap((b) => {
+    if (b.id) {
+      const outs = made.filter((m) => m.ticketId === b.id).map((m) => m.slug ?? m.title);
+      return [`- "${b.title}" is done.${b.note ? ` Its note: ${b.note}` : ""}${outs.length ? ` It produced: ${outs.join(", ")}.` : ""}`];
+    }
+    return b.question && b.answer ? [`- You asked "${b.question}"; the answer was: ${b.answer}`] : [];
+  });
+  if (answered) lines.push(`- You asked "${answered.question}"; the answer was: ${answered.answer}`);
+  return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
+}
+
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date()) {
   let wake: WakeHook | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -95,7 +125,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     const open = deps.some((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off") || d.decisionStatus === "open");
     if (open) return null;
     const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, ticketId), eq(tickets.systemState, "blocked"))).returning();
-    if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked" });
+    if (wakeAssignee && t?.assigneeAgentId && wake) await wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", note: await unblockedNote(db, t.id) });
     return t ?? null;
   }
 
@@ -543,7 +573,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `The owner answered your question "${d.question}": ${answer}` });
       }
       for (const t of unblocked) {
-        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id });
+        if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
       }
       return { id, answer, delivered };
     },

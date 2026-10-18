@@ -53,7 +53,7 @@ const fakeFetch = (async (input: string | URL) => {
 
 async function setup() {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", fetch: fakeFetch });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", fetch: fakeFetch });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });

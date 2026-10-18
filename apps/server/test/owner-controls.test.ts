@@ -14,7 +14,7 @@ afterEach(async () => {
 
 async function setup() {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false });
   ctx = { close: async () => (await built.app.close(), await close()) };
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;

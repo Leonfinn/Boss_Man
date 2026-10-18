@@ -18,7 +18,7 @@ afterEach(async () => {
 
 async function setup() {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws" });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws" });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -117,7 +117,7 @@ describe("ticket conversation (R65)", () => {
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
     await c.scheduler.tick();
     const client = await c.mcp(c.starts()[0]!.runId);
-    await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review" } });
+    await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Ready." } });
     await client.close();
     const [row] = await c.db.select({ state: tickets.systemState, col: workflowColumns.systemState }).from(tickets).innerJoin(workflowColumns, eq(workflowColumns.id, tickets.columnId)).where(eq(tickets.id, t.id));
     expect(row).toEqual({ state: "review", col: "review" });

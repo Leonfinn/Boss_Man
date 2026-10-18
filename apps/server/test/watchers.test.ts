@@ -20,7 +20,7 @@ afterEach(async () => {
 async function setup() {
   let clock = new Date("2026-10-18T09:00:00Z");
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", now: () => clock });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: () => clock });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -38,7 +38,7 @@ async function setup() {
   const starts = () => sent.filter((c): c is Extract<RunnerCommand, { type: "run.start" }> => c.type === "run.start");
   const advance = (minutes: number) => (clock = new Date(clock.getTime() + minutes * 60_000));
   const watchWakes = () => db.select().from(wakes).where(eq(wakes.reason, WATCH_REASON));
-  return { ...built, db, close, req, base, company, scrum, project, emit, starts, advance, watchWakes };
+  return { ...built, db, close, req, base, company, scrum, project, emit, starts, advance, watchWakes, now: () => clock };
 }
 
 describe("ticket watchers (R80)", () => {
@@ -75,9 +75,37 @@ describe("ticket watchers (R80)", () => {
     c.advance(20);
     await c.scheduler.tick();
     expect(await c.watchWakes()).toHaveLength(1);
+    // Due, and something changed, so it reports again.
+    await c.db.update(tickets).set({ title: "Add checkout flow" }).where(eq(tickets.id, t.id));
     c.advance(11);
     await c.scheduler.tick();
     expect(await c.watchWakes()).toHaveLength(2);
+  });
+
+  it("runs only when the ticket's facts changed, and reports anyway after four intervals (R85)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Add checkout" })).json() as { id: string };
+    await c.req("PUT", `/api/tickets/${t.id}/watcher`, { agentId: c.scrum.id, everyMinutes: 10 });
+    const round = async (change?: () => Promise<unknown>) => {
+      await change?.();
+      c.advance(11);
+      await c.scheduler.tick();
+      const run = c.starts().filter((s) => s.agentId === c.scrum.id).at(-1);
+      if (run) await c.emit({ type: "run.ended", runId: run.runId, stopReason: "end_turn", error: null });
+      return (await c.watchWakes()).length;
+    };
+    await c.scheduler.tick();
+    expect(await c.watchWakes()).toHaveLength(1);
+    // Nothing changed: no run, but it's still checked on schedule.
+    expect(await round()).toBe(1);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.watchedAt).toEqual(c.now());
+    // A new message from the owner is a change.
+    expect(await round(() => c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Any news?" }))).toBe(2);
+    expect(await round()).toBe(2);
+    expect(await round()).toBe(2);
+    expect(await round()).toBe(2);
+    // The fourth quiet interval since the last report forces one.
+    expect(await round()).toBe(3);
   });
 
   it("covers every due ticket in one run, gives a final report when done, and can be turned off", async () => {
@@ -128,6 +156,7 @@ describe("ticket watchers (R80)", () => {
       await c.scheduler.tick();
       const run = c.starts().filter((s) => s.agentId === c.scrum.id).at(-1);
       if (run) await c.emit({ type: "run.ended", runId: run.runId, stopReason: "end_turn", error: null });
+      await c.db.update(tickets).set({ title: `Add checkout ${i}` }).where(eq(tickets.id, t.id));
       c.advance(10);
     }
     expect((await c.watchWakes()).filter((w) => w.status === "dropped")).toEqual([]);

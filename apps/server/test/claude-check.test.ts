@@ -13,7 +13,7 @@ afterEach(async () => {
 
 async function setup(online = true) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST", url: string, payload?: unknown, headers: Record<string, string> = { cookie }) => built.app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as object } : {}) });

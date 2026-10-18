@@ -27,7 +27,7 @@ let ctx: Awaited<ReturnType<typeof setup>>;
 
 async function setup() {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, heartbeatMs: 200 });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, heartbeatMs: 200 });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -202,7 +202,7 @@ describe("Boss Man MCP server", () => {
     // A Homelab Co ticket is invisible to App Co's agent.
     const [hp] = await ctx.db.insert(projects).values({ companyId: ctx.homelab.company.id, name: "Ops" }).returning();
     const [ht] = await ctx.db.insert(tickets).values({ companyId: ctx.homelab.company.id, projectId: hp!.id, title: "Patch TrueNAS" }).returning();
-    const cross = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ht!.id, state: "done" } });
+    const cross = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ht!.id, state: "done", summary: "Done." } });
     expect(cross.isError).toBe(true);
     const [still] = await ctx.db.select().from(tickets).where(eq(tickets.id, ht!.id));
     expect(still!.systemState).toBe("backlog");
@@ -214,8 +214,8 @@ describe("Boss Man MCP server", () => {
     const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.appCo.company.id, projectId: p!.id, title: "Add rate limiting", systemState: "in_progress" }).returning();
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "done" } }))).toMatch(/move the ticket to "review" instead/);
-    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "review" } }))).toMatch(/now review/);
-    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "done", outcome: "cancelled" } }))).toMatch(/now done/);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "review", summary: "Ready." } }))).toMatch(/now review/);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "done", outcome: "cancelled", summary: "Dropped." } }))).toMatch(/now done/);
     await c.close();
   });
 
