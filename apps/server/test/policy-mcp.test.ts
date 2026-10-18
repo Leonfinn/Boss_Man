@@ -186,7 +186,7 @@ describe("Boss Man MCP server", () => {
   it("exposes a small, described tool set", async () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const { tools } = await c.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notify_owner", "raise_decision", "report_key_result", "request_engagement", "review", "runs", "set_ticket_state", "skills", "ticket_reply", "tickets", "wiki"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notify_owner", "propose_hire", "raise_decision", "report_key_result", "request_engagement", "review", "runs", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "wiki"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
     await c.close();
   });
