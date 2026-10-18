@@ -10,7 +10,17 @@
 #
 # Back up secrets/master.key: without it, stored secrets cannot be decrypted.
 #
-# Runners (one per company): create the company in the UI, then issue its runner token
+# Runners, the easy way (R55): turn on the launcher, and each company's runner starts by itself
+# when the company is created (Settings › Runner shows it). In .env:
+#   BOSSMAN_LAUNCHER=1
+#   COMPOSE_PROFILES=launcher
+#   BOSSMAN_DATA=/absolute/host/folder          # company data lives in $BOSSMAN_DATA/companies
+#   BOSSMAN_DOCKER_GID=<stat -c %g /var/run/docker.sock>
+# then: mkdir -p "$BOSSMAN_DATA/companies" && sudo chown 1000:1000 "$BOSSMAN_DATA/companies"
+# The launcher is the only container that can reach Docker, and it accepts only "start, stop or
+# restart company X's runner"; it builds the locked-down container spec itself.
+#
+# Runners by hand (without the launcher): create the company in the UI, then issue its runner token
 # (POST /api/companies/<id>/runner, shown once) and save it:
 #   printf '%s' '<token>' > secrets/runner-app-co.token
 #   sudo chown 1000:1000 secrets/runner-app-co.token && chmod 600 secrets/runner-app-co.token
@@ -71,6 +81,10 @@ services:
     environment:
       DATABASE_URL: postgres://bossman:${POSTGRES_PASSWORD}@db:5432/bossman
       BOSSMAN_MASTER_KEY_FILE: /run/secrets/master_key
+      # The runner launcher (R55); see the top of this file.
+      BOSSMAN_LAUNCHER: ${BOSSMAN_LAUNCHER:-0}
+      BOSSMAN_LAUNCHER_URL: http://launcher:3105
+      BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
       # Session cookies are Secure by default and need HTTPS (e.g. Tailscale Serve or a
       # reverse proxy). Set to 1 only for plain-HTTP access on a trusted LAN.
       BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
@@ -78,12 +92,45 @@ services:
       BOSSMAN_PORTAL_PORT: "3101"
     secrets:
       - master_key
+    volumes:
+      # The key the launcher makes on first start; the server only reads it.
+      - launcher-key:/run/launcher:ro
+    networks: [default, launcher]
     ports:
       # Bound to localhost by default; set BOSSMAN_BIND=0.0.0.0 to reach it from the LAN.
       # BOSSMAN_HOST_PORT picks the host's port when 3100 is taken; the container keeps 3100.
       - "${BOSSMAN_BIND:-127.0.0.1}:${BOSSMAN_HOST_PORT:-3100}:3100"
       # The portal; bound to localhost unless BOSSMAN_PORTAL_BIND says otherwise.
       - "${BOSSMAN_PORTAL_BIND:-127.0.0.1}:${BOSSMAN_PORTAL_HOST_PORT:-3101}:3101"
+
+  launcher:
+    build:
+      context: .
+      dockerfile: apps/launcher/Dockerfile
+    image: boss-man-launcher:current
+    restart: unless-stopped
+    profiles: ["launcher"]
+    environment:
+      BOSSMAN_DATA: ${BOSSMAN_DATA:-/srv/boss-man/data}
+      BOSSMAN_RUNNER_NETWORK: boss-man_default
+      BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
+      BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
+      BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
+    # Docker's socket, through the socket's own group rather than root.
+    group_add: ["${BOSSMAN_DOCKER_GID:-999}"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The same path inside and out, so the folders it binds into runners are real host paths.
+      - ${BOSSMAN_DATA:-/srv/boss-man/data}/companies:${BOSSMAN_DATA:-/srv/boss-man/data}/companies
+      - launcher-key:/run/launcher
+    # Only the server can reach it, on a network with no way out; it publishes no ports.
+    networks: [launcher]
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    pids_limit: 64
 
   runner-app-co:
     <<: *runner
@@ -101,7 +148,12 @@ secrets:
   runner_app_co_token:
     file: ./secrets/runner-app-co.token
 
+networks:
+  launcher:
+    internal: true
+
 volumes:
+  launcher-key:
   db-data:
   app-co-workspaces:
   app-co-runner-data:

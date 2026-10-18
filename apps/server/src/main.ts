@@ -15,6 +15,8 @@ const { app, scheduler, sweeps, notes, feedback, review } = await buildApp({
   secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1",
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,
+  // The runner launcher (R55): starts each company's runner, so no tokens are copied by hand.
+  launcher: env.BOSSMAN_LAUNCHER === "1" ? { url: env.BOSSMAN_LAUNCHER_URL ?? "http://launcher:3105", keyFile: env.BOSSMAN_LAUNCHER_KEY_FILE ?? "/run/launcher/key" } : undefined,
   sweepLimits: {
     ...(env.BOSSMAN_STALE_BLOCKER_HOURS ? { staleAfterMs: Number(env.BOSSMAN_STALE_BLOCKER_HOURS) * 3_600_000 } : {}),
     ...(env.BOSSMAN_STALL_MINUTES ? { stallAfterMs: Number(env.BOSSMAN_STALL_MINUTES) * 60_000 } : {}),

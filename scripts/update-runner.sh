@@ -12,12 +12,21 @@
 set -euo pipefail
 
 IMAGE=boss-man-runner
-compose() { docker compose --profile runners "$@"; }
+# Compose runners follow COMPOSE_PROFILES (from .env); with none set, the "runners" profile as
+# before. Runners the launcher made (R55) are recreated by the launcher itself.
+profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2- || true)}"
+compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
+restart_runners() {
+  compose up -d --no-build
+  local launcher
+  launcher="$(docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher)"
+  if [[ -n "$launcher" ]]; then docker exec "$launcher" node dist/main.js recreate-all; fi
+}
 
 if [[ "${1:-}" == "--rollback" ]]; then
   docker image inspect "$IMAGE:previous" >/dev/null 2>&1 || { echo "No previous image to roll back to." >&2; exit 1; }
   docker tag "$IMAGE:previous" "$IMAGE:current"
-  compose up -d --no-build
+  restart_runners
   echo "Rolled back to the previous runner image."
   exit 0
 fi
@@ -41,5 +50,5 @@ fi
 if docker image inspect "$IMAGE:current" >/dev/null 2>&1; then docker tag "$IMAGE:current" "$IMAGE:previous"; fi
 docker tag "$IMAGE:candidate" "$IMAGE:current"
 docker rmi "$IMAGE:candidate" >/dev/null
-compose up -d --no-build
+restart_runners
 echo "Runners now use the new image ($stamp). To undo: scripts/update-runner.sh --rollback"

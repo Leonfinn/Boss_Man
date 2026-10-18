@@ -4,7 +4,9 @@ import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
-type RunnerStatus = { registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null };
+/** The runner's container when the launcher runs it (R55); null when the launcher is off. */
+type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
+type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
 
@@ -63,6 +65,64 @@ function Runner({ company }: { company: Company }) {
     });
   // The compose file's first runner reads this file; R55's launcher replaces the copying.
   const file = "secrets/runner-app-co.token";
+  const launched = s?.launcher;
+  const launch = (method: "POST" | "DELETE", what: "launch" | "restart", done: string) =>
+    act.run(async () => {
+      await api(`/api/companies/${company.id}/runner/${what}`, { method });
+      status.reload();
+      return done;
+    });
+  if (launched) {
+    const c = launched.container;
+    const connected = s?.registered && s.connected;
+    return (
+      <Section id="runner-h" title="Runner">
+        <p className="muted" style={{ fontSize: 14 }}>
+          Boss Man's launcher runs this company's runner as the container <code className="mono">boss-man-runner-{launched.slug}</code>, locked down, with its files under <code className="mono">companies/{launched.slug}</code> in your data folder.
+        </p>
+        <p style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", alignItems: "center" }} role="status">
+          {connected ? (
+            <span className="tag green">Connected</span>
+          ) : c?.state === "running" ? (
+            <span className="tag amber">Starting…</span>
+          ) : c ? (
+            <span className="tag amber">{c.state[0]!.toUpperCase() + c.state.slice(1)}</span>
+          ) : (
+            <span className="tag">Not started</span>
+          )}
+          {c && <span className="muted">{c.status}</span>}
+          {s?.registered && s.lastSeenAt && <span className="muted">Last seen {when(s.lastSeenAt)}</span>}
+          {s?.registered && s.imageVersion && <span className="mono muted">Image {s.imageVersion}</span>}
+        </p>
+        {launched.error && (
+          <p className="error" role="alert">
+            {launched.error}
+          </p>
+        )}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={act.busy}
+            onClick={() => (!c || window.confirm("Reconnect the runner? It gets a new token and a fresh container; work in progress resumes from its journal.")) && void launch("POST", "launch", c ? "Reconnecting…" : "Starting…")}
+          >
+            {c ? "Reconnect runner" : "Start runner"}
+          </button>
+          {c && (
+            <>
+              <button type="button" className="btn" disabled={act.busy} onClick={() => void launch("POST", "restart", "Restarting…")}>
+                Restart
+              </button>
+              <button type="button" className="btn" disabled={act.busy} onClick={() => window.confirm("Stop and remove the runner? Its workspaces and sessions stay on disk; agents can't run until it's started again.") && void launch("DELETE", "launch", "Stopped.")}>
+                Stop
+              </button>
+            </>
+          )}
+        </div>
+        {act.view}
+      </Section>
+    );
+  }
   return (
     <Section id="runner-h" title="Runner">
       {s && !s.registered && <p>This company has no runner yet. A runner is the container its agents work in; it connects out to this server, so it needs no open ports.</p>}

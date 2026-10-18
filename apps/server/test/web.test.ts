@@ -76,7 +76,7 @@ describe("the web UI (R45)", () => {
     const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
     const { company } = (await app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "App Co" } })).json();
     const status = () => app.inject({ method: "GET", url: `/api/companies/${company.id}/runner`, headers: { cookie } }).then((r) => r.json());
-    expect(await status()).toEqual({ registered: false });
+    expect(await status()).toEqual({ registered: false, launcher: null });
     const reg = (await app.inject({ method: "POST", url: `/api/companies/${company.id}/runner`, headers: { cookie } })).json();
     expect(await status()).toMatchObject({ registered: true, runnerId: reg.runnerId, connected: false });
     built.runners.connect(reg.runnerId, () => true);

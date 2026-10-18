@@ -15,6 +15,7 @@ import { fundingService } from "./services/funding.js";
 import { repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { runnersService } from "./services/runners.js";
+import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -74,6 +75,8 @@ export type AppOptions = {
   portalLimits?: Partial<PortalLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
   now?: () => Date;
+  /** The runner launcher (R55), when BOSSMAN_LAUNCHER=1. */
+  launcher?: LauncherOptions;
 };
 
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
@@ -129,6 +132,7 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
+  const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
@@ -397,6 +401,11 @@ export async function buildApp(opts: AppOptions) {
         await tx.insert(agents).values({ companyId: company!.id, name: "Wiki Maintainer", role: "worker", agentKind: "claude", paused: true, duty: "wiki" });
         return { company: company!, ceo: ceo! };
       });
+      // With the launcher, a new company's runner starts by itself (R55); a failure is the owner's to see.
+      if (launch.enabled)
+        void launch.start(result.company.id).catch((err) =>
+          notes.notify({ companyId: result.company.id, agentId: null, level: "flag", title: `${result.company.name}'s runner didn't start`, body: (err as Error).message, link: "#/settings" }).catch(() => {}),
+        );
       return reply.code(201).send(result);
     });
 
@@ -569,9 +578,19 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/runner", async (req) => {
       const { id } = IdParam.parse(req.params);
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
-      if (!r) return { registered: false };
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt };
+      const launcher = await launch.status(id);
+      if (!r) return { registered: false, launcher };
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, launcher };
     });
+
+    // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.
+    const launchErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof LauncherError) return reply.code(err.status).send({ error: "launcher", message: err.message });
+      throw err;
+    };
+    owner.post("/api/companies/:id/runner/launch", async (req, reply) => launch.start(IdParam.parse(req.params).id).catch(launchErrors(reply)));
+    owner.post("/api/companies/:id/runner/restart", async (req, reply) => launch.restart(IdParam.parse(req.params).id).catch(launchErrors(reply)));
+    owner.delete("/api/companies/:id/runner/launch", async (req, reply) => launch.stop(IdParam.parse(req.params).id).catch(launchErrors(reply)));
 
     owner.get("/api/companies/:id/grants", async (req) => {
       const { id } = IdParam.parse(req.params);
