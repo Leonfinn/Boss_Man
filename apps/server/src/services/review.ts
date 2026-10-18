@@ -1,12 +1,11 @@
 // Review (R39): the review state carries the ticket's diff against its base, line comments
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
-import { and, desc, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, eq, isNotNull } from "drizzle-orm";
 import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, ownerReviews, parseRepoUrl, renderTemplate, riskOf, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { decisions, projects, runners, runs, settings, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, decisions, projects, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
-import type { runsService } from "./runs.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
@@ -22,13 +21,12 @@ export class ReviewError extends Error {
 }
 
 export type GitTemplates = { commit: string; pr: string };
-type WakeHook = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
+type NotifyHook = (agentId: string, input: { reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
 
 export function reviewService(
   db: Db,
   deps: {
     runners: ReturnType<typeof runnersService>;
-    runs: ReturnType<typeof runsService>;
     work: ReturnType<typeof workService>;
     loops: ReturnType<typeof loopGuards>;
     /** Pull requests on the git host (R59), with the company's GIT_TOKEN. */
@@ -37,7 +35,7 @@ export function reviewService(
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
   },
 ) {
-  let wake: WakeHook | null = null;
+  let wake: NotifyHook | null = null;
 
   async function ticketWithRepo(ticketId: string, companyId?: string) {
     const [row] = await db
@@ -90,20 +88,11 @@ export function reviewService(
     return { outcome: "pull_request" as const, delivered: null, detail: { note, url: t.pullRequestUrl } };
   }
 
-  /** Sends text to the ticket's live run if there is one, otherwise wakes its assignee with it. */
-  async function tellAgent(ticket: typeof tickets.$inferSelect, text: string, reason: string, from: string, causedByRunId?: string | null) {
-    const [live] = await db
-      .select({ id: runs.id })
-      .from(runs)
-      .where(and(eq(runs.ticketId, ticket.id), isNull(runs.endedAt)))
-      .orderBy(desc(runs.startedAt));
-    if (live) {
-      await deps.runs.message(live.id, { text, from, companyId: ticket.companyId, causedByRunId });
-      return "sent to the running agent";
-    }
+  /** Tells the ticket's assignee: into its live run if it has one, otherwise by waking it (notify decides). */
+  async function tellAgent(ticket: typeof tickets.$inferSelect, text: string, reason: string, causedByRunId?: string | null) {
     if (!ticket.assigneeAgentId || !wake) throw new ReviewError(409, "The ticket has no assignee to send this to.");
-    await wake({ agentId: ticket.assigneeAgentId, ticketId: ticket.id, reason, priority: 3, note: text, causedByRunId });
-    return "the assignee will be woken with it";
+    const w = (await wake(ticket.assigneeAgentId, { ticketId: ticket.id, reason, priority: 3, note: text, causedByRunId })) as { status: string };
+    return w.status === "steered" ? "sent to the running agent" : "the assignee will be woken with it";
   }
 
   async function templates(companyId: string): Promise<GitTemplates> {
@@ -112,7 +101,7 @@ export function reviewService(
   }
 
   return {
-    setWakeHook(hook: WakeHook) {
+    setWakeHook(hook: NotifyHook) {
       wake = hook;
     },
 
@@ -192,7 +181,7 @@ export function reviewService(
     async sendBack(ticketId: string, text: string, reviewer: string, causedByRunId?: string | null) {
       const { t } = await ticketWithRepo(ticketId);
       await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
-      return tellAgent({ ...t, systemState: "in_progress" }, text, "review", reviewer, causedByRunId);
+      return tellAgent({ ...t, systemState: "in_progress" }, text, "review", causedByRunId);
     },
 
     /**
@@ -218,7 +207,7 @@ export function reviewService(
       };
       const sendBack = async (text: string, reason: string) => {
         await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
-        return tellAgent({ ...t, systemState: "in_progress" }, text, reason, reviewer, causedByRunId);
+        return tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
       };
 
       // The project's check, plus its deeper one for high and critical work (R47, R48).
@@ -294,6 +283,29 @@ export function reviewService(
       }
     },
 
+    /**
+     * Tells someone when a waiting pull request's checks change (R86): a failure goes to the
+     * assignee, who is sent back to fix it; a pass goes to the CEO, who can see why it hasn't
+     * merged. Each head commit and result is told once.
+     */
+    async notifyChecks(ticketId: string) {
+      const { t, repoUrl, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
+      if (!t.pullRequestHead || !t.pullRequestNumber || t.systemState !== "review") return;
+      const { cfg, token } = await prTarget(t.companyId, repoUrl, gitHost, gitApiBase);
+      const c = await deps.gitHosts!.checks(cfg, token, t.pullRequestHead);
+      const key = `${t.pullRequestHead}:${c.state}`;
+      if ((c.state !== "failed" && c.state !== "passed") || key === t.pullRequestCi) return;
+      await db.update(tickets).set({ pullRequestCi: key }).where(eq(tickets.id, ticketId));
+      if (c.state === "failed" && t.assigneeAgentId) {
+        await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
+        await tellAgent({ ...t, systemState: "in_progress" }, `The checks on your pull request ${t.pullRequestUrl ?? ""} failed: ${c.failing.join(", ") || "see the host"}. Fix them, push, then move the ticket back to review.`, "ci failed");
+      }
+      if (c.state === "passed") {
+        const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+        if (ceo) await wake?.(ceo.id, { ticketId, reason: "ci passed", note: `The checks passed on the pull request for "${t.title}", but it hasn't merged: ${t.pullRequestNote ?? "the host hasn't said why"}. Move it forward.` });
+      }
+    },
+
     /** Checks every ticket waiting on a pull request: merged on the host, or mergeable now. */
     async syncPullRequests() {
       const waiting = await db.select({ id: tickets.id }).from(tickets).where(and(isNotNull(tickets.pullRequestNumber), eq(tickets.systemState, "review")));
@@ -301,6 +313,7 @@ export function reviewService(
       for (const w of waiting) {
         const r = await this.mergePullRequest(w.id).catch(() => null);
         if (r?.outcome === "merged") merged++;
+        else if (r) await this.notifyChecks(w.id).catch(() => undefined);
       }
       return { checked: waiting.length, merged };
     },
@@ -314,12 +327,12 @@ export function reviewService(
     },
 
     /** Asks the agent to commit, or to push and open a PR, using the company's templates. */
-    async gitAction(ticketId: string, action: "commit" | "pr", from = "the owner") {
+    async gitAction(ticketId: string, action: "commit" | "pr") {
       const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId);
       if (!repoUrl) throw new ReviewError(422, "That ticket's project has no git repo.");
       const tpl = (await templates(t.companyId))[action];
       const text = renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title });
-      return { delivered: await tellAgent(t, text, action === "pr" ? "open pr" : "commit", from), message: text };
+      return { delivered: await tellAgent(t, text, action === "pr" ? "open pr" : "commit"), message: text };
     },
   };
 }

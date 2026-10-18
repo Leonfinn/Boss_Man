@@ -4,12 +4,12 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import { agentIdentity, planningGuidance, stateNoteLine, UNTRUSTED_NOTE } from "@boss-man/shared";
+import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
-import { agents, companies, costEvents, decisions, engagements, fundingSources, projects, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { agents, companies, costEvents, decisions, engagements, fundingSources, projects, nudges, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { issueRunToken } from "../mcp.js";
 import { record } from "./activity.js";
 import { buildBrief } from "./brief.js";
@@ -40,6 +40,10 @@ export type Limits = {
    */
   answerBatchMs: number;
   answerBatchMaxMs: number;
+  /** The shorter wait for "unblocked" and "assigned" notices (R86). */
+  quickBatchMs: number;
+  /** Nudges one agent may send another in ten minutes (R86). */
+  nudgesPerPairPer10Min: number;
 };
 
 /** Wakes the owner asked for; never limited. A message counts only when no run sent it. */
@@ -57,7 +61,7 @@ const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000 };
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
   agentId: string;
@@ -70,6 +74,10 @@ export type WakeInput = {
   deployId?: string | null;
   /** Recovery (R42): the interrupted run to pick up from. */
   resumeRunId?: string | null;
+  /** Set by notify(): hold the wake until then, saying why. */
+  defer?: { until: Date; why: string };
+  /** Set by notify(): deliver the note into this live run instead of starting one. */
+  steerRunId?: string | null;
 };
 
 type Alert = (companyId: string, question: string) => Promise<unknown>;
@@ -89,6 +97,8 @@ export function schedulerService(
     workspaceRoot?: string;
     limits?: Partial<Limits>;
     now?: () => Date;
+    /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
+    quietHours?: () => Promise<QuietHours | null>;
     /** Start a pass as soon as a wake is queued (R85); tests that drive ticks themselves turn it off. */
     tickOnWake?: boolean;
     log?: (msg: string) => void;
@@ -245,12 +255,7 @@ export function schedulerService(
     for (const x of due) byWatcher.set(x.watcherAgentId!, [...(byWatcher.get(x.watcherAgentId!) ?? []), x.id]);
     for (const [agentId, ids] of byWatcher) {
       const add = ids.map((id) => `Watch ticket ${id}`).join("\n");
-      const [waiting] = await db
-        .select({ id: wakes.id, note: wakes.note })
-        .from(wakes)
-        .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, WATCH_REASON), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)));
-      if (waiting) await db.update(wakes).set({ note: `${waiting.note ?? ""}\n${add}` }).where(eq(wakes.id, waiting.id));
-      else await self.wake({ agentId, reason: WATCH_REASON, note: add, priority: 1 });
+      await self.notify(agentId, { reason: WATCH_REASON, note: add, priority: 1 });
     }
   }
 
@@ -281,7 +286,7 @@ export function schedulerService(
     lines.push(
       "",
       "Look things up before saying you can't: tickets finds and reads any ticket in your company (what it produced, and files from its branch), and wiki reads the company's pages. If you can resolve something with your tools, do it rather than leaving a follow-up note.",
-      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it; a move to review, done or blocked needs a summary of up to 240 characters, which stays on the ticket for whoever reads it next); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help.",
+      "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it; a move to review, done or blocked needs a summary of up to 240 characters, which stays on the ticket for whoever reads it next); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help; nudge (a colleague by name, why, and the ticket if it's about one) to hand something to a colleague or ask them a question. Routine updates are not nudges: put them in ticket_reply or the ticket's state note.",
       "Ending your turn does not move the ticket.",
       UNTRUSTED_NOTE,
     );
@@ -418,41 +423,6 @@ export function schedulerService(
         resumeRunId: input.resumeRunId ?? null,
       };
 
-      // Answers to an agent's questions are gathered for a short while, then given to it in one
-      // run: the owner often answers several in a row, and each run costs as much as the next (R68).
-      // Review requests are gathered the same way, so five reviews are one CEO run (R85).
-      if ((input.reason === ANSWER_REASON || input.reason === REVIEW_REASON) && limits.answerBatchMs > 0) {
-        const t = now();
-        const [waiting] = await db
-          .select()
-          .from(wakes)
-          .where(
-            and(
-              eq(wakes.agentId, agent.id),
-              eq(wakes.reason, input.reason),
-              base.ticketId ? eq(wakes.ticketId, base.ticketId) : isNull(wakes.ticketId),
-              inArray(wakes.status, ["queued", "deferred"]),
-              isNull(wakes.runId),
-            ),
-          )
-          .orderBy(asc(wakes.createdAt))
-          .limit(1);
-        if (waiting) {
-          const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + limits.answerBatchMs);
-          const notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
-          // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.
-          const listed = input.reason === REVIEW_REASON && waiting.note?.includes(base.note?.split(" ")[1] ?? "\0");
-          const [row] = await db
-            .update(wakes)
-            .set({ note: listed ? waiting.note : [waiting.note, base.note].filter(Boolean).join(input.reason === REVIEW_REASON ? "\n" : "\n\n"), priority: Math.max(waiting.priority, base.priority), notBefore })
-            .where(eq(wakes.id, waiting.id))
-            .returning();
-          return row!;
-        }
-        const [row] = await db.insert(wakes).values({ ...base, status: "deferred", statusReason: `waiting briefly for more ${input.reason === REVIEW_REASON ? "reviews" : "answers"}`, notBefore: new Date(t.getTime() + limits.answerBatchMs) }).returning();
-        return row!;
-      }
-
       if (depth > limits.maxDepth) {
         const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `chain of ${depth} wake-ups exceeds ${limits.maxDepth}` }).returning();
         await deps.alert(agent.companyId, `${agent.name} was woken ${depth} times in a chain, which looks like a loop. The last wake ("${input.reason}") was dropped. Look into it, then wake the agent again if it's fine.`);
@@ -473,7 +443,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== REVIEW_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -487,6 +457,7 @@ export function schedulerService(
               sql`not (${wakes.reason} in (${sql.join([...OWNER_REASONS].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`,
               sql`${wakes.reason} <> ${WATCH_REASON}`,
               sql`${wakes.reason} <> ${REVIEW_REASON}`,
+              sql`${wakes.reason} <> ${ANSWER_REASON}`,
             ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
@@ -507,10 +478,109 @@ export function schedulerService(
           return row!;
         }
       }
-      const [row] = await db.insert(wakes).values(base).returning();
+      if (input.steerRunId) {
+        const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, agent.companyId));
+        const text = `Message from Boss Man (${input.reason}): ${input.note}`;
+        if (runner && deps.runners.send(runner.id, { type: "run.message", runId: input.steerRunId, text, interrupt: false })) {
+          const [row] = await db.insert(wakes).values({ ...base, status: "steered", statusReason: `delivered into run ${input.steerRunId}` }).returning();
+          return row!;
+        }
+      }
+      // Agent wakes below high priority wait out the owner's quiet hours; one morning run covers them (R86).
+      const quietEnd = !fromOwner(input) && base.priority < limits.highPriority && deps.quietHours ? quietHoursEnd(now(), await deps.quietHours()) : null;
+      const hold = quietEnd && (!input.defer || quietEnd > input.defer.until) ? { until: quietEnd, why: "quiet hours" } : input.defer;
+      const [row] = await db.insert(wakes).values(hold ? { ...base, status: "deferred", statusReason: hold.why, notBefore: hold.until } : base).returning();
       // Start it now rather than at the next timer pass (R85).
-      if (deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
+      if (!hold && deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
       return row!;
+    },
+
+    /**
+     * Tells an agent something (R86), the one way to do it. A live run on the same ticket (or
+     * none, for a ticketless notice) is told directly; otherwise the note joins a wake already
+     * waiting for the same agent, ticket and reason, held for that reason's batch window; and
+     * otherwise a new wake is queued, through every guard in wake().
+     */
+    async notify(agentId: string, input: Omit<WakeInput, "agentId" | "defer" | "steerRunId">) {
+      const ticketId = input.ticketId ?? null;
+      const note = input.note ?? null;
+      const priority = input.priority ?? 2;
+      const t = now();
+      // Chat runs have their own tools, and a watch report is built from its wake's note, so neither takes a steer.
+      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON) {
+        const [live] = await db
+          .select({ id: runs.id })
+          .from(runs)
+          .where(and(eq(runs.agentId, agentId), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat")), ticketId ? eq(runs.ticketId, ticketId) : isNull(runs.ticketId), input.causedByRunId ? ne(runs.id, input.causedByRunId) : undefined))
+          .orderBy(desc(runs.startedAt))
+          .limit(1);
+        if (live) return this.wake({ ...input, agentId, steerRunId: live.id });
+      }
+      // How long a reason waits for more of itself; 0 still joins a wake that is already waiting.
+      const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.answerBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs } as Record<string, number>)[input.reason] ?? 0;
+      const [waiting] = await db
+        .select()
+        .from(wakes)
+        .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, input.reason), ticketId ? eq(wakes.ticketId, ticketId) : isNull(wakes.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
+        .orderBy(asc(wakes.createdAt))
+        .limit(1);
+      if (!waiting) return this.wake({ ...input, agentId, ...(window > 0 ? { defer: { until: new Date(t.getTime() + window), why: `waiting briefly for more "${input.reason}"` } } : {}) });
+      // Each note waits the window again, up to answerBatchMaxMs after the first.
+      const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + window);
+      let notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
+      // A high-priority note ends a quiet-hours wait.
+      const release = waiting.statusReason === "quiet hours" && priority >= limits.highPriority;
+      if (release) notBefore = null;
+      // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.
+      const listed = !note || !!waiting.note?.includes(input.reason === REVIEW_REASON ? (note.split(" ")[1] ?? "\0") : note);
+      const [row] = await db
+        .update(wakes)
+        .set({ note: listed ? waiting.note : [waiting.note, note].filter(Boolean).join(input.reason === REVIEW_REASON ? "\n" : "\n\n"), priority: Math.max(waiting.priority, priority), notBefore, ...(release ? { status: "queued" as const, statusReason: null } : {}) })
+        .where(eq(wakes.id, waiting.id))
+        .returning();
+      if (release && deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
+      return row!;
+    },
+
+    /**
+     * An agent hands something to a colleague (R86). It goes through notify() with the sender's
+     * run as the cause, so the depth and self-wake limits apply, plus two limits of its own:
+     * a few per pair per ten minutes, and no A-to-B-to-A ping-pong on one ticket.
+     */
+    async nudge(input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }): Promise<{ ok: true; delivered: string } | { ok: false; error: string }> {
+      const [from] = await db.select().from(agents).where(eq(agents.id, input.fromAgentId));
+      if (!from) return { ok: false, error: "No such agent." };
+      const team = await db.select().from(agents).where(and(eq(agents.companyId, from.companyId), isNull(agents.retiredAt)));
+      const to = team.find((a) => a.id === input.to) ?? team.find((a) => a.name.toLowerCase() === input.to.toLowerCase());
+      if (!to) return { ok: false, error: `No agent called ${input.to} in your company.` };
+      if (to.id === from.id) return { ok: false, error: "That's you." };
+      const ticketId = input.ticketId ?? null;
+      if (ticketId) {
+        const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
+        if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
+      }
+      const since = new Date(now().getTime() - 10 * 60_000);
+      const [sent] = await db.select({ n: sql<number>`count(*)::int` }).from(nudges).where(and(eq(nudges.fromAgentId, from.id), eq(nudges.toAgentId, to.id), eq(nudges.dropped, false), gt(nudges.createdAt, since)));
+      if ((sent?.n ?? 0) >= limits.nudgesPerPairPer10Min) return { ok: false, error: `You've nudged ${to.name} ${limits.nudgesPerPairPer10Min} times in 10 minutes. Wait for them, or put it on the ticket.` };
+      const [back] = await db
+        .select({ id: nudges.id })
+        .from(nudges)
+        .where(and(eq(nudges.fromAgentId, to.id), eq(nudges.toAgentId, from.id), eq(nudges.dropped, false), gt(nudges.createdAt, since), ticketId ? eq(nudges.ticketId, ticketId) : isNull(nudges.ticketId)))
+        .limit(1);
+      const row = { companyId: from.companyId, fromAgentId: from.id, toAgentId: to.id, ticketId };
+      if (back) {
+        const [told] = await db
+          .select({ id: nudges.id })
+          .from(nudges)
+          .where(and(eq(nudges.dropped, true), gt(nudges.createdAt, since), or(and(eq(nudges.fromAgentId, from.id), eq(nudges.toAgentId, to.id)), and(eq(nudges.fromAgentId, to.id), eq(nudges.toAgentId, from.id)))))
+          .limit(1);
+        await db.insert(nudges).values({ ...row, dropped: true });
+        if (!told) await deps.alert(from.companyId, `${from.name} and ${to.name} are nudging each other back and forth about the same thing. The latest nudge was dropped. Look into it.`);
+        return { ok: false, error: `${to.name} nudged you about this a moment ago. Answer them on the ticket instead of nudging back.` };
+      }
+      await db.insert(nudges).values(row);
+      const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });
+      return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it" };
     },
 
     /**
@@ -695,7 +765,7 @@ export function schedulerService(
       if (!t) return;
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
       if (!ceo || ceo.id === byAgentId || ceo.id === t.assigneeAgentId) return;
-      await this.wake({ agentId: ceo.id, reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
+      await this.notify(ceo.id, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
     },
 
     /**
@@ -713,19 +783,13 @@ export function schedulerService(
           .where(eq(ticketDependencies.blockedTicketId, id));
         if (blockers.some((b) => b.state !== "done")) continue;
         const [t] = await db.update(tickets).set({ systemState: "ready", lastActivityAt: now() }).where(and(eq(tickets.id, id), eq(tickets.systemState, "blocked"))).returning();
-        if (t?.assigneeAgentId) await this.wake({ agentId: t.assigneeAgentId, ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
+        if (t?.assigneeAgentId) await this.notify(t.assigneeAgentId, { ticketId: t.id, reason: "unblocked", causedByRunId, note: await unblockedNote(db, t.id) });
       }
       // The wiki maintainer files what finished work produced (R73). One waiting run covers
       // every ticket finished before it starts, and a paused maintainer's run waits.
       const [done] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
       const [keeper] = done ? await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, done.companyId), eq(agents.duty, "wiki"))) : [];
-      if (keeper) {
-        const [waiting] = await db
-          .select({ id: wakes.id })
-          .from(wakes)
-          .where(and(eq(wakes.agentId, keeper.id), eq(wakes.reason, WIKI_REASON), inArray(wakes.status, ["queued", "deferred"])));
-        if (!waiting) await this.wake({ agentId: keeper.id, reason: WIKI_REASON, priority: 1, causedByRunId });
-      }
+      if (keeper) await this.notify(keeper.id, { reason: WIKI_REASON, priority: 1, causedByRunId });
     },
   };
   return self;

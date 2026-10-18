@@ -1,9 +1,9 @@
 // A ticket's conversation (R65). The owner writes on a ticket and the agent working it
 // hears: straight into its live run if there is one, otherwise as a new run on the ticket.
 // Agents answer with the ticket_reply tool, and each run's last message lands here too.
-import { and, asc, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, ne, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, runs, ticketMessages, tickets, wakes } from "../db/schema.js";
+import { agents, runs, ticketMessages, tickets } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
 import { record } from "./activity.js";
 
@@ -20,9 +20,9 @@ export class TicketChatError extends Error {
   }
 }
 
-type WakeHook = (input: { agentId: string; ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>;
+type NotifyHook = (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<unknown>;
 
-export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsService>; wake: WakeHook }) {
+export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsService>; notify: NotifyHook }) {
   async function ticket(ticketId: string, companyId?: string) {
     const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
     if (!t || (companyId && t.companyId !== companyId)) throw new TicketChatError(404, "No ticket with that ID in your company.");
@@ -77,14 +77,9 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       // Stored before the wake, so the new run's prompt already carries it.
       const [m] = await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "owner", agentId, runId, text, delivery }).returning();
       await record(db, { companyId: t.companyId, ticketId, kind: "message", summary: `Owner wrote: ${text}` });
-      // One waiting run picks up every message sent before it starts.
-      const [waiting] =
-        delivery === "woken"
-          ? await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, agentId!), eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])))
-          : [];
-      if (delivery === "woken" && !waiting) {
-        await deps.wake({
-          agentId: agentId!,
+      // One waiting run picks up every message sent before it starts: notify joins a waiting wake.
+      if (delivery === "woken") {
+        await deps.notify(agentId!, {
           ticketId,
           reason: "message",
           priority: 3,

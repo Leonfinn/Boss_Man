@@ -225,6 +225,13 @@
       "when": 1792341982093,
       "tag": "0031_activity_brief",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1792343671813,
+      "tag": "0032_notify",
+      "breakpoints": true
     }
   ]
 }

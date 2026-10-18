@@ -44,6 +44,7 @@ const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], is
 export type McpHooks = {
   onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown>;
   onTicketReview?: (ticketId: string, byAgentId: string | null, causedByRunId: string) => Promise<unknown>;
+  nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
 };
 
 /** The ticket row for an agent, with its state note shown with its age (R85). */
@@ -205,6 +206,20 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body: body.slice(0, 300), link: `#/tickets/${ticketId}` });
       return text("Posted on the ticket's conversation.");
+    },
+  );
+
+  server.registerTool(
+    "nudge",
+    {
+      description:
+        "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, and none back and forth about the same ticket.",
+      inputSchema: { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) },
+    },
+    async ({ agent, ticketId, why }) => {
+      if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
+      const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
+      return r.ok ? text(`Nudged: ${r.delivered}.`) : fail(r.error);
     },
   );
 
