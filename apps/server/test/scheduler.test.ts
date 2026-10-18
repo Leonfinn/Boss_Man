@@ -187,8 +187,35 @@ describe("scheduler", () => {
     ctx = await setup();
     const d = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Which DNS provider?", options: ["deSEC", "Cloudflare"], recommended: "deSEC" });
     await ctx.req("POST", `/api/decisions/${d.id}/answer`, { answer: "deSEC" });
+    // It waits a moment for more answers (R68); move past that.
+    await ctx.db.update(wakes).set({ notBefore: new Date(Date.now() - 1000) }).where(eq(wakes.reason, "decision answered"));
     await ctx.req("POST", "/api/scheduler/tick");
     expect(ctx.commands[0]!.prompt).toContain('The owner answered your question "Which DNS provider?": deSEC');
+  });
+
+  it("gives an agent several answers in a row in one run, not one run each (R68)", async () => {
+    ctx = await setup();
+    const ask = (question: string) => ctx!.decisions.raise({ companyId: ctx!.company.id, agentId: ctx!.ceo.id, question, options: ["Yes", "No"], recommended: "Yes" });
+    const [a, b, c] = [await ask("Mission?"), await ask("Objectives?"), await ask("Research first?")];
+    await ctx.req("POST", `/api/decisions/${a.id}/answer`, { answer: "Yes" });
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect(ctx.commands).toEqual([]);
+    const [first] = await ctx.db.select().from(wakes).where(eq(wakes.reason, "decision answered"));
+    expect(first).toMatchObject({ status: "deferred", statusReason: "waiting briefly for more answers" });
+    expect(first!.notBefore!.getTime() - Date.now()).toBeGreaterThan(100_000);
+
+    // Each answer waits again, but never more than five minutes after the first.
+    await ctx.db.update(wakes).set({ createdAt: new Date(Date.now() - 4 * 60_000), notBefore: new Date(Date.now() - 2 * 60_000) }).where(eq(wakes.id, first!.id));
+    await ctx.req("POST", `/api/decisions/${b.id}/answer`, { answer: "No" });
+    await ctx.req("POST", `/api/decisions/${c.id}/answer`, { answer: "Yes" });
+    const all = await ctx.db.select().from(wakes).where(eq(wakes.reason, "decision answered"));
+    expect(all).toHaveLength(1);
+    expect(Math.abs(all[0]!.notBefore!.getTime() - (Date.now() + 60_000))).toBeLessThan(5_000);
+
+    await ctx.db.update(wakes).set({ notBefore: new Date(Date.now() - 1000) }).where(eq(wakes.id, first!.id));
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect(ctx.commands).toHaveLength(1);
+    for (const q of ['"Mission?": Yes', '"Objectives?": No', '"Research first?": Yes']) expect(ctx.commands[0]!.prompt).toContain(q);
   });
 
   it("finishing a ticket unblocks and wakes the work waiting on it", async () => {
