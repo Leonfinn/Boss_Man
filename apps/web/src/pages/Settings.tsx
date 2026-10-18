@@ -13,7 +13,7 @@ type Secret = { id: string; name: string; kind: string; hint: string | null };
 /** What each kind of credential is called inside an agent's environment by default. */
 const CREDENTIALS = [
   { kind: "claude_oauth_token", label: "Claude setup-token", env: "CLAUDE_CODE_OAUTH_TOKEN", help: "Run `claude setup-token` on your own computer and paste the token it prints." },
-  { kind: "generic", label: "GitHub token", env: "GIT_TOKEN", help: "A fine-grained token for the company's repos, with Contents and Pull requests read and write." },
+  { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents and Pull requests read and write. Gitea: a token with the write:repository scope." },
   { kind: "anthropic_api_key", label: "Anthropic API key", env: "ANTHROPIC_API_KEY", help: "From the Anthropic Console. Runs on it are billed to your API credit." },
   { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
@@ -52,7 +52,7 @@ function useAction() {
   return { busy, run, view };
 }
 
-function Runner({ company }: { company: Company }) {
+export function Runner({ company }: { company: Company }) {
   const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
   const [token, setToken] = useState<string | null>(null);
   const act = useAction();
@@ -160,7 +160,7 @@ function Runner({ company }: { company: Company }) {
   );
 }
 
-function Credentials({ company }: { company: Company }) {
+export function Credentials({ company }: { company: Company }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   const [choice, setChoice] = useState(0);
@@ -316,7 +316,7 @@ function Credentials({ company }: { company: Company }) {
   );
 }
 
-function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
+export function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 30_000, "sources");
   const [form, setForm] = useState({ name: "", kind: "subscription", provider: "anthropic", grant: "", anchor: "" });
   const act = useAction();
@@ -450,7 +450,7 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
   );
 }
 
-function ProjectRow({ p }: { p: Project }) {
+export function ProjectRow({ p }: { p: Project }) {
   const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
   const [host, setHost] = useState(p.gitHost);
   const act = useAction();
@@ -634,9 +634,18 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           <h1>Settings</h1>
           <p className="sub">What each company needs to run: a runner, credentials, funding and its repos.</p>
         </div>
+        <button type="button" className="btn" onClick={() => go("setup")}>
+          Run the setup wizard
+        </button>
       </header>
       {!company ? (
-        <p>Create a company on the Kanban first.</p>
+        <p>
+          Create a company on the Kanban first, or{" "}
+          <button type="button" className="linkish" onClick={() => go("setup")}>
+            run the setup wizard
+          </button>
+          .
+        </p>
       ) : (
         <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <Runner company={company} />

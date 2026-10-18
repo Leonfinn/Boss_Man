@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { api, type Company, type Decision } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
@@ -21,7 +21,7 @@ function kindOf(d: Decision) {
   return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -70,6 +70,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           </div>
         )}
       </header>
+      {banner}
 
       {loaded && shown.length === 0 ? (
         agentsWorking > 0 ? (

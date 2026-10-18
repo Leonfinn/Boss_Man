@@ -15,8 +15,9 @@ import { agents, companies, engagements, owners, projects, runners as runnersTab
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { modelsService } from "./services/models.js";
-import { repoUrlAllowed } from "@boss-man/shared";
+import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
+import { setupService } from "./services/setup.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -261,6 +262,7 @@ export async function buildApp(opts: AppOptions) {
   });
   const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now });
   const gitHosts = gitHostService({ fetch: opts.fetch });
+  const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
     runners,
     runs: runsSvc,
@@ -761,6 +763,27 @@ export async function buildApp(opts: AppOptions) {
         .where(eq(projects.id, id))
         .returning();
       return p ?? reply.code(404).send({ error: "not_found" });
+    });
+
+    // The setup wizard (R56): where the owner is in it, and what's still to do for a company.
+    owner.get("/api/setup-progress", async () => setup.progress());
+    owner.put("/api/setup-progress", async (req) => setup.save(z.object({ dismissed: z.boolean(), step: z.number().int().min(0).max(10), companyId: Uuid.nullable() }).partial().parse(req.body)));
+    owner.get("/api/companies/:id/setup-checklist", async (req, reply) => (await setup.checklist(IdParam.parse(req.params).id)) ?? reply.code(404).send({ error: "not_found" }));
+
+    // Is the company's git token good for this repo (R58, R56)? One read of the repo, with its permissions.
+    owner.post("/api/projects/:id/check-git-token", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [p] = await db.select().from(projects).where(eq(projects.id, id));
+      if (!p) return reply.code(404).send({ error: "not_found" });
+      const a = p.repoUrl ? parseRepoUrl(p.repoUrl) : null;
+      if (!a || (p.gitHost !== "github" && p.gitHost !== "gitea") || !p.gitApiBase) return { ok: false, canPush: false, message: "Boss Man doesn't know this project's git host yet; save its repo address first." };
+      const token = (await secretsSvc.resolveCompanyEnv(p.companyId, "check")).GIT_TOKEN;
+      if (!token) return { ok: false, canPush: false, message: "The company has no GIT_TOKEN yet." };
+      try {
+        return await gitHosts.checkAccess({ kind: p.gitHost, apiBase: p.gitApiBase, owner: a.owner, repo: a.repo }, token);
+      } catch (err) {
+        return { ok: false, canPush: false, message: `Couldn't reach the host: ${(err as Error).message}` };
+      }
     });
 
     // Merge check presets (R57): the runner proposes checks from the repo, alongside the standard ones.
