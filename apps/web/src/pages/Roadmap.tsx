@@ -201,7 +201,7 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
               P{o.priority}
             </span>{" "}
             {o.title}
-            {o.status !== "active" && <span className="tag"> {o.status}</span>}
+            {o.status !== "active" && <span className="tag"> {o.status === "dropped" ? "removed" : o.status}</span>}
           </h3>
           {o.keyResults.length > 0 && (
             <ul className="rm-krs">
@@ -230,8 +230,8 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
               <button type="button" className="btn small" onClick={() => setStatus("done")}>
                 Mark done
               </button>
-              <button type="button" className="btn small" onClick={() => window.confirm(`Drop "${o.title}"?`) && setStatus("dropped")}>
-                Drop
+              <button type="button" className="btn small" onClick={() => window.confirm(`Remove "${o.title}" from the roadmap? It's kept: tick "Show done work" to see it again, and Reopen to bring it back.`) && setStatus("dropped")}>
+                Remove
               </button>
             </>
           ) : (
