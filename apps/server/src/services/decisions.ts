@@ -30,7 +30,10 @@ export type DecisionContext =
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
   | { type: "ticket_cap"; ticketId: string }
   | { type: "budget_limit"; policyId: string }
-  | { type: "risk_review"; ticketId: string; reviewer: string };
+  | { type: "risk_review"; ticketId: string; reviewer: string }
+  /** The CEO's proposals for the team (R62), applied when the owner approves. */
+  | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string }; byAgentId: string }
+  | { type: "instructions"; agentId: string; instructions: string; byAgentId: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -71,10 +74,13 @@ export type LoopHooks = {
   land(ticketId: string, reviewer: string): Promise<unknown>;
 };
 
+type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
+
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date()) {
   let wake: WakeHook | null = null;
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
+  let onAgentDecision: AgentDecisionHook | null = null;
   let loopHooks: LoopHooks | null = null;
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
@@ -330,6 +336,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onDeploy = hook;
     },
 
+    setAgentHook(hook: AgentDecisionHook) {
+      onAgentDecision = hook;
+    },
+
     setLoopHooks(hooks: LoopHooks) {
       loopHooks = hooks;
     },
@@ -496,6 +506,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await onEngagement?.(ctx.engagementId, answer === "Approve");
       } else if (ctx.type === "deploy") {
         await onDeploy?.(ctx.deployId, answer === "Approve");
+      } else if (ctx.type === "hire" || ctx.type === "instructions") {
+        await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
       } else if (ctx.type === "review_loop" || ctx.type === "ticket_cap") {
         // Free the ticket from this decision first, so the action below sets its final state.
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));

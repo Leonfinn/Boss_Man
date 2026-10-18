@@ -4,11 +4,11 @@
 // to use each tool so Claude Code's tool search finds them.
 import { randomBytes } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { and, asc, desc, eq, gt, ilike, inArray, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { IMPORTANCE, planFirstByDefault, RISK_TIERS, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, RISK_TIERS, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, workflowColumns } from "./db/schema.js";
@@ -25,6 +25,7 @@ import { TicketChatError, type ticketChatService } from "./services/ticket-chat.
 import { WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
+import { AgentError, type agentsService } from "./services/agents.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -53,9 +54,10 @@ type Services = {
   ticketChat: ReturnType<typeof ticketChatService>;
   wiki: ReturnType<typeof wikiService>;
   skills: ReturnType<typeof skillsService>;
+  agents: ReturnType<typeof agentsService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki, skills }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki, skills, agents: team }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -157,7 +159,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerSharedTools(server, db, { notes, wiki, skills, review }, scope);
+  registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
 
   server.registerTool(
     "ticket_reply",
@@ -608,7 +610,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
  * Tools every run has, chat included (R69, R71, R77): the wiki, the skill library, and reading
  * the company's tickets, so an agent can look things up instead of saying it can't see them.
  */
-function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, review }: Pick<Services, "notes" | "wiki" | "skills" | "review">, scope: Scope) {
+function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, review, agents: team }: Pick<Services, "notes" | "wiki" | "skills" | "review" | "agents">, scope: Scope) {
   server.registerTool(
     "tickets",
     {
@@ -694,6 +696,59 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     },
   );
 
+  // The CEO builds the team (R62): hires wait for the owner unless they've said otherwise, and
+  // instruction changes go through with a notification and an Undo unless they want to approve those too.
+  const ceoOnly = async () => {
+    const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+    return me?.role === "ceo" && scope.agentId ? scope.agentId : null;
+  };
+  server.registerTool(
+    "propose_hire",
+    {
+      description: `Hire a new agent for the company (CEO only). Start from a template (${AGENT_TEMPLATES.map((t) => `${t.id}: ${t.summary}`).join("; ")}), give it a name, and tailor its title and instructions to the company. Say why you're hiring. Unless the owner has said otherwise, the hire waits for their approval in Decisions. Use board to see who there is first.`,
+      inputSchema: {
+        name: z.string().trim().min(1).max(80),
+        template: z.string().max(40).optional(),
+        title: z.string().trim().max(80).optional(),
+        instructions: z.string().trim().max(20_000).optional(),
+        model: z.string().max(200).optional(),
+        fundingSourceId: z.string().uuid().optional(),
+        reason: z.string().trim().min(1).max(2000),
+      },
+    },
+    async (input) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can hire.");
+      try {
+        const r = await team.proposeHire(scope.companyId, ceo, input);
+        return text("hired" in r ? `${r.hired.name} is hired (agent ${r.hired.id}); give them work with create_ticket.` : `The hire is waiting for the owner's approval (decision ${r.decisionId}).`);
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+  server.registerTool(
+    "update_instructions",
+    {
+      description: "Change an agent's standing instructions (CEO only): the whole new text, which replaces the old. Say why. The owner is told, and can undo it; if they've asked to approve such changes, it waits in Decisions.",
+      inputSchema: { agent: z.string().trim().min(1).max(80), instructions: z.string().trim().min(1).max(20_000), reason: z.string().trim().min(1).max(2000) },
+    },
+    async ({ agent, instructions, reason }) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can change instructions.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`, isNull(agents.retiredAt)));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      try {
+        const r = await team.proposeInstructions(who.id, ceo, instructions, reason);
+        return text("applied" in r ? `${who.name}'s instructions are updated from their next run.` : `The change is waiting for the owner's approval (decision ${r.decisionId}).`);
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
   server.registerTool(
     "wiki",
     {
@@ -748,9 +803,9 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review }: Services, scope: Scope) {
+function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team }: Services, scope: Scope) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
-  registerSharedTools(server, db, { notes, wiki, skills, review }, scope);
+  registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
   const workFail = (err: unknown) => {
     if (err instanceof WorkError) return fail(err.message);

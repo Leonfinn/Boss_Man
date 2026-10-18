@@ -13,7 +13,8 @@ import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
-import { AgentError, agentsService } from "./services/agents.js";
+import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
+import { modelsService } from "./services/models.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
@@ -135,7 +136,8 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
-  const agentsSvc = agentsService(db, { now: opts.now });
+  const agentsSvc = agentsService(db, { now: opts.now, notify: (n) => notes.notify(n) });
+  const models = modelsService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
@@ -193,6 +195,7 @@ export async function buildApp(opts: AppOptions) {
   runners.onConnect((runnerId) => decisionsSvc.redeliver(runnerId));
   runners.onResume((runner, pending) => decisionsSvc.resume(runner, pending));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
+  decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   const WINDOW_NAME: Record<string, string> = { five_hour: "5-hour", seven_day: "weekly" };
   async function quotaWatch(fundingSourceId: string) {
@@ -229,6 +232,8 @@ export async function buildApp(opts: AppOptions) {
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "chat end failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
     if (event.type === "run.quota") void quotaWatch(event.fundingSourceId).catch((err) => app.log.error({ err }, "quota forecast failed"));
+    // What each agent kind offers, for the model picker (R60).
+    if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err }, "model list failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
@@ -288,7 +293,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -1145,6 +1150,15 @@ export async function buildApp(opts: AppOptions) {
     };
     const Instructions = z.string().trim().max(20_000).nullable();
     owner.get("/api/agent-templates", async () => agentsSvc.templates());
+    // Model lists for the picker (R60); refresh=1 asks API providers again.
+    owner.get("/api/companies/:id/models", async (req) => models.forCompany(IdParam.parse(req.params).id, { refresh: z.object({ refresh: z.string().optional() }).parse(req.query).refresh === "1" }));
+    // What the CEO may change about the team without asking (R62).
+    owner.get("/api/companies/:id/agent-approvals", async (req) => ({ approvals: await agentsSvc.approvals(IdParam.parse(req.params).id) }));
+    owner.put("/api/companies/:id/agent-approvals", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const { approvals } = z.object({ approvals: z.enum(AGENT_APPROVALS) }).parse(req.body);
+      return { approvals: await agentsSvc.setApprovals(id, approvals) };
+    });
     owner.get("/api/companies/:id/agents", async (req) => agentsSvc.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/agents", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
