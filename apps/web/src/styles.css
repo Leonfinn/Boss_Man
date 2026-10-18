@@ -72,8 +72,10 @@ p { margin: 0; }
 .side .brand img { width: 32px; height: 32px; }
 .side .brand span { font-family: var(--display); font-weight: 800; font-size: 22px; color: #fff; letter-spacing: -0.01em; }
 .side ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-.side a.nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; padding: 8px 10px; border-radius: 8px; text-decoration: none; color: var(--side-text); }
+.side a.nav { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px 10px; border-radius: 8px; text-decoration: none; color: var(--side-text); }
 .side a.nav[aria-current="page"] { background: var(--side-active); color: #fff; font-weight: 600; }
+.side a.nav svg { flex: none; }
+.side a.nav .nav-label { flex: 1; min-width: 0; }
 .side .count { font-family: var(--mono); font-size: 12px; min-width: 22px; text-align: center; padding: 1px 6px; border-radius: 999px; background: var(--badge); color: var(--ink); }
 .side h2 { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.08em; color: var(--side-muted); text-transform: uppercase; }
 .side .companies { display: flex; flex-direction: column; gap: 10px; padding: 0 8px; }
@@ -468,7 +470,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
 @media (max-width: 760px) { .dash-lists { grid-template-columns: minmax(0, 1fr); } .dash-list li > span.muted { display: none; } }
 
 /* Company switcher and grouped navigation (R72, R75) */
-.side .nav-groups { display: flex; flex-direction: column; gap: 16px; }
+.side .nav-groups { display: flex; flex-direction: column; gap: 14px; }
+.side .nav-groups section + section { padding-top: 14px; border-top: 1px solid #2a3544; }
 .side .nav-groups h2 { padding: 0 10px 4px; }
 .side .menu-toggle { display: none; background: var(--side-raised); border: 1px solid #33404f; color: #fff; border-radius: 8px; min-height: 40px; padding: 8px 12px; text-align: left; font-size: 14px; }
 .switcher { position: relative; }
