@@ -31,6 +31,13 @@ export type Limits = {
   quotaHoldAt: number;
   /** Wakes at or above this priority ignore the quota hold. */
   highPriority: number;
+  /**
+   * How long an agent's wake for an answered decision waits for more answers, so answering
+   * several in a row starts one run, not one each (R68). Each answer waits this long again,
+   * up to answerBatchMaxMs after the first.
+   */
+  answerBatchMs: number;
+  answerBatchMaxMs: number;
 };
 
 /** Wakes the owner asked for; never limited. A message counts only when no run sent it. */
@@ -38,11 +45,13 @@ export type Limits = {
 export const WIKI_REASON = "wiki upkeep";
 /** A watcher's report on the tickets it watches (R80). Scheduled by Boss Man, so not counted as ticketless churn. */
 export const WATCH_REASON = "ticket watch";
+/** An agent's question answered by the owner (decisions.ts). */
+export const ANSWER_REASON = "decision answered";
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3 };
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000 };
 
 export type WakeInput = {
   agentId: string;
@@ -364,6 +373,38 @@ export function schedulerService(
         deployId: input.deployId ?? null,
         resumeRunId: input.resumeRunId ?? null,
       };
+
+      // Answers to an agent's questions are gathered for a short while, then given to it in one
+      // run: the owner often answers several in a row, and each run costs as much as the next (R68).
+      if (input.reason === ANSWER_REASON && limits.answerBatchMs > 0) {
+        const t = now();
+        const [waiting] = await db
+          .select()
+          .from(wakes)
+          .where(
+            and(
+              eq(wakes.agentId, agent.id),
+              eq(wakes.reason, ANSWER_REASON),
+              base.ticketId ? eq(wakes.ticketId, base.ticketId) : isNull(wakes.ticketId),
+              inArray(wakes.status, ["queued", "deferred"]),
+              isNull(wakes.runId),
+            ),
+          )
+          .orderBy(asc(wakes.createdAt))
+          .limit(1);
+        if (waiting) {
+          const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + limits.answerBatchMs);
+          const notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
+          const [row] = await db
+            .update(wakes)
+            .set({ note: [waiting.note, base.note].filter(Boolean).join("\n\n"), priority: Math.max(waiting.priority, base.priority), notBefore })
+            .where(eq(wakes.id, waiting.id))
+            .returning();
+          return row!;
+        }
+        const [row] = await db.insert(wakes).values({ ...base, status: "deferred", statusReason: "waiting briefly for more answers", notBefore: new Date(t.getTime() + limits.answerBatchMs) }).returning();
+        return row!;
+      }
 
       if (depth > limits.maxDepth) {
         const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `chain of ${depth} wake-ups exceeds ${limits.maxDepth}` }).returning();
