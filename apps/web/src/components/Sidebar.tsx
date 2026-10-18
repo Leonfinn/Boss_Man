@@ -2,41 +2,42 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
+import { Activity, BookOpen, Bell, Gavel, Handshake, KeyRound, Kanban, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Scale, Settings, Sparkles, Users, Wallet, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
-type Item = { id: string; label: string };
-const GROUPS: Array<{ title: string | null; items: Item[] }> = [
+type Item = { id: string; label: string; icon: LucideIcon };
+const GROUPS: Array<{ title: string; items: Item[] }> = [
   {
-    title: null,
+    title: "Overview",
     items: [
-      { id: "dashboard", label: "Dashboard" },
-      { id: "decisions", label: "Decisions" },
-      { id: "notifications", label: "Notifications" },
-      { id: "chat", label: "Chat" },
+      { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+      { id: "decisions", label: "Decisions", icon: Gavel },
+      { id: "notifications", label: "Notifications", icon: Bell },
+      { id: "chat", label: "Chat", icon: MessageSquare },
     ],
   },
   {
     title: "Work",
     items: [
-      { id: "board", label: "Kanban" },
-      { id: "roadmap", label: "Roadmap" },
-      { id: "plan", label: "Plan" },
-      { id: "wiki", label: "Wiki" },
-      { id: "features", label: "Features" },
-      { id: "feedback", label: "Feedback" },
+      { id: "board", label: "Kanban", icon: Kanban },
+      { id: "roadmap", label: "Roadmap", icon: Map },
+      { id: "plan", label: "Plan", icon: ListChecks },
+      { id: "wiki", label: "Wiki", icon: BookOpen },
+      { id: "features", label: "Features", icon: Sparkles },
+      { id: "feedback", label: "Feedback", icon: MessageCircle },
     ],
   },
   {
     title: "Company",
     items: [
-      { id: "agents", label: "Agents" },
-      { id: "skills", label: "Skills" },
-      { id: "runs", label: "Runs" },
-      { id: "engagements", label: "Engagements" },
-      { id: "funding", label: "Funding" },
-      { id: "rules", label: "Rules" },
-      { id: "secrets", label: "Secrets" },
-      { id: "settings", label: "Settings" },
+      { id: "agents", label: "Agents", icon: Users },
+      { id: "skills", label: "Skills", icon: Puzzle },
+      { id: "runs", label: "Runs", icon: Activity },
+      { id: "engagements", label: "Engagements", icon: Handshake },
+      { id: "funding", label: "Funding", icon: Wallet },
+      { id: "rules", label: "Rules", icon: Scale },
+      { id: "secrets", label: "Secrets", icon: KeyRound },
+      { id: "settings", label: "Settings", icon: Settings },
     ],
   },
 ];
@@ -140,13 +141,14 @@ export function Sidebar(props: {
       </button>
       <div id="nav-groups" className={`nav-groups${menu ? " open" : ""}`}>
         {GROUPS.map((g) => (
-          <section key={g.title ?? "top"} aria-label={g.title ?? "Overview"}>
-            {g.title && <h2>{g.title}</h2>}
+          <section key={g.title} aria-label={g.title}>
+            <h2>{g.title}</h2>
             <ul>
               {g.items.map((n) => (
                 <li key={n.id}>
                   <a className="nav" href={`#/${n.id}`} onClick={() => setMenu(false)} aria-current={props.active === n.id || (props.active === "tickets" && n.id === "board") ? "page" : undefined}>
-                    <span>{n.label}</span>
+                    <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
+                    <span className="nav-label">{n.label}</span>
                     {n.id === "decisions" && decisionsHere > 0 && <span className="count" aria-label={`${decisionsHere} waiting`}>{decisionsHere}</span>}
                     {n.id === "feedback" && props.feedback > 0 && <span className="count" aria-label={`${props.feedback} to process`}>{props.feedback}</span>}
                     {n.id === "notifications" && props.unread > 0 && <span className="count" aria-label={`${props.unread} unread`}>{props.unread}</span>}
