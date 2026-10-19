@@ -40,7 +40,27 @@ const OTHER = "__other__";
  * The model field (R60): Default, then what the agent's kind offers on the runner and what its
  * funding source's API key can use, then Other… for a typed ID.
  */
-function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists }: { id: string; value: string; onChange: (v: string) => void; agentKind: string; fundingSourceId: string; lists: ModelLists | null }) {
+function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, refresh }: { id: string; value: string; onChange: (v: string) => void; agentKind: string; fundingSourceId: string; lists: ModelLists | null; refresh: () => Promise<string> }) {
+  const [asking, setAsking] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+  // Asks the runner for the list now, without a chat message (a throwaway session that sends no prompt).
+  const refreshButton = (
+    <>
+      {" "}
+      <button
+        type="button"
+        className="linkish"
+        disabled={asking}
+        onClick={() => {
+          setAsking(true);
+          refresh().then(setSaid, (err: Error) => setSaid(err.message)).finally(() => setAsking(false));
+        }}
+      >
+        {asking ? "Asking the runner…" : "Refresh models"}
+      </button>
+      {said && <span role="status"> {said}</span>}
+    </>
+  );
   // The adapter's own "default" is the same as leaving the model blank.
   const fromRunner = (lists?.runner[agentKind]?.models ?? []).filter((m) => m.value !== "default");
   const fromApi = lists?.api.find((a) => a.fundingSourceId === fundingSourceId);
@@ -57,8 +77,9 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists }:
               Choose from the list
             </button>
           ) : (
-            `No list yet: ${agentKind} reports its models the first time it runs.`
+            `No list yet: the runner reports ${agentKind}'s models when it connects with a credential, or on request.`
           )}
+          {refreshButton}
         </small>
       </>
     );
@@ -88,6 +109,7 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists }:
         )}
         <option value={OTHER}>Other…</option>
       </select>
+      <small className="muted">{refreshButton}</small>
       {fromApi?.error && <small className="error">{fromApi.error}</small>}
     </>
   );
@@ -111,7 +133,7 @@ export const flipWord = (field: string, after: unknown) => (typeof after === "bo
 const show = (v: unknown, sources: FundingSource[]) =>
   v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
 
-function Hire({ companyId, templates, sources, lists, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; onDone: (name: string) => void }) {
+function Hire({ companyId, templates, sources, lists, refresh, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onDone: (name: string) => void }) {
   const [tpl, setTpl] = useState<Template | null>(null);
   const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", fundingSourceId: "" });
   const [error, setError] = useState<string | null>(null);
@@ -180,7 +202,7 @@ function Hire({ companyId, templates, sources, lists, onDone }: { companyId: str
         </div>
         <div className="field">
           <label htmlFor="hire-model">Model</label>
-          <ModelPicker id="hire-model" value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind="claude" fundingSourceId={form.fundingSourceId} lists={lists} />
+          <ModelPicker id="hire-model" value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind="claude" fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
           <small className="muted">{tpl ? `Suggested: a ${tpl.modelTier} model. ` : ""}Blank uses the agent's default.</small>
         </div>
         <div className="field">
@@ -212,7 +234,7 @@ function Hire({ companyId, templates, sources, lists, onDone }: { companyId: str
   );
 }
 
-function Edit({ a, sources, lists, onSaved }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; onSaved: () => void }) {
+function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void }) {
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "" });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -256,7 +278,7 @@ function Edit({ a, sources, lists, onSaved }: { a: AgentRow; sources: FundingSou
             )}
             <div className="field">
               <label htmlFor={`model-${a.id}`}>Model</label>
-              <ModelPicker id={`model-${a.id}`} value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={a.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} />
+              <ModelPicker id={`model-${a.id}`} value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={a.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
             </div>
             <div className="field">
               <label htmlFor={`funding-${a.id}`}>Paid from</label>
@@ -372,6 +394,13 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
   const [open, setOpen] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   if (!company) return <p>Create a company on the Kanban first.</p>;
+  const refreshModels = async () => {
+    const r = await api<{ probed: Record<string, { ok: boolean; error?: string }> }>(`/api/companies/${company!.id}/models/refresh`, { method: "POST" });
+    models.reload();
+    const bad = Object.entries(r.probed).filter(([, v]) => !v.ok);
+    if (bad.length) return bad.map(([k, v]) => `${k}: ${v.error}`).join(" ");
+    return Object.keys(r.probed).length ? "Updated." : "Nothing to ask: the runner is offline, or the company has no Claude or OpenAI credential.";
+  };
   const changed = (text?: string) => {
     list.reload();
     onChanged();
@@ -443,7 +472,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             )}
           </div>
         </div>
-        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} onSaved={() => changed()} />}
+        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} />}
       </li>
     );
   };
@@ -474,6 +503,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           templates={templates.data.templates}
           sources={srcs}
           lists={models.data}
+          refresh={refreshModels}
           onDone={(name) => {
             setHiring(false);
             changed(`${name} hired. Give them a ticket on the Kanban, or make them a ticket's watcher.`);

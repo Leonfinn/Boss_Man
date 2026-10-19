@@ -32,3 +32,18 @@ describe("hire form", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Hire Ada" })).toBeTruthy());
   });
 });
+
+describe("Refresh models", () => {
+  it("asks the server to probe the runner and says what came back", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = url.includes("/models/refresh") ? { probed: { claude: { ok: true, count: 3 } } } : url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")] } : url.includes("/models") ? { runner: {}, api: [] } : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: /hire/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh models" }));
+    expect(await screen.findByText("Updated.")).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([u, i]) => String(u) === "/api/companies/c1/models/refresh" && (i as RequestInit).method === "POST")).toBe(true);
+  });
+});
