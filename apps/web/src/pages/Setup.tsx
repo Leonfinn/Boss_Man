@@ -1,4 +1,4 @@
-// The setup wizard (R56): seven steps from a new install to agents at work, each skippable,
+// The setup wizard (R56): eight steps from a new install to agents at work, each skippable,
 // with progress saved so it resumes. The steps reuse the Settings sections, so there's one way
 // to do each thing. What's still undone shows on Decisions until it's done or dismissed.
 import { useEffect, useState, type FormEvent } from "react";
@@ -11,10 +11,11 @@ export type ChecklistItem = { id: string; label: string; done: boolean };
 
 const STEPS = [
   { id: "company", title: "Your company", why: "Name it and say what it's for. The CEO plans the work from this." },
-  { id: "project", title: "A project", why: "A project is a repo the agents work in, on GitHub or your Gitea. Boss Man looks at the repo to propose the check that runs before work merges." },
+  { id: "project", title: "A project", why: "A project is a repo the agents work in, on GitHub or your Gitea. The checks that run before work merges come after the runner and git token." },
   { id: "runner", title: "The runner", why: "The runner is the container the company's agents work in. It connects out to this server, so it needs no open ports." },
   { id: "credential", title: "Claude", why: "Agents need something to run on: a Claude setup-token (your Pro or Max subscription) or an API key." },
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
+  { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
   { id: "funding", title: "What pays for the CEO", why: "Funding sources track cost and quota. Choose the one the CEO runs on; the Agents page sets the rest." },
   { id: "ticket", title: "A first ticket", why: "Optional: something for the team to start on." },
 ] as const;
@@ -94,7 +95,23 @@ function ProjectStep({ company }: { company: Company }) {
         </p>
       )}
       {list.map((p) => (
-        <ProjectRow key={p.id} p={p} />
+        <ProjectRow key={p.id} p={p} only="repo" />
+      ))}
+      <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+        The checks that run before merging are chosen at the "Checks before merging" step, once the runner and git token are set up.
+      </p>
+    </div>
+  );
+}
+
+function ChecksStep({ company }: { company: Company }) {
+  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-checks-${company.id}`);
+  const withRepo = (projects.data ?? []).filter((p) => p.repoUrl);
+  if (!withRepo.length) return <p className="muted">No project has a repo yet. Add one in step 2, then come back for this.</p>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {withRepo.map((p) => (
+        <ProjectRow key={p.id} p={p} only="checks" />
       ))}
     </div>
   );
@@ -298,8 +315,9 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
         {step === 2 && company && <Runner company={company} />}
         {step === 3 && company && <Credentials company={company} />}
         {step === 4 && company && <GitStep company={company} />}
-        {step === 5 && company && <FundingStep company={company} onChanged={onChanged} />}
-        {step === 6 && company && <TicketStep company={company} />}
+        {step === 5 && company && <ChecksStep company={company} />}
+        {step === 6 && company && <FundingStep company={company} onChanged={onChanged} />}
+        {step === 7 && company && <TicketStep company={company} />}
         <div className="setup-nav">
           {step > 0 && (
             <button type="button" className="btn" onClick={() => move(step - 1)}>
@@ -308,7 +326,7 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
           )}
           {step < STEPS.length - 1 ? (
             <>
-              <button type="button" className="btn primary" disabled={!company} onClick={() => move(step + 1)}>
+              <button type="button" className={done(s.id) ? "btn primary" : "btn"} disabled={!company} onClick={() => move(step + 1)}>
                 {done(s.id) ? "Next" : "Skip for now"}
               </button>
             </>

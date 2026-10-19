@@ -463,14 +463,17 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
   );
 }
 
-export function ProjectRow({ p }: { p: Project }) {
+/** `only`: "repo" hides the check pickers (detection needs the runner and git token), "checks" shows just them. */
+export function ProjectRow({ p, only }: { p: Project; only?: "repo" | "checks" }) {
+  const showRepo = only !== "checks";
+  const showChecks = only !== "repo";
   const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
   const [host, setHost] = useState(p.gitHost);
   const act = useAction();
   const [presets, setPresets] = useState<Presets | null>(null);
   const detect = async () => setPresets(await api<Presets>(`/api/projects/${p.id}/check-presets`, { method: "POST" }).catch(() => null));
   // Detected once per project; Re-detect asks again.
-  useEffect(() => void detect(), [p.id]);
+  useEffect(() => void (showChecks && detect()), [p.id, showChecks]);
   const save = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
@@ -486,6 +489,7 @@ export function ProjectRow({ p }: { p: Project }) {
   return (
     <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
       <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>{p.name}</p>
+      {showRepo && (<>
       <div className="field" style={{ gridColumn: "1 / -1" }}>
         <label htmlFor={`repo-${p.id}`}>Git repo</label>
         <input id={`repo-${p.id}`} className="mono" placeholder="https://github.com/you/repo.git" value={form.repoUrl} onChange={(e) => setForm({ ...form, repoUrl: e.target.value })} />
@@ -504,6 +508,8 @@ export function ProjectRow({ p }: { p: Project }) {
           <option value="pull_request">Open a pull request</option>
         </select>
       </div>
+      </>)}
+      {showChecks && (<>
       <CheckPicker id={`verify-${p.id}`} label="Before merging, Boss Man will" value={form.verifyCommand} onChange={(verifyCommand) => setForm({ ...form, verifyCommand })} presets={presets} />
       <CheckPicker id={`deep-${p.id}`} label="For high-risk work, also" value={form.deepVerifyCommand} onChange={(deepVerifyCommand) => setForm({ ...form, deepVerifyCommand })} presets={presets} />
       <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
@@ -514,7 +520,8 @@ export function ProjectRow({ p }: { p: Project }) {
           </button>
         )}
       </p>
-      <button className="btn" type="submit" disabled={act.busy}>
+      </>)}
+      <button className="btn primary" type="submit" disabled={act.busy}>
         Save
       </button>
       <div style={{ gridColumn: "1 / -1" }}>{act.view}</div>
