@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, type Notice, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
   note: { label: "Note", tone: "", help: "The feed only" },
@@ -83,6 +84,7 @@ function SettingsForm() {
   const [form, setForm] = useState<Form | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  const sv = useSaveState(form);
   useEffect(() => {
     void api<NotifySettings>("/api/notification-settings").then((s) => (setSaved(s), setForm(toForm(s))), (err: Error) => setNote({ ok: false, text: err.message }));
   }, []);
@@ -113,6 +115,7 @@ function SettingsForm() {
       });
       setSaved(s);
       setForm(toForm(s));
+      sv.markSaved(toForm(s));
       return "Saved.";
     });
   };
@@ -206,9 +209,7 @@ function SettingsForm() {
       </fieldset>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        <button className="btn primary" type="submit" disabled={busy}>
-          Save
-        </button>
+        <SaveButton {...sv} busy={busy} />
         {saved?.ntfy && (
           <button className="btn" type="button" disabled={busy} onClick={() => void test()}>
             Send a test to my phone

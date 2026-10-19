@@ -8,6 +8,7 @@ import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
 import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
+import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -15,6 +16,7 @@ import { agents, companies, engagements, owners, projects, runners as runnersTab
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { modelsService } from "./services/models.js";
+import { modelProbeService } from "./services/model-probe.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
@@ -209,6 +211,9 @@ export async function buildApp(opts: AppOptions) {
   recovery.setWakeHook((w) => scheduler.wake(w));
   // A runner that comes back gets any permission verdicts it missed (R22).
   runners.onConnect((runnerId) => decisionsSvc.redeliver(runnerId));
+  // Model lists come from a throwaway session on the runner, so the picker fills before any chat.
+  const modelProbe = modelProbeService(db, { runners, models, now: opts.now, log: (m) => app.log.warn(m) });
+  runners.onConnect((runnerId) => void modelProbe.onConnect(runnerId).catch((err) => app.log.warn({ err }, "model probe failed")));
   runners.onResume((runner, pending) => decisionsSvc.resume(runner, pending));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
@@ -505,7 +510,9 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const body = GrantInput.parse(req.body);
       try {
-        return reply.code(201).send(await secretsSvc.grant(id, body.companyId, body.envName, body.deployTargetId));
+        const grant = await secretsSvc.grant(id, body.companyId, body.envName, body.deployTargetId);
+        void modelProbe.onGrant(body.companyId, body.envName).catch((err) => app.log.warn({ err }, "model probe failed"));
+        return reply.code(201).send(grant);
       } catch (err) {
         if ((err as Error).message.startsWith("That deploy target")) return reply.code(422).send({ error: "invalid_target", message: (err as Error).message });
         throw err;
@@ -628,11 +635,14 @@ export async function buildApp(opts: AppOptions) {
     // Funding sources, cost and quota (R27–R29).
     const FundingInput = z.object({
       name: z.string().trim().min(1).max(80),
-      kind: z.enum(["api_credit", "subscription", "usage_credits", "api_payg"]),
-      provider: z.enum(["anthropic", "openai"]),
+      kind: z.enum(FUNDING_KINDS),
+      provider: z.enum(FUNDING_PROVIDERS),
       monthlyGrantUsd: z.number().nonnegative().optional(),
       cycleAnchor: z.coerce.date().optional(),
       secretId: Uuid.optional(),
+    }).superRefine((v, ctx) => {
+      const problem = fundingComboError(v.kind, v.provider);
+      if (problem) ctx.addIssue({ code: "custom", path: ["provider"], message: problem });
     });
 
     owner.post("/api/funding-sources", async (req, reply) => {
@@ -1205,6 +1215,8 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/agent-templates", async () => agentsSvc.templates());
     // Model lists for the picker (R60); refresh=1 asks API providers again.
     owner.get("/api/companies/:id/models", async (req) => models.forCompany(IdParam.parse(req.params).id, { refresh: z.object({ refresh: z.string().optional() }).parse(req.query).refresh === "1" }));
+    // "Refresh models": asks the company's runner for each kind's model list, then answers with what happened.
+    owner.post("/api/companies/:id/models/refresh", async (req) => ({ probed: await modelProbe.probe(IdParam.parse(req.params).id, { force: true }) }));
     // What the CEO may change about the team without asking (R62).
     owner.get("/api/companies/:id/agent-approvals", async (req) => ({ approvals: await agentsSvc.approvals(IdParam.parse(req.params).id) }));
     owner.put("/api/companies/:id/agent-approvals", async (req) => {

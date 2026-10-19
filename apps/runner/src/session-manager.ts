@@ -12,6 +12,7 @@ import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import type { RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { probeModels } from "./models-probe.js";
 import { gitAuthEnv, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
@@ -91,10 +92,10 @@ export function modelChoices(configOptions: unknown[] | null | undefined) {
   }
   return out.slice(0, 200);
 }
-const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
+export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
 
 const require = createRequire(import.meta.url);
-function defaultBin(agentKind: string): string {
+export function defaultBin(agentKind: string): string {
   const pkg = agentKind === "claude" ? "@agentclientprotocol/claude-agent-acp" : agentKind === "codex" ? "@agentclientprotocol/codex-acp" : null;
   if (!pkg) throw new Error(`No ACP adapter is registered for agent kind "${agentKind}".`);
   const manifest = require(`${pkg}/package.json`) as { bin: Record<string, string> | string };
@@ -112,7 +113,7 @@ type RunState = {
 };
 
 /** Stops an adapter and everything it started; escalates to SIGKILL if the group lingers. */
-function killGroup(child: ChildProcess, graceMs = 5000) {
+export function killGroup(child: ChildProcess, graceMs = 5000) {
   const pid = child.pid;
   if (!pid) return;
   const signal = (sig: NodeJS.Signals) => {
@@ -264,6 +265,22 @@ export class SessionManager {
           .then((env) => check(env.CLAUDE_CODE_OAUTH_TOKEN ? { CLAUDE_CODE_OAUTH_TOKEN: env.CLAUDE_CODE_OAUTH_TOKEN } : {}))
           .then(
             (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
+      case "models.probe": {
+        const reply = this.opts.reply ?? (() => {});
+        (this.opts.resolveCompanyEnv?.("check") ?? Promise.resolve({} as Record<string, string>))
+          .then((env) => probeModels(command.agentKind, env, { baseEnv: this.opts.baseEnv, adapterBin: this.opts.adapterBins?.[command.agentKind] }))
+          .then(
+            (models) => {
+              if (models.length) {
+                this.reportedModels.set(command.agentKind, JSON.stringify(models));
+                this.opts.emit({ type: "runner.models", agentKind: command.agentKind, models });
+              }
+              reply(command.requestId, { ok: true, data: { models } });
+            },
             (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
           );
         return;
