@@ -247,7 +247,7 @@ function SemanticSettings({ companyId }: { companyId: string }) {
               </option>
             ))}
           </select>
-          <small className="muted">Add the key under Secrets first.</small>
+          {!v.secretId && <small className="muted">Add the key under Secrets first, then pick it here.</small>}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <SaveButton {...sv} busy={busy} />
