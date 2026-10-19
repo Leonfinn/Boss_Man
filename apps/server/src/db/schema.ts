@@ -918,7 +918,11 @@ export const wikiPages = pgTable(
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("wiki_pages_company_slug").on(t.companyId, t.slug)],
+  (t) => [
+    uniqueIndex("wiki_pages_company_slug").on(t.companyId, t.slug),
+    // Full-text search (wiki.search); the query must use this exact expression to hit the index.
+    index("wiki_pages_fts").using("gin", sql`to_tsvector('english', ${t.title} || ' ' || ${t.body})`),
+  ],
 );
 
 /** Every saved version of a page, newest last, so a change can be seen and undone. */

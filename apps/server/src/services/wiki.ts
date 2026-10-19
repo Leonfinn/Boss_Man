@@ -2,7 +2,7 @@
 // or by agents through the wiki tool, and every save keeps a revision. A page written for a
 // ticket shows on that ticket as something it produced, next to repo files and links an
 // agent attaches, so "see the evidence" opens the work itself.
-import { and, asc, desc, eq, ilike, or } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, like, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, ticketArtifacts, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import { record } from "./activity.js";
@@ -49,6 +49,48 @@ export function pageSlug(folder: string, name: string) {
 /** The folder a bare address implies, for agents that pass only a slug: "research/agent-landscape" → "research". */
 const folderOf = (slug: string) => slug.split("/").slice(0, -1).join("/");
 
+/** A heading's span in a page body. start..end is the section with its subsections; start..ownEnd is its own text. */
+export type Section = { path: string; heading: string; level: number; start: number; ownEnd: number; end: number };
+
+/** Markdown ATX headings, ignoring # lines inside ``` or ~~~ fences. Text before the first heading is "intro" (level 0). */
+export function splitSections(body: string): Section[] {
+  const out: Section[] = [];
+  const stack: Section[] = [];
+  let fence: string | null = null;
+  let pos = 0;
+  for (const line of body.split("\n")) {
+    const f = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1]?.[0];
+    if (f) fence = fence === null ? f : fence === f ? null : fence;
+    const m = fence === null && !f ? /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/.exec(line) : null;
+    if (m) {
+      const level = m[1]!.length;
+      while (stack.length && stack.at(-1)!.level >= level) stack.pop();
+      const s: Section = { heading: m[2]!, level, path: [...stack.map((x) => x.heading), m[2]!].join(" > "), start: pos, ownEnd: body.length, end: body.length };
+      out.push(s);
+      stack.push(s);
+    }
+    pos += line.length + 1;
+  }
+  out.forEach((s, i) => {
+    s.ownEnd = out[i + 1]?.start ?? body.length;
+    s.end = out.slice(i + 1).find((x) => x.level <= s.level)?.start ?? body.length;
+  });
+  const first = out[0]?.start ?? body.length;
+  if (body.slice(0, first).trim()) out.unshift({ heading: "intro", level: 0, path: "intro", start: 0, ownEnd: first, end: first });
+  return out;
+}
+
+/** The section a reader asked for, by heading or heading path, case-insensitive; the first match wins. */
+export function findSection(sections: Section[], wanted: string) {
+  const w = wanted.trim().toLowerCase().replace(/\s*>\s*/g, " > ");
+  return sections.find((s) => s.path.toLowerCase() === w) ?? sections.find((s) => s.heading.toLowerCase() === w);
+}
+
+/** [[slug]] and [[slug#Section heading]] in a page body: the slugs it links to. */
+export const linkedSlugs = (body: string) => [...new Set([...body.matchAll(/\[\[([^\]#|]+?)(?:#[^\]]*)?\]\]/g)].map((m) => m[1]!.trim()))];
+
+export type SectionHit = { slug: string; title: string; path: string; snippet: string; score: number };
+
 type Author = { agentId: string | null; runId: string | null };
 
 export function wikiService(db: Db) {
@@ -63,19 +105,82 @@ export function wikiService(db: Db) {
     return p;
   }
 
+  const ftsExpr = sql`to_tsvector('english', ${wikiPages.title} || ' ' || ${wikiPages.body})`;
+  const ftsMatch = (q: string) => sql`${ftsExpr} @@ websearch_to_tsquery('english', ${q})`;
+  /** The company's best full-text matches, best first. */
+  const ftsPages = (companyId: string, q: string, limit: number) =>
+    db
+      .select({ id: wikiPages.id, slug: wikiPages.slug, title: wikiPages.title, body: wikiPages.body })
+      .from(wikiPages)
+      .where(and(eq(wikiPages.companyId, companyId), ftsMatch(q)))
+      .orderBy(sql`ts_rank(${ftsExpr}, websearch_to_tsquery('english', ${q})) desc`)
+      .limit(limit);
+
   return {
     slugify,
 
-    /** Pages, most recently changed first; q matches titles and text. */
+    /**
+     * Pages, most recently changed first. With q, full-text matches come first, best first, then
+     * plain substring matches (so a partial word still finds its page, as it always did).
+     */
     async list(companyId: string, q?: string) {
-      const like = q?.trim() ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
-      return db
+      const term = q?.trim();
+      const pattern = term ? `%${term.replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
+      const rows = await db
         .select({ id: wikiPages.id, slug: wikiPages.slug, folder: wikiPages.folder, title: wikiPages.title, ticketId: wikiPages.ticketId, updatedAt: wikiPages.updatedAt, updatedBy: agents.name })
         .from(wikiPages)
         .leftJoin(agents, eq(agents.id, wikiPages.updatedByAgentId))
-        .where(and(eq(wikiPages.companyId, companyId), like ? or(ilike(wikiPages.title, like), ilike(wikiPages.body, like)) : undefined))
+        .where(and(eq(wikiPages.companyId, companyId), pattern ? or(ilike(wikiPages.title, pattern), ilike(wikiPages.body, pattern), ftsMatch(term!)) : undefined))
         .orderBy(desc(wikiPages.updatedAt))
         .limit(2000);
+      if (!term) return rows;
+      const ranked = new Map((await ftsPages(companyId, term, 2000)).map((p, i) => [p.id, i]));
+      return rows.sort((a, b) => (ranked.get(a.id) ?? Infinity) - (ranked.get(b.id) ?? Infinity));
+    },
+
+    /**
+     * The sections that best match q, at most two per page, best first. Empty when full-text
+     * search finds nothing (callers fall back to list). Returns plain hits so a later
+     * vector-similarity ranking can be fused with this one.
+     */
+    async search(companyId: string, q: string, pages = 10): Promise<SectionHit[]> {
+      const top = await ftsPages(companyId, q, pages);
+      if (!top.length) return [];
+      const parts = top.flatMap((p, pi) =>
+        splitSections(p.body).map((s) => ({ pi, path: s.path, text: p.body.slice(s.start, s.ownEnd) })),
+      );
+      const scored = (await db.execute(sql`
+        with q as (select websearch_to_tsquery('english', ${q}) as q),
+        t as (select (e.ord - 1)::int as i, e.value as s from jsonb_array_elements_text(${JSON.stringify(parts.map((x) => `${x.path}\n${x.text}`))}::jsonb) with ordinality as e(value, ord))
+        select t.i, ts_rank(to_tsvector('english', t.s), q.q) as score, ts_headline('english', t.s, q.q, 'MaxWords=30, MinWords=12, MaxFragments=1, StartSel=*, StopSel=*') as snippet
+        from t, q where to_tsvector('english', t.s) @@ q.q`)) as unknown as { rows: Array<{ i: number; score: number; snippet: string }> } | Array<{ i: number; score: number; snippet: string }>;
+      const rows = Array.isArray(scored) ? scored : scored.rows;
+      const hits: SectionHit[] = [];
+      for (const [pi, p] of top.entries()) {
+        rows
+          .filter((r) => parts[r.i]!.pi === pi)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 2)
+          .forEach((r) => hits.push({ slug: p.slug, title: p.title, path: parts[r.i]!.path, snippet: r.snippet.replace(/\s+/g, " ").trim(), score: Number(r.score) }));
+      }
+      return hits;
+    },
+
+    /**
+     * Pages this text links to (that exist) and pages whose body links to slug.
+     * shortcut: linked-from is a LIKE scan of this company's pages; add a wiki_links table
+     * (written on save) when a company has thousands of pages or backlinks feel slow.
+     */
+    async links(companyId: string, slug: string, text: string) {
+      const wanted = linkedSlugs(text).filter((l) => l !== slug);
+      const out = wanted.length ? await db.select({ slug: wikiPages.slug }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), inArray(wikiPages.slug, wanted))) : [];
+      const esc = slug.replace(/[%_\\]/g, (c) => `\\${c}`);
+      const from = await db
+        .select({ slug: wikiPages.slug })
+        .from(wikiPages)
+        .where(and(eq(wikiPages.companyId, companyId), or(like(wikiPages.body, `%[[${esc}]]%`), like(wikiPages.body, `%[[${esc}#%`))))
+        .orderBy(asc(wikiPages.slug));
+      return { links: wanted.filter((l) => out.some((o) => o.slug === l)), linkedFrom: from.map((r) => r.slug).filter((l) => l !== slug) };
     },
 
     /** One page with its history and the tickets it was produced for. */

@@ -181,5 +181,17 @@ describe("charge-back (R26)", () => {
     expect((await ctx.engagements.view(e.id, ctx.appCo.company.id)).thread.at(-1)!.body).toBe("Any update?");
     expect((await ctx.engagements.view(e.id)).scope).toMatch(/^Deploy v1\.4/);
   });
-});
 
+  it("shows an agent the last 20 messages and all of them on request", async () => {
+    ctx = await setup();
+    const e = await ctx.request();
+    for (let i = 1; i <= 24; i++) await ctx.act(e.id, "requester", { action: "message", message: `note ${i}` });
+    const v = await ctx.engagements.view(e.id, ctx.homelab.company.id);
+    expect(v.thread).toHaveLength(20);
+    expect(v.earlierNotShown).toBe("5 earlier messages not shown; pass all: true to see the whole thread.");
+    expect(v.thread.at(-1)!.body).toContain("note 24");
+    const all = await ctx.engagements.view(e.id, ctx.homelab.company.id, true);
+    expect(all.thread).toHaveLength(25);
+    expect(all).not.toHaveProperty("earlierNotShown");
+  });
+});
