@@ -272,6 +272,17 @@ export function schedulerService(
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
         lines.push("", planningGuidance(t.t.risk));
+        lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
+        if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
+          const team = await db
+            .select({ name: agents.name, role: agents.role, title: agents.title })
+            .from(agents)
+            .where(and(eq(agents.companyId, agent.companyId), isNull(agents.retiredAt), eq(agents.paused, false), ne(agents.id, agent.id), sql`${agents.duty} is distinct from 'assistant'`));
+          lines.push(
+            "",
+            `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Only do the work yourself when nobody on the team can.${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,
+          );
+        }
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));

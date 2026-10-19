@@ -76,7 +76,7 @@ type Services = {
   pa: ReturnType<typeof paService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki, skills, agents: team, pa }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -85,11 +85,49 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     return rows.length === 1 ? rows[0]! : null;
   }
 
+  // CEOs and managers hand work to a colleague by name; returns the agent's id or the refusal text.
+  async function delegateTarget(name: string): Promise<{ id: string } | { error: string }> {
+    const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+    if (me?.role !== "ceo" && me?.role !== "manager") return { error: "Only your company's CEO or a manager can assign tickets to colleagues." };
+    // The PA only answers the owner from read-only tools, so it can't take ticket work.
+    const team_ = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, scope.companyId), isNull(agents.retiredAt), sql`${agents.duty} is distinct from 'assistant'`));
+    const a = team_.find((x) => x.name.toLowerCase() === name.trim().toLowerCase());
+    if (!a) return { error: `No active agent called ${name} in your company. Valid names: ${team_.map((x) => x.name).join(", ")}.` };
+    // The work service lets the owner assign to a paused agent, but the wake would sit unanswered; an agent shouldn't hand work to a dead end.
+    if (a.paused) return { error: `${a.name} is paused, so they would not pick it up. Pick someone else.` };
+    return { id: a.id };
+  }
+
+  server.registerTool(
+    "assign_ticket",
+    {
+      description:
+        "For CEOs and managers: hand one of your company's tickets to a colleague by name (ticketId, agent, note up to 240 characters saying why and what you expect). The colleague is woken to work on it and reads your note on the ticket. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      inputSchema: { ticketId: z.string().uuid(), agent: z.string().min(1), note: z.string().min(1).max(240), expected_version: z.number().int().optional() },
+    },
+    async ({ ticketId, agent, note, expected_version }) => {
+      const to = await delegateTarget(agent);
+      if ("error" in to) return fail(to.error);
+      const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      // shortcut: version is checked just before the write, not inside it; fine for one CEO per company, upgrade if two agents assign at once.
+      if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${t.state}, version ${t.version}. Read it again with tickets, then decide.`);
+      if (t.assignee === to.id) return fail(`That ticket is already assigned to ${agent}.`);
+      try {
+        const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim() });
+        return text(`Ticket ${ticketId} is now assigned to ${agent} (version ${u.version}); they are woken with your note.`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
   server.registerTool(
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for, and featureId when it delivers a feature request. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for, and featureId when it delivers a feature request. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
@@ -98,9 +136,12 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         risk: z.enum(RISK_TIERS).optional(),
         planFirst: z.boolean().optional(),
         featureId: z.string().uuid().optional(),
+        assignee: z.string().optional(),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst, featureId }) => {
+    async ({ title, body, project, engagementId, risk, planFirst, featureId, assignee }) => {
+      const to = assignee ? await delegateTarget(assignee) : null;
+      if (to && "error" in to) return fail(to.error);
       if (featureId) {
         const [f] = await db.select({ id: features.id }).from(features).where(and(eq(features.id, featureId), eq(features.companyId, scope.companyId)));
         if (!f) return fail("No feature with that id in your company.");
@@ -139,7 +180,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId: featureId ?? null })
         .returning({ id: tickets.id });
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
-      return text(`Created ticket ${t!.id} in ${p.name}.`);
+      if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id });
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
     },
   );
 
