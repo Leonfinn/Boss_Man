@@ -10,7 +10,7 @@ import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, decisions, engagements, fundingSources, projects, nudges, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
-import { issueRunToken } from "../mcp.js";
+import { cut, issueRunToken } from "../mcp.js";
 import { record } from "./activity.js";
 import { buildBrief } from "./brief.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -266,14 +266,14 @@ export function schedulerService(
       const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {
         lines.push("", `Ticket ${t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
-        if (t.t.body) lines.push("", t.t.body);
+        if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
         const note = stateNoteLine(t.t, now());
         if (note) lines.push("", note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
         lines.push("", planningGuidance(t.t.risk));
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
-        else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", t.t.plan);
+        else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
         // The ticket's conversation with the owner (R65).
         const talk = await conversationLines(db, t.t.id);
         if (talk.length) lines.push("", "The ticket's conversation so far, oldest first:", ...talk);

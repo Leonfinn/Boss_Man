@@ -1,0 +1,1 @@
+CREATE INDEX "wiki_pages_fts" ON "wiki_pages" USING gin (to_tsvector('english', "title" || ' ' || "body"));

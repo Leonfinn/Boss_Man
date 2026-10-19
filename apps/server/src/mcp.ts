@@ -24,7 +24,7 @@ import type { chaptersService } from "./services/chapters.js";
 import { WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
-import { WikiError, type wikiService } from "./services/wiki.js";
+import { findSection, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import { AgentError, type agentsService } from "./services/agents.js";
@@ -41,6 +41,11 @@ export async function issueRunToken(db: Db, scope: Scope, ttlHours = 12): Promis
 const STATES = ["backlog", "ready", "in_progress", "blocked", "review", "done"] as const;
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], isError: true });
+/** A lossless cap: at most n chars of s from offset; when there's more, says how much and how to get it. */
+export const cut = (s: string, n: number, how: (next: number) => string, offset = 0) =>
+  s.length <= offset + n ? s.slice(offset) : `${s.slice(offset, offset + n)}\n\n… ${s.length - offset - n} more chars; ${how(offset + n)}`;
+const CAP = 40_000;
+const OUTLINE_OVER = 8000;
 
 export type McpHooks = {
   onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown>;
@@ -314,10 +319,11 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "engagement",
     {
       description:
-        "Work on an engagement between your company and another. action: list (your company's engagements), view (status, terms and thread), message, and the lifecycle steps. As the provider: accept, reject, counter (with changed terms), deliver (summary plus refs). As the requester: accept_counter, withdraw, sign_off, request_revision. Never put credentials in an engagement.",
+        "Work on an engagement between your company and another. action: list (your company's engagements), view (status, terms and the last 20 thread messages; all: true for the whole thread), message, and the lifecycle steps. As the provider: accept, reject, counter (with changed terms), deliver (summary plus refs). As the requester: accept_counter, withdraw, sign_off, request_revision. Never put credentials in an engagement.",
       inputSchema: {
         action: z.enum(["list", "view", "accept", "reject", "counter", "accept_counter", "withdraw", "message", "deliver", "sign_off", "request_revision"]),
         engagementId: z.string().uuid().optional(),
+        all: z.boolean().optional(),
         message: z.string().max(5000).optional(),
         summary: z.string().max(5000).optional(),
         refs: z.array(z.string().max(500)).max(20).optional(),
@@ -331,7 +337,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       try {
         if (input.action === "list") return text(JSON.stringify(await engagements.list(scope.companyId)));
         if (!input.engagementId) return fail("Give the engagementId.");
-        if (input.action === "view") return text(JSON.stringify(await engagements.view(input.engagementId, scope.companyId)));
+        if (input.action === "view") return text(JSON.stringify(await engagements.view(input.engagementId, scope.companyId, input.all)));
         const needs = (field: "message" | "summary") => (input[field] ? null : fail(`The ${input.action.replace("_", " ")} action needs a ${field}.`));
         const missing =
           input.action === "counter" || input.action === "message" || input.action === "request_revision" ? needs("message") : input.action === "deliver" ? needs("summary") : null;
@@ -447,9 +453,9 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description), mark (noteId, state processed|archived).",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description), mark (noteId, state processed|archived).",
       inputSchema: {
-        action: z.enum(["inbox", "features", "log", "link", "create_feature", "mark"]),
+        action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark"]),
         noteId: z.string().uuid().optional(),
         featureId: z.string().uuid().optional(),
         importance: z.enum(IMPORTANCE).optional(),
@@ -471,10 +477,16 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
             rows
               .map(({ note: n, customer }) => {
                 const head = `Note ${n.id} from ${customer ?? "someone anonymous"} via ${n.source}, ${n.createdAt.toISOString().slice(0, 10)}${n.title ? `: ${n.title}` : ""}`;
-                return `${head}\n${n.untrusted ? untrusted(`feedback via ${n.source}`, n.text) : n.text}`;
+                const body = cut(n.text, 2000, () => `read it all with feedback note noteId=${n.id}`);
+                return `${head}\n${n.untrusted ? untrusted(`feedback via ${n.source}`, body) : body}`;
               })
               .join("\n\n"),
           );
+        }
+        if (input.action === "note") {
+          if (!input.noteId) return fail("Give the noteId.");
+          const { note: n } = await feedback.noteDetail(input.noteId, scope.companyId);
+          return text(`${n.title ? `${n.title}\n` : ""}${n.untrusted ? untrusted(`feedback via ${n.source}`, n.text) : n.text}`);
         }
         if (input.action === "features") {
           const all = await feedback.scored(scope.companyId);
@@ -660,15 +672,15 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     "tickets",
     {
       description:
-        "Look up your company's tickets. find (optional q to search titles and descriptions, optional state) lists matches with their ids; read (ticketId) gives one ticket in full: description, state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged.",
-      inputSchema: { action: z.enum(["find", "read", "file"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().uuid().optional(), path: z.string().max(500).optional() },
+        "Look up your company's tickets. find (optional q to search titles and descriptions, optional state) lists matches with their ids; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters.",
+      inputSchema: { action: z.enum(["find", "read", "file"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().uuid().optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional() },
     },
-    async ({ action, q, state, ticketId, path }) => {
+    async ({ action, q, state, ticketId, path, offset }) => {
       if (action === "file") {
         if (!ticketId || !path) return fail("Give the ticketId and the file's path in the repo.");
         try {
           const f = await review.readFile(ticketId, path, scope.companyId);
-          return text(`${path} (from the ticket's ${f.from === "worktree" ? "worktree" : "branch"}${f.truncated ? "; cut off at 256 KB" : ""}):\n\n${f.text}`);
+          return text(`${path} (from the ticket's ${f.from === "worktree" ? "worktree" : "branch"}${f.truncated ? "; cut off at 256 KB" : ""}):\n\n${cut(f.text, CAP, (m) => `continue with tickets file offset=${m}`, offset)}`);
         } catch (err) {
           if (err instanceof ReviewError) return fail(err.message);
           throw err;
@@ -705,7 +717,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
           t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
           "",
           "## Description",
-          t.body ?? "(none)",
+          t.body ? cut(t.body, CAP, (m) => `continue with tickets read ticketId=${t.id} offset=${m}`, offset) : "(none)",
+          ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", cut(t.plan, CAP, () => "the rest isn't shown here")] : []), // shortcut: plans over 40000 chars aren't paged; add an offset if one ever is
           "",
           "## What it produced",
           ...(made.length ? made.map((m) => (m.kind === "wiki_page" ? `- wiki page ${m.slug} (read it with wiki read)` : m.kind === "url" ? `- link ${m.url}` : `- repo file ${m.path}${m.ref ? ` at ${m.ref}` : ""} (read it with tickets file)`)) : ["(nothing attached)"]),
@@ -810,7 +823,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; gives each page's slug and folder), read (slug), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. Writing to an existing slug updates it; older versions are kept.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
         action: z.enum(["list", "read", "write", "attach"]),
         q: z.string().max(200).optional(),
@@ -822,18 +835,46 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
         path: z.string().max(500).optional(),
         ref: z.string().max(200).optional(),
         url: z.string().max(2000).optional(),
+        section: z.string().max(300).optional(),
+        offset: z.number().int().min(0).optional(),
       },
     },
     async (input) => {
       const by = { agentId: scope.agentId, runId: scope.runId };
       try {
         switch (input.action) {
-          case "list":
+          case "list": {
+            const hits = input.q?.trim() ? await wiki.search(scope.companyId, input.q) : [];
+            if (hits.length)
+              return text(hits.map((h) => `${h.slug} — ${h.title} › ${h.path}\n  ${h.snippet}\n  read: wiki read slug="${h.slug}" section="${h.path}"`).join("\n\n"));
             return text(JSON.stringify((await wiki.list(scope.companyId, input.q)).map((p) => ({ slug: p.slug, folder: p.folder, title: p.title, updatedAt: p.updatedAt }))));
+          }
           case "read": {
             if (!input.slug) return fail("Give the page's slug.");
             const p = await wiki.get(scope.companyId, input.slug);
-            return text(`# ${p.title}\n\n${p.body}`);
+            const sections = splitSections(p.body);
+            const outline = (error?: string) =>
+              [
+                ...(error ? [error, ""] : []),
+                `# ${p.title}`,
+                `${p.body.length} characters, ${sections.length} sections:`,
+                ...sections.map((s) => `- ${s.path} (${s.ownEnd - s.start} chars): ${p.body.slice(s.start, s.ownEnd).split("\n").find((l) => l.trim() && !/^#+\s/.test(l))?.trim().slice(0, 100) ?? ""}`),
+                "",
+                `Read a section with section="<heading>", or the whole page in parts with offset=0.`,
+              ].join("\n");
+            let body: string;
+            let shown: string;
+            if (input.section) {
+              const s = findSection(sections, input.section);
+              if (!s) return text(outline(`No section "${input.section}" on this page.`));
+              shown = p.body.slice(s.start, s.end);
+              body = `# ${p.title} > ${s.path}\n\n${shown}`;
+            } else if (input.offset !== undefined || p.body.length <= OUTLINE_OVER) {
+              shown = p.body.slice(input.offset ?? 0, (input.offset ?? 0) + CAP);
+              body = `${input.offset ? "" : `# ${p.title}\n\n`}${cut(p.body, CAP, (m) => `continue with offset=${m}`, input.offset ?? 0)}`;
+            } else return text(outline());
+            const l = await wiki.links(scope.companyId, p.slug, shown);
+            return text([body, ...(l.links.length ? [`Links: ${l.links.join(", ")}`] : []), ...(l.linkedFrom.length ? [`Linked from: ${l.linkedFrom.join(", ")}`] : [])].join("\n\n"));
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");

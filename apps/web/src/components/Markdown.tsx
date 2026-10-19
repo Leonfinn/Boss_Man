@@ -3,7 +3,11 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-export function Markdown({ text }: { text: string }) {
+// [[slug]] and [[slug#Section]] become links to that wiki page when the company is known.
+const wikiLinks = (text: string, companyId: string) =>
+  text.replace(/\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g, (_, slug: string, sec = "") => `[${slug.trim()}${sec}](#/wiki/${companyId}/${slug.trim()})`);
+
+export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?: string }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -25,7 +29,7 @@ export function Markdown({ text }: { text: string }) {
           ),
         }}
       >
-        {text}
+        {wikiCompanyId ? wikiLinks(text, wikiCompanyId) : text}
       </ReactMarkdown>
     </div>
   );

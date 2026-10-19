@@ -181,7 +181,7 @@ function PageView({ companyId, slug, folders, go, onChanged, onNewHere }: { comp
           </button>
         </div>
       )}
-      <Markdown text={(old ?? p).body} />
+      <Markdown text={(old ?? p).body} wikiCompanyId={companyId} />
       {error && (
         <p className="error" role="alert">
           {error}

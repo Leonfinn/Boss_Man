@@ -1285,7 +1285,7 @@ export async function buildApp(opts: AppOptions) {
       throw err;
     };
     owner.get("/api/engagements", async () => engagementsSvc.list());
-    owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id).catch(engagementErrors(reply)));
+    owner.get("/api/engagements/:id", async (req, reply) => engagementsSvc.view(IdParam.parse(req.params).id, undefined, true).catch(engagementErrors(reply)));
     owner.post("/api/engagements", async (req, reply) => {
       const b = z
         .object({ requesterCompanyId: Uuid, providerCompanyId: Uuid, requesterProjectId: Uuid.optional(), title: z.string().trim().min(1).max(200), ...Terms })

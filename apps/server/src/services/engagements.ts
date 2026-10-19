@@ -57,6 +57,8 @@ function guard(...texts: Array<string | undefined | null>) {
   }
 }
 
+const THREAD_SHOWN = 20;
+
 export function engagementsService(db: Db, deps: { release: (ticketId: string) => Promise<unknown>; now?: () => Date }) {
   const now = deps.now ?? (() => new Date());
   let wake: WakeHook | null = null;
@@ -271,7 +273,7 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
     },
 
     /** Status, terms and thread: everything either side may see. */
-    async view(id: string, companyId?: string) {
+    async view(id: string, companyId?: string, all = false) {
       const e = await load(id);
       if (companyId && companyId !== e.requesterCompanyId && companyId !== e.providerCompanyId) throw new EngagementError(404, "No such engagement.");
       const thread = await db
@@ -307,7 +309,8 @@ export function engagementsService(db: Db, deps: { release: (ticketId: string) =
           ) / 1e6,
         counterTerms: e.counterTerms && theirs === e.providerCompanyId ? untrusted(theirName!, JSON.stringify(e.counterTerms)) : e.counterTerms,
         delivery: e.delivery && theirs === e.providerCompanyId ? untrusted(theirName!, JSON.stringify(e.delivery)) : e.delivery,
-        thread: thread.map((m) => ({ ...m, body: mark(m.body, m.fromCompanyId) })),
+        ...(!all && thread.length > THREAD_SHOWN ? { earlierNotShown: `${thread.length - THREAD_SHOWN} earlier messages not shown; pass all: true to see the whole thread.` } : {}),
+        thread: (all ? thread : thread.slice(-THREAD_SHOWN)).map((m) => ({ ...m, body: mark(m.body, m.fromCompanyId) })),
       };
     },
 
