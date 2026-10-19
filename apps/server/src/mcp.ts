@@ -188,7 +188,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
     },
     async ({ ticketId, state, outcome, expected_version, summary }) => {
@@ -240,7 +240,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "ticket_reply",
     {
-      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. For a decision you need from them, use raise_decision instead.",
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. For a decision you need from them, use raise_decision instead. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
       inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000) },
     },
     async ({ ticketId, text: body }) => {

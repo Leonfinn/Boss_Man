@@ -188,6 +188,8 @@ describe("Boss Man MCP server", () => {
     const { tools } = await c.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(["assign_ticket", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notify_owner", "nudge", "pa_verdict", "propose_hire", "raise_decision", "report_key_result", "request_engagement", "review", "runs", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "whats_new", "wiki"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
+    expect(tools.find((t) => t.name === "ticket_reply")!.description).toContain("Details:");
+    expect(tools.find((t) => t.name === "set_ticket_state")!.description).toContain("plain words");
     await c.close();
   });
 
