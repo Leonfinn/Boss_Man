@@ -133,9 +133,12 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .values({
           companyId: r.run.companyId,
           kind: "stalled_run",
-          question: `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. It may be stuck, or busy with a long command.`,
+          // No event at all: the runner never began it, most likely lost in a runner restart.
+          question: r.run.lastEventAt
+            ? `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. It may be stuck, or busy with a long command.`
+            : `${r.agentName ?? "An agent"}'s run${r.ticketTitle ? ` on "${r.ticketTitle}"` : ""} never started: the runner hasn't reported it beginning in ${ago(r.idle)}, probably because the runner restarted. Cancel it, then message ${r.agentName ?? "the agent"} on the task to start again.`,
           options: [KEEP_WAITING, CANCEL_RUN],
-          recommendedOption: KEEP_WAITING,
+          recommendedOption: r.run.lastEventAt ? KEEP_WAITING : CANCEL_RUN,
           raisedByAgentId: r.run.agentId,
           dedupeKey: `stalled:${runId}`,
           context: ctx,

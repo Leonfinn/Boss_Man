@@ -168,6 +168,17 @@ describe("stalled runs (R32)", () => {
     expect(ctx.commands.at(-1)).toEqual({ type: "run.cancel", runId });
   });
 
+  it("says when a run never started, and recommends cancelling it", async () => {
+    ctx = await setup();
+    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    ctx.advance(6 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+    const [row] = await ctx.queue();
+    expect(row).toMatchObject({ kind: "stalled_run", recommendedOption: "Cancel run" });
+    expect(row!.question).toBe(`CEO's run on "Checkout error states" never started: the runner hasn't reported it beginning in 6 minutes, probably because the runner restarted. Cancel it, then message CEO on the task to start again.`);
+  });
+
   it("withdraws when the run speaks again, and says nothing more after keep waiting", async () => {
     ctx = await setup();
     const { runId } = await launch();

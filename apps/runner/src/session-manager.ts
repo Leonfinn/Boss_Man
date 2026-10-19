@@ -181,14 +181,24 @@ export class SessionManager {
     for (const run of this.runs.values()) killGroup(run.child, 2000);
   }
 
+  private starting = new Set<string>();
+  private cancelledEarly = new Set<string>();
+
   handle(command: RunnerCommand) {
     switch (command.type) {
       case "run.start":
-        void this.start(command);
+        this.starting.add(command.runId);
+        void this.start(command).finally(() => this.starting.delete(command.runId));
         return;
       case "run.cancel": {
         const run = this.runs.get(command.runId);
-        if (!run) return;
+        if (!run) {
+          // Still being set up: stopped before its agent starts. Unknown (lost in a restart, say):
+          // say it ended, or the server waits on it forever.
+          if (this.starting.has(command.runId)) this.cancelledEarly.add(command.runId);
+          else this.opts.emit({ type: "run.ended", runId: command.runId, stopReason: "cancelled", error: null });
+          return;
+        }
         // A stop means stop: queued messages don't start another turn.
         run.queued.length = 0;
         run.cancel();
@@ -362,6 +372,11 @@ export class SessionManager {
       }
     }
     const dropSkills = () => skillsDir && rmSync(skillsDir, { recursive: true, force: true });
+    if (this.cancelledEarly.delete(cmd.runId)) {
+      dropSkills();
+      emit({ type: "run.ended", runId: cmd.runId, stopReason: "cancelled", error: null });
+      return;
+    }
 
     let bin: string;
     try {
