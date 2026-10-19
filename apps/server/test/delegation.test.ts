@@ -31,7 +31,7 @@ async function setup() {
   });
   void runnerRow;
   const ticket = async (patch: Partial<typeof tickets.$inferInsert> = {}) => (await db.insert(tickets).values({ companyId: co.company.id, projectId: p!.id, title: "Add rate limiting", systemState: "ready", ...patch }).returning())[0]!;
-  return { ...built, db, close, base, co, dev, commands, ticket };
+  return { ...built, db, close, base, co, dev, commands, ticket, req };
 }
 
 beforeEach(async () => {
@@ -101,6 +101,9 @@ describe("CEO delegation", () => {
   });
 
   it("the CEO's ticket prompt has the delegate rule and team; a worker's does not", async () => {
+    // The PA is read-only, so it is never offered as someone to delegate to.
+    const pa = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/agents`, { name: "Assistant", template: "assistant" })).json() as { id: string };
+    await ctx.db.update(agents).set({ paused: false }).where(eq(agents.id, pa.id));
     const t = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id });
     const t2 = await ctx.ticket({ assigneeAgentId: ctx.dev.id, title: "Other" });
     await ctx.scheduler.wake({ agentId: ctx.co.ceo.id, reason: "assigned", ticketId: t.id });
@@ -109,7 +112,8 @@ describe("CEO delegation", () => {
     const ceoPrompt = ctx.commands.find((x) => x.agentId === ctx.co.ceo.id)!.prompt;
     const devPrompt = ctx.commands.find((x) => x.agentId === ctx.dev.id)!.prompt;
     expect(ceoPrompt).toContain("assign_ticket");
-    expect(ceoPrompt).toMatch(/Your team: Dev \(Engineer\)/);
+    expect(ceoPrompt).toMatch(/Your team: Dev \(Engineer\)\./);
+    expect(ceoPrompt).not.toContain("Assistant (");
     expect(ceoPrompt).toContain("never as loose files");
     expect(devPrompt).not.toContain("assign_ticket");
     expect(devPrompt).not.toContain("Your team:");

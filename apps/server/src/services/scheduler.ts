@@ -277,7 +277,7 @@ export function schedulerService(
           const team = await db
             .select({ name: agents.name, role: agents.role, title: agents.title })
             .from(agents)
-            .where(and(eq(agents.companyId, agent.companyId), isNull(agents.retiredAt), eq(agents.paused, false), ne(agents.id, agent.id)));
+            .where(and(eq(agents.companyId, agent.companyId), isNull(agents.retiredAt), eq(agents.paused, false), ne(agents.id, agent.id), sql`${agents.duty} is distinct from 'assistant'`));
           lines.push(
             "",
             `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Only do the work yourself when nobody on the team can.${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,

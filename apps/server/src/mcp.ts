@@ -89,7 +89,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   async function delegateTarget(name: string): Promise<{ id: string } | { error: string }> {
     const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
     if (me?.role !== "ceo" && me?.role !== "manager") return { error: "Only your company's CEO or a manager can assign tickets to colleagues." };
-    const team_ = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, scope.companyId), isNull(agents.retiredAt)));
+    // The PA only answers the owner from read-only tools, so it can't take ticket work.
+    const team_ = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, scope.companyId), isNull(agents.retiredAt), sql`${agents.duty} is distinct from 'assistant'`));
     const a = team_.find((x) => x.name.toLowerCase() === name.trim().toLowerCase());
     if (!a) return { error: `No active agent called ${name} in your company. Valid names: ${team_.map((x) => x.name).join(", ")}.` };
     // The work service lets the owner assign to a paused agent, but the wake would sit unanswered; an agent shouldn't hand work to a dead end.
