@@ -175,6 +175,17 @@ describe("scheduler", () => {
     expect(low.notBefore?.getTime()).toBe(resets * 1000);
   });
 
+  it("tells an agent on a ticket to save its state note before ending, but not one with no ticket", async () => {
+    ctx = await setup({ instance: 2 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.req("POST", `/api/agents/${worker.id}/wake`, { priority: 1, note: "say hi" });
+    await ctx.req("POST", "/api/scheduler/tick");
+    const rule = "Before you end your run, record the ticket's current state in its note: call set_ticket_state";
+    expect(ctx.commands.find((c) => c.agentId === ctx.ceo.id)!.prompt).toContain(rule);
+    expect(ctx.commands.find((c) => c.agentId === worker.id)!.prompt).not.toContain(rule);
+  });
+
   it("launches higher priority first when capacity is short", async () => {
     ctx = await setup({ instance: 1 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();

@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, ticketArtifacts, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { decisions, ticketArtifacts, ticketDependencies, tickets, wakes, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -46,6 +46,17 @@ async function agent(agentId: string) {
 }
 
 describe("state notes (R85)", () => {
+  it("saves a note in the same state without moving the card to another column", async () => {
+    const [later] = await ctx.db.insert(workflowColumns).values({ projectId: ctx.project.id, name: "Testing", systemState: "in_progress", position: 99 }).returning();
+    const t = await ctx.ticket("Add rate limiting", { columnId: later!.id });
+    const c = await agent(ctx.dev.id);
+    await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Limiter written; tests next." } });
+    expect(await row(t.id)).toMatchObject({ systemState: "in_progress", columnId: later!.id, stateNote: "Limiter written; tests next." });
+    await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Ready." } });
+    expect((await row(t.id)).columnId).not.toBe(later!.id);
+    await c.close();
+  });
+
   it("refuses a move to review, done or blocked without a summary", async () => {
     const t = await ctx.ticket("Add rate limiting");
     const c = await agent(ctx.dev.id);
