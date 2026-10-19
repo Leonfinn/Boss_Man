@@ -1,7 +1,7 @@
 // R38 against a real local "remote" repo: worktree per ticket, pinned base, patch save and
 // restore, serialised creation, and credentials that never touch disk.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -167,7 +167,10 @@ describe("workspace clean-up (R54)", () => {
     expect(existsSync(path.join(root, "tmp", "old.index"))).toBe(false);
     expect(git(ws.repoDir(ids.project), "worktree", "list")).not.toContain(ids.b);
     expect(later.tickets).toEqual([{ ticketId: ids.a, projectId: ids.project, bytes: expect.any(Number) }]);
-    expect(later.tickets[0]!.bytes).toBeGreaterThan(256 * 1024);
+    // Usage counts allocated blocks, which some filesystems (ZFS, overlays) report lazily or loosely:
+    // compare with what the filesystem says this file occupies, not with its length.
+    const big = lstatSync(path.join(a.path, "big.bin"));
+    expect(later.tickets[0]!.bytes).toBeGreaterThanOrEqual(typeof big.blocks === "number" ? big.blocks * 512 : big.size);
     expect(later.repos).toEqual([{ projectId: ids.project, bytes: expect.any(Number) }]);
     expect(later.usedBytes).toBe(later.tickets[0]!.bytes + later.repos[0]!.bytes);
     // The ticket's branch survives its worktree.
