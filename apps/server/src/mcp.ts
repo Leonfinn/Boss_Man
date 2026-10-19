@@ -155,7 +155,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         if (t?.repoUrl && outcome !== "cancelled") return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
       }
       if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
-      // The card moves to the project's first column for the new state, so the board matches.
+      // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
       const [col] = await db
         .select({ id: workflowColumns.id })
         .from(workflowColumns)
@@ -167,7 +167,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: col?.id ?? null, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
