@@ -6,6 +6,7 @@ import { and, asc, desc, eq, ilike, inArray, like, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, ticketArtifacts, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import { record } from "./activity.js";
+import type { WikiSemantic } from "./wiki-semantic.js";
 
 export const MAX_BODY = 200_000;
 
@@ -93,7 +94,7 @@ export type SectionHit = { slug: string; title: string; path: string; snippet: s
 
 type Author = { agentId: string | null; runId: string | null };
 
-export function wikiService(db: Db) {
+export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "similar">) {
   async function ownTicket(companyId: string, ticketId: string) {
     const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
     if (!t) throw new WikiError(404, "No ticket with that ID in this company.");
@@ -140,10 +141,29 @@ export function wikiService(db: Db) {
 
     /**
      * The sections that best match q, at most two per page, best first. Empty when full-text
-     * search finds nothing (callers fall back to list). Returns plain hits so a later
-     * vector-similarity ranking can be fused with this one.
+     * search finds nothing (callers fall back to list). When semantic search is on, the 50
+     * nearest sections by meaning are fused with the 50 best full-text sections (reciprocal
+     * rank fusion), so a section can match without sharing a word with the query.
      */
     async search(companyId: string, q: string, pages = 10): Promise<SectionHit[]> {
+      const similar = await semantic?.similar(companyId, q);
+      if (!similar) return this.ftsSearch(companyId, q, pages);
+      const fts = await this.ftsSearch(companyId, q, 25);
+      const fused = new Map<string, SectionHit>();
+      for (const [list, isFts] of [[fts, true], [similar, false]] as const)
+        list.forEach((h, rank) => {
+          const key = `${h.slug}\n${h.path}`;
+          const add = 1 / (60 + rank + 1);
+          const have = fused.get(key);
+          if (have) have.score += add;
+          else fused.set(key, { slug: h.slug, title: h.title, path: h.path, snippet: h.snippet, score: add });
+          if (isFts) fused.get(key)!.snippet = h.snippet;
+        });
+      return [...fused.values()].sort((a, b) => b.score - a.score).slice(0, pages * 2);
+    },
+
+    /** Full-text only: the sections of the best-matching pages, at most two per page. */
+    async ftsSearch(companyId: string, q: string, pages = 10): Promise<SectionHit[]> {
       const top = await ftsPages(companyId, q, pages);
       if (!top.length) return [];
       const parts = top.flatMap((p, pi) =>
@@ -253,6 +273,7 @@ export function wikiService(db: Db) {
           .onConflictDoNothing();
         await record(db, { companyId, agentId: input.agentId, ticketId: input.ticketId, kind: "artifact", summary: `Wrote wiki page "${title}"` });
       }
+      if (changed) semantic?.enqueue(companyId, p!.id);
       return { page: p!, created: !existing };
     },
 

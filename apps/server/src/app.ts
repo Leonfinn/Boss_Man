@@ -40,6 +40,7 @@ import { dashboardService } from "./services/dashboard.js";
 import { SkillError, skillsService } from "./services/skills.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
+import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
@@ -60,6 +61,8 @@ export type AppOptions = {
   /** Mark cookies Secure. Turn off only for plain-HTTP local development. */
   secureCookies?: boolean;
   logger?: boolean;
+  /** Quiet time before a wiki page is embedded after a write. Default 30s. */
+  semanticDebounceMs?: number;
   /** Runner heartbeat interval; tests shorten it. */
   heartbeatMs?: number;
   /** Launch-safety limits (R30); defaults in DEFAULT_LIMITS. */
@@ -197,7 +200,9 @@ export async function buildApp(opts: AppOptions) {
   const runsSvc = runsService(db, { runners });
   runsSvc.setWakeHook((w) => scheduler.wake(w));
   const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w) });
-  const wiki = wikiService(db);
+  const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
+  app.addHook("onClose", async () => semantic.stop());
+  const wiki = wikiService(db, semantic);
   const dashboard = dashboardService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -998,6 +1003,18 @@ export async function buildApp(opts: AppOptions) {
       const { id, rev } = z.object({ id: Uuid, rev: Uuid }).parse(req.params);
       return wiki.revision(id, rev).catch(wikiErrors(reply));
     });
+    // Semantic wiki search settings. dims stays at the 768 the embeddings column holds.
+    const semanticView = (s: Awaited<ReturnType<typeof semantic.settings>>) => ({ enabled: s.enabled, baseUrl: s.baseUrl, model: s.model, dims: s.dims, secretId: s.secretId });
+    owner.get("/api/companies/:id/wiki-semantic", async (req) => semanticView(await semantic.settings(IdParam.parse(req.params).id)));
+    owner.put("/api/companies/:id/wiki-semantic", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ enabled: z.boolean(), baseUrl: z.string().url().max(300).regex(/^https?:/), model: z.string().trim().min(1).max(200), secretId: Uuid.nullable() }).parse(req.body);
+      const before = await semantic.settings(id);
+      const after = await semantic.setSettings(id, b);
+      if (after.enabled && (!before.enabled || before.model !== after.model || before.baseUrl !== after.baseUrl || before.secretId !== after.secretId)) await semantic.reindexAll(id);
+      return semanticView(after);
+    });
+    owner.post("/api/companies/:id/wiki-semantic/reindex", async (req, reply) => reply.code(202).send({ pages: await semantic.reindexAll(IdParam.parse(req.params).id) }));
     owner.get("/api/tickets/:id/artifacts", async (req) => wiki.artifacts(IdParam.parse(req.params).id));
     owner.delete("/api/artifacts/:id", async (req, reply) => wiki.removeArtifact(IdParam.parse(req.params).id).then(() => reply.code(204).send(), wikiErrors(reply)));
 
@@ -1405,5 +1422,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki, semantic };
 }

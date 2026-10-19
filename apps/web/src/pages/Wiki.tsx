@@ -194,6 +194,66 @@ function PageView({ companyId, slug, folders, go, onChanged, onNewHere }: { comp
 /** Not a stored page: the server builds it when asked (R84). "~" can't appear in a page address. */
 const BRIEF = "~brief";
 
+type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null };
+
+/** Semantic search: off by default. The key is a secret from the encrypted store. */
+function SemanticSettings({ companyId }: { companyId: string }) {
+  const cur = usePoll((signal) => api<Semantic>(`/api/companies/${companyId}/wiki-semantic`, { signal }), 600_000, `sem-${companyId}`);
+  const secrets = usePoll((signal) => api<Array<{ id: string; name: string }>>("/api/secrets", { signal }), 600_000, "secrets");
+  const [v, setV] = useState<Semantic | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => setV(cur.data ?? null), [cur.data]);
+  if (!v) return null;
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId } }).then(
+      () => setMsg(v.enabled ? "Saved. Pages are being embedded in the background." : "Saved."),
+      (err: Error) => setMsg(err.message),
+    );
+  };
+  return (
+    <details className="card">
+      <summary>Semantic search</summary>
+      <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <p className="muted">Wiki text is sent to the provider below to be embedded, and so are search words. Full-text search keeps working if it fails.</p>
+        <label>
+          <input type="checkbox" checked={v.enabled} onChange={(e) => setV({ ...v, enabled: e.target.checked })} /> Search by meaning as well as words
+        </label>
+        <div className="field">
+          <label htmlFor="sem-url">Provider address</label>
+          <input id="sem-url" value={v.baseUrl} onChange={(e) => setV({ ...v, baseUrl: e.target.value })} />
+          <small className="muted">Any OpenAI-compatible /embeddings service. Google's own: https://generativelanguage.googleapis.com/v1beta/openai (model gemini-embedding-001).</small>
+        </div>
+        <div className="field">
+          <label htmlFor="sem-model">Model (768 dimensions)</label>
+          <input id="sem-model" value={v.model} onChange={(e) => setV({ ...v, model: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="sem-key">API key</label>
+          <select id="sem-key" value={v.secretId ?? ""} onChange={(e) => setV({ ...v, secretId: e.target.value || null })}>
+            <option value="">None</option>
+            {(secrets.data ?? []).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          <small className="muted">Add the key under Secrets first.</small>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="submit" className="btn primary">
+            Save
+          </button>
+          <button type="button" className="btn" onClick={() => api(`/api/companies/${companyId}/wiki-semantic/reindex`, { method: "POST" }).then(() => setMsg("Re-embedding all pages."), (err: Error) => setMsg(err.message))}>
+            Re-embed all
+          </button>
+        </div>
+        {msg && <p role="status">{msg}</p>}
+      </form>
+    </details>
+  );
+}
+
 function BriefView({ companyId }: { companyId: string }) {
   const brief = usePoll((signal) => api<{ markdown: string }>(`/api/companies/${companyId}/brief`, { signal }), 30_000, companyId);
   if (brief.error) return <p className="error" role="alert">{brief.error.message}</p>;
@@ -316,6 +376,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
               </ul>
             )}
             {list.data && pages.length === 0 && <p className="muted">{q.trim() ? "No page matches." : "No pages yet."}</p>}
+            <SemanticSettings companyId={company.id} />
             <TreeList
               folder={tree(pages)}
               companyId={company.id}
