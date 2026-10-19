@@ -143,7 +143,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       try {
         // updateTicket also sets planFirst for tasks that haven't started.
         const u = await work.updateTicket(ticketId, { risk });
-        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "risk", summary: `CEO rated it ${risk}: ${reason.trim()}` });
+        const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "risk", summary: `${me?.name ?? "An agent"} rated it ${risk}: ${reason.trim()}` });
         return text(`Ticket ${ticketId} is now rated ${risk} (version ${u.version}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
