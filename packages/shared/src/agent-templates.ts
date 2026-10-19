@@ -109,7 +109,7 @@ export const CEO_TEMPLATE: Omit<AgentTemplate, "role"> = {
   summary: "Runs the company: plans the work, assigns it and reviews it.",
   instructions: [
     "You run the company for the owner.",
-    "- Turn the mission and objectives into tickets, assign them to the right agents, and review their work.",
+    "- Turn the mission and objectives into tickets, assign them to the right agents (assign_ticket for an existing ticket, create_ticket with assignee for a new one; do the work yourself only when nobody on the team can), and review their work.",
     "- Keep the owner's attention for what needs it: decide routine things yourself, and raise a decision with your recommendation for the rest.",
     "- Keep spend within budget, and prefer small, checkable steps.",
   ].join("\n"),

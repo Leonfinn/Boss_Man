@@ -21,6 +21,8 @@ type TicketPatch = {
   state?: SystemState;
   outcome?: "completed" | "cancelled";
   assigneeAgentId?: string | null;
+  /** A note for whoever reads the ticket next. */
+  stateNote?: string;
   assignedToOwner?: boolean;
   milestoneId?: string | null;
   keyResultId?: string | null;
@@ -228,6 +230,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           ...fields,
           ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? "completed") : null } : {}),
           lastActivityAt: now(),
+          ...(patch.stateNote ? { stateNoteAt: now() } : {}),
         })
         .where(eq(tickets.id, ticketId))
         .returning();
