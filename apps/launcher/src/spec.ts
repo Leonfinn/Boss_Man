@@ -52,6 +52,8 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
       IpcMode: "private",
       UTSMode: "",
       PidsLimit: 1024,
+      // An init as PID 1 reaps the zombies agents' tools leave, which would otherwise fill the pid limit.
+      Init: true,
       Memory: cfg.memoryBytes,
       RestartPolicy: { Name: "unless-stopped" },
     },

@@ -53,6 +53,8 @@ x-runner: &runner
   security_opt: ["no-new-privileges:true"]
   mem_limit: ${BOSSMAN_RUNNER_MEMORY:-4g}
   pids_limit: 1024
+  # An init as PID 1 reaps the zombies agents' tools leave behind.
+  init: true
 
 services:
   db:
