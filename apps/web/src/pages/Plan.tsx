@@ -8,7 +8,7 @@ const GAP_X = 70;
 const GAP_Y = 18;
 const PAD = 12;
 
-const KIND = { ticket: "Ticket", engagement: "Engagement", decision: "Decision" } as const;
+const KIND = { ticket: "Task", engagement: "Engagement", decision: "Decision" } as const;
 
 function nodeClass(n: PlanNode) {
   if (!n.open) return "pl-node done";
@@ -153,18 +153,18 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
       <header className="page-head">
         <div>
           <h1>Plan</h1>
-          <p className="sub">Open tickets that wait on something, and what they wait on. Red lines still hold work up. Tap a card to light up its chain.</p>
+          <p className="sub">Open tasks that wait on something, and what they wait on. Red lines still hold work up. Tap a card to light up its chain.</p>
         </div>
       </header>
       {plan.error && <p className="error">{plan.error.message}</p>}
       {!company ? (
         <p>Create a company on the Kanban first.</p>
       ) : p && !p.nodes.length ? (
-        <p className="muted">No open ticket waits on anything. Add what a ticket waits on from its page.</p>
+        <p className="muted">No open task waits on anything. Add what a task waits on from its page.</p>
       ) : p ? (
         <>
           <p className="muted" style={{ fontSize: 14 }}>
-            {blocked} blocked ticket{blocked === 1 ? "" : "s"} across {p.nodes.length} items.
+            {blocked} blocked task{blocked === 1 ? "" : "s"} across {p.nodes.length} items.
           </p>
           <Causes plan={p} />
           <Graph plan={p} />

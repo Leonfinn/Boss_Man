@@ -5,7 +5,7 @@ export const when = (iso: string | null | undefined) => (iso ? new Date(iso).toL
 
 /** Why a run started, in words, from the wake that launched it. */
 const WHY: Record<string, string> = {
-  assigned: "Was given the ticket",
+  assigned: "Was given the task",
   "woken by owner": "You woke it",
   message: "Your message",
   chat: "Chat with you",
@@ -14,7 +14,7 @@ const WHY: Record<string, string> = {
   "decision answered": "Your answer to its question",
   feedback: "New feedback to triage",
   chased: "Chased: something is waiting on it",
-  unblocked: "Its ticket was unblocked",
+  unblocked: "Its task was unblocked",
   resume: "Picking up after a restart",
   engagement: "Another company's request",
   "deploy rejected": "You rejected its deploy",
@@ -80,7 +80,7 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
               <td>
                 {r.ticket && r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : null}
                 <div className="muted" style={{ fontSize: 13 }} title={r.note ?? undefined}>
-                  {whyRun(r) || (r.ticket ? "" : "No ticket")}
+                  {whyRun(r) || (r.ticket ? "" : "No task")}
                 </div>
               </td>
               <td className="mono">{r.model ?? "default"}</td>

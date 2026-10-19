@@ -114,7 +114,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     </div>
                     <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question}</h2>
                     <div className="meta">
-                      {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tickets`}</span>}
+                      {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
                       {d.reasons.map((r) => (
                         <span key={r}>{r}</span>

@@ -85,6 +85,10 @@ export type Ticket = {
   planFirst: boolean;
   plan: string | null;
   planApprovedAt: string | null;
+  /** The feature it delivers and the task it is a sub-task of, by title, on a board card. */
+  featureId?: string | null;
+  featureTitle?: string | null;
+  parentTitle?: string | null;
 };
 export type TicketDetail = Ticket & { milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
@@ -240,7 +244,7 @@ export type Feature = {
   value: number;
   demandPart: number;
   priority: number;
-  tickets: { total: number; done: number };
+  tickets: { total: number; done: number; items: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }> };
 };
 export type ScoredFeatures = { settings: { demandWeight: number; ceoTriage: boolean }; drivers: Driver[]; maxDemand: number; features: Feature[] };
 export type FeedbackSettingsView = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; drivers: Driver[]; areas: FeatureArea[] };
@@ -259,5 +263,5 @@ export type FeatureDetail = {
   maxDemand: number;
   subfeatures: Feature[];
   insights: Array<Insight & { fromSubfeature: boolean; note: { id: string; title: string | null; text: string; source: string; untrusted: boolean; createdAt: string }; customer: { id: string; name: string; segment: string | null } | null }>;
-  tickets: Array<{ id: string; title: string; state: string; outcome: string | null }>;
+  tickets: Array<{ id: string; title: string; state: string; outcome: string | null; assignee: string | null }>;
 };

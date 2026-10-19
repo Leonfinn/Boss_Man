@@ -200,6 +200,7 @@ const ACTIVE: FeatureStatus[] = ["idea", "considering", "planned", "in_progress"
 
 function FeatureRow({ f, drivers, maxDemand, sub, onPatch }: { f: Feature; drivers: Driver[]; maxDemand: number; sub?: boolean; onPatch: (id: string, body: Record<string, unknown>) => void }) {
   return (
+    <>
     <tr>
       <td style={{ paddingLeft: sub ? 36 : undefined, minWidth: 220 }}>
         <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
@@ -237,8 +238,24 @@ function FeatureRow({ f, drivers, maxDemand, sub, onPatch }: { f: Feature; drive
       <td className="mono">
         <b>{f.priority.toFixed(1)}</b>
       </td>
-      <td className="mono muted">{f.tickets.total ? `${f.tickets.done}/${f.tickets.total}` : "–"}</td>
+      <td className="mono muted" style={{ whiteSpace: "nowrap" }}>{f.tickets.total ? `${f.tickets.done}/${f.tickets.total} tasks` : "–"}</td>
     </tr>
+    {f.tickets.items.length > 0 && (
+      <tr>
+        <td colSpan={7 + drivers.length} style={{ paddingLeft: sub ? 56 : 20 }}>
+          <ul className="link-list" aria-label={`Tasks of ${f.title}`}>
+            {f.tickets.items.map((t) => (
+              <li key={t.id}>
+                <a href={`#/tickets/${t.id}`}>{t.title}</a>
+                <span className={`tag ${t.state === "done" ? "green" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+                <span className="muted">{t.assignee ?? "unassigned"}</span>
+              </li>
+            ))}
+          </ul>
+        </td>
+      </tr>
+    )}
+    </>
   );
 }
 
@@ -320,7 +337,7 @@ function FeatureList({ companies, company, go }: { companies: Company[]; company
                     <th>Effort</th>
                     <th title="Weighted average of demand and criteria, 0 to 5">Value</th>
                     <th title="Value × 3 ÷ effort">Priority</th>
-                    <th title="Tickets done">Work</th>
+                    <th title="Tasks done">Work</th>
                   </tr>
                 </thead>
                 {groups.map((g) => (
@@ -362,7 +379,7 @@ function CreateTicket({ featureId, companyId, title, go }: { featureId: string; 
   if (projects.data && !list.length)
     return (
       <p className="muted" style={{ fontSize: 14 }}>
-        Create a project on the Kanban to turn this into tickets.
+        Create a project on the Kanban to turn this into tasks.
       </p>
     );
   const submit = (e: FormEvent) => {
@@ -370,9 +387,9 @@ function CreateTicket({ featureId, companyId, title, go }: { featureId: string; 
     void api<{ id: string }>(`/api/features/${featureId}/tickets`, { method: "POST", body: { projectId: pid, title: name.trim() || title, risk } }).then((t) => go(`tickets/${t.id}`), (err: Error) => setError(err.message));
   };
   return (
-    <form onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }} aria-label="Create a ticket for this feature">
+    <form onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end" }} aria-label="Create a task for this feature">
       <div className="field" style={{ flex: "2 1 220px" }}>
-        <label htmlFor="ft-title">New ticket</label>
+        <label htmlFor="ft-title">New task</label>
         <input id="ft-title" maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
       </div>
       {list.length > 1 && (
@@ -398,7 +415,7 @@ function CreateTicket({ featureId, companyId, title, go }: { featureId: string; 
         </select>
       </div>
       <button className="btn primary" type="submit" disabled={!pid}>
-        Create ticket
+        Create task
       </button>
       {error && <p className="error">{error}</p>}
     </form>
@@ -616,7 +633,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           Delivery
         </h2>
         <p className="muted" style={{ fontSize: 13 }}>
-          A ticket made here is described from the feature and what people asked for, strongest first. The feature moves to in progress when work on a ticket starts, and to released when every ticket is done.
+          A task made here is described from the feature and what people asked for, strongest first. The feature moves to in progress when work on a task starts, and to released when every task is done.
         </p>
         <CreateTicket featureId={id} companyId={companyId} title={f.title} go={go} />
       </section>
@@ -639,12 +656,13 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           )}
           {d.tickets.length > 0 && (
             <div>
-              <p className="label">Tickets delivering it</p>
+              <p className="label">Tasks delivering it</p>
               <ul className="link-list">
                 {d.tickets.map((t) => (
                   <li key={t.id}>
                     <a href={`#/tickets/${t.id}`}>{t.title}</a>
                     <span className={`tag ${t.state === "done" ? "green" : ""}`}>{t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>
+                    <span className="muted">{t.assignee ?? "unassigned"}</span>
                   </li>
                 ))}
               </ul>

@@ -154,7 +154,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
                       <span className={`rstate ${res!.tone}`} aria-label={res!.label}>
                         {res!.icon}
                       </span>
-                      {r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : <a href={`#/runs/${r.id}`}>{r.purpose === "chat" ? "Answering in chat" : "Work with no ticket"}</a>}
+                      {r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : <a href={`#/runs/${r.id}`}>{r.purpose === "chat" ? "Answering in chat" : "Work with no task"}</a>}
                     </>
                   ) : (
                     <span className="muted">Hasn't run yet</span>
@@ -180,7 +180,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
         </a>
         <a className="card stat" href="#/board">
           <strong>{s.inProgress}</strong>
-          <span>Tickets in progress</span>
+          <span>Tasks in progress</span>
           <small className="muted">
             {s.inReview} in review, {s.open} open, {s.blocked} blocked
           </small>
@@ -227,7 +227,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
           ]}
         />
         <Chart
-          title="New tickets by status"
+          title="New tasks by status"
           days={d.ticketsByDay}
           series={[
             { key: "backlog", label: "Backlog", tone: "grey" },
@@ -261,10 +261,10 @@ export function Dashboard({ company }: { company: Company | undefined }) {
         </section>
         <section aria-labelledby="dash-tickets">
           <h2 id="dash-tickets" className="section-label">
-            Recent tickets
+            Recent tasks
           </h2>
           <ul className="card dash-list">
-            {d.recentTickets.length === 0 && <li className="muted">No tickets yet.</li>}
+            {d.recentTickets.length === 0 && <li className="muted">No tasks yet.</li>}
             {d.recentTickets.map((t) => (
               <li key={t.id}>
                 <span className={`tag ${STATE_TONE[t.state] ?? ""}`}>{t.state === "done" && t.outcome === "cancelled" ? "cancelled" : t.state.replace(/_/g, " ")}</span>

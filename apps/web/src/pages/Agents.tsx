@@ -316,7 +316,7 @@ function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: F
                   {c.undoneAt && <span className="tag" style={{ marginLeft: 6 }}>Undone</span>}
                 </span>
                 {!c.undoneAt && c.field !== "hired" && c.field !== "rehired" && (
-                  <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} onClick={() => void run(() => api(`/api/agent-changes/${c.id}/undo`, { method: "POST" }), c.field === "retired" ? "Rehired, with their tickets back." : "Undone.")}>
+                  <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} onClick={() => void run(() => api(`/api/agent-changes/${c.id}/undo`, { method: "POST" }), c.field === "retired" ? "Rehired, with their tasks back." : "Undone.")}>
                     {c.field === "retired" ? "Rehire" : "Undo"}
                   </button>
                 )}
@@ -430,12 +430,12 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             <div className="muted" style={{ fontSize: 13 }}>
               {a.current ? (
                 <>
-                  Working on <a href={`#/tickets/${a.current.ticketId}`}>{a.current.title ?? "a ticket"}</a>
+                  Working on <a href={`#/tickets/${a.current.ticketId}`}>{a.current.title ?? "a task"}</a>
                 </>
               ) : a.openTickets ? (
-                `${a.openTickets} open ticket${a.openTickets === 1 ? "" : "s"}`
+                `${a.openTickets} open task${a.openTickets === 1 ? "" : "s"}`
               ) : (
-                "No open tickets"
+                "No open tasks"
               )}
               {" · "}
               <span className="mono">{a.model ?? "default model"}</span> · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
@@ -463,7 +463,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
                 type="button"
                 className="btn"
                 onClick={() =>
-                  window.confirm(`Retire ${a.name}? They stop working, their open tickets go back to unassigned and they stop watching tickets. You can rehire them from their history.`) &&
+                  window.confirm(`Retire ${a.name}? They stop working, their open tasks go back to unassigned and they stop watching tasks. You can rehire them from their history.`) &&
                   void act(() => api(`/api/agents/${a.id}/retire`, { method: "POST" }), `${a.name} retired.`)
                 }
               >
@@ -506,7 +506,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           refresh={refreshModels}
           onDone={(name) => {
             setHiring(false);
-            changed(`${name} hired. Give them a ticket on the Kanban, or make them a ticket's watcher.`);
+            changed(`${name} hired. Give them a task on the Kanban, or make them a task's watcher.`);
           }}
         />
       )}

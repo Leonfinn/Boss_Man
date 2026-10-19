@@ -139,7 +139,7 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
     <section className="card activity" aria-labelledby="activity-h">
       <h2 id="activity-h">Activity</h2>
       <div className="activity-feed" role="log" aria-live="polite">
-        {feed.length === 0 && convo.data && <p className="muted">No activity yet. When an agent works on this ticket, you'll see what it's doing here, and you can talk to it below.</p>}
+        {feed.length === 0 && convo.data && <p className="muted">No activity yet. When an agent works on this task, you'll see what it's doing here, and you can talk to it below.</p>}
         {feed.map(({ key, m, r }) =>
           r ? (
             <RunBlock key={key} run={r} />
@@ -175,7 +175,7 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
           id="activity-text"
           rows={2}
           maxLength={4000}
-          placeholder={live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the ticket to have an agent pick it up."}
+          placeholder={live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the task to have an agent pick it up."}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}

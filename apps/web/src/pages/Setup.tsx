@@ -18,7 +18,7 @@ const STEPS = [
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
   { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
   { id: "funding", title: "What pays for the CEO", why: "Funding sources track cost and quota. Choose the one the CEO runs on; the Agents page sets the rest." },
-  { id: "ticket", title: "A first ticket", why: "Optional: something for the team to start on." },
+  { id: "ticket", title: "A first task", why: "Optional: something for the team to start on." },
 ] as const;
 
 function CompanyStep({ company, onCreated }: { company: Company | undefined; onCreated: (id: string) => void }) {
@@ -224,7 +224,7 @@ function TicketStep({ company }: { company: Company }) {
         </label>
       )}
       <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={!form.title.trim()}>
-        Add the ticket to {project.name}
+        Add the task to {project.name}
       </button>
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>

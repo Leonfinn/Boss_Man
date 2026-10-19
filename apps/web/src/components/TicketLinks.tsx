@@ -37,7 +37,7 @@ export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; o
         </h2>
       )}
       <div className="field" style={{ maxWidth: 420 }}>
-        <label htmlFor="t-feature">Delivers the feature</label>
+        <label htmlFor="t-feature">Feature</label>
         <select id="t-feature" value={t.featureId ?? ""} onChange={(e) => void api(`/api/tickets/${t.id}`, { method: "PATCH", body: { featureId: e.target.value || null } }).then(() => (setError(null), onChanged()), fail)}>
           <option value="">None</option>
           {(feats.data?.features ?? [])
@@ -86,7 +86,7 @@ export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; o
                 <span className="muted">{w.kind}</span>
                 <a href={w.link}>{w.title}</a>
                 {w.kind === "decision" ? (
-                  <span className="muted">Answer it to release this ticket.</span>
+                  <span className="muted">Answer it to release this task.</span>
                 ) : (
                   <button type="button" className="btn small" onClick={() => remove(w.dependencyId)}>
                     Remove
@@ -102,7 +102,7 @@ export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; o
           <div className="field" style={{ flex: "1 1 280px" }}>
             <label htmlFor="t-blocker">Make it wait on</label>
             <select id="t-blocker" value={blocker} onFocus={loadCandidates} onPointerDown={loadCandidates} onChange={(e) => setBlocker(e.target.value)}>
-              <option value="">Choose a ticket</option>
+              <option value="">Choose a task</option>
               {(candidates ?? [])
                 .filter((c) => !taken.has(c.id))
                 .map((c) => (

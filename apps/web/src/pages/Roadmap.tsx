@@ -7,7 +7,7 @@ export const STATUS: Record<MilestoneStatus, { label: string; tone: string; colo
   late: { label: "Late", tone: "red", colour: "var(--red-ink)" },
   at_risk: { label: "At risk", tone: "amber", colour: "var(--amber)" },
   on_track: { label: "On track", tone: "blue", colour: "var(--accent)" },
-  no_work: { label: "No tickets", tone: "", colour: "#8b95a3" },
+  no_work: { label: "No tasks", tone: "", colour: "#8b95a3" },
   unscheduled: { label: "No date", tone: "", colour: "#8b95a3" },
 };
 
@@ -89,7 +89,7 @@ function Timeline({ o, win, now, selected, onSelect }: { o: RoadmapObjective; wi
             <span>
               <b>{m.title}</b>
               <small>
-                {short(m.targetDate!)} · {m.total ? `${m.done}/${m.total}` : "no tickets"} · {STATUS[m.status].label}
+                {short(m.targetDate!)} · {m.total ? `${m.done}/${m.total}` : "no tasks"} · {STATUS[m.status].label}
               </small>
             </span>
           </button>
@@ -125,7 +125,7 @@ function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () 
         <button
           className="btn"
           type="button"
-          onClick={() => window.confirm(`Delete "${m.title}"? Its tickets stay, without a milestone.`) && void api(`/api/milestones/${m.id}`, { method: "DELETE" }).then(onChanged, (err: Error) => setError(err.message))}
+          onClick={() => window.confirm(`Delete "${m.title}"? Its tasks stay, without a milestone.`) && void api(`/api/milestones/${m.id}`, { method: "DELETE" }).then(onChanged, (err: Error) => setError(err.message))}
         >
           Delete
         </button>
@@ -143,7 +143,7 @@ function MilestoneDetail({ m, onChanged }: { m: RoadmapMilestone; onChanged: () 
           ))}
         </ul>
       ) : (
-        list.data && <p className="muted">No tickets yet. Pick this milestone on a ticket's page to add it.</p>
+        list.data && <p className="muted">No tasks yet. Pick this milestone on a task's page to add it.</p>
       )}
     </div>
   );
@@ -258,7 +258,7 @@ function Objective({ o, win, now, onChanged }: { o: RoadmapObjective; win: { sta
                   <span className="rm-dot" style={{ ["--c" as string]: STATUS[m.status].colour }} aria-hidden="true" />
                   <b>{m.title}</b>
                   <span className="muted">{m.targetDate ? short(m.targetDate) : "No date"}</span>
-                  <span className="muted">{m.total ? `${m.done}/${m.total} done` : "no tickets"}</span>
+                  <span className="muted">{m.total ? `${m.done}/${m.total} done` : "no tasks"}</span>
                   <span className={`tag ${STATUS[m.status].tone}`}>{STATUS[m.status].label}</span>
                 </button>
               </li>
@@ -346,11 +346,11 @@ function MilestoneCard({ m, selected, onSelect, onChanged }: { m: RoadmapMilesto
         <span className="muted">{m.targetDate ? short(m.targetDate) : "No date"}</span>
       </div>
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <span className="bar" style={{ flex: 1 }} aria-label={`${m.done} of ${m.total} tickets done`}>
+        <span className="bar" style={{ flex: 1 }} aria-label={`${m.done} of ${m.total} tasks done`}>
           <span style={{ width: `${pct * 100}%` }} />
         </span>
         <span className="mono muted" style={{ fontSize: 12 }}>
-          {m.total ? `${m.done}/${m.total}` : "no tickets"}
+          {m.total ? `${m.done}/${m.total}` : "no tasks"}
         </span>
       </div>
       {(m.active > 0 || m.blocked > 0) && (
@@ -452,7 +452,7 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
         <p className="muted" style={{ fontSize: 13 }}>
           {TABS.find((t) => t.id === tab)!.help}{" "}
           {tab === "timeline"
-            ? "At risk means due within two weeks with blocked tickets or less than half done. Late means the date has passed with work left."
+            ? "At risk means due within two weeks with blocked tasks or less than half done. Late means the date has passed with work left."
             : "Milestones are placed automatically; pin one to move it."}
         </p>
         {data.error && <p className="error">{data.error.message}</p>}
