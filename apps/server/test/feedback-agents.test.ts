@@ -61,12 +61,11 @@ describe("features and tickets", () => {
     expect((await c.req("POST", `/api/features/${f.id}/tickets`, { projectId: op.id })).statusCode).toBe(422);
 
     await c.req("PATCH", `/api/tickets/${t.id}`, { state: "in_progress" });
-    expect(await c.feedback.syncStatuses()).toEqual([{ id: f.id, status: "in_progress" }]);
+    expect((await c.req("GET", `/api/features/${f.id}`)).json().feature.status).toBe("in_progress");
     await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
-    expect(await c.feedback.syncStatuses()).toEqual([{ id: f.id, status: "released" }]);
+    expect((await c.req("GET", `/api/features/${f.id}`)).json().feature.status).toBe("released");
     expect((await c.req("GET", `/api/features/${f.id}`)).json().feature.releasedAt).not.toBeNull();
     expect(await c.db.select({ title: notifications.title, link: notifications.link }).from(notifications)).toEqual([{ title: "Released: Dark mode", link: `#/features/${c.company.id}/${f.id}` }]);
-    expect(await c.feedback.syncStatuses()).toEqual([]);
 
     // A ticket can be pointed at a feature from the board too, within the company.
     const t2 = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Polish", featureId: f.id })).json();

@@ -576,7 +576,7 @@ function Projects({ company }: { company: Company }) {
   return (
     <Section id="projects-h" title="Projects">
       <p className="muted" style={{ fontSize: 14 }}>
-        With a repo, each ticket gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
+        With a repo, each task gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
       </p>
       {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} />) : <p>No projects yet: create one on the Kanban.</p>}
     </Section>

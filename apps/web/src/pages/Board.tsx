@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from "react";
-import { api, RISKS, type Board as BoardData, type Company, type Project, type Risk } from "../api";
+import { api, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type Project, type Risk, type ScoredFeatures } from "../api";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { STATUS_TONE } from "./Features";
 
 function initials(name: string) {
   return name
@@ -52,11 +53,11 @@ function QuickAdd({ label, button, onAdd }: { label: string; button: string; onA
   );
 }
 
-type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean };
+type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null };
 
 /** New ticket (R63): a button that opens a card with everything a ticket needs to start well. */
-function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers: RiskTiers; onAdd: (t: NewTicketInput) => Promise<unknown> }) {
-  const blank = { title: "", body: "", risk: "medium" as Risk, assignee: "" };
+function NewTicket({ agents, features, tiers, onAdd }: { agents: Company["agents"]; features: Feature[]; tiers: RiskTiers; onAdd: (t: NewTicketInput) => Promise<unknown> }) {
+  const blank = { title: "", body: "", risk: "medium" as Risk, assignee: "", feature: "" };
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
@@ -80,6 +81,7 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
         planFirst,
         assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
         assignedToOwner: form.assignee === "owner",
+        featureId: form.feature || null,
       });
       close();
     } catch (err) {
@@ -91,7 +93,7 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
   if (!open) {
     return (
       <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} onClick={() => setOpen(true)}>
-        New ticket
+        New task
       </button>
     );
   }
@@ -99,7 +101,7 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
   return (
     <form
       className="card"
-      aria-label="New ticket"
+      aria-label="New task"
       onSubmit={submit}
       onKeyDown={(e) => {
         if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
@@ -136,6 +138,17 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
             ))}
           </select>
         </div>
+        <div className="field">
+          <label htmlFor="nt-feature">Feature</label>
+          <select id="nt-feature" value={form.feature} onChange={(e) => setForm({ ...form, feature: e.target.value })}>
+            <option value="">None</option>
+            {features.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.title}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="field" style={{ flex: "1 1 280px" }}>
           <label htmlFor="nt-risk">Risk</label>
           <select id="nt-risk" value={form.risk} onChange={(e) => setForm({ ...form, risk: e.target.value as Risk })} style={{ maxWidth: 200 }}>
@@ -150,7 +163,7 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
       </div>
       {agentChosen && (
         <p role="note" style={{ fontSize: 14, margin: 0 }}>
-          <strong>Starts straight away:</strong> {agents.find((a) => a.id === form.assignee)?.name ?? "The agent"} begins as soon as you add the ticket.
+          <strong>Starts straight away:</strong> {agents.find((a) => a.id === form.assignee)?.name ?? "The agent"} begins as soon as you add the task.
         </p>
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -161,7 +174,7 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
           Cancel
         </button>
         <span className="muted" style={{ fontSize: 13 }}>
-          Ctrl+Enter (Cmd+Enter on a Mac) adds it. The feature and milestone are set on the ticket page.
+          Ctrl+Enter (Cmd+Enter on a Mac) adds it. The milestone is set on the task page.
         </span>
       </div>
       {error && (
@@ -173,6 +186,29 @@ function NewTicket({ agents, tiers, onAdd }: { agents: Company["agents"]; tiers:
   );
 }
 
+/** One card per feature: its status and how many of its tasks are done. */
+function FeatureCards({ features }: { features: Feature[] }) {
+  if (!features.length) return null;
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
+      {features.map((f) => (
+        <article className="ticket" key={f.id} aria-label={`Feature ${f.title}`}>
+          <h3>
+            <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
+          </h3>
+          <span className={`tag ${STATUS_TONE[f.status]}`} style={{ alignSelf: "flex-start" }}>{FEATURE_STATUS_LABEL[f.status]}</span>
+          <span className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={f.tickets.total} aria-valuenow={f.tickets.done} aria-label={`${f.title} progress`}>
+            <span style={{ width: `${(f.tickets.done / f.tickets.total) * 100}%` }} />
+          </span>
+          <span className="mono muted" style={{ fontSize: 12 }}>
+            {f.tickets.done} of {f.tickets.total} tasks done
+          </span>
+        </article>
+      ))}
+    </div>
+  );
+}
+
 export function Board({ companies, projectId, go, onCompaniesChanged }: { companies: Company[]; projectId: string | undefined; go: (to: string) => void; onCompaniesChanged: () => void }) {
   const projects = usePoll(
     async (signal) => (await Promise.all(companies.map((c) => api<Project[]>(`/api/companies/${c.id}/projects`, { signal })))).flat(),
@@ -181,6 +217,8 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
   );
   const current = projects.data?.find((p) => p.id === projectId) ?? projects.data?.[0];
   const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
+  const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
+  const [view, setView] = useState<"all" | "features" | "tasks">("all");
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
   const tiers = useRiskTiers();
 
@@ -202,7 +240,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
   if (projects.data && !current) {
     return (
       <State img={art.setup} alt="No projects yet" title="No projects yet">
-        <p>Projects hold a board of tickets and, optionally, a git repo the agents work in.</p>
+        <p>Projects hold a board of tasks and, optionally, a git repo the agents work in.</p>
         <QuickAdd
           label={`Project name for ${companies[0]!.name}`}
           button="Create project"
@@ -241,6 +279,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
       {current && (
         <NewTicket
           agents={company?.agents ?? []}
+          features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")}
           tiers={tiers}
           onAdd={async (t) => {
             await api(`/api/projects/${current.id}/tickets`, { method: "POST", body: t });
@@ -253,6 +292,16 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
           {board.error.message}
         </p>
       )}
+      <div role="group" aria-label="Show" style={{ display: "flex", gap: 8 }}>
+        {(["all", "features", "tasks"] as const).map((v) => (
+          <button key={v} type="button" className="chip" aria-pressed={view === v} onClick={() => setView(v)}>
+            {v === "all" ? "All" : v === "features" ? "Features" : "Tasks"}
+          </button>
+        ))}
+      </div>
+      {view !== "tasks" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.tickets.total > 0 && f.status !== "declined")} />}
+      {view !== "features" && (
+      <>
       <p className="muted" style={{ fontSize: 13 }}>
         Column names are this project's own. The grey tag under each name is the fixed state agents see, so renaming a column never confuses them.
       </p>
@@ -290,7 +339,9 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
                           {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
                         </div>
                       )}
-                      {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a ticket") : `${t.blockedBy.length} things`}</span>}
+                      {t.parentTitle && <span className="muted" style={{ fontSize: 12 }}>Sub-task of {t.parentTitle}</span>}
+                      {t.featureTitle && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.featureTitle}</span>}
+                      {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
                       {t.outcome === "cancelled" && <span className="tag">Cancelled</span>}
                       <div className="row">
                         <span className="mono">{t.branch ?? (t.dueDate ? `Due ${t.dueDate}` : "")}</span>
@@ -310,6 +361,8 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
           })}
         </div>
       </div>
+      </>
+      )}
     </>
   );
 }

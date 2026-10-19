@@ -154,7 +154,13 @@ export async function buildApp(opts: AppOptions) {
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now);
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
-  const deploysSvc = deploysService(db, { now: opts.now });
+  const deploysSvc = deploysService(db, {
+    now: opts.now,
+    onShipped: async (ticketId) => {
+      const [t] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
+      await feedback.syncFeature(t?.featureId);
+    },
+  });
   const chapters = chaptersService(db, { now: opts.now });
   const feedback = feedbackService(db, {
     now: opts.now,
@@ -185,6 +191,7 @@ export async function buildApp(opts: AppOptions) {
     chat,
     funding,
     deploys: deploysSvc,
+    onFeature: (id) => feedback.syncFeature(id),
     limits: opts.limits,
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
@@ -281,6 +288,7 @@ export async function buildApp(opts: AppOptions) {
   const work = workService(db, {
     onAssigned: (t) => scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),
+    onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
   });
   const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now });

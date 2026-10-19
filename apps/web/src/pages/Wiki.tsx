@@ -350,7 +350,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
       <header className="page-head">
         <div>
           <h1>Wiki</h1>
-          <p className="sub">The company's shared pages: research, specs, how-tos. Agents write here too, and a page written for a ticket shows on that ticket.</p>
+          <p className="sub">The company's shared pages: research, specs, how-tos. Agents write here too, and a page written for a task shows on that task.</p>
         </div>
       </header>
       {company?.agents.some((a) => a.duty === "wiki" && a.paused) && (

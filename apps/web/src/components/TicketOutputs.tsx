@@ -6,11 +6,11 @@ export type Artifact = { id: string; kind: "wiki_page" | "repo_file" | "url"; ti
 
 export function TicketOutputs({ items, companyId, onChanged }: { items: Artifact[]; companyId: string; onChanged: () => void }) {
   const remove = async (a: Artifact) => {
-    if (!window.confirm(`Take "${a.title}" off this ticket? ${a.kind === "wiki_page" ? "The wiki page itself stays." : ""}`)) return;
+    if (!window.confirm(`Take "${a.title}" off this task? ${a.kind === "wiki_page" ? "The wiki page itself stays." : ""}`)) return;
     await api(`/api/artifacts/${a.id}`, { method: "DELETE" });
     onChanged();
   };
-  if (!items.length) return <p className="muted">Nothing yet. Documents agents write for this ticket appear here.</p>;
+  if (!items.length) return <p className="muted">Nothing yet. Documents agents write for this task appear here.</p>;
   return (
     <ul className="link-list">
       {items.map((a) => (
@@ -38,7 +38,7 @@ export function TicketOutputs({ items, companyId, onChanged }: { items: Artifact
               </>
             )}
           </small>
-          <button type="button" className="link" onClick={() => void remove(a)} aria-label={`Take ${a.title} off this ticket`}>
+          <button type="button" className="link" onClick={() => void remove(a)} aria-label={`Take ${a.title} off this task`}>
             Remove
           </button>
         </li>

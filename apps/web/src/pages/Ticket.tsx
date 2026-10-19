@@ -37,7 +37,7 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
           </div>
         ))}
       </div>
-      {(lines.length > MAX_DIFF_LINES || diff.truncated) && <p className="muted">The diff is longer than shown here; the full patch is in the ticket's branch.</p>}
+      {(lines.length > MAX_DIFF_LINES || diff.truncated) && <p className="muted">The diff is longer than shown here; the full patch is in the task's branch.</p>}
     </div>
   );
 }
@@ -116,7 +116,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       setDiff(null);
       setDiff(await api<WorkspaceDiff>(`/api/tickets/${id}/diff${which === "last_turn" ? "?range=last_turn" : ""}`));
     } catch (err) {
-      setDiffError(err instanceof ApiError && err.status === 409 ? `${err.message} The diff comes from the runner that holds the ticket's worktree.` : (err as Error).message);
+      setDiffError(err instanceof ApiError && err.status === 409 ? `${err.message} The diff comes from the runner that holds the task's worktree.` : (err as Error).message);
     }
   };
   // Approval lands in the background; poll its status quickly while it runs.
@@ -159,7 +159,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     setBusy(true);
     try {
       const r = await api<{ outcome: string }>(`/api/tickets/${id}/pull-request/merge`, { method: "POST" });
-      setNote({ ok: true, text: r.outcome === "merged" ? "Merged; the ticket is done." : "Still waiting on the host." });
+      setNote({ ok: true, text: r.outcome === "merged" ? "Merged; the task is done." : "Still waiting on the host." });
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -168,7 +168,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
-  if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such ticket." : ticket.error.message}</p>;
+  if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
   if (!t) return null;
   const made = outputs.data ?? [];
   // Plan first only matters before anyone starts; once work has begun it's history (R76).
@@ -178,7 +178,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       <header className="page-head">
         <div>
           <p className="label">
-            <a href={`#/board/${t.projectId}`}>{t.project}</a> · ticket
+            <a href={`#/board/${t.projectId}`}>{t.project}</a> · task
           </p>
           <h1>{t.title}</h1>
         </div>
@@ -395,7 +395,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   <small className="muted">{t.watchedAt ? `Last asked for a report ${when(t.watchedAt)}.` : "A first report is on its way."} Updates appear in Activity and your notifications.</small>
                 </>
               ) : (
-                <small className="muted">An agent, such as a scrum master, that posts a short status update on this ticket and what it depends on.</small>
+                <small className="muted">An agent, such as a scrum master, that posts a short status update on this task and what it depends on.</small>
               )}
             </dd>
             <dt>Project</dt>

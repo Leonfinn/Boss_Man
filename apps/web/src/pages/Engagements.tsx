@@ -138,7 +138,7 @@ export function Engagement({ id }: { id: string }) {
             </div>
           )}
           <p className="muted" style={{ fontSize: 13, background: "var(--ground)", borderRadius: 6, padding: "10px 12px" }}>
-            Each company sees this page and the thread only. {e.provider}'s own tickets, secrets and deploy targets stay private to it.
+            Each company sees this page and the thread only. {e.provider}'s own tasks, secrets and deploy targets stay private to it.
           </p>
         </section>
 
