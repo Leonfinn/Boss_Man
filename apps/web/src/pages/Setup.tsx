@@ -3,6 +3,7 @@
 // to do each thing. What's still undone shows on Decisions until it's done or dismissed.
 import { useEffect, useState, type FormEvent } from "react";
 import { api, type Company, type FundingSource, type Project } from "../api";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { Credentials, Funding, ProjectRow, Runner } from "./Settings";
 
@@ -24,8 +25,11 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
   const [name, setName] = useState(company?.name ?? "");
   const [mission, setMission] = useState(company?.mission ?? "");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sv = useSaveState({ name, mission });
   const save = async (e: FormEvent) => {
     e.preventDefault();
+    setBusy(true);
     try {
       if (company) {
         await api(`/api/companies/${company.id}`, { method: "PATCH", body: { name: name.trim(), mission: mission.trim() || null } });
@@ -34,9 +38,12 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
         const { company: c } = await api<{ company: Company }>("/api/companies", { method: "POST", body: { name: name.trim(), ...(mission.trim() ? { mission: mission.trim() } : {}) } });
         onCreated(c.id);
       }
+      sv.markSaved();
       setNote({ ok: true, text: "Saved." });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
     }
   };
   return (
@@ -49,9 +56,13 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
         <label htmlFor="setup-mission">What it's for</label>
         <textarea id="setup-mission" rows={3} maxLength={2000} placeholder="e.g. Build and run Boss Man itself: features from the roadmap, fixes from feedback." value={mission} onChange={(e) => setMission(e.target.value)} />
       </div>
-      <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={!name.trim()}>
-        {company ? "Save" : "Create the company"}
-      </button>
+      {company ? (
+        <SaveButton {...sv} busy={busy} disabled={!name.trim()} style={{ alignSelf: "flex-start" }} />
+      ) : (
+        <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={busy || !name.trim()}>
+          Create the company
+        </button>
+      )}
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>
           {note.text}

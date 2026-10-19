@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
 import { api, usd, type Company, type FundingSource } from "../api";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
@@ -104,6 +105,9 @@ const STATUS: Record<AgentRow["status"], [string, string]> = { working: ["Workin
 const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", funding: "Paid from", kind: "Agent kind", paused: "Paused" };
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 const jobOf = (a: Pick<AgentRow, "role" | "title" | "duty">) => (a.role === "ceo" ? "CEO" : (a.title ?? (a.duty === "wiki" ? "Wiki Maintainer" : a.role === "manager" ? "Manager" : "Agent")));
+/** Boolean fields read as plain words, e.g. paused true -> "Paused", false -> "Unpaused", not "yes -> no". */
+const FLIP: Record<string, [string, string]> = { paused: ["Paused", "Unpaused"], starred: ["Starred", "Unstarred"] };
+export const flipWord = (field: string, after: unknown) => (typeof after === "boolean" && FLIP[field] ? FLIP[field]![after ? 0 : 1] : null);
 const show = (v: unknown, sources: FundingSource[]) =>
   v === null || v === undefined || v === "" ? "none" : typeof v === "boolean" ? (v ? "yes" : "no") : typeof v === "string" ? (sources.find((s) => s.id === v)?.name ?? v) : JSON.stringify(v);
 
@@ -212,20 +216,27 @@ function Edit({ a, sources, lists, onSaved }: { a: AgentRow; sources: FundingSou
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "" });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const sv = useSaveState(form);
+  const [busy, setBusy] = useState(false);
   const run = async (fn: () => Promise<unknown>, done: string) => {
     try {
       await fn();
       setNote({ ok: true, text: done });
       history.reload();
       onSaved();
+      return true;
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
+      return false;
     }
   };
-  const save = (e: FormEvent) => {
+  const save = async (e: FormEvent) => {
     e.preventDefault();
     const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, fundingSourceId: form.fundingSourceId || null };
-    void run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
+    setBusy(true);
+    const ok = await run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
+    setBusy(false);
+    if (ok) sv.markSaved();
   };
   const retired = !!a.retiredAt;
   return (
@@ -264,9 +275,7 @@ function Edit({ a, sources, lists, onSaved }: { a: AgentRow; sources: FundingSou
             <textarea id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
             <small className="muted">{a.role === "ceo" ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)." : "Used from the agent's next run."}</small>
           </div>
-          <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }}>
-            Save
-          </button>
+          <SaveButton {...sv} busy={busy} style={{ alignSelf: "flex-start" }} />
         </form>
       )}
       {note && (
@@ -281,7 +290,7 @@ function Edit({ a, sources, lists, onSaved }: { a: AgentRow; sources: FundingSou
             <li key={c.id}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
                 <span>
-                  <strong>{FIELD[c.field] ?? c.field}</strong> <span className="muted">by {by ?? "you"}, {when(c.createdAt)}</span>
+                  <strong>{flipWord(c.field, c.after) ?? FIELD[c.field] ?? c.field}</strong> <span className="muted">by {by ?? "you"}, {when(c.createdAt)}</span>
                   {c.undoneAt && <span className="tag" style={{ marginLeft: 6 }}>Undone</span>}
                 </span>
                 {!c.undoneAt && c.field !== "hired" && c.field !== "rehired" && (
@@ -299,7 +308,7 @@ function Edit({ a, sources, lists, onSaved }: { a: AgentRow; sources: FundingSou
                   </div>
                 </details>
               ) : (
-                !["hired", "retired", "rehired"].includes(c.field) && (
+                !["hired", "retired", "rehired"].includes(c.field) && !flipWord(c.field, c.after) && (
                   <span className="muted">
                     {show(c.before, sources)} → {show(c.after, sources)}
                   </span>

@@ -3,6 +3,7 @@ import { api, type Company, type FundingSource, type Project } from "../api";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
@@ -174,6 +175,7 @@ export function Credentials({ company, onChanged }: { company: Company; onChange
   const [env, setEnv] = useState<string>(CREDENTIALS[0].env);
   const [existing, setExisting] = useState("");
   const act = useAction();
+  const sv = useSaveState({ choice, name, value, env, existing });
   const c = CREDENTIALS[choice]!;
   const describe = (r: { problems?: string[]; live: { ok: boolean; message: string } | null }) => {
     const problems = r.problems?.length ? ` ${r.problems.join(" ")}` : "";
@@ -213,6 +215,7 @@ export function Credentials({ company, onChanged }: { company: Company; onChange
       setValue("");
       setName("");
       setExisting("");
+      sv.markSaved({ choice, name: "", value: "", env, existing: "" });
       grants.reload();
       secrets.reload();
       onChanged?.();
@@ -319,9 +322,7 @@ export function Credentials({ company, onChanged }: { company: Company; onChange
               Check
             </button>
           )}
-          <button className="btn primary" type="submit" disabled={act.busy}>
-            Save
-          </button>
+          <SaveButton {...sv} busy={act.busy} />
         </div>
       </form>
       <p className="muted" style={{ fontSize: 13 }}>
@@ -474,6 +475,7 @@ export function ProjectRow({ p, only, onChanged }: { p: Project; only?: "repo" |
   const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
   const [host, setHost] = useState(p.gitHost);
   const act = useAction();
+  const sv = useSaveState(form);
   const [presets, setPresets] = useState<Presets | null>(null);
   const detect = async () => setPresets(await api<Presets>(`/api/projects/${p.id}/check-presets`, { method: "POST" }).catch(() => null));
   // Detected once per project; Re-detect asks again.
@@ -486,6 +488,7 @@ export function ProjectRow({ p, only, onChanged }: { p: Project; only?: "repo" |
         body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
       });
       setHost(saved.gitHost);
+      sv.markSaved();
       onChanged?.();
       if (form.landing === "pull_request" && form.repoUrl && !saved.gitHost) return "Saved, but Boss Man couldn't tell which git host this is, so pull requests won't open. Check the address, and that the host is reachable from the Boss Man server.";
       return saved.gitHost ? `Saved. Git host: ${saved.gitHost === "gitea" ? "Gitea" : "GitHub"} (${saved.gitApiBase}).` : "Saved.";
@@ -526,9 +529,7 @@ export function ProjectRow({ p, only, onChanged }: { p: Project; only?: "repo" |
         )}
       </p>
       </>)}
-      <button className="btn primary" type="submit" disabled={act.busy}>
-        Save
-      </button>
+      <SaveButton {...sv} busy={act.busy} />
       <div style={{ gridColumn: "1 / -1" }}>{act.view}</div>
     </form>
   );

@@ -6,6 +6,7 @@ import { api, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { SaveButton } from "../components/SaveButton";
 
 type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
 type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }> };
@@ -141,6 +142,7 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
 function SkillView({ company, id, onChanged, onClose }: { company: Company; id: string; onChanged: () => void; onClose: () => void }) {
   const skill = usePoll((signal) => api<SkillDetail>(`/api/companies/${company.id}/skills/${id}`, { signal }), 60_000, id);
   const [holders, setHolders] = useState<string[] | null>(null);
+  const [savedHolders, setSavedHolders] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const s = skill.data;
@@ -209,10 +211,8 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
             </label>
           ))}
         </div>
-        {holders && (
-          <button type="button" className="btn primary" style={{ marginTop: 10 }} onClick={() => void run(async () => (await api(`/api/companies/${company.id}/skills/${id}/agents`, { method: "PUT", body: { agentIds: holders } }), setHolders(null), "Saved. Agents get it from their next run."))}>
-            Save
-          </button>
+        {(holders || savedHolders) && (
+          <SaveButton dirty={!!holders} saved={savedHolders} style={{ marginTop: 10 }} onClick={() => void run(async () => (await api(`/api/companies/${company.id}/skills/${id}/agents`, { method: "PUT", body: { agentIds: holders } }), setHolders(null), setSavedHolders(true), "Saved. Agents get it from their next run."))} />
         )}
         <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
           The CEO can also give and take skills; you're told when it does. Skills load for Claude agents.
@@ -259,6 +259,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
 /** A pack (R71): skills added together from one link, given, updated and removed as one. */
 function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company: Company; pack: string; rows: SkillRow[]; onChanged: () => void; onPick: (id: string) => void; onClose: () => void }) {
   const [holders, setHolders] = useState<string[] | null>(null);
+  const [savedHolders, setSavedHolders] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const holds = (agentId: string) => rows.filter((r) => r.agents.some((a) => a.id === agentId)).length;
   const chosen = holders ?? company.agents.filter((a) => holds(a.id) === rows.length).map((a) => a.id);
@@ -340,10 +341,8 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
             );
           })}
         </div>
-        {holders && (
-          <button type="button" className="btn primary" style={{ marginTop: 10 }} onClick={() => void run(async () => (await api(`/api/companies/${company.id}/skill-packs/agents`, { method: "PUT", body: { pack, agentIds: holders } }), setHolders(null), "Saved. Agents get the pack from their next run."))}>
-            Save
-          </button>
+        {(holders || savedHolders) && (
+          <SaveButton dirty={!!holders} saved={savedHolders} style={{ marginTop: 10 }} onClick={() => void run(async () => (await api(`/api/companies/${company.id}/skill-packs/agents`, { method: "PUT", body: { pack, agentIds: holders } }), setHolders(null), setSavedHolders(true), "Saved. Agents get the pack from their next run."))} />
         )}
       </fieldset>
       {note && (
