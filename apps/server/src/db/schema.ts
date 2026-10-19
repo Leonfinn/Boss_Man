@@ -88,7 +88,7 @@ export const agents = pgTable(
   (t) => [
     // One CEO per company (R18).
     uniqueIndex("agents_one_ceo_per_company").on(t.companyId).where(sql`${t.role} = 'ceo'`),
-    uniqueIndex("agents_one_duty_per_company").on(t.companyId, t.duty).where(sql`${t.duty} is not null`),
+    uniqueIndex("agents_one_duty_per_company").on(t.companyId, t.duty).where(sql`${t.duty} is not null and ${t.retiredAt} is null`),
   ],
 );
 
@@ -735,6 +735,30 @@ export const ownerChatMessages = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],
+);
+
+/** What the PA did with each owner question (R87): posted, or escalated to the CEO with why; the CEO may mark it right or wrong. */
+export const paAnswers = pgTable(
+  "pa_answers",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    chatMessageId: uuid("chat_message_id").notNull().references(() => ownerChatMessages.id, { onDelete: "cascade" }),
+    question: text("question").notNull(),
+    reply: text("reply"),
+    cites: jsonb("cites").$type<Array<{ kind: "ticket" | "decision" | "run"; id: string }>>().notNull().default([]),
+    /** "posted" or "escalated:<reason>". */
+    outcome: text("outcome").notNull(),
+    /** Picked for the CEO's audit list. */
+    sampled: boolean("sampled").notNull().default(false),
+    /** The copy of an escalated question in the CEO's chat, and when its answer was passed back. */
+    ceoMessageId: uuid("ceo_message_id").references(() => ownerChatMessages.id, { onDelete: "set null" }),
+    ceoRepliedAt: timestamp("ceo_replied_at", { withTimezone: true }),
+    verdict: text("verdict"),
+    verdictNote: text("verdict_note"),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("pa_answers_one_per_message").on(t.chatMessageId), index("pa_answers_company_time").on(t.companyId, t.createdAt)],
 );
 
 export const ticketMessageAuthor = pgEnum("ticket_message_author", ["owner", "agent", "system"]);

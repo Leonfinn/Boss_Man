@@ -3,7 +3,7 @@
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, decisions, engagements, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { activity, agents, decisions, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
 const one = (s: string, n = 160) => {
@@ -83,9 +83,12 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const done = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"))).orderBy(desc(tickets.lastActivityAt)).limit(10);
     const unassigned = await db.select().from(tickets).where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "ready"), isNull(tickets.assigneeAgentId), eq(tickets.assignedToOwner, false))).orderBy(asc(tickets.createdAt));
     const recent = await changes(null);
+    // A sample of what the PA told the owner, for the CEO to mark right or wrong (R87).
+    const audit = await db.select().from(paAnswers).where(and(eq(paAnswers.companyId, companyId), eq(paAnswers.sampled, true), isNull(paAnswers.verdict))).orderBy(asc(paAnswers.createdAt));
     body = [
       `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
       ...section("Needs you", capped(needLines, 8)),
+      ...section("PA answers to check", capped(audit.map((a) => `- ${a.id}: asked "${one(a.question, 100)}"; the PA said "${one(a.reply ?? "", 200)}" citing ${(a.cites as Array<{ kind: string; id: string }>).map((c) => `${c.kind} ${c.id}`).join(", ")}. Mark it with pa_verdict.`), 3)),
       ...section("In flight", capped(await flightLines(), 8)),
       ...section("Last done", [...done.map((t) => `- "${one(t.title, 60)}" (${t.outcome ?? "done"}, ${age(t.lastActivityAt)} ago).${noteOf(t)}`), ...(n("done") > done.length ? [MORE(n("done") - done.length)] : [])]),
       ...section("Ready but unassigned", capped(unassigned.map((t) => `- "${one(t.title, 60)}" (${t.id})`), 5)),

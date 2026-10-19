@@ -35,6 +35,7 @@ import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, type PortalLimits } from "./portal.js";
 import { ChatError, chatService } from "./services/chat.js";
+import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { SkillError, skillsService } from "./services/skills.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
@@ -167,6 +168,12 @@ export async function buildApp(opts: AppOptions) {
   });
   // The scheduler is made below; the chat only needs it once a message is sent.
   const chat = chatService(db, { notify: (agentId, input) => scheduler.notify(agentId, input), workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  const pa = paService(db, {
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    now: opts.now,
+    auditRate: Number(process.env.PA_AUDIT_RATE ?? 0.1),
+    timeZone: async () => (await notes.getSettings()).quietHours?.timeZone,
+  });
   const scheduler = schedulerService(db, {
     runners,
     chapters,
@@ -231,9 +238,11 @@ export async function buildApp(opts: AppOptions) {
     // The owner chat's answers.
     if (event.type === "run.update" && (event.update as { kind?: string } | null)?.kind === "agent_message") {
       void chat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "chat reply failed"));
+      void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "PA relay failed"));
       void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "ticket reply failed"));
     }
     if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "chat end failed"));
+    if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "PA fail-open failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
     if (event.type === "run.quota") void quotaWatch(event.fundingSourceId).catch((err) => app.log.error({ err }, "quota forecast failed"));
     // What each agent kind offers, for the model picker (R60).
@@ -296,7 +305,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 

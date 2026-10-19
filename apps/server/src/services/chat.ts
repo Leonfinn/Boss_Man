@@ -25,13 +25,21 @@ export class ChatError extends Error {
 type Agent = typeof agents.$inferSelect;
 
 export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string }) {
-  /** The agent the conversation is with: the one named, or the company's CEO. */
+  async function agentOf(companyId: string, agentId: string): Promise<Agent> {
+    const [a] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, agentId)));
+    if (!a) throw new ChatError(404, "No such agent in this company.");
+    return a;
+  }
+
+  /** Who answers a message: the agent named, else the company's PA, else its CEO. A PA that is paused or retired is skipped, so the CEO answers (R87). */
   async function who(companyId: string, agentId?: string | null): Promise<Agent> {
-    const [a] = await db
-      .select()
-      .from(agents)
-      .where(and(eq(agents.companyId, companyId), agentId ? eq(agents.id, agentId) : eq(agents.role, "ceo")));
-    if (!a) throw new ChatError(agentId ? 404 : 409, agentId ? "No such agent in this company." : "This company has no CEO to answer.");
+    const team = await db.select().from(agents).where(eq(agents.companyId, companyId));
+    const ceo = team.find((a) => a.role === "ceo");
+    const pa = team.find((a) => a.duty === "assistant" && !a.paused && !a.retiredAt);
+    const named = agentId ? team.find((a) => a.id === agentId) : undefined;
+    if (agentId && !named) throw new ChatError(404, "No such agent in this company.");
+    const a = named ? (named.duty === "assistant" && !pa ? ceo : named) : (pa ?? ceo);
+    if (!a) throw new ChatError(409, "This company has no CEO to answer.");
     return a;
   }
 
@@ -55,7 +63,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
     },
 
     async list(companyId: string, agentId?: string | null) {
-      const agent = await who(companyId, agentId);
+      const agent = agentId ? await agentOf(companyId, agentId) : await who(companyId);
       const items = await db
         .select()
         .from(ownerChatMessages)
@@ -67,7 +75,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
 
     /** Everyone the owner can message, CEO first, each with their last message and what they're doing. */
     async threads(companyId: string) {
-      const team = await db.select({ id: agents.id, name: agents.name, role: agents.role }).from(agents).where(eq(agents.companyId, companyId));
+      const team = await db.select({ id: agents.id, name: agents.name, role: agents.role, duty: agents.duty, paused: agents.paused, retired: agents.retiredAt }).from(agents).where(eq(agents.companyId, companyId));
       const last = team.length
         ? await db
             .selectDistinctOn([ownerChatMessages.agentId], { agentId: ownerChatMessages.agentId, role: ownerChatMessages.role, text: ownerChatMessages.text, createdAt: ownerChatMessages.createdAt })
@@ -76,14 +84,15 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
             .orderBy(ownerChatMessages.agentId, desc(ownerChatMessages.createdAt))
         : [];
       const byAgent = new Map(last.map((m) => [m.agentId, m]));
-      const rank = { ceo: 0, manager: 1, worker: 2 } as const;
+      // An active PA is the owner's first conversation, the CEO next (R87).
+      const rank = (a: (typeof team)[number]) => (a.duty === "assistant" && !a.paused && !a.retired ? -1 : { ceo: 0, manager: 1, worker: 2 }[a.role]);
       const rows = await Promise.all(
         team.map(async (a) => {
           const m = byAgent.get(a.id);
           return { ...a, last: m ? { role: m.role, text: m.text.slice(0, 140), createdAt: m.createdAt } : null, state: await state(companyId, a.id) };
         }),
       );
-      return rows.sort((x, y) => rank[x.role] - rank[y.role] || x.name.localeCompare(y.name));
+      return rows.sort((x, y) => rank(x) - rank(y) || x.name.localeCompare(y.name)).map(({ paused, retired, ...a }) => a);
     },
 
     cwd: (companyId: string, agentId: string) => path.posix.join(deps.workspaceRoot, "chat", companyId, agentId),
@@ -91,7 +100,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
     /** The run's prompt: the conversation so far and what it's for. */
     async prompt(companyId: string, agentId: string) {
       const [company] = await db.select({ name: companies.name }).from(companies).where(eq(companies.id, companyId));
-      const agent = await who(companyId, agentId);
+      const agent = await agentOf(companyId, agentId);
       const recent = (
         await db
           .select()
@@ -101,6 +110,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
           .limit(HISTORY)
       ).reverse();
       const ceo = agent.role === "ceo";
+      if (agent.duty === "assistant") return paPrompt(agent, company?.name ?? "this company", recent);
       return [
         ceo
           ? `You are ${agent.name}, the CEO of ${company?.name ?? "this company"}, chatting with the owner in Boss Man. The owner writes to you in plain language; you turn what they ask into work on the board.`
@@ -130,8 +140,9 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
 
     /** The answering run's final message becomes the agent's reply. */
     async onAgentMessage(runId: string, text: string) {
-      const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
-      if (r?.purpose !== "chat") return;
+      const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
+      // The PA speaks only through pa_reply, which is checked; its own closing text never reaches the owner (R87).
+      if (r?.purpose !== "chat" || r.duty === "assistant") return;
       await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text, runId });
     },
 
@@ -141,4 +152,21 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "system", text: `The reply couldn't be finished: ${error.slice(0, 500)}`, runId });
     },
   };
+}
+
+const speaker = (role: string) => (role === "owner" ? "Owner" : role === "assistant" ? "You" : "Boss Man");
+
+/** The PA's chat prompt (R87): what it may use, and that pa_reply is the only way to answer. */
+function paPrompt(agent: Agent, company: string, recent: Array<{ role: string; text: string }>) {
+  return [
+    `You are ${agentIdentity(agent, company).who}, chatting with the owner in Boss Man.`,
+    ...agentIdentity(agent, company).instructions,
+    "",
+    "Your tools are read-only: tickets (find and read), decisions (what is waiting on someone), list_my_work, board, whats_new and wiki (list and read). You can't create or change anything.",
+    "- Look the answer up with your tools first, then answer the owner's LAST message with pa_reply: text, cites (the tickets and decisions your answer rests on, each with its id) and confidence (high only when the tools show it plainly). Your closing text is not shown to the owner; pa_reply is the only way you answer.",
+    "- Boss Man checks every reply in code. It escalates to the CEO instead of posting when you cite an id no tool showed you, cite nothing, are unsure, or the question asks for judgement (why, should, plans, priorities, money, risk, deploys, hiring). If you can't answer from what the tools return, call pa_escalate with a short summary of what you found.",
+    "",
+    "The conversation so far, oldest first:",
+    ...recent.map((m) => `${speaker(m.role)}: ${m.text}`),
+  ].join("\n");
 }

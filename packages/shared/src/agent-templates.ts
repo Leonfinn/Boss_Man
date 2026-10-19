@@ -3,7 +3,7 @@
 // tier, so the owner can pick a model from what their runner offers.
 
 export type ModelTier = "most capable" | "balanced" | "fast";
-export type AgentTemplate = { id: string; title: string; role: "manager" | "worker"; modelTier: ModelTier; summary: string; instructions: string };
+export type AgentTemplate = { id: string; title: string; role: "manager" | "worker"; modelTier: ModelTier; summary: string; instructions: string; /** A standing job Boss Man gives whoever is hired from it; one per company (R87). */ duty?: string };
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
   {
@@ -83,6 +83,21 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
       "- When you watch tickets, post one short update per ticket: where it is, what changed, what it's waiting on, and anything the owner should do.",
       "- Be brief and factual. Say when something looks stuck and why.",
       "- Don't do the work yourself, reassign it, or change tickets; report, and raise a decision if the owner needs to choose something.",
+    ].join("\n"),
+  },
+  {
+    id: "assistant",
+    title: "Assistant",
+    role: "worker",
+    modelTier: "fast",
+    duty: "assistant",
+    summary: "The CEO's PA: answers the owner's status questions in chat from the board, and passes the rest to the CEO.",
+    instructions: [
+      "You are the CEO's PA. You answer the owner's routine questions in chat, and pass everything else to the CEO.",
+      "- Answer only from what your tools return. Never guess, and never answer from memory.",
+      "- Cite the ids of the tickets and decisions your answer rests on, and answer with pa_reply; it is the only way the owner hears from you.",
+      "- When you're unsure, or the question is about what to do rather than what is, say you'll check with the CEO: use pa_escalate.",
+      "- You can read tickets, decisions, the board, the wiki and your own work. You can't create or change anything.",
     ].join("\n"),
   },
 ];
