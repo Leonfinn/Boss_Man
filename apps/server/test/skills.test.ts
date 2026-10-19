@@ -34,6 +34,11 @@ const multi: Record<string, string> = {
   ".cursor/skills/polish/SKILL.md": "---\nname: polish\ndescription: Polishes UI.\n---\nCursor copy.",
   ".codex/skills/polish/SKILL.md": "---\nname: polish\ndescription: Polishes UI.\n---\nCodex copy.",
 };
+// A skill with many example assets, like cathrynlavery/diagram-design.
+const big: Record<string, string> = {
+  "skills/diagrams/SKILL.md": "---\nname: diagrams\ndescription: Draws diagrams.\n---\nBody.",
+  ...Object.fromEntries(Array.from({ length: 250 }, (_, i) => [`skills/diagrams/assets/example-${i}.html`, `<p>${i}</p>`])),
+};
 const fakeFetch = (async (input: string | URL) => {
   const url = String(input);
   fetched.push(url);
@@ -43,6 +48,11 @@ const fakeFetch = (async (input: string | URL) => {
   if (url.startsWith("https://api.github.com/repos/acme/multi/git/trees/")) return json({ tree: Object.keys(multi).map((p) => ({ path: p, type: "blob", size: multi[p]!.length })) });
   const rawMulti = "https://raw.githubusercontent.com/acme/multi/3333333333333333333333333333333333333333/";
   if (url.startsWith(rawMulti) && multi[decodeURIComponent(url.slice(rawMulti.length))] !== undefined) return new Response(multi[decodeURIComponent(url.slice(rawMulti.length))]);
+  if (url === "https://api.github.com/repos/acme/big") return json({ default_branch: "main" });
+  if (url === "https://api.github.com/repos/acme/big/commits/main") return json({ sha: "4444444444444444444444444444444444444444" });
+  if (url.startsWith("https://api.github.com/repos/acme/big/git/trees/")) return json({ tree: Object.keys(big).map((p) => ({ path: p, type: "blob", size: big[p]!.length })) });
+  const rawBig = "https://raw.githubusercontent.com/acme/big/4444444444444444444444444444444444444444/";
+  if (url.startsWith(rawBig) && big[url.slice(rawBig.length)] !== undefined) return new Response(big[url.slice(rawBig.length)]);
   if (url === "https://api.github.com/repos/acme/kit") return json({ default_branch: "main" });
   if (url === "https://api.github.com/repos/acme/kit/commits/main") return json({ sha: commit });
   if (url.startsWith(`https://api.github.com/repos/acme/kit/git/trees/${commit}`)) return json({ tree: Object.keys(files).map((p) => ({ path: p, type: "blob", size: files[p]!.length })) });
@@ -182,6 +192,15 @@ describe("skills library (R71)", () => {
       ["SKILL.md", multi[".claude/skills/polish/SKILL.md"]],
       ["reference/a.md", "ref"],
     ]);
+  });
+  it("adds a skill with hundreds of asset files", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const added = await c.req("POST", base, { from: "link", url: "https://github.com/acme/big" });
+    expect(added.json()).toEqual([expect.objectContaining({ name: "diagrams" })]);
+    const files = (await c.req("GET", `${base}/${added.json()[0].id}`)).json().files as Array<{ path: string; text: string }>;
+    expect(files).toHaveLength(251);
+    expect(files.find((f) => f.path === "assets/example-249.html")?.text).toBe("<p>249</p>");
   });
   it("keeps skills from one link together as a pack: given, updated and removed as one", async () => {
     const c = (ctx = await setup());
