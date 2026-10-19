@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
@@ -55,6 +55,8 @@ function Fold({ title, hint, open, children }: { title: string; hint?: string; o
   );
 }
 
+type Landing = { state: "running"; startedAt: string; command: string | null } | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
+const elapsed = (ms: number) => `${Math.floor(Math.max(0, ms) / 60_000)}:${String(Math.floor(Math.max(0, ms) / 1000) % 60).padStart(2, "0")}`;
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
 const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
 
@@ -117,22 +119,34 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       setDiffError(err instanceof ApiError && err.status === 409 ? `${err.message} The diff comes from the runner that holds the ticket's worktree.` : (err as Error).message);
     }
   };
+  // Approval lands in the background; poll its status quickly while it runs.
+  const [landing, setLanding] = useState<Landing | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const running = landing?.state === "running";
+  useEffect(() => {
+    api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`).then((r) => setLanding(r.landing), () => undefined);
+  }, [id]);
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`).then((r) => {
+        if (r.landing && r.landing.state !== "running") ticket.reload();
+        setLanding(r.landing);
+      }, () => undefined);
+    }, 2_000);
+    return () => clearInterval(timer);
+  }, [running, id]);
   const review = async (verdict: "approved" | "changes_requested") => {
     setBusy(true);
     try {
-      const r = await api<{ outcome?: string; delivered?: string | null }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(summary.trim() ? { summary: summary.trim() } : {}) } });
+      const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(summary.trim() ? { summary: summary.trim() } : {}) } });
       setSummary("");
-      setNote({
-        ok: true,
-        text:
-          verdict === "changes_requested"
-            ? `Sent back: ${r.delivered ?? "done"}.`
-            : r.outcome === "merged" || r.outcome === "done"
-              ? "Approved and merged; the ticket is done."
-              : r.outcome === "pull_request"
-                ? "Approved. The pull request is open; the host hasn't let Boss Man merge it yet (see Review). Boss Man checks again every couple of minutes."
-                : `Approved, but it couldn't merge yet (${(r.outcome ?? "").replace(/_/g, " ")}); it's gone back to the assignee with what to fix.`,
-      });
+      if (r.landing) {
+        setNow(Date.now());
+        setLanding(r.landing);
+        setNote(null);
+      } else setNote({ ok: true, text: `Sent back: ${r.delivered ?? "done"}.` });
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -256,6 +270,29 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </Fold>
           )}
 
+          {landing && (
+            <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
+              {landing.state === "running" ? (
+                <span>
+                  Approved. Running the pre-merge check{landing.command ? ` (${landing.command})` : ""}; this can take several minutes. Elapsed: {elapsed(now - Date.parse(landing.startedAt))}.
+                </span>
+              ) : (
+                <span>
+                  {landing.url && landing.text.includes(landing.url) ? (
+                    <>
+                      {landing.text.split(landing.url)[0]}
+                      <a href={landing.url} target="_blank" rel="noreferrer">
+                        {landing.url}
+                      </a>
+                      {landing.text.split(landing.url).slice(1).join(landing.url)}
+                    </>
+                  ) : (
+                    landing.text
+                  )}
+                </span>
+              )}
+            </div>
+          )}
           {t.systemState === "review" && (
             <Fold title="Review" hint={t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" : "waiting for you"}>
               {t.pullRequestNumber && t.pullRequestNote && (
@@ -281,10 +318,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <textarea id="review-summary" rows={3} value={summary} onChange={(e) => setSummary(e.target.value)} />
               </div>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button type="button" className="btn primary" disabled={busy} onClick={() => void review("approved")}>
+                <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
                   {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
                 </button>
-                <button type="button" className="btn" disabled={busy || !summary.trim()} onClick={() => void review("changes_requested")}>
+                <button type="button" className="btn" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
                   Request changes
                 </button>
               </div>

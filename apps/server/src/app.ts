@@ -1391,8 +1391,12 @@ export async function buildApp(opts: AppOptions) {
       const b = z
         .object({ verdict: z.enum(["approved", "changes_requested"]), comments: z.array(ReviewComment).max(100).optional(), summary: z.string().max(5000).optional() })
         .parse(req.body);
-      return review.submit(id, { ...b, reviewer: "the owner" }).catch(reviewErrors(reply));
+      // Approval lands in the background (the check can outlast a proxy or browser timeout); the page polls /landing.
+      const r = await review.submit(id, { ...b, reviewer: "the owner", background: true }).catch(reviewErrors(reply));
+      if ((r as { outcome?: string } | undefined)?.outcome === "landing") reply.code(202);
+      return r;
     });
+    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: review.landing(IdParam.parse(req.params).id) }));
     // Try the ticket's pull request again now, rather than waiting for the sync (R59).
     owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {

@@ -57,6 +57,9 @@ export const MISSED_REASON = "missed work";
 export const ANSWER_REASON = "decision answered";
 /** Tickets moved to review, gathered into one CEO run (R85). */
 export const REVIEW_REASON = "review requested";
+/** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
+export const PLAIN_SUMMARY_RULE =
+  "Write to the owner as a non-developer. Every ticket_reply starts with 1 to 3 plain sentences: what changed for them and whether they need to do anything. Then a line that says only \"Details:\" followed by the technical report (files, commits, tests). Ticket state notes (set_ticket_state summary) are plain words too, with no file paths unless essential.";
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
@@ -283,6 +286,7 @@ export function schedulerService(
             `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Only do the work yourself when nobody on the team can.${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,
           );
         }
+        lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
