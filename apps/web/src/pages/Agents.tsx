@@ -1,6 +1,7 @@
 // Agents (R62): who works for the company, what each is doing and has used this month, and
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
+import { Star } from "lucide-react";
 import { api, usd, type Company, type FundingSource } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
@@ -19,6 +20,7 @@ type AgentRow = {
   funding: string | null;
   fundingKind: string | null;
   paused: boolean;
+  starred: boolean;
   duty: string | null;
   retiredAt: string | null;
   status: "working" | "idle" | "paused" | "retired";
@@ -87,6 +89,14 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists }:
       </select>
       {fromApi?.error && <small className="error">{fromApi.error}</small>}
     </>
+  );
+}
+
+export function StarButton({ agent, onToggle }: { agent: { name: string; starred: boolean }; onToggle: () => void }) {
+  return (
+    <button type="button" className="btn star" aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? "Starred: shown under Chat" : "Star to show under Chat"} onClick={onToggle}>
+      <Star size={16} aria-hidden="true" fill={agent.starred ? "currentColor" : "none"} />
+    </button>
   );
 }
 
@@ -401,6 +411,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
           </div>
           <div className="agent-actions">
             <span className={`tag ${tone}`}>{label}</span>
+            {!a.retiredAt && <StarButton agent={a} onToggle={() => void act(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { starred: !a.starred } }), a.starred ? `${a.name} unstarred.` : `${a.name} starred.`)} />}
             {!a.retiredAt && (
               <button type="button" className="btn" onClick={() => void act(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { paused: !a.paused } }), a.paused ? `${a.name} started.` : `${a.name} paused.`)}>
                 {a.paused ? "Start" : "Pause"}

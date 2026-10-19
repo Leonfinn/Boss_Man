@@ -5,6 +5,7 @@ import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEve
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { StarButton } from "./Agents";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
@@ -59,12 +60,13 @@ function busyText(state: string, name: string) {
   return state.replace(/^waiting: /, "Waiting: ");
 }
 
-export function ChatPage({ companies, companyId, agentId, go }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; go: (to: string) => void }) {
+export function ChatPage({ companies, companyId, agentId, go, onChanged }: { companies: Company[]; companyId: string | undefined; agentId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const threads = usePoll((signal) => (company ? api<Thread[]>(`/api/companies/${company.id}/chat/threads`, { signal }) : Promise.resolve([])), 5000, company?.id ?? "none");
   const team = threads.data ?? [];
   // The CEO is the default conversation; on a phone, the list shows until someone is picked.
   const current = team.find((t) => t.id === agentId) ?? team[0];
+  const starred = company?.agents.find((a) => a.id === current?.id);
   const [busy, setBusy] = useState(false);
   const chat = usePoll(
     (signal) => (company && current ? api<Chat>(`/api/companies/${company.id}/chat?agentId=${current.id}`, { signal }) : Promise.resolve(null)),
@@ -156,6 +158,7 @@ export function ChatPage({ companies, companyId, agentId, go }: { companies: Com
                   <h2>{current.name}</h2>
                   <small className="muted">{state !== "idle" ? busyText(state, current.name) : roleOf(current)}</small>
                 </div>
+                {starred && <StarButton agent={starred} onToggle={() => void api(`/api/agents/${current.id}`, { method: "PATCH", body: { starred: !starred.starred } }).then(onChanged, (err: Error) => setError(err.message))} />}
               </header>
               <div className="chat-log" role="log" aria-live="polite">
                 {items.length === 0 && chat.data && (

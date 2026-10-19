@@ -2,7 +2,7 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, Bell, Gavel, Handshake, KeyRound, Kanban, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Scale, Settings, Sparkles, Users, Wallet, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, Bell, Gavel, Handshake, KeyRound, Kanban, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Scale, Settings, Sparkles, Star, Users, Wallet, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
@@ -114,6 +114,7 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
 
 export function Sidebar(props: {
   active: string;
+  activeAgent?: string;
   companies: Company[];
   current: Company | undefined;
   decisions: Decision[];
@@ -126,6 +127,7 @@ export function Sidebar(props: {
   onLogout: () => void;
 }) {
   const [menu, setMenu] = useState(false);
+  const starred = props.current?.agents.filter((a) => a.starred) ?? [];
   const waiting = (companyId: string) => props.decisions.filter((d) => d.companyId === companyId).length;
   const decisionsHere = props.current ? waiting(props.current.id) : props.decisions.length;
   const label = GROUPS.flatMap((g) => g.items).find((i) => i.id === props.active || (props.active === "tickets" && i.id === "board"))?.label ?? "Menu";
@@ -153,6 +155,18 @@ export function Sidebar(props: {
                     {n.id === "feedback" && props.feedback > 0 && <span className="count" aria-label={`${props.feedback} to process`}>{props.feedback}</span>}
                     {n.id === "notifications" && props.unread > 0 && <span className="count" aria-label={`${props.unread} unread`}>{props.unread}</span>}
                   </a>
+                  {n.id === "chat" && starred.length > 0 && (
+                    <ul className="sub-nav" aria-label="Starred agents">
+                      {starred.map((a) => (
+                        <li key={a.id}>
+                          <a className="nav" href={`#/chat/${a.companyId}/${a.id}`} onClick={() => setMenu(false)} aria-current={props.active === "chat" && props.activeAgent === a.id ? "page" : undefined}>
+                            <Star size={14} strokeWidth={1.75} aria-hidden="true" />
+                            <span className="nav-label">{a.name}</span>
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ul>

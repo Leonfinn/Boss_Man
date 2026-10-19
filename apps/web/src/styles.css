@@ -74,6 +74,8 @@ p { margin: 0; }
 .side ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .side a.nav { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 8px 10px; border-radius: 8px; text-decoration: none; color: var(--side-text); }
 .side a.nav[aria-current="page"] { background: var(--side-active); color: #fff; font-weight: 600; }
+.side ul.sub-nav { margin: 2px 0 0 18px; }
+.side ul.sub-nav a.nav { min-height: 32px; padding: 4px 10px; font-size: 14px; }
 .side a.nav svg { flex: none; }
 .side a.nav .nav-label { flex: 1; min-width: 0; }
 .side .count { font-family: var(--mono); font-size: 12px; min-width: 22px; text-align: center; padding: 1px 6px; border-radius: 999px; background: var(--badge); color: var(--ink); }
@@ -409,6 +411,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
 .messenger-list .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 .messenger-chat { display: flex; flex-direction: column; min-height: 0; }
 .messenger-head { display: flex; gap: 10px; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--line); }
+.messenger-head .star { margin-left: auto; }
 .messenger-head h2 { font-size: 16px; font-weight: 600; }
 .messenger-head .back { display: none; font-size: 20px; text-decoration: none; padding: 0 6px; }
 .messenger .chat-log { flex: 1; max-height: none; min-height: 0; }
