@@ -21,3 +21,15 @@ export async function signIn(t: TestApp): Promise<{ cookie: string }> {
   if (!c) throw new Error("no session cookie");
   return { cookie: `bm_session=${c.value}` };
 }
+
+/** The owner approves a ticket: the request returns 202 at once, so wait for the landing to finish and fold its outcome into the answer. */
+export async function approveAndWait(req: (method: "GET" | "POST", url: string, payload?: unknown) => Promise<{ statusCode: number; json: () => any }>, ticketId: string) {
+  const res = await req("POST", `/api/tickets/${ticketId}/review`, { verdict: "approved" });
+  if (res.statusCode !== 202) return res;
+  for (let i = 0; i < 200; i++) {
+    const { landing } = (await req("GET", `/api/tickets/${ticketId}/landing`)).json();
+    if (landing?.state === "finished") return { statusCode: 202, json: () => ({ ...res.json(), outcome: landing.outcome, message: landing.text, landing }) };
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error("landing never finished");
+}

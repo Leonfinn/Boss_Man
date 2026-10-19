@@ -5,6 +5,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, notifications, projects, tickets, wakes } from "../src/db/schema.js";
+import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -68,7 +69,7 @@ async function setup(opts: { token?: boolean } = {}) {
   });
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", body: "Limit the API to 100 requests a minute.", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
   await db.delete(wakes);
-  const approve = () => req("POST", `/api/tickets/${ticket.id}/review`, { verdict: "approved" });
+  const approve = () => approveAndWait(req, ticket.id);
   const state = async () => (await db.select().from(tickets).where(eq(tickets.id, ticket.id)))[0]!;
   return { ...built, db, close, req, company, worker, project, ticket, sent, gitea, approve, state };
 }
@@ -119,7 +120,6 @@ describe("pull requests on Gitea (R59)", () => {
     const c = (ctx = await setup({ token: false }));
     await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
     const res = await c.approve();
-    expect(res.statusCode).toBe(409);
     expect(res.json().message).toContain("GIT_TOKEN");
     await c.db.update(projects).set({ gitHost: null, gitApiBase: null }).where(eq(projects.id, c.project.id));
     expect((await c.approve()).json().message).toContain("git host");

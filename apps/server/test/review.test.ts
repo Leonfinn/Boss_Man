@@ -1,10 +1,12 @@
 import { randomBytes } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runs, tickets, wakes } from "../src/db/schema.js";
+import { landingText } from "../src/services/review.js";
+import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -24,7 +26,8 @@ const DIFF: WorkspaceDiff = {
 
 type Answers = { verify?: unknown; merge?: unknown };
 
-async function setup(opts: { online?: boolean; answers?: Answers } = {}) {
+async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
+  const held: Array<() => void> = [];
   const answers: Answers = { merge: { status: "merged", commit: "c".repeat(40) }, ...opts.answers };
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
@@ -42,7 +45,11 @@ async function setup(opts: { online?: boolean; answers?: Answers } = {}) {
     built.runners.connect(reg.runnerId, (c) => {
       sent.push(c);
       if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: DIFF }));
-      if (c.type === "workspace.verify") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.verify }));
+      if (c.type === "workspace.verify") {
+        const reply = () => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.verify });
+        if (opts.hold) held.push(reply);
+        else queueMicrotask(reply);
+      }
       if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
       return true;
     });
@@ -50,7 +57,7 @@ async function setup(opts: { online?: boolean; answers?: Answers } = {}) {
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${ticket.id}` }).where(eq(tickets.id, ticket.id));
   await db.delete(wakes);
-  return { ...built, db, close, req, company, ceo, worker, project, ticket, sent, answers };
+  return { ...built, db, close, req, company, ceo, worker, project, ticket, sent, answers, held };
 }
 
 describe("review (R39)", () => {
@@ -88,10 +95,10 @@ describe("review (R39)", () => {
     await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "changes_requested", summary: "Add tests for the window." });
     expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.worker.id, reason: "review", ticketId: c.ticket.id })]);
     await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
-    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).json()).toMatchObject({ verdict: "approved" });
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ verdict: "approved", outcome: "merged" });
     expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]).toMatchObject({ systemState: "done", outcome: "completed", mergeCommit: "c".repeat(40) });
     expect(c.sent.at(-1)).toMatchObject({ type: "workspace.release", ticketId: c.ticket.id });
-    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(409);
+    expect((await approveAndWait(c.req, c.ticket.id)).statusCode).toBe(409);
   });
 
   it("needs something to act on, and the coder can't review their own ticket", async () => {
@@ -112,8 +119,35 @@ describe("review (R39)", () => {
 
 });
 
+describe("approval lands in the background (B)", () => {
+  it("returns 202 at once, shows the running check, then the outcome in plain words", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: false, exitCode: 2, timedOut: false, output: "boom", ms: 900 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    const res = await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+    expect(res.statusCode).toBe(202);
+    expect(res.json()).toMatchObject({ outcome: "landing", landing: { state: "running", command: "pnpm test" } });
+    expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running" });
+    // A second approval while the check runs is refused.
+    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(409);
+    await vi.waitFor(() => expect(c.held).toHaveLength(1));
+    c.held[0]!();
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+    const { landing } = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json();
+    expect(landing.text).toBe("Approved, but not merged: the check failed (exit code 2). It's gone back to Engineer to fix; the check's output is in the conversation below.");
+  });
+
+  it("says each outcome in plain words", () => {
+    const ctx = { branch: "main", assignee: "Engineer" };
+    expect(landingText({ outcome: "merged" }, ctx)).toBe("Merged into main.");
+    expect(landingText({ outcome: "pull_request", detail: { url: "https://h/pr/1", note: "needs an approval" } }, ctx)).toBe("Pull request opened: https://h/pr/1. It hasn't merged yet: needs an approval");
+    expect(landingText({ outcome: "verify_failed", detail: { timedOut: true, ms: 660_000 } }, ctx)).toContain("the check timed out after 11 minutes. It's gone back to Engineer to fix");
+    expect(landingText({ outcome: "conflicts", detail: { files: ["a.ts"] } }, ctx)).toBe("Approved, but not merged: the work conflicts with main in a.ts. It's gone back to Engineer to sort out.");
+    expect(landingText({ outcome: "uncommitted", detail: { files: ["b.ts"] } }, ctx)).toContain("isn't saved to the branch yet (b.ts)");
+  });
+});
+
 describe("landing an approved ticket (R46, R47)", () => {
-  const approve = (c: Awaited<ReturnType<typeof setup>>) => c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+  const approve = (c: Awaited<ReturnType<typeof setup>>) => approveAndWait(c.req, c.ticket.id);
   const state = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
 
   it("runs the project's check first, merges into the default branch, and the merge closes the ticket", async () => {
