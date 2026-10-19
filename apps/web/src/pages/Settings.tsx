@@ -52,7 +52,7 @@ function useAction() {
   return { busy, run, view };
 }
 
-export function Runner({ company }: { company: Company }) {
+export function Runner({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
   const [token, setToken] = useState<string | null>(null);
   const act = useAction();
@@ -62,6 +62,7 @@ export function Runner({ company }: { company: Company }) {
       if (s?.registered && !window.confirm("Issuing a new token disconnects the runner using the old one until you update it. Continue?")) return;
       setToken((await api<{ token: string }>(`/api/companies/${company.id}/runner`, { method: "POST" })).token);
       status.reload();
+      onChanged?.();
     });
   // The compose file's first runner reads this file; R55's launcher replaces the copying.
   const file = "secrets/runner-app-co.token";
@@ -70,6 +71,7 @@ export function Runner({ company }: { company: Company }) {
     act.run(async () => {
       await api(`/api/companies/${company.id}/runner/${what}`, { method });
       status.reload();
+      onChanged?.();
       return done;
     });
   if (launched) {
@@ -163,7 +165,7 @@ export function Runner({ company }: { company: Company }) {
 /** A setup-token can only be proved by Claude Code, so its check runs on the runner (R58). */
 const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
-export function Credentials({ company }: { company: Company }) {
+export function Credentials({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   const [choice, setChoice] = useState(0);
@@ -213,6 +215,7 @@ export function Credentials({ company }: { company: Company }) {
       setExisting("");
       grants.reload();
       secrets.reload();
+      onChanged?.();
       return `Saved. ${company.name}'s agents now get it as ${env}.${warnings.length ? ` Note: ${warnings.join(" ")}` : ""}`;
     });
   };
@@ -348,6 +351,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
       });
       setForm({ ...form, name: "", grant: "", anchor: "" });
       sources.reload();
+      onChanged?.();
       return "Added.";
     });
   };
@@ -464,7 +468,7 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
 }
 
 /** `only`: "repo" hides the check pickers (detection needs the runner and git token), "checks" shows just them. */
-export function ProjectRow({ p, only }: { p: Project; only?: "repo" | "checks" }) {
+export function ProjectRow({ p, only, onChanged }: { p: Project; only?: "repo" | "checks"; onChanged?: () => void }) {
   const showRepo = only !== "checks";
   const showChecks = only !== "repo";
   const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
@@ -482,6 +486,7 @@ export function ProjectRow({ p, only }: { p: Project; only?: "repo" | "checks" }
         body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
       });
       setHost(saved.gitHost);
+      onChanged?.();
       if (form.landing === "pull_request" && form.repoUrl && !saved.gitHost) return "Saved, but Boss Man couldn't tell which git host this is, so pull requests won't open. Check the address, and that the host is reachable from the Boss Man server.";
       return saved.gitHost ? `Saved. Git host: ${saved.gitHost === "gitea" ? "Gitea" : "GitHub"} (${saved.gitApiBase}).` : "Saved.";
     });

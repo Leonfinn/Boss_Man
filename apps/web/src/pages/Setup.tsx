@@ -61,7 +61,7 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
   );
 }
 
-function ProjectStep({ company }: { company: Company }) {
+function ProjectStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 30_000, `setup-projects-${company.id}`);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +71,7 @@ function ProjectStep({ company }: { company: Company }) {
       await api(`/api/companies/${company.id}/projects`, { method: "POST", body: { name: name.trim() } });
       setName("");
       projects.reload();
+      onChanged();
     } catch (err) {
       setError((err as Error).message);
     }
@@ -95,7 +96,7 @@ function ProjectStep({ company }: { company: Company }) {
         </p>
       )}
       {list.map((p) => (
-        <ProjectRow key={p.id} p={p} only="repo" />
+        <ProjectRow key={p.id} p={p} only="repo" onChanged={onChanged} />
       ))}
       <p className="muted" style={{ fontSize: 13, margin: 0 }}>
         The checks that run before merging are chosen at the "Checks before merging" step, once the runner and git token are set up.
@@ -104,29 +105,29 @@ function ProjectStep({ company }: { company: Company }) {
   );
 }
 
-function ChecksStep({ company }: { company: Company }) {
+function ChecksStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-checks-${company.id}`);
   const withRepo = (projects.data ?? []).filter((p) => p.repoUrl);
   if (!withRepo.length) return <p className="muted">No project has a repo yet. Add one in step 2, then come back for this.</p>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {withRepo.map((p) => (
-        <ProjectRow key={p.id} p={p} only="checks" />
+        <ProjectRow key={p.id} p={p} only="checks" onChanged={onChanged} />
       ))}
     </div>
   );
 }
 
-function GitStep({ company }: { company: Company }) {
+function GitStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-git-${company.id}`);
   const [result, setResult] = useState<{ ok: boolean; canPush: boolean; message: string } | null>(null);
   const withRepo = (projects.data ?? []).filter((p) => p.repoUrl);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <Credentials company={company} />
+      <Credentials company={company} onChanged={onChanged} />
       {withRepo.map((p) => (
         <p key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: 0 }}>
-          <button type="button" className="btn" onClick={() => void api<{ ok: boolean; canPush: boolean; message: string }>(`/api/projects/${p.id}/check-git-token`, { method: "POST" }).then(setResult, (err) => setResult({ ok: false, canPush: false, message: (err as Error).message }))}>
+          <button type="button" className="btn" onClick={() => void api<{ ok: boolean; canPush: boolean; message: string }>(`/api/projects/${p.id}/check-git-token`, { method: "POST" }).then(setResult, (err) => setResult({ ok: false, canPush: false, message: (err as Error).message })).finally(onChanged)}>
             Check the token against {p.name}
           </button>
           {result && (
@@ -267,8 +268,10 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
     }
   }, [progress.data, step]);
   const company = companies.find((c) => c.id === companyId) ?? (companyId ? undefined : companies[0]);
-  const list = usePoll((signal) => (company ? api<ChecklistItem[]>(`/api/companies/${company.id}/setup-checklist`, { signal }) : Promise.resolve([])), 10_000, `setup-steps-${company?.id ?? "none"}`);
+  const list = usePoll((signal) => (company ? api<ChecklistItem[]>(`/api/companies/${company.id}/setup-checklist`, { signal }) : Promise.resolve([])), 3_000, `setup-steps-${company?.id ?? "none"}`);
   if (step === null) return null;
+  // After any save in a step: re-read the checklist (so "Next" appears now) and the companies (the CEO's funding).
+  const refresh = () => (list.reload(), onChanged());
   const save = (patch: Partial<Progress>) => void api("/api/setup-progress", { method: "PUT", body: patch }).catch(() => {});
   const move = (to: number) => {
     setStep(to);
@@ -311,12 +314,12 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
             }}
           />
         )}
-        {step === 1 && company && <ProjectStep company={company} />}
-        {step === 2 && company && <Runner company={company} />}
-        {step === 3 && company && <Credentials company={company} />}
-        {step === 4 && company && <GitStep company={company} />}
-        {step === 5 && company && <ChecksStep company={company} />}
-        {step === 6 && company && <FundingStep company={company} onChanged={onChanged} />}
+        {step === 1 && company && <ProjectStep company={company} onChanged={refresh} />}
+        {step === 2 && company && <Runner company={company} onChanged={refresh} />}
+        {step === 3 && company && <Credentials company={company} onChanged={refresh} />}
+        {step === 4 && company && <GitStep company={company} onChanged={refresh} />}
+        {step === 5 && company && <ChecksStep company={company} onChanged={refresh} />}
+        {step === 6 && company && <FundingStep company={company} onChanged={refresh} />}
         {step === 7 && company && <TicketStep company={company} />}
         <div className="setup-nav">
           {step > 0 && (
