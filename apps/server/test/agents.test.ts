@@ -29,6 +29,17 @@ async function setup() {
 }
 
 describe("the Agents tab (R62)", () => {
+  it("stars an agent, and the star persists in the company's agent list", async () => {
+    const c = (ctx = await setup());
+    const sam = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Sam", template: "scrum-master" })).json() as { id: string };
+    const starredIn = async () => ((await c.req("GET", `/api/companies/${c.company.id}/agents`)).json() as Array<{ id: string; starred: boolean }>).find((x) => x.id === sam.id)!.starred;
+    expect(await starredIn()).toBe(false);
+    expect((await c.req("PATCH", `/api/agents/${sam.id}`, { starred: true })).statusCode).toBe(200);
+    expect(await starredIn()).toBe(true);
+    const companies = (await c.req("GET", "/api/companies")).json() as Array<{ agents: Array<{ id: string; starred: boolean }> }>;
+    expect(companies[0]!.agents.find((x) => x.id === sam.id)!.starred).toBe(true);
+  });
+
   it("hires from a template, whose title and instructions reach the agent's prompt", async () => {
     const c = (ctx = await setup());
     const { templates } = (await c.req("GET", "/api/agent-templates")).json() as { templates: typeof AGENT_TEMPLATES };

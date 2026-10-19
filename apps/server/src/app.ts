@@ -1217,7 +1217,7 @@ export async function buildApp(opts: AppOptions) {
     owner.patch("/api/agents/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z
-        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean() })
+        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean() })
         .partial()
         .parse(req.body);
       const [before] = await db.select().from(agents).where(eq(agents.id, id));

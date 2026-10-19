@@ -34,7 +34,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 // ---------- Shapes the screens use ----------
 
-export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; duty: string | null };
+export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[] };
 export type Project = {
   id: string;

@@ -15,7 +15,7 @@ export class AgentError extends Error {
 }
 
 type AgentRow = typeof agents.$inferSelect;
-export type AgentPatch = Partial<Pick<AgentRow, "name" | "title" | "instructions" | "model" | "fundingSourceId" | "agentKind" | "paused">>;
+export type AgentPatch = Partial<Pick<AgentRow, "name" | "title" | "instructions" | "model" | "fundingSourceId" | "agentKind" | "paused" | "starred">>;
 /** Fields whose changes are kept, and can be undone, under the name the history shows. */
 const TRACKED: Array<[keyof AgentPatch, string]> = [
   ["name", "name"],
@@ -217,7 +217,8 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
       const before = await agent(agentId);
       if (before.retiredAt && patch.paused === false) throw new AgentError(409, `${before.name} is retired. Rehire them first.`);
       const changed = TRACKED.filter(([col]) => patch[col] !== undefined && patch[col] !== before[col]);
-      if (!changed.length) return before;
+      // Starring is the owner's own tidy-up, so it isn't kept in the history.
+      if (!changed.length && (patch.starred === undefined || patch.starred === before.starred)) return before;
       const [after] = await db.update(agents).set(patch).where(eq(agents.id, agentId)).returning();
       for (const [col, field] of changed) await record(before, field, before[col], after![col], byAgentId);
       return after!;

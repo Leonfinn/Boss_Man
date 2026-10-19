@@ -73,6 +73,8 @@ export const agents = pgTable(
     fundingSourceId: uuid("funding_source_id").references(() => fundingSources.id, { onDelete: "set null" }),
     /** A paused agent isn't started; its work waits until the owner unpauses it. */
     paused: boolean("paused").notNull().default(false),
+    /** Starred agents are linked under Chat in the sidebar. */
+    starred: boolean("starred").notNull().default(false),
     /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
     duty: text("duty"),
     /** Job title (e.g. "Scrum Master"), the template it was hired from, and its standing instructions (R62). */
