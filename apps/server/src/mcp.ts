@@ -28,7 +28,7 @@ import { WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import { AgentError, type agentsService } from "./services/agents.js";
-import { remember, type paService } from "./services/pa.js";
+import { markSearched, remember, type paService } from "./services/pa.js";
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -905,6 +905,7 @@ function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTo
       return server.registerTool(name, config, (async (input: { action?: string }, extra: never) => {
         if (name === "wiki" && input.action !== "list" && input.action !== "read") return fail("You can only read the wiki.");
         const r = await cb(input, extra);
+        if (name === "tickets" || name === "decisions") markSearched(runId);
         if (name !== "wiki" && input.action !== "file") remember(runId, JSON.stringify(r));
         return r;
       }) as never);
@@ -932,7 +933,7 @@ function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa }
     "pa_reply",
     {
       description:
-        "Answer the owner's last message. The only way you answer them. text is the answer, in plain words, from what your tools returned. cites lists every ticket or decision it rests on, each with its id (ids your tools returned in this run only). confidence is high only when the tools show the answer plainly. Boss Man checks the reply and may hand the question to the CEO instead; the result says so.",
+        "Answer the owner's last message. The only way you answer them. text is the answer, in plain words, from what your tools returned. cites lists every ticket or decision it rests on, each with its id (ids your tools returned in this run only). An empty list is allowed for a \"nothing found\" answer, but only after you searched with the tickets or decisions tool. confidence is high only when the tools show the answer plainly. Boss Man checks the reply and may hand the question to the CEO instead; the result says so.",
       inputSchema: {
         text: z.string().min(1).max(4000),
         cites: z.array(z.object({ kind: z.enum(["ticket", "decision", "run"]), id: z.string().uuid() })).max(20),

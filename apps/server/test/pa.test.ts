@@ -152,6 +152,32 @@ describe("the CEO's PA (R87)", () => {
     expect(await c.outcomes()).toEqual(["posted", "escalated:the owner asked again"]);
   });
 
+  it("does not count the same question asked in the CEO's own thread as a re-ask", async () => {
+    const c = await setup();
+    expect((await c.req("POST", c.chatUrl, { text: "What is blocked?", agentId: c.ceo.id })).statusCode).toBe(201);
+    const id = await c.ticket("Add checkout");
+    const { client } = await c.ask("what is blocked");
+    await read(client, id);
+    expect(textOf(await reply(client, "Nothing.", [{ kind: "ticket", id }]))).toBe("Posted to the owner.");
+    expect(await c.outcomes()).toEqual(["posted"]);
+  });
+
+  it("posts an empty cite list as a board search when the run searched tickets", async () => {
+    const c = await setup();
+    const { client } = await c.ask("What is blocked?");
+    await client.callTool({ name: "tickets", arguments: { action: "find", q: "blocked" } });
+    expect(textOf(await reply(client, "Nothing is blocked.", []))).toBe("Posted to the owner.");
+    expect((await c.thread(c.pa.id)).at(-1)!.text).toMatch(/from a board search as of \d\d:\d\d UTC/);
+  });
+
+  it("escalates an empty cite list when the run only read the wiki", async () => {
+    const c = await setup();
+    const { client } = await c.ask("What is blocked?");
+    await client.callTool({ name: "wiki", arguments: { action: "list" } });
+    expect(textOf(await reply(client, "Nothing is blocked.", []))).toContain("no cites");
+    expect(await c.outcomes()).toEqual(["escalated:no cites"]);
+  });
+
   it("keeps its judgement patterns in one list", () => {
     for (const q of ["why", "should we", "recommend one", "what next", "plan it", "prioritise", "approve it", "budget", "cost", "money", "spend", "hire", "fire him", "deploy", "risk", "merge it"]) expect(JUDGEMENT.some((p) => p.test(q)), q).toBe(true);
     expect(JUDGEMENT.some((p) => p.test("what is the state of the first ticket"))).toBe(false);
