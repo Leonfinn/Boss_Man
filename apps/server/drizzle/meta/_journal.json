@@ -253,6 +253,13 @@
       "when": 1792416346829,
       "tag": "0035_wiki_fts",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1792418114849,
+      "tag": "0036_semantic_wiki",
+      "breakpoints": true
     }
   ]
 }

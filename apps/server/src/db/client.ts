@@ -23,7 +23,8 @@ export async function openPglite(dataDir?: string): Promise<{ db: Db; close: () 
   const { PGlite } = await import("@electric-sql/pglite");
   const { drizzle } = await import("drizzle-orm/pglite");
   const { migrate } = await import("drizzle-orm/pglite/migrator");
-  const client = new PGlite(dataDir);
+  const { vector } = await import("@electric-sql/pglite-pgvector");
+  const client = new PGlite({ dataDir, extensions: { vector } });
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder });
   return { db: db as unknown as Db, close: () => client.close() };

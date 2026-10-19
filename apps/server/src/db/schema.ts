@@ -18,6 +18,7 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  vector,
 } from "drizzle-orm/pg-core";
 
 const id = () => uuid("id").primaryKey().defaultRandom();
@@ -938,6 +939,34 @@ export const wikiRevisions = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("wiki_revisions_page_time").on(t.pageId, t.createdAt)],
+);
+
+/** Per company: optional semantic wiki search. Off by default; the API key is a secret in the encrypted store. */
+export const wikiSemanticSettings = pgTable("wiki_semantic_settings", {
+  companyId: uuid("company_id").primaryKey().references(() => companies.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  baseUrl: text("base_url").notNull().default("https://openrouter.ai/api/v1"),
+  model: text("model").notNull().default("google/gemini-embedding-001"),
+  dims: integer("dims").notNull().default(768),
+  secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+});
+
+/** One embedding per wiki section. Searched exactly (no index); add an HNSW index on embedding with vector_cosine_ops when sections number in the hundreds of thousands. */
+export const wikiSectionEmbeddings = pgTable(
+  "wiki_section_embeddings",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    pageId: uuid("page_id").notNull().references(() => wikiPages.id, { onDelete: "cascade" }),
+    sectionPath: text("section_path").notNull(),
+    /** sha256 of model, dims, path and text: unchanged means no need to embed again. */
+    contentHash: text("content_hash").notNull(),
+    model: text("model").notNull(),
+    dims: integer("dims").notNull(),
+    embedding: vector("embedding", { dimensions: 768 }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("wiki_section_embeddings_page_path").on(t.pageId, t.sectionPath), index("wiki_section_embeddings_company").on(t.companyId)],
 );
 
 export const artifactKind = pgEnum("artifact_kind", ["wiki_page", "repo_file", "url"]);
