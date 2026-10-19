@@ -48,7 +48,8 @@ export function modelsService(db: Db, deps: { reveal: (secretId: string) => Prom
     async forCompany(companyId: string, opts: { refresh?: boolean } = {}) {
       const rows = await db.select().from(settings).where(like(settings.key, `models:${companyId}:%`));
       const runner = Object.fromEntries(rows.map((r) => [r.key.slice(`models:${companyId}:`.length), r.value as { models: ModelChoice[]; observedAt: string }]));
-      const sources = (await db.select().from(fundingSources)).filter((s) => s.kind !== "subscription" && s.secretId);
+      // Only Anthropic and OpenAI have a model-list API; other providers' models come from the runner's own list.
+      const sources = (await db.select().from(fundingSources)).filter((s) => s.kind !== "subscription" && s.secretId && (s.provider === "anthropic" || s.provider === "openai"));
       const api: ApiList[] = [];
       for (const s of sources) {
         const cached = apiCache.get(s.id);

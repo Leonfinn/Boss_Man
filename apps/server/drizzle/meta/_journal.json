@@ -260,6 +260,13 @@
       "when": 1792418114849,
       "tag": "0036_semantic_wiki",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1792429800910,
+      "tag": "0037_funding_providers",
+      "breakpoints": true
     }
   ]
 }

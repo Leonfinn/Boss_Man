@@ -333,6 +333,16 @@ export function Credentials({ company, onChanged }: { company: Company; onChange
   );
 }
 
+const PROVIDERS: Array<[string, string]> = [
+  ["anthropic", "Anthropic"],
+  ["openai", "OpenAI"],
+  ["bedrock", "Amazon Bedrock"],
+  ["foundry", "Microsoft Foundry"],
+  ["gateway", "LLM gateway"],
+];
+/** Mirrors the server's rule: a subscription is only a Claude or ChatGPT plan. */
+const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai";
+
 export function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 30_000, "sources");
   const [form, setForm] = useState({ name: "", kind: "subscription", provider: "anthropic", grant: "", anchor: "" });
@@ -377,7 +387,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
         </div>
         <div className="field">
           <label htmlFor="fs-kind">Kind</label>
-          <select id="fs-kind" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+          <select id="fs-kind" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value, provider: providerFits(e.target.value, form.provider) ? form.provider : "anthropic" })}>
             <option value="subscription">Subscription (setup-token)</option>
             <option value="api_credit">API credit, monthly grant</option>
             <option value="api_payg">API, pay as you go</option>
@@ -387,10 +397,36 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
         <div className="field">
           <label htmlFor="fs-provider">Provider</label>
           <select id="fs-provider" value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value })}>
-            <option value="anthropic">Anthropic</option>
-            <option value="openai">OpenAI</option>
+            {PROVIDERS.filter(([id]) => providerFits(form.kind, id)).map(([id, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
           </select>
         </div>
+        <details style={{ gridColumn: "1 / -1" }}>
+          <summary>What the provider controls</summary>
+          <div className="muted" style={{ fontSize: 14, display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            <p>
+              The provider decides which service lists models for an API-key source (Anthropic and OpenAI only; other providers use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from Credentials above, as environment variables.
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              <li>Subscription + Anthropic: a Claude Pro or Max plan, run with a setup-token (<code>CLAUDE_CODE_OAUTH_TOKEN</code>).</li>
+              <li>Subscription + OpenAI: a ChatGPT plan, used by Codex agents.</li>
+              <li>API kinds: a key from that provider (Anthropic, OpenAI).</li>
+              <li>
+                Amazon Bedrock (API kinds only): add three credentials with "Other": <code>CLAUDE_CODE_USE_BEDROCK</code> = 1, <code>AWS_REGION</code> and <code>AWS_BEARER_TOKEN_BEDROCK</code> (a Bedrock API key). Name models as Bedrock IDs, e.g. <code>us.anthropic.claude-sonnet-4-6</code>.
+              </li>
+              <li>
+                Microsoft Foundry (API kinds only): <code>CLAUDE_CODE_USE_FOUNDRY</code> = 1, <code>ANTHROPIC_FOUNDRY_RESOURCE</code> (the resource name) and <code>ANTHROPIC_FOUNDRY_API_KEY</code>. Model names are your deployment names.
+              </li>
+              <li>
+                LLM gateway (API kinds only): <code>ANTHROPIC_BASE_URL</code> and <code>ANTHROPIC_AUTH_TOKEN</code>, for a gateway that serves Claude models in the Anthropic format. Anthropic doesn't support non-Claude models through a gateway.
+              </li>
+            </ul>
+            <p>Claude agents only: Codex runs on OpenAI.</p>
+          </div>
+        </details>
         {form.kind === "api_credit" && (
           <>
             <div className="field">

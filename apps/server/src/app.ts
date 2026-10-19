@@ -8,6 +8,7 @@ import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
 import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
+import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -628,11 +629,14 @@ export async function buildApp(opts: AppOptions) {
     // Funding sources, cost and quota (R27–R29).
     const FundingInput = z.object({
       name: z.string().trim().min(1).max(80),
-      kind: z.enum(["api_credit", "subscription", "usage_credits", "api_payg"]),
-      provider: z.enum(["anthropic", "openai"]),
+      kind: z.enum(FUNDING_KINDS),
+      provider: z.enum(FUNDING_PROVIDERS),
       monthlyGrantUsd: z.number().nonnegative().optional(),
       cycleAnchor: z.coerce.date().optional(),
       secretId: Uuid.optional(),
+    }).superRefine((v, ctx) => {
+      const problem = fundingComboError(v.kind, v.provider);
+      if (problem) ctx.addIssue({ code: "custom", path: ["provider"], message: problem });
     });
 
     owner.post("/api/funding-sources", async (req, reply) => {

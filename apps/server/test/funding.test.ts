@@ -82,3 +82,12 @@ describe("budgets", () => {
     expect(lab.status).toMatchObject({ usedMicros: 6_000_000, state: "exceeded", action: "pause" });
   });
 });
+
+describe("funding source provider and kind", () => {
+  it("accepts API kinds for Bedrock, Foundry and gateways, and refuses a subscription on them", async () => {
+    const ok = await post("/api/funding-sources", { name: "Bedrock", kind: "api_payg", provider: "bedrock" });
+    expect(ok.statusCode).toBe(201);
+    expect((await post("/api/funding-sources", { name: "Sub on Bedrock", kind: "subscription", provider: "bedrock" })).statusCode).toBeGreaterThanOrEqual(400);
+    expect((await post("/api/funding-sources", { name: "Max", kind: "subscription", provider: "openai" })).statusCode).toBe(201);
+  });
+});
