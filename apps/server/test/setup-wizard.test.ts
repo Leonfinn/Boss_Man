@@ -44,7 +44,7 @@ describe("the setup wizard (R56)", () => {
     const c = (ctx = await setup());
     const { company, ceo } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
     const todo = async () => ((await c.req("GET", `/api/companies/${company.id}/setup-checklist`)).json() as Array<{ id: string; done: boolean }>).filter((i) => !i.done).map((i) => i.id);
-    expect(await todo()).toEqual(["company", "project", "runner", "credential", "git", "funding", "ticket"]);
+    expect(await todo()).toEqual(["company", "project", "runner", "credential", "git", "checks", "funding", "ticket"]);
 
     await c.req("PATCH", `/api/companies/${company.id}`, { mission: "Ship the shop." });
     const project = (await c.req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
@@ -63,6 +63,8 @@ describe("the setup wizard (R56)", () => {
     const source = (await c.req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
     await c.req("PATCH", `/api/agents/${ceo.id}`, { fundingSourceId: source.id });
     await c.req("POST", `/api/projects/${project.id}/tickets`, { title: "Plan the shop" });
+    expect(await todo()).toContain("checks");
+    await c.req("PATCH", `/api/projects/${project.id}`, { verifyCommand: "pnpm test" });
     // Only the runner is left: it isn't connected.
     expect(await todo()).toEqual(["runner"]);
   });
