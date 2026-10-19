@@ -267,6 +267,8 @@ export const tickets = pgTable(
     planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
     /** The feature request this ticket delivers, if any. */
     featureId: uuid("feature_id").references((): AnyPgColumn => features.id, { onDelete: "set null" }),
+    /** The task this is a sub-task of (one level only); the parent waits on it. */
+    parentTicketId: uuid("parent_ticket_id").references((): AnyPgColumn => tickets.id, { onDelete: "set null" }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),

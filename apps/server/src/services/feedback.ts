@@ -3,10 +3,10 @@
 // matters to that person. Features are scored on demand (from their insights) and on the
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, gt, ilike, inArray, lt, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
+import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
 
 export class FeedbackError extends Error {
   constructor(
@@ -101,10 +101,11 @@ export function feedbackService(
       : [];
     const work = fs.length
       ? await db
-          .select({ featureId: tickets.featureId, total: count(), done: sql<number>`count(*) filter (where ${tickets.systemState} = 'done')`.mapWith(Number) })
+          .select({ featureId: tickets.featureId, id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, assignee: agents.name })
           .from(tickets)
-          .where(inArray(tickets.featureId, fs.map((f) => f.id)))
-          .groupBy(tickets.featureId)
+          .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+          .where(and(inArray(tickets.featureId, fs.map((f) => f.id)), isNull(tickets.parentTicketId)))
+          .orderBy(asc(tickets.createdAt))
       : [];
     // A feature's demand includes its subfeatures'.
     const childrenOf = new Map<string, string[]>();
@@ -126,8 +127,8 @@ export function feedbackService(
         const d = demand.get(f.id)!;
         const scores = f.driverScores as Record<string, number | null>;
         const p = priorityScore({ demand: d.demand, maxDemand, demandWeight: s.demandWeight, drivers: drivers.map((x) => ({ weight: x.weight, value: scores[x.id] ?? null })), effort: f.effort });
-        const w = work.find((x) => x.featureId === f.id);
-        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, tickets: { total: Number(w?.total ?? 0), done: w?.done ?? 0 } };
+        const items = work.filter((x) => x.featureId === f.id).map(({ id, title, state, outcome, assignee }) => ({ id, title, state, outcome, assignee }));
+        return { ...f, driverScores: scores, demand: d.demand, insightCount: d.insights, customerCount: d.customers, value: p.value, demandPart: p.demandPart, priority: p.priority, tickets: { total: items.length, done: items.filter((x) => x.state === "done").length, items } };
       }),
     };
   }
@@ -266,7 +267,6 @@ export function feedbackService(
         .leftJoin(feedbackCustomers, eq(feedbackCustomers.id, feedbackNotes.customerId))
         .where(inArray(insights.featureId, ids))
         .orderBy(desc(insights.createdAt));
-      const ts = await db.select({ id: tickets.id, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome }).from(tickets).where(eq(tickets.featureId, id)).orderBy(asc(tickets.createdAt));
       return {
         feature: me,
         drivers: all.drivers,
@@ -274,7 +274,7 @@ export function feedbackService(
         maxDemand: all.maxDemand,
         subfeatures: all.features.filter((x) => x.parentId === id),
         insights: evidence.map((e) => ({ ...e.insight, fromSubfeature: e.insight.featureId !== id, note: { ...e.note, text: e.note.text.slice(0, 2000) }, customer: e.customer?.id ? e.customer : null })),
-        tickets: ts,
+        tickets: me.tickets.items,
       };
     },
 
@@ -373,36 +373,50 @@ export function feedbackService(
     },
 
     /**
-     * Moves features along with their tickets: in progress once one is being worked on or
-     * reviewed, released once every ticket is done and at least one was completed.
+     * Moves one feature along with its tasks, called whenever a task of it starts, finishes,
+     * reopens or is added. In progress once work starts; released once every task is done and
+     * at least one was completed, and, when the company has a production deploy target, once a
+     * deploy of one of its tasks to it has succeeded; back to in progress if a released
+     * feature's task reopens. Declined is never touched, and a manual status stands until the
+     * next task event.
      */
-    async syncStatuses(companyId?: string) {
-      const rows = await db
+    async syncFeature(featureId: string | null | undefined) {
+      if (!featureId) return null;
+      const [f] = await db.select().from(features).where(eq(features.id, featureId));
+      if (!f || f.status === "declined") return null;
+      const [r] = await db
         .select({
-          feature: features,
-          open: sql<number>`count(*) filter (where ${tickets.systemState} <> 'done')`.mapWith(Number),
+          open: sql<number>`count(*) filter (where ${tickets.parentTicketId} is null and ${tickets.systemState} <> 'done')`.mapWith(Number),
           active: sql<number>`count(*) filter (where ${tickets.systemState} in ('in_progress', 'review'))`.mapWith(Number),
-          completed: sql<number>`count(*) filter (where ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
+          completed: sql<number>`count(*) filter (where ${tickets.parentTicketId} is null and ${tickets.systemState} = 'done' and ${tickets.outcome} is distinct from 'cancelled')`.mapWith(Number),
         })
-        .from(features)
-        .innerJoin(tickets, eq(tickets.featureId, features.id))
-        .where(and(inArray(features.status, ["idea", "considering", "planned", "in_progress"]), companyId ? eq(features.companyId, companyId) : undefined))
-        .groupBy(features.id);
-      const changed: Array<{ id: string; status: FeatureStatus }> = [];
-      for (const r of rows) {
-        const f = r.feature;
-        const next: FeatureStatus | null = r.open === 0 && r.completed > 0 ? "released" : r.active > 0 && f.status !== "in_progress" ? "in_progress" : null;
-        if (!next || next === f.status) continue;
-        const [u] = await db
-          .update(features)
-          .set({ status: next, updatedAt: now(), ...(next === "released" ? { releasedAt: now() } : {}) })
-          .where(and(eq(features.id, f.id), eq(features.status, f.status)))
-          .returning();
-        if (!u) continue;
-        changed.push({ id: f.id, status: next });
-        if (next === "released") await deps.onReleased?.(u);
+        .from(tickets)
+        .where(eq(tickets.featureId, featureId));
+      let released = r!.open === 0 && r!.completed > 0;
+      if (released) {
+        const [prod] = await db.select({ id: deployTargets.id }).from(deployTargets).where(and(eq(deployTargets.companyId, f.companyId), eq(deployTargets.isProduction, true))).limit(1);
+        if (prod) {
+          // shortcut: any succeeded production deploy of one of its tasks releases it, not one covering every task; upgrade if per-task coverage matters.
+          const [shipped] = await db
+            .select({ id: deploys.id })
+            .from(deploys)
+            .innerJoin(deployTargets, eq(deployTargets.id, deploys.targetId))
+            .innerJoin(tickets, eq(tickets.id, deploys.ticketId))
+            .where(and(eq(tickets.featureId, featureId), eq(deploys.status, "succeeded"), eq(deployTargets.isProduction, true)))
+            .limit(1);
+          released = !!shipped;
+        }
       }
-      return changed;
+      const started = r!.active > 0 || r!.completed > 0;
+      const next: FeatureStatus | null = released ? "released" : f.status === "released" ? (r!.open > 0 ? "in_progress" : null) : started && ["idea", "considering", "planned"].includes(f.status) ? "in_progress" : null;
+      if (!next || next === f.status) return null;
+      const [u] = await db
+        .update(features)
+        .set({ status: next, updatedAt: now(), releasedAt: next === "released" ? now() : null })
+        .where(and(eq(features.id, f.id), eq(features.status, f.status)))
+        .returning();
+      if (u && next === "released") await deps.onReleased?.(u);
+      return u ?? null;
     },
 
     /** A ticket's description from a feature: what it is and what people asked for, strongest first. */

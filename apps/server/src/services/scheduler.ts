@@ -98,6 +98,8 @@ export function schedulerService(
     chat?: { cwd(companyId: string, agentId: string): string; prompt(companyId: string, agentId: string): Promise<string>; claim(companyId: string, agentId: string, runId: string): Promise<unknown> };
     chapters?: { forLaunch(agent: typeof agents.$inferSelect, runId: string, wake: string): Promise<ChapterLaunch>; onLaunchFailed(runId: string): Promise<unknown> };
     workspaceRoot?: string;
+    /** A task of this feature started, so its status may need to follow. */
+    onFeature?: (featureId: string) => Promise<unknown>;
     limits?: Partial<Limits>;
     now?: () => Date;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
@@ -113,7 +115,7 @@ export function schedulerService(
   const workspaceRoot = deps.workspaceRoot ?? "/home/node/workspaces";
 
   async function startTicket(ticketId: string) {
-    const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, ticketId));
+    const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId, featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "backlog" && t?.state !== "ready") return;
     const [col] = await db
       .select({ id: workflowColumns.id })
@@ -125,6 +127,7 @@ export function schedulerService(
       .update(tickets)
       .set({ systemState: "in_progress", columnId: col?.id ?? null, lastActivityAt: now() })
       .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "ready"])));
+    if (t.featureId) await deps.onFeature?.(t.featureId);
   }
 
   async function globallyPaused() {
