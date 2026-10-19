@@ -8,7 +8,8 @@ import type { Db } from "../db/client.js";
 import { agentSkills, agents, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
-export const LIMITS = { files: 200, bytes: 2 * 1024 * 1024, skillsPerLink: 50, perAgentBytes: 20 * 1024 * 1024 };
+// Skills may ship many example assets (e.g. cathrynlavery/diagram-design has 200+), so the caps are generous.
+export const LIMITS = { files: 1000, bytes: 16 * 1024 * 1024, skillsPerLink: 50, perAgentBytes: 40 * 1024 * 1024 };
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export class SkillError extends Error {
@@ -184,12 +185,13 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
       // A skill's files are everything in its folder, except other skills nested inside it.
       const nested = all.filter((d) => d !== dir && (dir === "" || d.startsWith(`${dir}/`)));
       const blobs = tree.tree.filter((e) => e.type === "blob" && (dir === "" || e.path.startsWith(`${dir}/`)) && !nested.some((d) => e.path.startsWith(`${d}/`)));
-      if (blobs.length > LIMITS.files) throw new SkillError(400, `${dir || "The repository"} has more than ${LIMITS.files} files; link to the skill's own folder.`);
+      if (blobs.length > LIMITS.files) throw new SkillError(400, `${dir || "That skill"} has ${blobs.length} files; a skill can have at most ${LIMITS.files}.`);
       if (blobs.reduce((n, b) => n + (b.size ?? 0), 0) > LIMITS.bytes) throw new SkillError(400, `${dir || "That skill"} is over ${LIMITS.bytes / 1024 / 1024} MB.`);
       const files: SkillFile[] = [];
-      for (const b of blobs) {
-        const bytes = (await fetchOk(`https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`, "bytes")) as Buffer;
-        files.push({ path: dir ? b.path.slice(dir.length + 1) : b.path, content: bytes.toString("base64") });
+      // Eight downloads at a time: big skills have hundreds of files.
+      for (let i = 0; i < blobs.length; i += 8) {
+        const batch = await Promise.all(blobs.slice(i, i + 8).map((b) => fetchOk(`https://raw.githubusercontent.com/${gh.owner}/${gh.repo}/${commit}/${b.path.split("/").map(encodeURIComponent).join("/")}`, "bytes") as Promise<Buffer>));
+        batch.forEach((bytes, j) => files.push({ path: dir ? blobs[i + j]!.path.slice(dir.length + 1) : blobs[i + j]!.path, content: bytes.toString("base64") }));
       }
       found.push({ folder: dir.split("/").at(-1) || gh.repo, files, url: `https://github.com/${gh.owner}/${gh.repo}/tree/${ref}${dir ? `/${dir}` : ""}` });
     }
