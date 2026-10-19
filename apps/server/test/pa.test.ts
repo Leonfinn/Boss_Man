@@ -174,6 +174,8 @@ describe("the CEO's PA (R87)", () => {
     const c = await setup();
     const { client } = await c.ask("What is blocked?");
     await client.callTool({ name: "wiki", arguments: { action: "list" } });
+    // Reading one ticket isn't a search either.
+    await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: "00000000-0000-4000-8000-000000000000" } });
     expect(textOf(await reply(client, "Nothing is blocked.", []))).toContain("no cites");
     expect(await c.outcomes()).toEqual(["escalated:no cites"]);
   });

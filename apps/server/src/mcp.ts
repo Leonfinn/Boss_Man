@@ -905,7 +905,8 @@ function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTo
       return server.registerTool(name, config, (async (input: { action?: string }, extra: never) => {
         if (name === "wiki" && input.action !== "list" && input.action !== "read") return fail("You can only read the wiki.");
         const r = await cb(input, extra);
-        if (name === "tickets" || name === "decisions") markSearched(runId);
+        // Only a search can show "nothing found"; reading one ticket can't.
+        if ((name === "tickets" && input.action === "find") || (name === "decisions" && input.action === "list")) markSearched(runId);
         if (name !== "wiki" && input.action !== "file") remember(runId, JSON.stringify(r));
         return r;
       }) as never);
