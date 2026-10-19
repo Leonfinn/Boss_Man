@@ -362,14 +362,16 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               <label htmlFor="t-risk">Risk</label>
             </dt>
             <dd>
-              <select id="t-risk" value={t.risk ?? "medium"} onChange={(e) => void patch({ risk: e.target.value as Risk })}>
+              <select id="t-risk" value={t.risk ?? ""} onChange={(e) => e.target.value && void patch({ risk: e.target.value as Risk })}>
+                {!t.risk && <option value="">Not rated yet</option>}
                 {RISKS.map((r) => (
                   <option key={r} value={r}>
                     {r[0]!.toUpperCase() + r.slice(1)}
                   </option>
                 ))}
               </select>
-              <RiskHelp tiers={tiers} current={t.risk ?? "medium"} />
+              {!t.risk && <small className="muted" style={{ display: "block" }}>Not rated yet — the CEO rates it when it reviews the task (treated as medium until then).</small>}
+              <RiskHelp tiers={tiers} current={t.risk} />
             </dd>
             <dt>
               <label htmlFor="t-watcher">Watcher</label>

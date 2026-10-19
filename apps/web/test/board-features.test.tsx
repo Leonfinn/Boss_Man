@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Board } from "../src/pages/Board";
@@ -59,6 +59,28 @@ describe("board", () => {
     fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.getByText("Need infra")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
+  });
+});
+
+describe("new task form", () => {
+  it("leaves the risk for the CEO to rate by default and posts no risk", async () => {
+    const posts: unknown[] = [];
+    stub();
+    const base = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST" && url.endsWith("/tickets")) {
+        posts.push(JSON.parse(String(init.body)));
+        return json({ id: "t9" });
+      }
+      return base(url, init);
+    }));
+    render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "New task" }));
+    expect((screen.getByLabelText("Risk") as HTMLSelectElement).selectedOptions[0]!.textContent).toBe("Let the CEO rate it");
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Fix login" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to backlog" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect((posts[0] as { risk: unknown }).risk ?? null).toBeNull();
   });
 });
 

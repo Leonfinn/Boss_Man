@@ -78,3 +78,21 @@ describe("approve and merge", () => {
     await waitFor(() => expect(screen.queryByText(/Running the pre-merge check/)).toBeNull());
   });
 });
+
+describe("unrated task", () => {
+  it("says the CEO rates it when it reviews the task", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/tickets/t1") return json({ id: "t1", title: "Add limiter", systemState: "backlog", risk: null, projectId: "p1", project: "App", companyId: "c1", assignee: null, createdAt: "2026-10-19T09:00:00Z", lastActivityAt: "2026-10-19T09:00:00Z" });
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        if (url.endsWith("/artifacts") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        return json({});
+      }),
+    );
+    render(<Ticket id="t1" companies={[{ id: "c1", name: "App Co", mission: null, paused: false, agents: [] }]} />);
+    expect(await screen.findByText("Not rated yet — the CEO rates it when it reviews the task (treated as medium until then).")).toBeTruthy();
+  });
+});

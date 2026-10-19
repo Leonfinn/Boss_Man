@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, projects, runners, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, projects, runners, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -118,5 +118,59 @@ describe("CEO delegation", () => {
     expect(devPrompt).not.toContain("assign_ticket");
     expect(devPrompt).not.toContain("Your team:");
     expect(devPrompt).toContain("never as loose files");
+  });
+});
+
+describe("CEO rates risk", () => {
+  const rate = (c: Client, ticketId: string, risk: string) => c.callTool({ name: "set_ticket_risk", arguments: { ticketId, risk, reason: "Touches billing." } });
+
+  it("rates an unrated backlog task, sets plan-first and records why; raises but never lowers", async () => {
+    const t = await ctx.ticket({ systemState: "backlog" });
+    const c = await agent(ctx.co.ceo.id);
+    expect((await rate(c, t.id, "medium")).isError).toBeFalsy();
+    expect(await row(t.id)).toMatchObject({ risk: "medium", planFirst: false });
+    expect((await rate(c, t.id, "high")).isError).toBeFalsy();
+    expect(await row(t.id)).toMatchObject({ risk: "high", planFirst: true });
+    const log = await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id));
+    expect(log.map((a) => a.summary)).toContain("CEO rated it high: Touches billing.");
+    const lower = await rate(c, t.id, "low");
+    expect(lower.isError).toBe(true);
+    expect(textOf(lower)).toMatch(/only the owner can lower/);
+    expect((await row(t.id)).risk).toBe("high");
+    await c.close();
+  });
+
+  it("leaves a running task's plan-first alone", async () => {
+    const t = await ctx.ticket({ systemState: "in_progress" });
+    const c = await agent(ctx.co.ceo.id);
+    await rate(c, t.id, "critical");
+    expect(await row(t.id)).toMatchObject({ risk: "critical", planFirst: false });
+    await c.close();
+  });
+
+  it("refuses a worker and a ticket from another company", async () => {
+    const t = await ctx.ticket();
+    const dev = await agent(ctx.dev.id);
+    const res = await rate(dev, t.id, "high");
+    expect(res.isError).toBe(true);
+    expect((await row(t.id)).risk).toBeNull();
+    await dev.close();
+
+    const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string }; ceo: { id: string } };
+    const [op] = await ctx.db.insert(projects).values({ companyId: other.company.id, name: "Theirs" }).returning();
+    const [ot] = await ctx.db.insert(tickets).values({ companyId: other.company.id, projectId: op!.id, title: "Theirs", systemState: "ready" }).returning();
+    const c = await agent(ctx.co.ceo.id);
+    const cross = await rate(c, ot!.id, "high");
+    expect(cross.isError).toBe(true);
+    expect(textOf(cross)).toMatch(/No ticket with that ID/);
+    expect((await row(ot!.id)).risk).toBeNull();
+    await c.close();
+  });
+
+  it.each([[null, true], ["low", false]] as const)("the CEO's wake prompt for a task rated %s asks for a rating: %s", async (risk, asks) => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id, risk });
+    await ctx.scheduler.wake({ agentId: ctx.co.ceo.id, reason: "assigned", ticketId: t.id });
+    await ctx.scheduler.tick();
+    expect(ctx.commands.at(-1)!.prompt.includes("set_ticket_risk")).toBe(asks);
   });
 });
