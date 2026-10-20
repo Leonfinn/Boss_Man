@@ -275,6 +275,17 @@ describe("stalled runs (R32)", () => {
     // The paused agent outranks other rows.
     expect((await ctx.queue())[0]!.reasons[0]).toBe("An agent is paused until you answer");
   });
+
+  it("drops a run's open permission request from the queue when the run ends", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.permission_request", runId, requestId: "r1", title: "git push", kind: "execute", rawInput: { command: "git push origin main" }, options: [] } as unknown as RunnerEvent);
+    expect(await ctx.queue()).toHaveLength(1);
+    await ctx.emit({ type: "run.ended", runId, stopReason: "cancelled", error: null });
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "permission"));
+    expect(d!.status).toBe("withdrawn");
+  });
 });
 
 describe("the server ends runs it can't reach", () => {

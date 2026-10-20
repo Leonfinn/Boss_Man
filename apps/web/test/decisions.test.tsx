@@ -39,12 +39,19 @@ describe("decision queue", () => {
     expect(screen.getByRole("heading", { name: "App Co has used 92% of its $60 budget. Raise it?" })).toBeTruthy();
     expect(screen.getByLabelText("Score 52")).toBeTruthy();
     expect(screen.getByText('Blocks "Checkout error states"')).toBeTruthy();
+    expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
+    expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
     expect(screen.getByText("1 decision waiting across all companies, ranked by what they unblock.", { exact: false })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Raise to $80" }));
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());
     expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ method: "POST", body: JSON.stringify({ answer: "Raise to $80" }) }));
     expect(onAnswered).toHaveBeenCalled();
+  });
+
+  it("explains a paused agent's score", () => {
+    render(<Decisions decisions={[decision({ score: 5, parts: { blocking: 0, urgency: 0, age: 0, liveRun: 5 } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("Score 5: 5 for a paused agent + 0 for waiting.")).toBeTruthy();
   });
 
   it("says why an answer was refused", async () => {

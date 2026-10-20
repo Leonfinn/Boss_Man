@@ -1,6 +1,6 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, eq, isNotNull, isNull, max, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, max, sql } from "drizzle-orm";
 import type { JournalEntry, RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
@@ -34,6 +34,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       })
       .where(eq(runs.id, runId))
       .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+    // A finished run's own questions are moot: its permission requests and stall alerts leave the queue.
+    await db
+      .update(decisions)
+      .set({ status: "withdrawn", dedupeKey: null })
+      .where(and(eq(decisions.status, "open"), inArray(decisions.kind, ["permission", "stalled_run"]), sql`${decisions.context}->>'runId' = ${runId}`));
     if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
     return ended;
   }
