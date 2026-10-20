@@ -460,6 +460,8 @@ export const runs = pgTable("runs", {
   /** When the runner last reported anything for this run; a long silence is a stall (R32). */
   lastEventAt: timestamp("last_event_at", { withTimezone: true }),
   outcome: text("outcome"),
+  /** When the owner asked to stop the run; the sweep ends it if the runner never confirms. */
+  cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);

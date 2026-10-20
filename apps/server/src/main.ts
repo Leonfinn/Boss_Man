@@ -1,6 +1,7 @@
 import { loadMasterKey } from "./crypto.js";
 import { openPglite, openPostgres } from "./db/client.js";
 import { buildApp } from "./app.js";
+import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
 import { providerLiveValidator } from "./services/secrets.js";
 
@@ -8,7 +9,7 @@ const env = process.env;
 const master = loadMasterKey(env);
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
-const { app, scheduler, sweeps, notes, feedback, review } = await buildApp({
+const { app, scheduler, sweeps, notes, feedback, review, semantic } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -23,20 +24,24 @@ const { app, scheduler, sweeps, notes, feedback, review } = await buildApp({
   },
 });
 
-// Scheduling passes; run ends and new wakes also prompt one.
-const tick = setInterval(() => void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed")), Number(env.BOSSMAN_TICK_MS ?? 5000));
-// New decisions reach the owner's notifications (R44).
-const notify = setInterval(() => void notes.syncDecisions().catch((err) => app.log.error({ err }, "notification sync failed")), Number(env.BOSSMAN_NOTIFY_MS ?? 5000));
-// Stale-blocker, stalled-run and missed-work sweeps.
-const sweep = setInterval(() => void sweeps.run().catch((err) => app.log.error({ err }, "sweep failed")), Number(env.BOSSMAN_SWEEP_MS ?? 60_000));
-// Pull requests waiting on the git host: merged there, or mergeable now (R59).
-const prSync = setInterval(() => void review.syncPullRequests().catch((err) => app.log.error({ err }, "pull request sync failed")), Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000));
+const bg = createBackground(
+  [
+    // Scheduling passes; run ends and new wakes also prompt one.
+    { name: "scheduler tick", everyMs: Number(env.BOSSMAN_TICK_MS ?? 5000), run: () => scheduler.tick() },
+    // New decisions reach the owner's notifications (R44).
+    { name: "notification sync", everyMs: Number(env.BOSSMAN_NOTIFY_MS ?? 5000), run: () => notes.syncDecisions() },
+    // Stale-blocker, stalled-run and missed-work sweeps.
+    { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
+    // Pull requests waiting on the git host: merged there, or mergeable now (R59).
+    { name: "pull request sync", everyMs: Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000), run: () => review.syncPullRequests() },
+  ],
+  (err, name) => app.log.error({ err }, `${name} failed`),
+);
+bg.startBackground();
 
 const shutdown = async () => {
-  clearInterval(tick);
-  clearInterval(sweep);
-  clearInterval(prSync);
-  clearInterval(notify);
+  await bg.stopBackground();
+  await semantic.drain(); // embed queued wiki pages instead of dropping them
   await app.close();
   await close();
   process.exit(0);
