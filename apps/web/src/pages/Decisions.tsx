@@ -15,6 +15,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   stalled_run: { label: "Stalled run", tone: "amber" },
   question: { label: "Question", tone: "" },
   deploy: { label: "Production deploy", tone: "red" },
+  self_deploy: { label: "Boss Man update", tone: "blue" },
 };
 
 const OPTION_HELP: Record<string, string> = {
@@ -63,7 +64,7 @@ function StallEvidenceView({ e }: { e: StallEvidence }) {
 
 function kindOf(d: Decision) {
   const ctx = (d as Decision & { context?: { type?: string } }).context;
-  const key = ctx?.type === "deploy" ? "deploy" : d.options.includes("Approve plan") ? "plan" : d.kind;
+  const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" ? ctx.type : d.options.includes("Approve plan") ? "plan" : d.kind;
   return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 

@@ -8,13 +8,14 @@ const env = process.env;
 const master = loadMasterKey(env);
 const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
 
-const { app, scheduler, sweeps, notes, feedback, review } = await buildApp({
+const { app, scheduler, sweeps, notes, feedback, review, selfDeploy } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
   secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1",
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,
+  deployerDir: env.BOSSMAN_DEPLOYER_DIR,
   // The runner launcher (R55): starts each company's runner, so no tokens are copied by hand.
   launcher: env.BOSSMAN_LAUNCHER === "1" ? { url: env.BOSSMAN_LAUNCHER_URL ?? "http://launcher:3105", keyFile: env.BOSSMAN_LAUNCHER_KEY_FILE ?? "/run/launcher/key" } : undefined,
   sweepLimits: {
@@ -32,7 +33,11 @@ const sweep = setInterval(() => void sweeps.run().catch((err) => app.log.error({
 // Pull requests waiting on the git host: merged there, or mergeable now (R59).
 const prSync = setInterval(() => void review.syncPullRequests().catch((err) => app.log.error({ err }, "pull request sync failed")), Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000));
 
+// What the host deployer reports: raises "Deploy?" when main moves and tells the owner how a deploy went. // leader-only
+const selfDeployPoll = setInterval(() => void selfDeploy.sync().catch((err) => app.log.error({ err }, "self-deploy sync failed")), Number(env.BOSSMAN_SELF_DEPLOY_MS ?? 5000));
+
 const shutdown = async () => {
+  clearInterval(selfDeployPoll);
   clearInterval(tick);
   clearInterval(sweep);
   clearInterval(prSync);

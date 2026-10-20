@@ -24,6 +24,7 @@ import { secretGrants } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
+import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { DeployError, deploysService } from "./services/deploys.js";
@@ -91,6 +92,8 @@ export type AppOptions = {
   now?: () => Date;
   /** The runner launcher (R55), when BOSSMAN_LAUNCHER=1. */
   launcher?: LauncherOptions;
+  /** The folder shared with the host deployer (docs/09-self-deploy.md); self-deploy is off without it. */
+  deployerDir?: string;
 };
 
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
@@ -152,6 +155,7 @@ export async function buildApp(opts: AppOptions) {
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
+  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), log: (m) => app.log.warn(m) });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId));
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const deploysSvc = deploysService(db, {
@@ -224,6 +228,7 @@ export async function buildApp(opts: AppOptions) {
   runners.onConnect((runnerId) => void modelProbe.onConnect(runnerId).catch((err) => app.log.warn({ err }, "model probe failed")));
   runners.onResume((runner, pending) => decisionsSvc.resume(runner, pending));
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
+  decisionsSvc.setSelfDeployHook(selfDeploy);
   decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   const WINDOW_NAME: Record<string, string> = { five_hour: "5-hour", seven_day: "weekly" };
@@ -1386,6 +1391,13 @@ export async function buildApp(opts: AppOptions) {
       return { paused };
     });
 
+    // Self-deploy: what the host deployer last reported, and the "Deploy latest" button.
+    owner.get("/api/self-deploy", async () => selfDeploy.overview());
+    owner.post("/api/self-deploy/deploy-latest", async (_req, reply) => {
+      const r = await selfDeploy.deployLatest();
+      return "error" in r ? reply.code(409).send({ error: "nothing_to_deploy", message: r.error }) : r;
+    });
+
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
 
@@ -1539,5 +1551,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki, semantic };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki, semantic };
 }
