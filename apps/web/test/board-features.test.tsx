@@ -32,7 +32,7 @@ function stub() {
           columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Build the toggle", featureId: "f1", featureTitle: "Dark mode" }), card({ id: "t3", title: "Need infra", parentTitle: "Build the toggle" })] }],
         });
       if (url.endsWith("/features")) return json(scored);
-      if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, drivers: [], areas: [] });
+      if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
       return json([]);
     }),
   );

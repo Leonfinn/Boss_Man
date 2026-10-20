@@ -35,7 +35,7 @@ import { workService, WorkError } from "./services/work.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
-import { portalRoutes, type PortalLimits } from "./portal.js";
+import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
@@ -1183,6 +1183,31 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const b = z.object({ enabled: z.boolean(), title: z.string().trim().max(120).nullable(), intro: z.string().trim().max(2000).nullable() }).partial().parse(req.body);
       return feedback.setPortal(id, { ...b, ...(b.title === "" ? { title: null } : {}), ...(b.intro === "" ? { intro: null } : {}) });
+    });
+    // Only these three types, found by their first bytes: the portal is public, so no SVG.
+    const logoType = (b: Buffer) =>
+      b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ? "image/png"
+      : b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff ? "image/jpeg"
+      : b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP" ? "image/webp"
+      : null;
+    owner.put("/api/companies/:id/feedback/portal-logo", { bodyLimit: 400 * 1024 }, async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { data } = z.object({ data: z.string() }).parse(req.body);
+      const bytes = Buffer.from(data, "base64");
+      if (!bytes.length || bytes.length > 256 * 1024) return reply.code(413).send({ error: "too_large", message: "The logo must be 256 KB or smaller." });
+      const type = logoType(bytes);
+      if (!type) return reply.code(415).send({ error: "bad_type", message: "The logo must be a PNG, JPEG or WebP image." });
+      await feedback.setPortalLogo(id, { bytes, type });
+      return feedback.settings(id);
+    });
+    owner.delete("/api/companies/:id/feedback/portal-logo", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      await feedback.setPortalLogo(id, null);
+      return feedback.settings(id);
+    });
+    owner.get("/api/companies/:id/feedback/portal-logo", async (req, reply) => {
+      const logo = await feedback.portalLogo(IdParam.parse(req.params).id);
+      return logo ? sendLogo(reply, logo) : reply.code(404).send({ error: "not_found", message: "No logo." });
     });
     owner.post("/api/companies/:id/portal/rotate", async (req) => feedback.rotatePortal(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/features", async (req) => feedback.scored(IdParam.parse(req.params).id));

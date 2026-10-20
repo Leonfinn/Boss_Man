@@ -146,3 +146,50 @@ describe("feedback portal", () => {
     }
   });
 });
+
+describe("portal logo", () => {
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32, 1)]);
+  const b64 = (b: Buffer) => ({ data: b.toString("base64") });
+  const put = (c: Awaited<ReturnType<typeof setup>>, buf: Buffer) => c.req("PUT" as never, `/api/companies/${c.company.id}/feedback/portal-logo`, b64(buf));
+
+  it("accepts a PNG, serves it with the right type and nosniff, and reports it in the portal data", async () => {
+    const c = await setup();
+    const { portalToken } = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true })).json();
+    const v = visitor(t!.app, portalToken);
+    expect((await v("GET", "/api/portal")).json().hasLogo).toBe(false);
+    expect((await v("GET", "/api/portal/logo")).statusCode).toBe(404);
+
+    const ok = await put(c, PNG);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().hasLogo).toBe(true);
+    expect((await v("GET", "/api/portal")).json().hasLogo).toBe(true);
+    const img = await v("GET", "/api/portal/logo");
+    expect(img.statusCode).toBe(200);
+    expect(img.headers["content-type"]).toBe("image/png");
+    expect(img.headers["x-content-type-options"]).toBe("nosniff");
+    expect(img.headers["content-disposition"]).toBe("inline");
+    expect(img.headers["cache-control"]).toBe("private, no-cache");
+    expect(img.rawPayload.equals(PNG)).toBe(true);
+
+    const del = await c.req("DELETE", `/api/companies/${c.company.id}/feedback/portal-logo`);
+    expect(del.json().hasLogo).toBe(false);
+    expect((await v("GET", "/api/portal/logo")).statusCode).toBe(404);
+  });
+
+  it("refuses wrong bytes, SVG and files over 256 KB", async () => {
+    const c = await setup();
+    expect((await put(c, Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"))).statusCode).toBe(415);
+    expect((await put(c, Buffer.from("GIF89a-not-allowed-here-either"))).statusCode).toBe(415);
+    expect((await put(c, Buffer.concat([PNG, Buffer.alloc(256 * 1024)]))).statusCode).toBe(413);
+    expect((await c.req("GET", `/api/companies/${c.company.id}/feedback-settings`)).json().hasLogo).toBe(false);
+  });
+
+  it("is a 404 when the portal is off or the token is wrong", async () => {
+    const c = await setup();
+    const { portalToken } = (await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: true })).json();
+    await put(c, PNG);
+    expect((await visitor(t!.app, "x".repeat(32))("GET", "/api/portal/logo")).statusCode).toBe(404);
+    await c.req("PATCH", `/api/companies/${c.company.id}/portal`, { enabled: false });
+    expect((await visitor(t!.app, portalToken)("GET", "/api/portal/logo")).statusCode).toBe(404);
+  });
+});

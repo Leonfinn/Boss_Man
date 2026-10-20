@@ -17,8 +17,8 @@ export class FeedbackError extends Error {
   }
 }
 
-export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null };
-const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null };
+export type FeedbackSettings = { demandWeight: number; ceoTriage: boolean; portalEnabled: boolean; portalToken: string | null; portalTitle: string | null; portalIntro: string | null; hasLogo: boolean };
+const DEFAULTS: Omit<FeedbackSettings, never> = { demandWeight: 3, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false };
 
 type FeaturePatch = {
   title?: string;
@@ -58,8 +58,8 @@ export function feedbackService(
   const note = (id: string, companyId?: string) => own(db.select().from(feedbackNotes).where(eq(feedbackNotes.id, id)), companyId, "note");
 
   async function settings(companyId: string): Promise<FeedbackSettings> {
-    const [row] = await db.select().from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
-    return row ? { demandWeight: row.demandWeight, ceoTriage: row.ceoTriage, portalEnabled: row.portalEnabled, portalToken: row.portalToken, portalTitle: row.portalTitle, portalIntro: row.portalIntro } : { ...DEFAULTS };
+    const [row] = await db.select({ demandWeight: feedbackSettings.demandWeight, ceoTriage: feedbackSettings.ceoTriage, portalEnabled: feedbackSettings.portalEnabled, portalToken: feedbackSettings.portalToken, portalTitle: feedbackSettings.portalTitle, portalIntro: feedbackSettings.portalIntro, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
+    return row ?? { ...DEFAULTS };
   }
 
   /** Checks that the links a feature points at are in its company, and the hierarchy stays one level. */
@@ -458,6 +458,15 @@ export function feedbackService(
       await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...set }).onConflictDoUpdate({ target: feedbackSettings.companyId, set });
       return settings(companyId);
     },
+    /** Stores (or, with null, removes) the portal logo. Callers have already checked the bytes. */
+    async setPortalLogo(companyId: string, logo: { bytes: Buffer; type: string } | null) {
+      const set = { portalLogo: logo?.bytes ?? null, portalLogoType: logo?.type ?? null };
+      await db.insert(feedbackSettings).values({ companyId, ...DEFAULTS, ...set }).onConflictDoUpdate({ target: feedbackSettings.companyId, set });
+    },
+    async portalLogo(companyId: string) {
+      const [row] = await db.select({ bytes: feedbackSettings.portalLogo, type: feedbackSettings.portalLogoType }).from(feedbackSettings).where(eq(feedbackSettings.companyId, companyId));
+      return row?.bytes && row.type ? { bytes: row.bytes, type: row.type } : null;
+    },
     /** A new link; the old one stops working at once. */
     async rotatePortal(companyId: string) {
       const portalToken = randomBytes(24).toString("base64url");
@@ -468,7 +477,7 @@ export function feedbackService(
     async portalFor(token: string) {
       if (!/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
       const [row] = await db
-        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, company: companies.name })
+        .select({ companyId: feedbackSettings.companyId, title: feedbackSettings.portalTitle, intro: feedbackSettings.portalIntro, company: companies.name, hasLogo: sql<boolean>`${feedbackSettings.portalLogo} is not null` })
         .from(feedbackSettings)
         .innerJoin(companies, eq(companies.id, feedbackSettings.companyId))
         .where(and(eq(feedbackSettings.portalToken, token), eq(feedbackSettings.portalEnabled, true)));

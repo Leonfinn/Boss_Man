@@ -15,7 +15,7 @@ const STAGES: Array<{ id: Stage; label: string; help: string }> = [
   { id: "released", label: "Released", help: "Done recently." },
 ];
 type PortalFeature = { id: string; title: string; description: string | null; stage: Stage; myVote: { importance: Importance; comment: string | null } | null };
-type Portal = { title: string; intro: string | null; features: PortalFeature[] };
+type Portal = { title: string; intro: string | null; hasLogo: boolean; features: PortalFeature[] };
 
 const token = () => decodeURIComponent(window.location.hash.replace(/^#/, ""));
 
@@ -160,10 +160,33 @@ function Idea() {
   );
 }
 
+/** The logo as a data: URL: the token travels in a header, which an <img> can't send. */
+function useLogo(has: boolean | undefined) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    if (!has) return setSrc(null);
+    let live = true;
+    void fetch("/api/portal/logo", { headers: { "x-portal-token": token() } })
+      .then(async (r) => {
+        if (!r.ok) throw new Error("no logo");
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        if (live) setSrc(`data:${r.headers.get("content-type") ?? "image/png"};base64,${btoa(bin)}`);
+      })
+      .catch(() => live && setSrc(null));
+    return () => {
+      live = false;
+    };
+  }, [has]);
+  return src;
+}
+
 export function PortalApp() {
   const [data, setData] = useState<Portal | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<Stage>("considering");
+  const logo = useLogo(data?.hasLogo);
   const load = useCallback(() => {
     if (!token()) return setError("This link is incomplete. Ask for the full portal link.");
     void call<Portal>("/api/portal").then(
@@ -189,9 +212,12 @@ export function PortalApp() {
   return (
     <main className="portal">
       <header className="page-head">
-        <div>
-          <h1>{data.title}</h1>
-          {data.intro && <p className="sub" style={{ whiteSpace: "pre-wrap" }}>{data.intro}</p>}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {logo && <img src={logo} alt="" style={{ maxHeight: 48, width: "auto" }} />}
+          <div>
+            <h1>{data.title}</h1>
+            {data.intro && <p className="sub" style={{ whiteSpace: "pre-wrap" }}>{data.intro}</p>}
+          </div>
         </div>
       </header>
       <div className="tabs" role="tablist" aria-label="Stages">
