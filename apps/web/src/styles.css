@@ -361,6 +361,7 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 
 /* Markdown pages (R69) */
 .md { line-height: 1.6; overflow-wrap: anywhere; }
+.clamp-8 { max-height: 12.8em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 75%, transparent); mask-image: linear-gradient(to bottom, #000 75%, transparent); }
 .md > * + * { margin-top: 0.75em; }
 .md h1 { font-size: 24px; } .md h2 { font-size: 20px; margin-top: 1.2em; } .md h3 { font-size: 17px; margin-top: 1em; }
 .md h1, .md h2, .md h3, .md h4 { font-weight: 600; line-height: 1.3; }

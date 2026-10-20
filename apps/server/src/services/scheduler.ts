@@ -59,7 +59,7 @@ export const ANSWER_REASON = "decision answered";
 export const REVIEW_REASON = "review requested";
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
 export const PLAIN_SUMMARY_RULE =
-  "Write to the owner as a non-developer. Every ticket_reply starts with 1 to 3 plain sentences: what changed for them and whether they need to do anything. Then a line that says only \"Details:\" followed by the technical report (files, commits, tests). Ticket state notes (set_ticket_state summary) are plain words too, with no file paths unless essential.";
+  "Write to the owner as a non-developer. Every ticket_reply starts with 1 to 3 plain sentences: what changed for them and whether they need to do anything. A ticket in review waits on its reviewer: when that is the owner, say what they need to do (review and approve, or send it back); never tell them there is nothing to do. Then a line that says only \"Details:\" followed by the technical report (files, commits, tests). Ticket state notes (set_ticket_state summary) are plain words too, with no file paths unless essential.";
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);

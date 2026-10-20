@@ -4,14 +4,30 @@ import { when } from "../pages/Runs";
 
 export type Artifact = { id: string; kind: "wiki_page" | "repo_file" | "url"; title: string; slug: string | null; path: string | null; ref: string | null; url: string | null; agent: string | null; runId: string | null; createdAt: string };
 
-export function TicketOutputs({ items, companyId, onChanged }: { items: Artifact[]; companyId: string; onChanged: () => void }) {
+export function TicketOutputs({ items, companyId, onChanged, code }: { items: Artifact[]; companyId: string; onChanged: () => void; code?: { merged: string } | { branch: string } | null }) {
   const remove = async (a: Artifact) => {
     if (!window.confirm(`Take "${a.title}" off this task? ${a.kind === "wiki_page" ? "The wiki page itself stays." : ""}`)) return;
     await api(`/api/artifacts/${a.id}`, { method: "DELETE" });
     onChanged();
   };
-  if (!items.length) return <p className="muted">Nothing yet. Documents agents write for this task appear here.</p>;
+  const codeLine = code && (
+    <p className="muted">
+      {"merged" in code ? (
+        <>
+          Its code was merged as <span className="mono">{code.merged.slice(0, 7)}</span>.
+        </>
+      ) : (
+        <>
+          Its code is on the branch <span className="mono">{code.branch}</span>.
+        </>
+      )}{" "}
+      See Changes below.
+    </p>
+  );
+  if (!items.length) return codeLine || <p className="muted">Nothing yet. Documents agents write for this task appear here.</p>;
   return (
+    <>
+    {codeLine}
     <ul className="link-list">
       {items.map((a) => (
         <li key={a.id}>
@@ -44,5 +60,6 @@ export function TicketOutputs({ items, companyId, onChanged }: { items: Artifact
         </li>
       ))}
     </ul>
+    </>
   );
 }
