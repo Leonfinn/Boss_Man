@@ -34,7 +34,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 // ---------- Shapes the screens use ----------
 
-export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null };
+export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[] };
 export type Project = {
   id: string;
@@ -49,6 +49,10 @@ export type Project = {
   gitHost: "github" | "gitea" | null;
   gitApiBase: string | null;
 };
+
+/** Review routing per risk tier (step 1): "ceo", "senior-dev" or an agent id; the plan column also takes "owner" and "none". */
+export type ReviewRule = { planApprover: string; reviewer: string; ownerSignoff: boolean };
+export type ReviewPolicy = Record<Risk, ReviewRule>;
 export type Risk = "trivial" | "low" | "medium" | "high" | "critical";
 export const RISKS: Risk[] = ["trivial", "low", "medium", "high", "critical"];
 
@@ -63,6 +67,8 @@ export type Decision = {
   createdAt: string;
   companyName: string;
   agentName: string | null;
+  /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
+  forAgentName?: string | null;
   blocks: Array<{ id: string; title: string }>;
   score: number;
   parts: { blocking: number; urgency: number; age: number; liveRun: number };

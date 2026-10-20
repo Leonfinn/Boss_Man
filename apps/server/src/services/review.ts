@@ -2,13 +2,14 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, eq, isNotNull } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, ownerReviews, parseRepoUrl, renderTemplate, riskOf, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
+import { effectivePolicy } from "./review-policy.js";
 import type { notificationsService } from "./notifications.js";
 
 export class ReviewError extends Error {
@@ -172,8 +173,8 @@ export function reviewService(
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
       if (input.verdict === "approved") {
         await deps.loops.approved(ticketId, input.reviewer);
-        // High and critical work is the owner's to approve (R48): an agent's approval asks them.
-        if (input.reviewerAgentId && ownerReviews(t.risk)) {
+        // Where the review policy says the owner signs off, an agent's approval asks them (R48).
+        if (input.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
           const [d] = await db
             .insert(decisions)
             .values({

@@ -8,7 +8,7 @@ import type { Db } from "../db/client.js";
 import { decisions, failureSignatures, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
 
 export type LoopLimits = { repeatedFinding: number; maxRounds: number; circularFailures: number; circularWindowMs: number };
-export const DEFAULT_LOOP_LIMITS: LoopLimits = { repeatedFinding: 3, maxRounds: 5, circularFailures: 3, circularWindowMs: 2 * 3_600_000 };
+export const DEFAULT_LOOP_LIMITS: LoopLimits = { repeatedFinding: 3, maxRounds: 3, circularFailures: 3, circularWindowMs: 2 * 3_600_000 };
 
 export const SEND_BACK = "Send it back anyway";
 export const STOP_WORK = "Stop work on it";

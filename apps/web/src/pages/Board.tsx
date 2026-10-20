@@ -235,7 +235,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
   const [note, setNote] = useState<string | null>(null);
   const openForm = (a: Adding) => setAdding({ ...a, n: (adding?.n ?? 0) + 1 });
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
-  const tiers = useRiskTiers();
+  const tiers = useRiskTiers(current?.companyId);
 
   if (companies.length === 0) {
     return (

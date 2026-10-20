@@ -5,7 +5,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
-  ownerReviews,
+  ruleFor,
   rankDecision,
   recommendedVerdict,
   type BlockedTicket,
@@ -16,6 +16,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wikiPages } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -223,9 +224,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return rows.map((r) => ({ name: r.name, match: r.condition as PolicyRuleSpec["match"], outcome: r.outcome }));
   }
 
-  /** Wakes the company's CEO to answer a decision put to it (R19). */
-  async function tellCeo(companyId: string, question: string) {
-    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
+  /** Wakes the company's CEO, or the agent a plan was put to, to answer a decision (R19). */
+  async function tellCeo(companyId: string, question: string, agentId?: string) {
+    const [ceo] = agentId ? [{ id: agentId }] : await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
     if (ceo && wake) await wake({ agentId: ceo.id, reason: "decision", note: `A decision is waiting for you: ${question}\nUse the decisions tool to read it and answer.` });
   }
 
@@ -236,7 +237,20 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
     const plan = event.detail ?? null;
     if (t && plan) await db.update(tickets).set({ plan, lastActivityAt: now() }).where(eq(tickets.id, t.id));
-    const tier = !t || ownerReviews(t.risk) || agent?.role === "ceo" ? "owner" : "ceo";
+    // The review policy says who approves a plan: the owner, the CEO, or an agent. A CEO's own plan always goes to the owner.
+    let tier: "owner" | "ceo" = "owner";
+    let forAgentId: string | null = null;
+    if (t && agent?.role !== "ceo") {
+      const ref = ruleFor(await effectivePolicy(db, t), t.risk).planApprover;
+      // shortcut: "none" on a plan-first ticket still goes to the CEO (someone must release plan mode); skip only if owners ask for auto-approval.
+      if (ref === "none") tier = "ceo";
+      else if (ref !== "owner") {
+        tier = "ceo";
+        const r = await resolveActor(db, t.companyId, ref, run?.agentId ?? null);
+        if (r.note) await record(db, { companyId: t.companyId, kind: "review_fallback", summary: r.note, ticketId: t.id });
+        if (ref !== "ceo" && !r.note) forAgentId = r.agent?.id ?? null;
+      }
+    }
     const [row] = await db
       .insert(decisions)
       .values({
@@ -247,12 +261,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         recommendedOption: APPROVE_PLAN,
         raisedByAgentId: run?.agentId ?? null,
         tier,
+        forAgentId,
         dedupeKey: `permission:${event.requestId}`,
         context: { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan },
       })
       .onConflictDoNothing()
       .returning({ id: decisions.id, question: decisions.question });
-    if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
+    if (row && tier === "ceo") await tellCeo(runner.companyId, row.question, forAgentId ?? undefined);
     return { outcome: tier, rule: "Plans are approved before work starts", decisionId: row?.id ?? null };
   }
 
@@ -438,6 +453,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
         .where(eq(decisions.status, "open"));
       if (!open.length) return [];
+      const forIds = [...new Set(open.map((o) => o.d.forAgentId).filter((x): x is string => !!x))];
+      const forNames = new Map(forIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, forIds))).map((a) => [a.id, a.name]) : []);
 
       // Open work, with the most important objective it serves and its effective due date.
       const work = await db
@@ -520,7 +537,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           frontier = next;
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
-        return { ...d, companyName, agentName, blocks: chain, ...rank };
+        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, ...rank };
       });
       const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
       return Promise.all(sorted.map(async (r) => ((r.context as DecisionContext).type === "stalled_run" ? { ...r, evidence: await stallEvidence((r.context as { runId: string }).runId) } : r)));

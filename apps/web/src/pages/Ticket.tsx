@@ -85,7 +85,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
   const [draft, setDraft] = useState<string | null>(null);
   const [descOpen, setDescOpen] = useState(false);
-  const tiers = useRiskTiers();
+  const tiers = useRiskTiers(ticket.data?.companyId);
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
   const t = ticket.data;
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];

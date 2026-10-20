@@ -142,7 +142,7 @@ describe("the CEO answers decisions put to it (R19)", () => {
     expect(c.sent.at(-1)).toMatchObject({ type: "permission.decide", verdict: "allow" });
 
     const worker = await c.mcp(c.worker.id);
-    expect(textOf(await worker.callTool({ name: "decisions", arguments: { action: "list" } }))).toBe("Only your company's CEO answers decisions.");
+    expect(textOf(await worker.callTool({ name: "decisions", arguments: { action: "list" } }))).toBe("No decisions are waiting for you.");
     await ceo.close();
     await worker.close();
   });

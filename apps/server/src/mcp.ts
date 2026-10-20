@@ -28,6 +28,7 @@ import { findSection, splitSections, WikiError, type wikiService } from "./servi
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import { AgentError, type agentsService } from "./services/agents.js";
+import { resolveReviewer } from "./services/review-policy.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
@@ -706,7 +707,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "decisions",
     {
       description:
-        "For CEOs: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). The owner sees the same queue and may answer first. You can't answer your own requests.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). The owner sees the same queue and may answer first. You can't answer your own requests.",
       inputSchema: {
         action: z.enum(["list", "answer"]),
         id: z.string().uuid().optional(),
@@ -716,13 +717,17 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
     async (input) => {
       const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-      if (me?.role !== "ceo") return fail("Only your company's CEO answers decisions.");
+      const isCeo = me?.role === "ceo";
+      // A plan approver answers only plans put to them, never permission requests.
+      const mine = (d: typeof decisionsTable.$inferSelect) => isCeo || (!!scope.agentId && d.forAgentId === scope.agentId && (d.context as { plan?: boolean }).plan === true);
       if (input.action === "list") {
-        const open = await db
-          .select()
-          .from(decisionsTable)
-          .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), eq(decisionsTable.tier, "ceo")))
-          .orderBy(decisionsTable.createdAt);
+        const open = (
+          await db
+            .select()
+            .from(decisionsTable)
+            .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), eq(decisionsTable.tier, "ceo")))
+            .orderBy(decisionsTable.createdAt)
+        ).filter(mine);
         if (!open.length) return text("No decisions are waiting for you.");
         return text(
           open
@@ -735,7 +740,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       if (!input.id || !input.answer) return fail("Give the decision's id and your answer.");
       const [d] = await db.select().from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
-      if (!d || d.tier !== "ceo") return fail("No decision with that id is waiting for you.");
+      if (!d || d.tier !== "ceo" || !mine(d)) return fail("No decision with that id is waiting for you.");
       if (d.raisedByAgentId === scope.agentId) return fail("That's your own request; the owner answers it.");
       try {
         const r = await decisions.answer(input.id, input.answer, { note: input.note });
@@ -751,7 +756,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "review",
     {
       description:
-        "For CEOs: review a ticket in your company that's ready for review. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary). You can't review a ticket assigned to you.",
+        "For the CEO and the reviewer your company's review settings name for a ticket: review a ticket in your company that's ready for review. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary). You can't review a ticket assigned to you.",
       inputSchema: {
         action: z.enum(["diff", "submit"]),
         ticketId: z.string().uuid(),
@@ -761,8 +766,12 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       },
     },
     async (input) => {
-      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-      if (me?.role !== "ceo") return fail("Only your company's CEO reviews tickets.");
+      const [me] = scope.agentId ? await db.select({ role: agents.role, name: agents.name, title: agents.title }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      if (!me) return fail("Only your company's CEO or the ticket's reviewer reviews tickets.");
+      const [rt] = await db.select().from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!rt) return fail("No ticket with that ID in your company.");
+      if (rt.assigneeAgentId === scope.agentId) return fail("You can't review a ticket assigned to you.");
+      if (me.role !== "ceo" && (await resolveReviewer(db, rt)).agent?.id !== scope.agentId) return fail("Only your company's CEO or this ticket's reviewer reviews it.");
       try {
         if (input.action === "diff") {
           const d = await review.diff(input.ticketId, scope.companyId);
@@ -776,7 +785,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           verdict: input.verdict,
           comments: input.comments,
           summary: input.summary,
-          reviewer: `${me.name} (CEO)`,
+          reviewer: `${me.name} (${me.role === "ceo" ? "CEO" : me.title ?? me.role})`,
           reviewerAgentId: scope.agentId,
           companyId: scope.companyId,
           causedByRunId: scope.runId,

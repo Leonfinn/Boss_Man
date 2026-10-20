@@ -13,6 +13,7 @@ import { agents, companies, costEvents, decisions, engagements, fundingSources, 
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
+import { effectivePolicy, resolveReviewer } from "./review-policy.js";
 import { buildBrief } from "./brief.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
@@ -362,6 +363,7 @@ export function schedulerService(
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date) {
     const me = agentIdentity(agent, companyName);
     const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
+    if (agent.role === "ceo") lines.push("", "Reviews and plan approvals follow the company's review settings, so they may go to someone other than you; you review or approve when the chosen person is unavailable, and you can always overrule.");
     if (w.ticketId) {
       const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {
@@ -370,7 +372,11 @@ export function schedulerService(
         const note = stateNoteLine(t.t, now());
         if (note) lines.push("", note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
-        if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
+        if (t.t.risk) {
+          const serious = t.t.risk === "high" || t.t.risk === "critical";
+          const signoff = (await effectivePolicy(db, t.t))[t.t.risk].ownerSignoff;
+          lines.push("", `Risk: ${t.t.risk}.${signoff ? " The owner signs it off before it merges." : ""}${serious ? " The project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
+        }
         if (!t.t.risk && (agent.role === "ceo" || agent.role === "manager")) lines.push("", "This ticket has no risk rating yet. Before you delegate it or start work, read it and rate its risk with set_ticket_risk (ticketId, risk, and a one-line reason). The owner sees your rating and reason.");
         lines.push("", planningGuidance(t.t.risk));
         lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
@@ -881,13 +887,14 @@ export function schedulerService(
       return runner ? deps.runners.send(runner.id, { type: "workspace.release", projectId: t.projectId, ticketId }) : false;
     },
 
-    /** A ticket went to review: the CEO is woken to review it, unless it moved it or has it itself (R85). */
+    /** A ticket went to review: the reviewer the review policy names (the CEO if they're unavailable) is woken, unless they moved it or have it themselves (R85). */
     async onTicketReview(ticketId: string, byAgentId: string | null, causedByRunId?: string | null) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) return;
-      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
-      if (!ceo || ceo.id === byAgentId || ceo.id === t.assigneeAgentId) return;
-      await this.notify(ceo.id, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
+      const { agent: reviewer, note } = await resolveReviewer(db, t);
+      if (note) await record(db, { companyId: t.companyId, kind: "review_fallback", summary: note, ticketId });
+      if (!reviewer || reviewer.id === byAgentId || reviewer.id === t.assigneeAgentId) return;
+      await this.notify(reviewer.id, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
     },
 
     /**
