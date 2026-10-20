@@ -1,11 +1,11 @@
-// The launcher's API (R55): four calls, each about one company's runner, and nothing else.
+// The launcher's API (R55): five calls, each about one company's runner, and nothing else.
 // The server holds the key; Docker is reached only from here, with a spec the launcher builds.
 import { timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, LABEL, MOUNTS, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -19,7 +19,8 @@ export class LauncherError extends Error {
   }
 }
 
-export type RunnerStatus = { slug: string; state: string; status: string; image: string };
+/** `current` is true when the container runs the image `boss-man-runner:current` points at now. */
+export type RunnerStatus = { slug: string; state: string; status: string; image: string; current: boolean };
 
 export function launcher(cfg: LauncherConfig, docker: Docker) {
   /** The container for a slug, if the launcher made it; anything else under that name is refused. */
@@ -70,12 +71,19 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
 
     async list(): Promise<RunnerStatus[]> {
       const all = await docker.list(`${LABEL}=1`);
+      const current = await docker.imageId(IMAGE);
       return all
         .filter((c) => SLUG.test(c.Labels[COMPANY_LABEL] ?? "") && c.Names.includes(`/${containerName(c.Labels[COMPANY_LABEL]!)}`))
-        .map((c) => ({ slug: c.Labels[COMPANY_LABEL]!, state: c.State, status: c.Status, image: c.Image }));
+        .map((c) => ({ slug: c.Labels[COMPANY_LABEL]!, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current }));
     },
 
-    /** For scripts/update-runner.sh: every runner again on the current image, with its own token. */
+    /** One company's runner again on the current image, with its own token: how a drain swaps runners one by one. // leader-only (the server decides when) */
+    async recreate(slug: string) {
+      if (!(await ours(slug))) throw new LauncherError(404, "There's no runner for that company.");
+      return { slug, id: await create(slug) };
+    },
+
+    /** For scripts/update-runner.sh --now: every runner again on the current image, with its own token. */
     async recreateAll() {
       const done: string[] = [];
       for (const r of await this.list()) {
@@ -111,7 +119,7 @@ async function readJson(req: http.IncomingMessage): Promise<unknown> {
   }
 }
 
-/** The HTTP server: a bearer key on every call, the four routes, and an audit line per call. */
+/** The HTTP server: a bearer key on every call, the five routes, and an audit line per call. */
 export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.log(JSON.stringify(e))) {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://launcher");
@@ -130,7 +138,7 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, await api.list());
       }
-      const m = /^\/runners\/([^/]+)(\/restart)?$/.exec(url.pathname);
+      const m = /^\/runners\/([^/]+)(\/restart|\/recreate)?$/.exec(url.pathname);
       if (!m) throw new LauncherError(404, "Unknown call.");
       const slug = decodeURIComponent(m[1]!);
       if (!SLUG.test(slug)) throw new LauncherError(400, "Bad company slug.");
@@ -139,8 +147,8 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
 
       if (m[2]) {
         if (req.method !== "POST") throw new LauncherError(405, "Only POST here.");
-        if (body !== undefined && !(typeof body === "object" && body && Object.keys(body).length === 0)) throw new LauncherError(400, "Restart takes no body.");
-        return send(200, await api.restart(slug));
+        if (body !== undefined && !(typeof body === "object" && body && Object.keys(body).length === 0)) throw new LauncherError(400, "Restart and recreate take no body.");
+        return send(200, m[2] === "/recreate" ? await api.recreate(slug) : await api.restart(slug));
       }
       if (req.method === "PUT") {
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new LauncherError(400, "Send { token }.");
@@ -154,7 +162,7 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
         if (body !== undefined) throw new LauncherError(400, "Delete takes no body.");
         return send(200, await api.remove(slug));
       }
-      throw new LauncherError(405, "Use PUT, DELETE, or POST …/restart.");
+      throw new LauncherError(405, "Use PUT, DELETE, or POST …/restart or …/recreate.");
     } catch (err) {
       if (err instanceof LauncherError) return send(err.status, { error: err.message });
       if (err instanceof DockerError) {

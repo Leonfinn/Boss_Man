@@ -3,6 +3,7 @@
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { getHold } from "./maintenance.js";
 import { activity, agents, decisions, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
@@ -85,7 +86,9 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const recent = await changes(null);
     // A sample of what the PA told the owner, for the CEO to mark right or wrong (R87).
     const audit = await db.select().from(paAnswers).where(and(eq(paAnswers.companyId, companyId), eq(paAnswers.sampled, true), isNull(paAnswers.verdict))).orderBy(asc(paAnswers.createdAt));
+    const hold = await getHold(db);
     body = [
+      ...(hold ? [`UPDATE PENDING: Boss Man is waiting for runs to finish so it can update the runners (${hold.reason}, since ${hold.since.slice(0, 16).replace("T", " ")} UTC). No new run starts anywhere until it is done: do not delegate new work or open new tickets for now, finish what is in flight, and leave the rest for after.`, ""] : []),
       `Tickets: ${["backlog", "ready", "in_progress", "blocked", "review", "done"].map((s) => `${s} ${n(s)}`).join(", ")}.`,
       ...section("Needs you", capped(needLines, 8)),
       ...section("PA answers to check", capped(audit.map((a) => `- ${a.id}: asked "${one(a.question, 100)}"; the PA said "${one(a.reply ?? "", 200)}" citing ${(a.cites as Array<{ kind: string; id: string }>).map((c) => `${c.kind} ${c.id}`).join(", ")}. Mark it with pa_verdict.`), 3)),

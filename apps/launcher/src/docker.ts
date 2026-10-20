@@ -11,7 +11,7 @@ export class DockerError extends Error {
   }
 }
 
-export type ContainerSummary = { Id: string; Names: string[]; Image: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
+export type ContainerSummary = { Id: string; Names: string[]; Image: string; ImageID?: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
 export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string } };
 
 export function dockerClient(socketPath = "/var/run/docker.sock") {
@@ -55,6 +55,12 @@ export function dockerClient(socketPath = "/var/run/docker.sock") {
       const r = await call<ContainerInfo>("GET", `/containers/${encodeURIComponent(nameOrId)}/json`);
       if (r.status === 404) return null;
       return r.status === 200 && r.json ? r.json : fail(r, "Inspecting the container failed");
+    },
+    /** The id an image tag points at now, or null if there is no such image. */
+    async imageId(ref: string): Promise<string | null> {
+      const r = await call<{ Id: string }>("GET", `/images/${encodeURIComponent(ref)}/json`);
+      if (r.status === 404) return null;
+      return r.status === 200 && r.json ? r.json.Id : fail(r, "Inspecting the image failed");
     },
     async create(name: string, spec: unknown): Promise<string> {
       const r = await call<{ Id: string }>("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);

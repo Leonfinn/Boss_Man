@@ -772,6 +772,41 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
   );
 }
 
+type MaintenanceView = { on: false } | { on: true; deadline: string; runs: number; companies: number };
+
+/** Drain-then-swap for runner updates: start it by hand (after scripts/update-runner.sh built the image) or cancel one that is running. */
+function RunnerUpdate() {
+  const view = usePoll((signal) => api<MaintenanceView>("/api/maintenance", { signal }), 5_000, "maintenance-settings");
+  const act = useAction();
+  const m = view.data;
+  if (!m) return null;
+  return (
+    <Section id="drain-h" title="Runner update">
+      <p className="muted" style={{ fontSize: 14 }}>
+        {m.on
+          ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
+          : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Run scripts/update-runner.sh first to build the image."}
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy}
+          onClick={() =>
+            act.run(async () => {
+              await api(m.on ? "/api/maintenance/cancel" : "/api/maintenance/start", { method: "POST", body: {} });
+              view.reload();
+            })
+          }
+        >
+          {m.on ? "Cancel the update" : "Update runners (finish runs first)"}
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 export function Settings({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   return (
@@ -797,6 +832,7 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
         <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <Runner company={company} />
           <SelfDeploy go={go} />
+          <RunnerUpdate />
           <section className="card">
             <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
             <p className="muted" style={{ fontSize: 14 }}>

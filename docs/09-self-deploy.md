@@ -1,6 +1,6 @@
-# Self-deploy, phase 1: the host deployer
+# Self-deploy: the host deployer (phase 1) and the runner drain (phase 2)
 
-Status: built (phase 1). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2 (drain, migration step) and phase 3 (blue/green) come later and are only touched in the compatibility section. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
+Status: built (phases 1 and 2). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2's runner drain is described in its own section below. The migration step and phase 3 (blue/green) come later and are only touched in the compatibility section. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
 
 ## What it does
 
@@ -24,7 +24,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
 1. **Host script plus a one-minute TrueNAS cron job.** No container, no socket.
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
 3. **GitHub is the source of truth.** The `src` checkout pulls from `git@github.com:Leonfinn/Boss_Man.git` over a read-only deploy key set as `core.sshCommand` (`docs/06`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` through that same key: no API token, no second credential.
-4. **Server deploys and runner updates are separate approvals** until phase 2's drain exists. Updating runners cuts off agent runs in progress.
+4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, `scripts/`, `.github/` and the like only deploy when the owner runs `scripts/deploy.sh` by hand at the NAS.
 6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
 7. The server can write **one folder** and read **one folder**. It can never run anything on the host, and the host never executes anything from the request.
@@ -119,7 +119,7 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 
 - A decision of kind `approval` with context type `self_deploy` (no migration: no new enum value), tier `owner`, so only the owner's session can answer it; the CEO tool only answers `ceo`-tier decisions. Decisions belong to a company, so it is raised under the oldest one.
 - **Server:** raised by the poller when `available.json` shows `tip` differs from `deployed`, one per tip (`dedupeKey`); an older open one is withdrawn when main moves again, or when the owner hand-deploys. Options `Deploy` / `Not now`. The text shows the commit range, subjects, file count, migrations, and whether runner code changed. If the range touches infra files it is only an alert (`Got it`) saying to run `scripts/deploy.sh` at the NAS. Settings > Updates > **Deploy latest** raises it again for the current tip even if it was put off.
-- **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, with the in-flight-runs warning.
+- **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, whose text explains the drain (phase 2).
 - Approving checks that no deploy is running and no request is waiting, then writes the request. If the write fails the decision stays open.
 - **Notifications** (from the poller, once per result; the ladder): deployed = note, refused = flag, failed / partial / rolled back = page (phone through ntfy if configured). They link to Settings. The result is also stored on the decision and in the activity feed. `notifications.decision_id` is unique and already used by the "ask" notification, so the result notification is not linked to the decision row.
 - **Settings > Updates** shows the last deploy (result, commit, time, message), what is waiting, and the button.
@@ -150,12 +150,62 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 
 ## Compatibility with phase 2 (drain) and phase 3 (blue/green)
 
-- **Drain (phase 2):** keep the runner action behind `do_update_runner`; phase 2 changes what it calls (per-company drain, then per-runner recreate) without changing the request file. Unknown request fields are ignored, so a later `drain` field needs no migration.
+- **Drain (phase 2):** built behind `do_update_runner`, without changing the request file (see the next section).
 - **Migration step (phase 2):** goes into `deploy.sh`, not the host script.
 - **Health:** `/api/health` stays `200 {ok:true}`-compatible; `deploy.sh` waits on the container healthcheck.
 - **Blue/green (phase 3):** the replacement of plain `compose up -d` lives in `deploy.sh`'s `rebuild_and_start`; `do_deploy_server` just calls it. One `flock` already serialises server and runner actions, as the phase 3 design requires. The inbox/outbox mounts must be repeated on every colour; the proxy's config belongs on the infra list. `status.json` describes results, not container names.
 - **Leader-only:** the poller (`selfDeploy.sync`) and request writer (`selfDeploy.send`) are the two things phase 3 gates on the leader, so two colours never both raise decisions or write requests.
 - **Single-slot rollback:** `deploy.sh --rollback` (commit based) is unchanged. Tagging `boss-man-server:previous` before each build, proposed in the first draft, is **not built**; it needs the image named in `docker-compose.yml` (an infra change) and phase 3 makes it moot.
+
+## Phase 2: drain, then swap (runner updates)
+
+Before, a runner update recreated every runner at once and killed the agent runs in flight; crash recovery restarted them (repeated work, extra tokens). Now a runner update waits for the work to finish, across every company on this Boss Man, and swaps each company's runner as soon as that company is idle.
+
+### The flow
+
+```
+owner approves "Update runners" (or runs scripts/update-runner.sh)
+  1. update-runner.sh builds the new image, runs the canary, tags :current     (nothing running is touched)
+  2. it writes inbox/drain.json and returns                                    (the host lock is free again)
+  3. the server turns the maintenance hold on: banner, no new runs anywhere
+  4. every few seconds the drain step looks at each runner:
+       its company has no active run  ->  launcher recreates that runner on :current
+       its company is still busy      ->  wait
+  5. deadline (30 min) with runs still going -> ONE owner decision:
+       Stop the remaining runs and update now / Keep waiting another 30 min / Cancel the update
+  6. every runner is on :current (and has reconnected) -> the hold lifts, the owner is notified, the queue runs
+```
+
+### Decisions made
+
+1. **The hold is one `settings` row** (`maintenance`: `{reason, since, deadline, minutes, force?, swapped?, failed?}`), so no migration, and it survives a restart. It is separate from a company's Pause: Pause is `companies.paused`, which the drain never reads or writes, so companies the owner paused stay paused afterwards.
+2. **What the hold blocks.** The scheduler, in `tickOnce`, launches no new run in any company. Held wakes stay `queued` with the reason `update pending` (the same way a paused company's wakes wait), so nothing is lost and the first pass after the hold lifts starts them. Wakes that were `deferred` with a time (quiet hours, budgets) keep their own reason and time. **Nothing is exempt, chat and owner messages included.** Exempting chat would let a conversation start a run in a company mid-drain and keep that company's runner from swapping; the cost is that a chat message sent during a drain is answered after it. Runs already going are untouched.
+3. **Telling everyone.**
+   - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Runner update has **Update runners** (start by hand, for a manual `update-runner.sh` run) and **Cancel the update**.
+   - A CEO's brief (and the owner's plain brief page) starts with an `UPDATE PENDING` line: finish what is in flight, do not delegate new work. A CEO run that was already going when the hold started has its old brief; the hold is what actually stops its delegations from launching anything.
+   - The stall and missed-work sweeps: held wakes are `queued`, so a ticket with one counts as busy (not forgotten), and watchers' "tree stopped" check treats queued wakes as work. The missed-work sweep is skipped while the hold is on, so it cannot pile up wakes or raise "looks stuck" decisions for tickets that simply cannot start.
+4. **Drain and the deadline.** The first wait is `BOSSMAN_DRAIN_MINUTES` (default 30). If runs are still going at the deadline the owner gets one `maintenance` decision, owner tier, key `maintenance:<since>:<deadline>`. "Keep waiting" moves the deadline by the same number of minutes and the next deadline asks again; "Stop the remaining runs" sets `force`, so the next step recreates every runner whatever is running (crash recovery restarts those runs once the hold lifts); "Cancel" lifts the hold. Runners already swapped stay on the new image.
+5. **Swap per company.** The launcher gained `POST /runners/<slug>/recreate` (one runner, same token and data, new image) and `current: true|false` in `GET /runners` (the container's image id against the id `boss-man-runner:current` points at now). It is still the only container with `docker.sock`, and the server still only calls its HTTP API. Before recreating, the step waits for any scheduling pass in flight (`scheduler.settled()`) and counts the company's runs again, so a launch that started just before the hold cannot be killed.
+6. **Release.** When every runner is `current` and each swapped runner is connected, the row is deleted, any open deadline question is withdrawn, the owner gets a note ("Runners updated"), and the scheduler ticks. **If a swapped runner has not reconnected after 5 minutes, or a recreate failed, the owner gets a page naming the companies and the hold lifts anyway.** One broken runner would otherwise keep every company stopped; the rest are healthy and the page says which one is not.
+7. **No launcher, no drain.** Without `BOSSMAN_LAUNCHER=1` there is no per-runner recreate, so `update-runner.sh` restarts the compose runners at once (with a warning), as before. A launcher older than the server (no `current` in its list) ends the hold with a page asking for `scripts/deploy.sh --runner`.
+8. **Leader-only.** Starting and cancelling the hold, the drain step, the per-company recreate and the release are marked `// leader-only` (`maintenance.ts`, `main.ts`, `app.ts`, `launcher.ts`), for phase 3 to gate. The scheduler's hold check runs on every colour; it only reads the row.
+
+### How the script asks the server, and the host lock
+
+`scripts/update-runner.sh` (default) builds, canaries and tags `:current`, then writes `$BOSSMAN_DEPLOYER/inbox/drain.json` (temp file and rename) and **returns**. The server's drain step (every 5 s, `BOSSMAN_DRAIN_MS`) takes the file, deletes it and starts the hold. The file's existence is the whole request: nothing in it is read. The host deployer exports `BOSSMAN_DEPLOYER` for its "runner" action and runs it without `--now`, so the host holds its `flock` for the build and canary only, never while runs finish, and server deploys are not blocked. The host's `status.json` for a runner request therefore says "New runner image ready; Boss Man is waiting for runs to finish", and the server's notification for that says the same. **The swap's own result (done, or the problems) comes from the drain as a Boss Man notification**, not from the host script, so the failure webhook does not fire for a swap that goes wrong; the page notification (ntfy if configured) does.
+
+- `--now`: the old behaviour for emergencies at the NAS: `compose up -d` and `recreate-all`, runs cut off, no drain. It combines with `--rollback`.
+- `--rollback` retags `:previous` as `:current` and then drains onto it.
+- With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Runner update > **Update runners**.
+- `deploy.sh --runner` calls `update-runner.sh`, so it drains too.
+
+### Not covered
+
+- A forced swap or a crash kills runs; recovery restarts them as it always did.
+- `compose` runners (no launcher) cannot drain.
+- The hold is server-wide; there is no "drain only company X".
+- A CEO already mid-run when the hold starts does not see the brief line.
+- The 5-minute reconnect window and the 30-minute drain are defaults, not UNVERIFIED against real runner start-up times on the NAS.
 
 ## Open items
 

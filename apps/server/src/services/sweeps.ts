@@ -9,6 +9,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, REASSIGN, type DecisionContext } from "./decisions.js";
+import { getHold } from "./maintenance.js";
 import { MISSED_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -304,7 +305,11 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const t = now();
       await opts.endUnconfirmedCancels(t);
       const lost = await lostRuns(t);
-      return { staleBlockers: await staleBlockers(t), stalledRuns: await stalledRuns(t), missedWork: await missedWork(t), lostRuns: lost };
+      const staleB = await staleBlockers(t);
+      const stalled = await stalledRuns(t);
+      // While the update hold is on nothing can start, so an idle ticket is not forgotten work.
+      const missed = (await getHold(db)) ? { woken: 0, gaveUp: 0 } : await missedWork(t);
+      return { staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, lostRuns: lost };
     },
   };
 }

@@ -178,7 +178,7 @@ Build the runner image with the canary check. The script builds a candidate imag
 sudo scripts/update-runner.sh
 ```
 
-The script also runs `docker compose up -d` at the end. Until its token file holds a token (step 7), the runner stops at start-up with "Set BOSSMAN_RUNNER_TOKEN_FILE..." and Docker keeps restarting it. That's expected.
+With no launcher yet, the script also runs `docker compose up -d` at the end (a runner update later drains first, step 7b). Until its token file holds a token (step 7), the runner stops at start-up with "Set BOSSMAN_RUNNER_TOKEN_FILE..." and Docker keeps restarting it. That's expected.
 
 ## 6. First login and the setup wizard
 
@@ -267,7 +267,7 @@ Open **Settings > Runner** and choose **Start runner**. It shows **Starting…**
   sudo cp -a /mnt/NVME_Apps/Container_files/boss-man/data/app-co/. /mnt/NVME_Apps/Container_files/boss-man/data/companies/boss-man-co/
   ```
 
-- **Updates.** `sudo scripts/update-runner.sh` now asks the launcher to recreate its runners on the new image, and `--rollback` does the same on the previous one.
+- **Updates.** `sudo scripts/update-runner.sh` builds and checks the new image, then Boss Man drains (nothing new starts, runs finish) and the launcher recreates each company's runner as soon as that company is idle; `--rollback` does the same onto the previous image, and `--now` recreates everything at once (see the runner update section below).
 - **Going back.** Choose **Stop** in Settings > Runner, put `COMPOSE_PROFILES=runners` back in `.env`, remove the two lines you added, and follow step 7.
 
 ## 8. Credentials and funding
@@ -332,7 +332,7 @@ sudo scripts/deploy.sh
 It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to `/mnt/NVME_Apps/Container_files/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
 
 - `--dry-run` shows the steps without running anything.
-- `--runner` / `--no-runner` force or skip the runner update. Updating runners stops every runner and restarts it, which cuts off agent runs in progress; the script warns and asks first (`--yes` skips the question).
+- `--runner` / `--no-runner` force or skip the runner update. Updating runners builds the image and asks Boss Man to drain first (runs in progress finish); without the launcher it restarts them at once and cuts runs off. The script asks first (`--yes` skips the question).
 - `--commit <40-character hash>` deploys exactly that commit (it must be a fast-forward of what runs). The host deployer (step 9a) uses it.
 - `--rollback` puts the previous commit back and rebuilds. It never touches the database. If a deploy fails the health check, the script prints the exact rollback and restore commands and changes nothing by itself.
 
@@ -347,13 +347,21 @@ sudo git pull && sudo docker compose build server launcher && sudo docker compos
 
 Leave `launcher` out of the build if you don't use it (step 7b).
 
-`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. Run it after any update that changes `apps/runner`, `apps/launcher` or `packages/shared`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary, keeps the old one for rollback, and recreates the runners on it.
+`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. Run it after any update that changes `apps/runner`, `apps/launcher` or `packages/shared`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary and keeps the old one for rollback. It then asks Boss Man to **drain** (`docs/09-self-deploy.md`, phase 2): a banner appears on every page, nothing new starts in any company, runs in progress finish, and each company's runner is swapped as soon as it is idle. When every runner is on the new image the banner goes, and you get a notification. If runs are still going after 30 minutes (`BOSSMAN_DRAIN_MINUTES` in `.env` changes that) you get one decision: stop them and update now, keep waiting another 30 minutes, or cancel the update. Companies you paused stay paused.
 
 ```sh
 sudo scripts/update-runner.sh
 ```
 
-**Undo a runner update:**
+The script returns as soon as it has asked; follow the swap in the banner or **Settings > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Runner update.
+
+**Emergency: restart every runner now,** cutting off runs in progress (crash recovery restarts them):
+
+```sh
+sudo scripts/update-runner.sh --now
+```
+
+**Undo a runner update** (drains onto the previous image; add `--now` to do it at once):
 
 ```sh
 sudo scripts/update-runner.sh --rollback
@@ -498,7 +506,7 @@ What you may see instead of a deploy:
 - "Rejected: this change touches deployment files": run `scripts/deploy.sh` yourself in the `src` folder.
 - "Rejected: only one server deploy every 10 minutes": wait, then press **Deploy latest**.
 - "is not the tip of main": main moved after you approved; approve the new one.
-- Runner code changed: after the server is deployed, a second decision "Update the runners?" appears. It cuts off runs in progress, so approve it when the agents are quiet.
+- Runner code changed: after the server is deployed, a second decision "Update the runners?" appears. Approving it builds the new image, then drains: runs in progress finish and each runner is swapped when its company is idle, so there is no need to wait for quiet. Approving frees the host script within minutes; the result of the swap arrives as a Boss Man notification.
 
 **Turn it off:** disable the cron job, or remove `:deploy/truenas-deployer.yml` from `COMPOSE_FILE` and run `docker compose up -d server`.
 

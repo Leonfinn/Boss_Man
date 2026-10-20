@@ -8,7 +8,8 @@ import { companies, settings } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
-export type LaunchedRunner = { slug: string; state: string; status: string; image: string };
+/** `current`: running the image `boss-man-runner:current` points at now (absent from a launcher older than the server). */
+export type LaunchedRunner = { slug: string; state: string; status: string; image: string; current?: boolean };
 
 export class LauncherError extends Error {
   constructor(
@@ -101,6 +102,19 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       const slug = await slugFor(companyId);
       await call("DELETE", `/runners/${slug}`);
       return { slug };
+    },
+
+    /** For the drain: every runner with its company (null if the server has no company for that slug). */
+    async fleet() {
+      const all = await call<LaunchedRunner[]>("GET", "/runners");
+      const rows = await db.select().from(settings).where(like(settings.key, `${SLUG_KEY}%`));
+      const company = new Map(rows.map((r) => [r.value as string, r.key.slice(SLUG_KEY.length)]));
+      return all.map((r) => ({ slug: r.slug, companyId: company.get(r.slug) ?? null, current: r.current }));
+    },
+
+    /** One company's runner again on the current image; the launcher keeps its token and data. // leader-only */
+    async recreate(slug: string) {
+      await call("POST", `/runners/${slug}/recreate`);
     },
 
     async status(companyId: string): Promise<{ slug: string; container: LaunchedRunner | null; error?: string } | null> {

@@ -76,6 +76,7 @@ jobs:
       - name: Shell script tests (deploy.sh and the host deployer)
         run: |
           sudo apt-get install -y shellcheck >/dev/null
-          shellcheck scripts/deploy.sh scripts/deploy.test.sh scripts/host-deployer.sh scripts/host-deployer.test.sh
+          shellcheck scripts/deploy.sh scripts/deploy.test.sh scripts/host-deployer.sh scripts/host-deployer.test.sh scripts/update-runner.sh scripts/update-runner.test.sh
           scripts/deploy.test.sh
           scripts/host-deployer.test.sh
+          scripts/update-runner.test.sh

@@ -15,6 +15,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { effectivePolicy, resolveReviewer } from "./review-policy.js";
 import { buildBrief } from "./brief.js";
+import { getHold, HOLD_REASON } from "./maintenance.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
@@ -721,6 +722,9 @@ export function schedulerService(
       return pass;
     },
 
+    /** Resolves once no scheduling pass is mid-flight (the drain uses it before counting runs). */
+    settled: () => lane.catch(() => undefined),
+
     async tickOnce() {
       const result = { launched: 0, deferred: 0, waiting: 0, paused: false };
       if (await globallyPaused()) return { ...result, paused: true };
@@ -733,6 +737,14 @@ export function schedulerService(
         .where(or(eq(wakes.status, "queued"), and(eq(wakes.status, "deferred"), or(isNull(wakes.notBefore), lte(wakes.notBefore, t)))))
         .orderBy(desc(wakes.priority), asc(wakes.createdAt));
       if (queue.length === 0) return result;
+
+      // A server-wide maintenance hold (runner update drain): nothing new starts in any company. The wakes
+      // stay queued with that reason, like a paused company's, and the first pass after the hold lifts launches them.
+      if (await getHold(db)) {
+        const unmarked = queue.filter((w) => w.status !== "queued" || w.statusReason !== HOLD_REASON).map((w) => w.id);
+        if (unmarked.length) await db.update(wakes).set({ status: "queued", statusReason: HOLD_REASON }).where(inArray(wakes.id, unmarked));
+        return { ...result, waiting: queue.length };
+      }
 
       const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
       let total = active.length;
