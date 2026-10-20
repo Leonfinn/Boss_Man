@@ -40,7 +40,9 @@ RUN mkdir -p /run/launcher && chown node:node /run/launcher
 
 USER node
 WORKDIR /app/apps/server
-ENV NODE_ENV=production PORT=3100 BOSSMAN_WEB_DIR=/app/web
+# The commit this image was built from, shown by /api/health (docker build --build-arg BOSSMAN_COMMIT=<sha>).
+ARG BOSSMAN_COMMIT=dev
+ENV NODE_ENV=production PORT=3100 BOSSMAN_WEB_DIR=/app/web BOSSMAN_COMMIT=$BOSSMAN_COMMIT
 EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD node -e "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

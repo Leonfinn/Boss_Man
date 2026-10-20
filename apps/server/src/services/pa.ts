@@ -17,6 +17,7 @@ export type Cite = { kind: "ticket" | "decision" | "run"; id: string };
 const normal = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
+// shortcut: module-level and lost on restart, harmless because a PA run dies with the restart; entries are dropped in onRunEnded (which the server-ended path also fires).
 /** The ids each PA run has been shown by a read tool; a reply may cite only these. */
 const fetched = new Map<string, Set<string>>();
 export function remember(runId: string, text: string) {
@@ -25,8 +26,11 @@ export function remember(runId: string, text: string) {
   fetched.set(runId, ids);
 }
 
+// shortcut: same as `fetched`: in memory, pruned in onRunEnded, lost on restart harmlessly.
 /** Runs that called a ticket or decision tool, so an empty cite list can mean "nothing found". */
 const searched = new Set<string>();
+/** For tests: how many runs the cite guard still remembers. */
+export const citeStateSize = () => fetched.size + searched.size;
 export const markSearched = (runId: string) => void searched.add(runId);
 
 type Msg = typeof ownerChatMessages.$inferSelect;

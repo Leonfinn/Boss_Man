@@ -320,7 +320,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
     r.onload = () => run(api(`${logoUrl}`, { method: "PUT", body: { data: String(r.result).split(",")[1] ?? "" } }).then(() => setLogoV((v) => v + 1)), "Logo saved.");
     r.readAsDataURL(file);
   };
-  const link = d.portalToken ? `${window.location.origin}/portal.html#${d.portalToken}` : null;
+  const link = d.portalToken ? `${d.portalUrl ?? window.location.origin}/portal.html#${d.portalToken}` : null;
   return (
     <section className="card" aria-labelledby="portal-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <h2 id="portal-h" style={{ fontSize: 17, fontWeight: 600 }}>

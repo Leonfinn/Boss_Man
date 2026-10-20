@@ -1,5 +1,5 @@
 {
-  "id": "fabcb6dd-b01d-4fb5-83fd-abe5c475dcc3",
+  "id": "079e7f74-d666-4713-a092-7207233d44ea",
   "prevId": "d082d3e1-f93e-4a95-95dd-2f43e99264f8",
   "version": "7",
   "dialect": "postgresql",
@@ -3769,19 +3769,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "starred": {
-          "name": "starred",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "monthly_cap_micros": {
-          "name": "monthly_cap_micros",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
         "review_policy": {
           "name": "review_policy",
           "type": "jsonb",
@@ -6816,7 +6803,9 @@
         "openai",
         "bedrock",
         "foundry",
-        "gateway"
+        "gateway",
+        "openrouter",
+        "ollama"
       ]
     },
     "public.risk_tier": {

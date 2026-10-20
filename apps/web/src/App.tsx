@@ -181,7 +181,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} />
         ) : page === "secrets" ? (
-          <Secrets />
+          <Secrets companies={list} companyId={companyId} onChanged={companies.reload} />
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
