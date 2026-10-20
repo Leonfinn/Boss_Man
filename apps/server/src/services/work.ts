@@ -243,6 +243,44 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return row!;
     },
 
+    /**
+     * Arms the ticket's monitor: wake the assignee at `at` to re-check `note`. An agent sets it only on
+     * its own ticket, in the future; the owner may set "now". The owner re-arming a fired or exhausted
+     * monitor starts the count again.
+     */
+    async setMonitor(ticketId: string, input: { at: Date; note: string; maxChecks?: number; by?: { agentId: string; companyId: string } }) {
+      const [t] = await db.select().from(tickets).where(input.by ? and(eq(tickets.id, ticketId), eq(tickets.companyId, input.by.companyId)) : eq(tickets.id, ticketId));
+      if (!t) throw new WorkError(404, input.by ? "No ticket with that ID in your company." : "No such ticket.");
+      const note = input.note.trim();
+      if (!note || note.length > 500) throw new WorkError(422, "Say what to re-check, in 1 to 500 characters.");
+      if (Number.isNaN(input.at.getTime())) throw new WorkError(422, "That isn't a valid time.");
+      if (input.maxChecks !== undefined && (!Number.isInteger(input.maxChecks) || input.maxChecks < 1 || input.maxChecks > 20)) throw new WorkError(422, "maxChecks is 1 to 20.");
+      if (t.systemState !== "in_progress" && t.systemState !== "review") throw new WorkError(422, `A check can only be scheduled on a ticket that is in progress or in review; this one is ${t.systemState}.`);
+      if (!t.assigneeAgentId) throw new WorkError(422, "The ticket has no agent to wake.");
+      if (input.by) {
+        if (t.assigneeAgentId !== input.by.agentId) throw new WorkError(403, "Only the agent the ticket is assigned to can schedule a check.");
+        if (input.at.getTime() <= now().getTime()) throw new WorkError(422, "The time must be in the future.");
+      }
+      const [row] = await db
+        .update(tickets)
+        .set({ monitorAt: input.at, monitorNote: note, ...(input.maxChecks ? { monitorMax: input.maxChecks } : {}), ...(!input.by && !t.monitorAt ? { monitorAttempts: 0 } : {}) })
+        .where(eq(tickets.id, ticketId))
+        .returning();
+      const [who] = input.by ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, input.by.agentId)) : [];
+      await record(db, { companyId: t.companyId, agentId: input.by?.agentId, ticketId, kind: "monitor", summary: `${who?.name ?? "The owner"} scheduled a check for ${input.at.toISOString()}: ${note}`, at: now() });
+      return row!;
+    },
+
+    async clearMonitor(ticketId: string, by?: { agentId: string; companyId: string }) {
+      const [t] = await db.select().from(tickets).where(by ? and(eq(tickets.id, ticketId), eq(tickets.companyId, by.companyId)) : eq(tickets.id, ticketId));
+      if (!t) throw new WorkError(404, by ? "No ticket with that ID in your company." : "No such ticket.");
+      if (by && t.assigneeAgentId !== by.agentId) throw new WorkError(403, "Only the agent the ticket is assigned to can clear its check.");
+      if (!t.monitorAt) return t;
+      const [row] = await db.update(tickets).set({ monitorAt: null, monitorAttempts: 0 }).where(eq(tickets.id, ticketId)).returning();
+      await record(db, { companyId: t.companyId, agentId: by?.agentId, ticketId, kind: "monitor", summary: "Cleared the scheduled check", at: now() });
+      return row!;
+    },
+
     async updateTicket(ticketId: string, patch: TicketPatch) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
@@ -261,7 +299,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         .update(tickets)
         .set({
           ...fields,
-          ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? "completed") : null } : {}),
+          ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? "completed") : null, ...(col.systemState === "done" ? { monitorAt: null } : {}) } : {}),
           lastActivityAt: now(),
           ...(patch.stateNote ? { stateNoteAt: now() } : {}),
         })
