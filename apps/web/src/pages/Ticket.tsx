@@ -84,6 +84,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [busy, setBusy] = useState(false);
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
   const [draft, setDraft] = useState<string | null>(null);
+  const [descOpen, setDescOpen] = useState(false);
   const tiers = useRiskTiers();
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
   const t = ticket.data;
@@ -188,6 +189,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
   if (!t) return null;
   const made = outputs.data ?? [];
+  // Collapsed, a long description still shows its first 8 lines.
+  const longBody = (t.body?.split("\n").length ?? 0) > 8 || (t.body?.length ?? 0) > 800;
   // Plan first only matters before anyone starts; once work has begun it's history (R76).
   const notStarted = t.systemState === "backlog" || t.systemState === "ready";
   return (
@@ -206,7 +209,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <h2 id="desc-h" style={{ fontSize: 17, fontWeight: 600 }}>
-                Description
+                {longBody && draft === null ? (
+                  <button type="button" className="link" aria-expanded={descOpen} aria-controls="desc-body" onClick={() => setDescOpen(!descOpen)} style={{ font: "inherit", color: "inherit" }}>
+                    {descOpen ? "▾" : "▸"} Description
+                  </button>
+                ) : (
+                  "Description"
+                )}
               </h2>
               {draft === null && (
                 <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 12px" }} onClick={() => setDraft(t.body ?? "")}>
@@ -215,7 +224,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               )}
             </div>
             {draft === null ? (
-              t.body ? <Markdown text={t.body} /> : <p className="muted">No description yet. Say what should be done and what counts as finished.</p>
+              t.body ? (
+                <div id="desc-body" className={longBody && !descOpen ? "clamp-8" : undefined}>
+                  <Markdown text={t.body} />
+                </div>
+              ) : (
+                <p className="muted">No description yet. Say what should be done and what counts as finished.</p>
+              )
             ) : (
               <>
                 <label htmlFor="t-body" className="sr-only">
@@ -243,8 +258,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             )}
           </section>
 
-          <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : "nothing yet"}>
-            <TicketOutputs items={made} companyId={t.companyId} onChanged={outputs.reload} />
+          <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "code on its branch" : "nothing yet"}>
+            <TicketOutputs items={made} companyId={t.companyId} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch ? { branch: t.branch } : null} />
           </Fold>
 
           {t.plan && (
