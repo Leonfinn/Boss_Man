@@ -445,7 +445,10 @@ The server also has a port that serves only the portal: 3102 on the NAS (`BOSSMA
 
 ```sh
 BOSSMAN_PORTAL_BIND=<nas-ip>
+BOSSMAN_PORTAL_URL=http://<nas-ip>:3102
 ```
+
+`BOSSMAN_PORTAL_URL` is the portal's address as people reach it. The link to share under **Feedback > Feedback portal** uses it, so it points at the portal's own port rather than your owner UI. Change the port in both lines if you set `BOSSMAN_PORTAL_HOST_PORT` to something else.
 
 Then restart the server:
 
