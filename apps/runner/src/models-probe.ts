@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
-import { BASE_ENV_KEYS, defaultBin, killGroup, modelChoices } from "./session-manager.js";
+import { BASE_ENV_KEYS, adapterArgs, defaultBin, killGroup, modelChoices } from "./session-manager.js";
 
 export type ProbedModels = Array<{ value: string; name: string; description: string | null }>;
 
@@ -35,7 +35,7 @@ export async function probeModels(
   }
   const { GIT_TOKEN: _git, ...rest } = credentials;
   Object.assign(env, rest, { DISABLE_AUTOUPDATER: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" });
-  const child = spawn(opts.adapterBin ?? defaultBin(agentKind), [], { env, cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+  const child = spawn(opts.adapterBin ?? defaultBin(agentKind), adapterArgs(agentKind), { env, cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
   let stderr = "";
   child.stderr?.on("data", (d) => (stderr = (stderr + String(d)).slice(-2000)));
   const connection = acpClient({ name: "boss-man-runner" }).connect(

@@ -9,9 +9,11 @@ import type { modelsService } from "./models.js";
 import type { runnersService } from "./runners.js";
 
 /** The credentials that let each agent kind start. */
-export const KIND_CREDENTIALS: Record<"claude" | "codex", string[]> = {
+export const KIND_CREDENTIALS: Record<"claude" | "codex" | "opencode", string[]> = {
   claude: ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
   codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
+  // Keys only OpenCode uses; it also reads OPENAI_API_KEY and ANTHROPIC_API_KEY, but those start Codex and Claude probes already. A local Ollama needs OPENCODE_CONFIG_CONTENT.
+  opencode: ["OPENROUTER_API_KEY", "OLLAMA_API_KEY", "OPENCODE_CONFIG_CONTENT"],
 };
 const STALE_MS = 24 * 3_600_000;
 
@@ -19,13 +21,13 @@ export function modelProbeService(db: Db, deps: { runners: ReturnType<typeof run
   const now = deps.now ?? (() => new Date());
   const inFlight = new Set<string>();
 
-  async function probe(companyId: string, opts: { force?: boolean; only?: "claude" | "codex" } = {}): Promise<Record<string, { ok: boolean; count?: number; error?: string }>> {
+  async function probe(companyId: string, opts: { force?: boolean; only?: "claude" | "codex" | "opencode" } = {}): Promise<Record<string, { ok: boolean; count?: number; error?: string }>> {
     const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
     if (!runner || !deps.runners.isConnected(runner.id)) return {};
     const envs = (await db.select({ env: secretGrants.envName }).from(secretGrants).where(and(eq(secretGrants.companyId, companyId), inArray(secretGrants.envName, Object.values(KIND_CREDENTIALS).flat())))).map((g) => g.env);
     const known = await deps.models.forCompany(companyId).then((l) => l.runner);
     const out: Record<string, { ok: boolean; count?: number; error?: string }> = {};
-    for (const kind of ["claude", "codex"] as const) {
+    for (const kind of ["claude", "codex", "opencode"] as const) {
       if (opts.only && opts.only !== kind) continue;
       if (!KIND_CREDENTIALS[kind].some((e) => envs.includes(e))) continue;
       const seen = known[kind]?.observedAt;
