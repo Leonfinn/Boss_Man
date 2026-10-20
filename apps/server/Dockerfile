@@ -21,8 +21,8 @@ RUN pnpm --filter @boss-man/web build
 FROM node:22-bookworm-slim AS migrate
 RUN npm install -g --no-audit --no-fund esbuild@0.28.2
 WORKDIR /app/apps/server
-COPY apps/server/src/migrate.ts apps/server/src/migrate.ts
-COPY apps/server/src/db/migrate-lib.ts apps/server/src/db/migrate-lib.ts
+COPY apps/server/src/migrate.ts src/migrate.ts
+COPY apps/server/src/db/migrate-lib.ts src/db/migrate-lib.ts
 RUN esbuild src/migrate.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/migrate.js
 
 FROM node:22-bookworm-slim
