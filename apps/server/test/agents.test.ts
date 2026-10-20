@@ -43,12 +43,12 @@ describe("the Agents tab (R62)", () => {
   it("hires from a template, whose title and instructions reach the agent's prompt", async () => {
     const c = (ctx = await setup());
     const { templates } = (await c.req("GET", "/api/agent-templates")).json() as { templates: typeof AGENT_TEMPLATES };
-    expect(templates.map((t) => t.title)).toEqual(["Engineer", "Researcher", "Designer", "QA", "Writer", "Scrum Master", "Assistant"]);
+    expect(templates.map((t) => t.title)).toEqual(["Engineer", "Researcher", "Designer", "QA", "Writer", "Scrum Master", "Assistant", "Senior Developer", "Security Reviewer", "Adversarial Reviewer", "Senior Infrastructure Engineer", "Product Manager", "Release Manager", "Data & Analytics", "Support"]);
     const hired = await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Sam", template: "scrum-master" });
     expect(hired.statusCode).toBe(201);
     const sam = hired.json() as { id: string; title: string; instructions: string; template: string };
     expect(sam).toMatchObject({ title: "Scrum Master", template: "scrum-master" });
-    expect(sam.instructions).toContain("keep the owner up to date");
+    expect(sam.instructions).toContain("keep the owner and the CEO informed");
     expect((await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "X", template: "astronaut" })).statusCode).toBe(422);
 
     await c.req("POST", `/api/agents/${sam.id}/wake`, { note: "Say hello." });
@@ -56,7 +56,7 @@ describe("the Agents tab (R62)", () => {
     const start = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start" && x.agentId === sam.id)!;
     expect(start.prompt).toContain("You are Sam, the Scrum Master of App Co, working through Boss Man.");
     expect(start.prompt).toContain("Your instructions from the owner:");
-    expect(start.prompt).toContain("Don't do the work yourself");
+    expect(start.prompt).toContain("You report; you do not do the work");
   });
 
   it("lists each agent with what it's doing and its use this month", async () => {
