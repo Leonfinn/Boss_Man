@@ -90,4 +90,10 @@ describe("funding source provider and kind", () => {
     expect((await post("/api/funding-sources", { name: "Sub on Bedrock", kind: "subscription", provider: "bedrock" })).statusCode).toBeGreaterThanOrEqual(400);
     expect((await post("/api/funding-sources", { name: "Max", kind: "subscription", provider: "openai" })).statusCode).toBe(201);
   });
+
+  it("accepts OpenRouter credits and an Ollama Cloud plan, and refuses an OpenRouter subscription", async () => {
+    expect((await post("/api/funding-sources", { name: "OpenRouter", kind: "api_payg", provider: "openrouter" })).statusCode).toBe(201);
+    expect((await post("/api/funding-sources", { name: "Ollama Cloud", kind: "subscription", provider: "ollama" })).statusCode).toBe(201);
+    expect((await post("/api/funding-sources", { name: "Sub on OpenRouter", kind: "subscription", provider: "openrouter" })).statusCode).toBeGreaterThanOrEqual(400);
+  });
 });
