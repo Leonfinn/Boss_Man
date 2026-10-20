@@ -335,7 +335,7 @@ With the launcher (step 7b), rebuild it too and start everything:
 sudo git pull && sudo docker compose build server launcher && sudo docker compose up -d
 ```
 
-**New Claude Code release, roughly weekly (R9):** this checks a new runner image with the canary and keeps the old one for rollback.
+`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. Run it after any update that changes `apps/runner` or `packages/shared`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary, keeps the old one for rollback, and recreates the runners on it.
 
 ```sh
 sudo scripts/update-runner.sh
