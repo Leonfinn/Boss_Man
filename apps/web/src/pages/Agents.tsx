@@ -35,6 +35,18 @@ type Change = { c: { id: string; field: string; before: unknown; after: unknown;
 type ModelChoice = { value: string; name: string; description?: string | null };
 type ModelLists = { runner: Record<string, { models: ModelChoice[]; observedAt: string }>; api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }> };
 const OTHER = "__other__";
+const KINDS: Array<[string, string]> = [["claude", "Claude Code"], ["codex", "Codex"], ["opencode", "OpenCode"]];
+function KindSelect({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
+      {KINDS.map(([v, label]) => (
+        <option key={v} value={v}>
+          {label}
+        </option>
+      ))}
+    </select>
+  );
+}
 
 /**
  * The model field (R60): Default, then what the agent's kind offers on the runner and what its
@@ -135,7 +147,7 @@ const show = (v: unknown, sources: FundingSource[]) =>
 
 function Hire({ companyId, templates, sources, lists, refresh, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onDone: (name: string) => void }) {
   const [tpl, setTpl] = useState<Template | null>(null);
-  const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", fundingSourceId: "" });
+  const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", fundingSourceId: "", agentKind: "claude" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const choose = (t: Template | null) => {
@@ -157,6 +169,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
           instructions: form.instructions.trim() || null,
           model: form.model.trim() || null,
           fundingSourceId: form.fundingSourceId || null,
+          agentKind: form.agentKind,
         },
       });
       onDone(form.name.trim());
@@ -201,8 +214,12 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
           <input id="hire-title" maxLength={80} placeholder="e.g. Scrum Master" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
         </div>
         <div className="field">
+          <label htmlFor="hire-kind">Agent</label>
+          <KindSelect id="hire-kind" value={form.agentKind} onChange={(agentKind) => setForm({ ...form, agentKind, model: "" })} />
+        </div>
+        <div className="field">
           <label htmlFor="hire-model">Model</label>
-          <ModelPicker id="hire-model" value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind="claude" fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
+          <ModelPicker id="hire-model" value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={form.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
           <small className="muted">{tpl ? `Suggested: a ${tpl.modelTier} model. ` : ""}Blank uses the agent's default.</small>
         </div>
         <div className="field">
@@ -235,7 +252,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
 }
 
 function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void }) {
-  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "" });
+  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
@@ -254,7 +271,7 @@ function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: F
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, fundingSourceId: form.fundingSourceId || null };
+    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, fundingSourceId: form.fundingSourceId || null, agentKind: form.agentKind };
     setBusy(true);
     const ok = await run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
     setBusy(false);
@@ -277,8 +294,12 @@ function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: F
               </div>
             )}
             <div className="field">
+              <label htmlFor={`kind-${a.id}`}>Agent</label>
+              <KindSelect id={`kind-${a.id}`} value={form.agentKind} onChange={(agentKind) => setForm({ ...form, agentKind, model: "" })} />
+            </div>
+            <div className="field">
               <label htmlFor={`model-${a.id}`}>Model</label>
-              <ModelPicker id={`model-${a.id}`} value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={a.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
+              <ModelPicker id={`model-${a.id}`} value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={form.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
             </div>
             <div className="field">
               <label htmlFor={`funding-${a.id}`}>Paid from</label>

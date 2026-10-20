@@ -6,6 +6,7 @@
 # the same native binary as the standalone installer
 # (https://code.claude.com/docs/en/setup#install-with-npm). The Claude ACP adapter is
 # pointed at it with CLAUDE_CODE_EXECUTABLE (R6). Codex comes with the codex-acp adapter.
+# OpenCode (MIT) is the official opencode-ai npm package, unmodified, run as `opencode acp`.
 # Updates inside the container are off: new versions arrive by rebuilding (R9), e.g. weekly,
 # with scripts/update-runner.sh, which promotes a build only once its canary passes (R52):
 #   docker run --rm --network none boss-man-runner:candidate node_modules/.bin/tsx src/canary-main.ts
@@ -24,6 +25,7 @@ RUN apt-get update \
 RUN npm install -g --no-audit --no-fund pnpm@10.28.0
 
 ARG CLAUDE_CODE_VERSION=latest
+ARG OPENCODE_VERSION=1.19.3
 USER node
 ENV HOME=/home/node \
     NPM_CONFIG_PREFIX=/home/node/.npm-global \
@@ -31,13 +33,15 @@ ENV HOME=/home/node \
 RUN --mount=type=secret,id=extra_ca,uid=1000,required=false \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
  && npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
- && claude --version
+ && npm install -g --no-audit --no-fund "opencode-ai@${OPENCODE_VERSION}" \
+ && claude --version && opencode --version
 # Claude Code keeps its session transcripts here; it's a volume so a recovery run can reopen
 # an interrupted session after the container is recreated (R42).
 ENV CLAUDE_CODE_EXECUTABLE=/home/node/.npm-global/bin/claude \
     CLAUDE_CONFIG_DIR=/home/node/.claude \
     DISABLE_UPDATES=1 \
-    DISABLE_AUTOUPDATER=1
+    DISABLE_AUTOUPDATER=1 \
+    OPENCODE_DISABLE_AUTOUPDATE=1
 
 WORKDIR /home/node/app
 COPY --chown=node pnpm-workspace.yaml package.json pnpm-lock.yaml ./
@@ -52,8 +56,8 @@ COPY --chown=node apps/runner/src apps/runner/src
 
 # Workspaces (one directory per ticket) and the event journal live on volumes, so a
 # restart replays unacknowledged events and keeps work in progress (R31).
-RUN mkdir -p /home/node/workspaces /home/node/runner-data /home/node/.claude
-VOLUME ["/home/node/workspaces", "/home/node/runner-data", "/home/node/.claude"]
+RUN mkdir -p /home/node/workspaces /home/node/runner-data /home/node/.claude /home/node/.local/share/opencode
+VOLUME ["/home/node/workspaces", "/home/node/runner-data", "/home/node/.claude", "/home/node/.local/share/opencode"]
 
 WORKDIR /home/node/app/apps/runner
 ARG BOSSMAN_IMAGE_VERSION=dev

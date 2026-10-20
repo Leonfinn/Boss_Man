@@ -119,7 +119,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Prove the company's Claude setup-token works with one tiny prompt (R58). The runner fetches the token itself. */
   z.object({ type: z.literal("credential.check"), requestId: z.string() }),
   /** Ask an agent kind for its model list without sending a prompt: a throwaway ACP session, closed at once. */
-  z.object({ type: z.literal("models.probe"), requestId: z.string(), agentKind: z.enum(["claude", "codex"]) }),
+  z.object({ type: z.literal("models.probe"), requestId: z.string(), agentKind: z.enum(["claude", "codex", "opencode"]) }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
   z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),

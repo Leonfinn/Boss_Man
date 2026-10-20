@@ -92,10 +92,15 @@ export function modelChoices(configOptions: unknown[] | null | undefined) {
   }
   return out.slice(0, 200);
 }
-export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
+const currentModel = (configOptions: unknown[] | null | undefined) =>
+  ((configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { currentValue?: string } | undefined)?.currentValue;
+export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"];
 
 const require = createRequire(import.meta.url);
+/** OpenCode is its own ACP agent: `opencode acp`, from the opencode-ai npm package (the Dockerfile puts it on PATH). */
+export const adapterArgs = (agentKind: string): string[] => (agentKind === "opencode" ? ["acp"] : []);
 export function defaultBin(agentKind: string): string {
+  if (agentKind === "opencode") return "opencode";
   const pkg = agentKind === "claude" ? "@agentclientprotocol/claude-agent-acp" : agentKind === "codex" ? "@agentclientprotocol/codex-acp" : null;
   if (!pkg) throw new Error(`No ACP adapter is registered for agent kind "${agentKind}".`);
   const manifest = require(`${pkg}/package.json`) as { bin: Record<string, string> | string };
@@ -324,6 +329,19 @@ export class SessionManager {
       const existing = base.CODEX_CONFIG ? (JSON.parse(base.CODEX_CONFIG) as Record<string, unknown>) : {};
       env.CODEX_CONFIG = JSON.stringify({ ...existing, ...(cmd.model ? { model: cmd.model } : {}) });
     }
+    if (cmd.agentKind === "opencode") {
+      // OpenCode allows edits and shell commands unless told to ask (spike); "ask" sends them to Boss Man.
+      // The inline config wins over a repo's opencode.json. Provider settings (e.g. a local Ollama
+      // endpoint) arrive as a granted OPENCODE_CONFIG_CONTENT secret and are kept.
+      const mine = secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT;
+      const existing = mine ? (JSON.parse(mine) as Record<string, unknown>) : {};
+      // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
+      const verdict = cmd.boardToolsOnly ? "deny" : "ask";
+      const permission = { ...(existing.permission as object | undefined), edit: verdict, bash: verdict, webfetch: verdict, external_directory: verdict };
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...existing, autoupdate: false, share: "disabled", permission });
+      env.OPENCODE_DISABLE_AUTOUPDATE = "1";
+      env.OPENCODE_DISABLE_CLAUDE_CODE = "1"; // don't read ~/.claude as OpenCode config
+    }
     return env;
   }
 
@@ -390,7 +408,7 @@ export class SessionManager {
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run
     // kills the whole group.
-    const child = spawn(bin, [], { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const child = spawn(bin, adapterArgs(cmd.agentKind), { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stderr = "";
     child.stderr?.on("data", (d) => {
       stderr = (stderr + String(d)).slice(-4000);
@@ -565,12 +583,17 @@ export class SessionManager {
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
 
       let model = cmd.model;
+      if (cmd.agentKind === "opencode" && cmd.model && cmd.model !== currentModel(session.configOptions)) {
+        // Model ids are provider/model, as the session lists them (spike).
+        await agent.request(methods.agent.session.setConfigOption, { sessionId: session.sessionId, configId: "model", value: cmd.model } as never);
+      }
       if (cmd.agentKind === "claude" && cmd.model) {
         // Listed aliases are selected directly; anything else was pinned to "opus" at launch.
         const value = CLAUDE_ALIASES.has(cmd.model) ? cmd.model : "opus";
         await agent.request(methods.agent.session.setConfigOption, { sessionId: session.sessionId, configId: "model", value } as never);
       }
       // Plan-first tickets (R40) start in plan mode; a reopened session keeps the mode it had.
+      // shortcut: OpenCode's plan mode has no approval step Boss Man understands, so plan-first tickets run in build mode for it; add one if wanted.
       if (cmd.mode === "plan" && !session.resumed && cmd.agentKind === "claude") {
         await agent.request(methods.agent.session.setMode, { sessionId: session.sessionId, modeId: "plan" });
       }
