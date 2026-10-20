@@ -182,7 +182,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       <span className="muted" style={{ fontSize: 13 }}>
                         {d.companyName}
                         {d.agentName ? ` · ${d.agentName}` : ""}
-                        {d.tier === "ceo" ? " · for the CEO" : ""}
+                        {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
                     <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question}</h2>

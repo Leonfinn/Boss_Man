@@ -453,6 +453,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
         .where(eq(decisions.status, "open"));
       if (!open.length) return [];
+      const forIds = [...new Set(open.map((o) => o.d.forAgentId).filter((x): x is string => !!x))];
+      const forNames = new Map(forIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, forIds))).map((a) => [a.id, a.name]) : []);
 
       // Open work, with the most important objective it serves and its effective due date.
       const work = await db
@@ -535,7 +537,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           frontier = next;
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
-        return { ...d, companyName, agentName, blocks: chain, ...rank };
+        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, ...rank };
       });
       const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
       return Promise.all(sorted.map(async (r) => ((r.context as DecisionContext).type === "stalled_run" ? { ...r, evidence: await stallEvidence((r.context as { runId: string }).runId) } : r)));

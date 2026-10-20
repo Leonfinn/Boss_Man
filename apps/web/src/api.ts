@@ -67,6 +67,8 @@ export type Decision = {
   createdAt: string;
   companyName: string;
   agentName: string | null;
+  /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
+  forAgentName?: string | null;
   blocks: Array<{ id: string; title: string }>;
   score: number;
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
