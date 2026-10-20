@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, RISK_TIERS, stateNoteLine, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, stateNoteLine, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -29,6 +29,7 @@ import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import { AgentError, type agentsService } from "./services/agents.js";
 import { resolveReviewer } from "./services/review-policy.js";
+import { latestRows } from "./services/review-kinds.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
@@ -756,13 +757,16 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "review",
     {
       description:
-        "For the CEO and the reviewer your company's review settings name for a ticket: review a ticket in your company that's ready for review. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary). You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
       inputSchema: {
-        action: z.enum(["diff", "submit"]),
+        action: z.enum(["diff", "submit", "sequence", "overrule"]),
         ticketId: z.string().uuid(),
         verdict: z.enum(["approved", "changes_requested"]).optional(),
         comments: z.array(z.object({ path: z.string(), line: z.number().int().positive(), body: z.string().min(1) })).max(50).optional(),
         summary: z.string().max(5000).optional(),
+        kind: z.enum(["code", ...REVIEW_KINDS]).optional(),
+        order: z.array(z.enum(["code", ...REVIEW_KINDS])).max(4).optional(),
+        reason: z.string().max(2000).optional(),
       },
     },
     async (input) => {
@@ -771,8 +775,20 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const [rt] = await db.select().from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
       if (!rt) return fail("No ticket with that ID in your company.");
       if (rt.assigneeAgentId === scope.agentId) return fail("You can't review a ticket assigned to you.");
-      if (me.role !== "ceo" && (await resolveReviewer(db, rt)).agent?.id !== scope.agentId) return fail("Only your company's CEO or this ticket's reviewer reviews it.");
+      const rows = await latestRows(db, rt.id);
+      const named = rows.length ? rows.some((r) => r.reviewerAgentId === scope.agentId) : (await resolveReviewer(db, rt)).agent?.id === scope.agentId;
+      if (me.role !== "ceo" && !named) return fail("Only your company's CEO or this ticket's reviewer reviews it.");
+      if ((input.action === "sequence" || input.action === "overrule") && me.role !== "ceo") return fail("Only your company's CEO can do that.");
       try {
+        if (input.action === "sequence") {
+          const woken = await review.sequence(input.ticketId, input.order ?? [], scope.agentId!, scope.companyId);
+          return text(input.order?.length ? `Reviews will run in this order: ${input.order.join(", then ")}.${woken ? ` ${woken} reviewer(s) woken for their turn.` : ""}` : "Reviews will run all at once.");
+        }
+        if (input.action === "overrule") {
+          if (!input.kind || !input.reason) return fail("Give the kind of review and your reason.");
+          const r = await review.overrule(input.ticketId, { kind: input.kind, reason: input.reason, byAgentId: scope.agentId!, companyId: scope.companyId, causedByRunId: scope.runId });
+          return text(`Overruled the ${input.kind} review. ${reviewOutcome(r)}`);
+        }
         if (input.action === "diff") {
           const d = await review.diff(input.ticketId, scope.companyId);
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
@@ -785,20 +801,13 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           verdict: input.verdict,
           comments: input.comments,
           summary: input.summary,
+          kind: input.kind,
           reviewer: `${me.name} (${me.role === "ceo" ? "CEO" : me.title ?? me.role})`,
           reviewerAgentId: scope.agentId,
           companyId: scope.companyId,
           causedByRunId: scope.runId,
         });
-        if (r.verdict !== "approved") return text(`Changes requested; ${r.delivered}.`);
-        const outcome = "outcome" in r ? r.outcome : "done";
-        return text(
-          outcome === "owner_review"
-            ? `Approved. ${r.delivered}: the owner signs it off before it merges.`
-            : outcome === "merged" || outcome === "done"
-              ? "Approved; the ticket is done."
-              : `Approved, but it couldn't merge yet (${outcome.replace(/_/g, " ")}); it's gone back to the assignee with what to fix.`,
-        );
+        return text(reviewOutcome(r));
       } catch (err) {
         if (err instanceof ReviewError) return fail(err.message);
         throw err;
@@ -822,6 +831,18 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   );
 
   return server;
+}
+
+/** What a verdict (or an overrule) did, in a sentence for the reviewer. */
+function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?: string }): string {
+  const outcome = r.outcome ?? "done";
+  if (outcome === "waiting") return `Recorded: ${r.delivered}.`;
+  if (r.verdict !== "approved") return `Changes requested; ${r.delivered}.`;
+  return outcome === "owner_review"
+    ? `Approved. ${r.delivered}: the owner signs it off before it merges.`
+    : outcome === "merged" || outcome === "done"
+      ? "Approved; the ticket is done."
+      : `Approved, but it couldn't merge yet (${outcome.replace(/_/g, " ")}); it's gone back to the assignee with what to fix.`;
 }
 
 /**

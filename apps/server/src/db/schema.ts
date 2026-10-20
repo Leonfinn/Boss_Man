@@ -82,6 +82,8 @@ export const agents = pgTable(
     starred: boolean("starred").notNull().default(false),
     /** A standing job Boss Man gives the agent: "wiki" keeps the company wiki in order (R73). */
     duty: text("duty"),
+    /** Marks the agent as the company's reviewer of one kind (security, infra, adversarial); a review policy can name "the marked agent". */
+    reviewKind: text("review_kind"),
     /** Job title (e.g. "Scrum Master"), the template it was hired from, and its standing instructions (R62). */
     title: text("title"),
     template: text("template"),
@@ -275,6 +277,8 @@ export const tickets = pgTable(
     risk: riskTier("risk"),
     /** Plan-first (R40): the agent starts in plan mode until its plan is approved. */
     planFirst: boolean("plan_first").notNull().default(false),
+    /** The CEO's order for this ticket's reviews (slots by name); null or empty means all at once. */
+    reviewOrder: jsonb("review_order").$type<string[]>(),
     plan: text("plan"),
     planApprovedAt: timestamp("plan_approved_at", { withTimezone: true }),
     /** The feature request this ticket delivers, if any. */
@@ -647,6 +651,32 @@ export const ticketReviews = pgTable("ticket_reviews", {
   fingerprints: jsonb("fingerprints").notNull().default([]),
   createdAt: createdAt(),
 });
+
+/**
+ * One required review of a ticket in one round (a round is one trip into review). Parallel by
+ * default; a higher seq waits until every lower seq has approved or been overruled.
+ */
+export const reviewRequests = pgTable(
+  "review_requests",
+  {
+    id: id(),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** "code" (the tier's reviewer) or an extra kind. */
+    kind: text("kind").notNull(),
+    reviewerAgentId: uuid("reviewer_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    round: integer("round").notNull(),
+    seq: integer("seq").notNull().default(0),
+    /** pending, approved, changes_requested, overruled, or skipped (never ran because an earlier review failed). */
+    status: text("status").notNull().default("pending"),
+    notes: text("notes"),
+    comments: jsonb("comments").notNull().default([]),
+    overruledByAgentId: uuid("overruled_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    overruleReason: text("overrule_reason"),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("review_requests_slot").on(t.ticketId, t.round, t.kind)],
+);
 
 /** Normalised failures (run errors, failed checks), to spot an agent going round in circles. */
 export const failureSignatures = pgTable(

@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, RISKS, type Agent, type ReviewPolicy } from "../api";
+import { api, REVIEW_KINDS, RISKS, type Agent, type ReviewKindName, type ReviewPolicy } from "../api";
 import { usePoll } from "../hooks";
 import { SaveButton, useSaveState } from "./SaveButton";
 
@@ -14,7 +14,7 @@ const DEFAULTS: ReviewPolicy = {
 
 const cap = (r: string) => r[0]!.toUpperCase() + r.slice(1);
 
-/** The 5-row table: who approves the plan, who reviews the code, whether the owner signs off. */
+/** The 5-row table: who approves the plan, who reviews the code, which extra reviews it needs, whether the owner signs off. */
 export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value: ReviewPolicy; onChange: (v: ReviewPolicy) => void; agents: Agent[]; idPrefix: string }) {
   const team = agents.filter((a) => a.role !== "ceo" && !a.duty);
   const set = (tier: (typeof RISKS)[number], patch: Partial<ReviewPolicy["low"]>) => onChange({ ...value, [tier]: { ...value[tier], ...patch } });
@@ -29,6 +29,10 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
       ))}
     </>
   );
+  const setKind = (tier: (typeof RISKS)[number], kind: ReviewKindName, ref: string) => {
+    const { [kind]: _drop, ...rest } = value[tier].kinds ?? {};
+    set(tier, { kinds: ref ? { ...rest, [kind]: ref } : rest });
+  };
   return (
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
@@ -36,6 +40,9 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
           <th>Risk</th>
           <th>Plan approved by</th>
           <th>Code reviewed by</th>
+          {REVIEW_KINDS.map((k) => (
+            <th key={k}>{cap(k)} review</th>
+          ))}
           <th>You sign off</th>
         </tr>
       </thead>
@@ -55,6 +62,15 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
                 {people}
               </select>
             </td>
+            {REVIEW_KINDS.map((k) => (
+              <td key={k}>
+                <select aria-label={`${cap(tier)}: ${k} review by`} id={`${idPrefix}-${k}-${tier}`} value={value[tier].kinds?.[k] ?? ""} onChange={(e) => setKind(tier, k, e.target.value)}>
+                  <option value="">Off</option>
+                  <option value="marked">The agent marked as {k} reviewer</option>
+                  {people}
+                </select>
+              </td>
+            ))}
             <td>
               <input type="checkbox" aria-label={`${cap(tier)}: you sign off`} checked={value[tier].ownerSignoff} onChange={(e) => set(tier, { ownerSignoff: e.target.checked })} />
             </td>

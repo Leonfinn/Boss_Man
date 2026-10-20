@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
 import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
@@ -34,6 +34,7 @@ import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { ReviewError, reviewService } from "./services/review.js";
+import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
@@ -1011,6 +1012,9 @@ export async function buildApp(opts: AppOptions) {
       return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, assignee: row.assignee };
     });
 
+    // The reviews a ticket needs, every round, newest first (review kinds).
+    owner.get("/api/tickets/:id/reviews", async (req) => listReviews(db, IdParam.parse(req.params).id));
+
     // The runs on a ticket, oldest first, for its activity feed (R76).
     owner.get("/api/tickets/:id/runs", async (req) => {
       const { id } = IdParam.parse(req.params);
@@ -1417,16 +1421,22 @@ export async function buildApp(opts: AppOptions) {
     owner.patch("/api/agents/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z
-        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean() })
+        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean(), reviewKind: z.enum(REVIEW_KINDS).nullable() })
         .partial()
         .parse(req.body);
+      const { reviewKind, ...patch } = b;
       const [before] = await db.select().from(agents).where(eq(agents.id, id));
       if (!before) return reply.code(404).send({ error: "not_found" });
       // An agent with a standing job starts with no model; it needs one before it can run (R73).
       if (b.paused === false && before.duty && !(b.model !== undefined ? b.model : before.model)) {
         return reply.code(409).send({ error: "needs_model", message: `Choose a model for ${before.name} before starting it.` });
       }
-      return agentsSvc.update(id, b).then((a) => {
+      // One reviewer per kind: marking this agent unmarks whoever had it.
+      if (reviewKind !== undefined) {
+        if (reviewKind) await db.update(agents).set({ reviewKind: null }).where(and(eq(agents.companyId, before.companyId), eq(agents.reviewKind, reviewKind)));
+        await db.update(agents).set({ reviewKind }).where(eq(agents.id, id));
+      }
+      return agentsSvc.update(id, patch).then((a) => {
         // Unpausing lets its waiting work start now rather than at the next tick.
         if (b.paused === false && before.paused) void scheduler.tick().catch((err) => app.log.error({ err }, "tick after unpause failed"));
         return a;

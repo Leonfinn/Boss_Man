@@ -23,6 +23,7 @@ type AgentRow = {
   paused: boolean;
   starred: boolean;
   duty: string | null;
+  reviewKind?: string | null;
   retiredAt: string | null;
   status: "working" | "idle" | "paused" | "retired";
   current: { ticketId: string; title: string | null } | null;
@@ -291,6 +292,21 @@ function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: F
               <div className="field">
                 <label htmlFor={`title-${a.id}`}>Job title</label>
                 <input id={`title-${a.id}`} maxLength={80} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+              </div>
+            )}
+            {a.role !== "ceo" && (
+              <div className="field">
+                <label htmlFor={`rk-${a.id}`}>Company's reviewer for</label>
+                <select
+                  id={`rk-${a.id}`}
+                  value={a.reviewKind ?? ""}
+                  onChange={(e) => void run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body: { reviewKind: e.target.value || null } }), e.target.value ? `${a.name} is now the ${e.target.value} reviewer.` : `${a.name} no longer reviews by kind.`)}
+                >
+                  <option value="">Nothing</option>
+                  <option value="security">Security reviews</option>
+                  <option value="infra">Infra reviews</option>
+                  <option value="adversarial">Adversarial reviews</option>
+                </select>
               </div>
             )}
             <div className="field">

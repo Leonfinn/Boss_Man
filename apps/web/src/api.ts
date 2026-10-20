@@ -34,7 +34,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 // ---------- Shapes the screens use ----------
 
-export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null };
+export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; reviewKind?: ReviewKindName | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
@@ -54,7 +54,9 @@ export type Project = {
 };
 
 /** Review routing per risk tier (step 1): "ceo", "senior-dev" or an agent id; the plan column also takes "owner" and "none". */
-export type ReviewRule = { planApprover: string; reviewer: string; ownerSignoff: boolean };
+export type ReviewRule = { planApprover: string; reviewer: string; ownerSignoff: boolean; /** Extra reviews: a kind that is missing is off; "marked" is the agent marked as that kind's reviewer. */ kinds?: Partial<Record<ReviewKindName, string>> };
+export type ReviewKindName = "security" | "infra" | "adversarial";
+export const REVIEW_KINDS: ReviewKindName[] = ["security", "infra", "adversarial"];
 export type ReviewPolicy = Record<Risk, ReviewRule>;
 export type Risk = "trivial" | "low" | "medium" | "high" | "critical";
 export const RISKS: Risk[] = ["trivial", "low", "medium", "high", "critical"];

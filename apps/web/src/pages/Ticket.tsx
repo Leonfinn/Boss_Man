@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
+import { TicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
@@ -325,6 +326,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               )}
             </div>
           )}
+          <TicketReviews ticketId={id} />
           {t.systemState === "review" && (
             <Fold title="Review" hint={t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" : "waiting for you"}>
               {t.pullRequestNumber && t.pullRequestNote && (
