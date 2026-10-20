@@ -316,9 +316,16 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
             if (view === "tasks") setView("features");
             feats.reload();
             if (f.planWithCeo) {
-              await api(`/api/features/${created.id}/tickets`, { method: "POST", body: { projectId: current.id, title: `Plan: ${f.title}`, assigneeAgentId: ceo!.id } });
-              board.reload();
-              feats.reload();
+              // The feature exists now: a failed planning task mustn't make a retry add it twice.
+              try {
+                await api(`/api/features/${created.id}/tickets`, { method: "POST", body: { projectId: current.id, title: `Plan: ${f.title}`, assigneeAgentId: ceo!.id } });
+              } catch (err) {
+                setNote(`Feature added, but its planning task couldn't be created (${(err as Error).message}). Use "Add task" on the feature's card.`);
+                return;
+              } finally {
+                board.reload();
+                feats.reload();
+              }
             }
             setNote(f.planWithCeo ? "Feature added. The CEO will plan it and break it into tasks." : "Feature added.");
           }}
