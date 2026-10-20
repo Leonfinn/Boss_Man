@@ -184,6 +184,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs)),
           // Waiting on a scheduled check is a plan, not missed work.
           isNull(tickets.monitorAt),
+          // A watched tree that has stopped is the watcher's to handle: it was woken about this exact state (watch_stopped_fp is cleared when the tree moves).
+          sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
         ),
       );
     // An agent with a live run (chat aside) or any waiting wake is busy: its other tickets are just queued behind that.

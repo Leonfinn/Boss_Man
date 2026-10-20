@@ -2,7 +2,7 @@
 // way (R30): kill switches, concurrency ceilings, a causation-depth cap, a self-wake rate
 // limit and priority order. Before launching it checks budgets and fails closed (R34),
 // and holds low-priority work while a subscription window is nearly used up (R33).
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
@@ -10,7 +10,8 @@ import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { agents, companies, costEvents, decisions, engagements, fundingSources, projects, nudges, quotaSamples, runners, runs, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
-import { cut, issueRunToken } from "../mcp.js";
+import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
+export { TREE_REASON };
 import { record } from "./activity.js";
 import { buildBrief } from "./brief.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -51,6 +52,7 @@ export type Limits = {
 export const WIKI_REASON = "wiki upkeep";
 /** A watcher's report on the tickets it watches (R80). Scheduled by Boss Man, so not counted as ticketless churn. */
 export const WATCH_REASON = "ticket watch";
+// TREE_REASON (mcp.ts) wakes the watcher when everything in its watched tree has stopped.
 /** An assigned ticket nobody is working on, found by the sweep (R82). */
 export const MISSED_REASON = "missed work";
 /** An agent's question answered by the owner (decisions.ts). */
@@ -238,6 +240,60 @@ export function schedulerService(
   }
 
   /**
+   * The watched ticket and its sub-tasks, when none of the open ones has a live path: a run, a
+   * waiting wake, a scheduled check, an open decision or an unfinished engagement. Returns the
+   * stopped tickets and a fingerprint of their state, or null if the tree is moving or done.
+   */
+  async function stoppedTree(root: typeof tickets.$inferSelect) {
+    const tree = await db
+      .select({ t: tickets, assignee: agents.name })
+      .from(tickets)
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(or(eq(tickets.id, root.id), eq(tickets.parentTicketId, root.id)), ne(tickets.systemState, "done")))
+      .orderBy(asc(tickets.id));
+    if (!tree.length || tree.some((x) => x.t.monitorAt)) return null;
+    const ids = tree.map((x) => x.t.id);
+    const [busyRun] = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt))).limit(1);
+    const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+    if (busyRun || busyWake) return null;
+    const deps = await db
+      .select({ blocked: ticketDependencies.blockedTicketId, ticket: tickets.title, ticketState: tickets.systemState, decision: decisions.status, engagement: engagements.status })
+      .from(ticketDependencies)
+      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+      .leftJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+      .where(inArray(ticketDependencies.blockedTicketId, ids));
+    if (deps.some((d) => d.decision === "open" || (d.engagement && d.engagement !== "signed_off"))) return null;
+    const waits = (id: string) => deps.filter((d) => d.blocked === id && d.ticket && d.ticketState !== "done").map((d) => `${d.ticket} (${d.ticketState})`).sort();
+    const items = tree.map((x) => ({ title: x.t.title, state: x.t.systemState, assignee: x.assignee ?? (x.t.assignedToOwner ? "the owner" : "nobody"), waits: waits(x.t.id), key: [x.t.id, x.t.systemState, x.t.assigneeAgentId, x.t.version, waits(x.t.id).join(",")].join("|") }));
+    return { items, fp: createHash("sha256").update(items.map((i) => i.key).join("\n")).digest("hex") };
+  }
+
+  /** Wakes each watcher once per distinct stopped state of its tree (watchdog); a moving tree forgets the last one. */
+  async function watchTrees(watched: (typeof tickets.$inferSelect)[]) {
+    for (const x of watched) {
+      if (x.systemState === "done") continue;
+      const s = await stoppedTree(x);
+      if (!s) {
+        if (x.watchStoppedFp) await db.update(tickets).set({ watchStoppedFp: null }).where(eq(tickets.id, x.id));
+        continue;
+      }
+      if (s.fp === x.watchStoppedFp) continue;
+      await db.update(tickets).set({ watchStoppedFp: s.fp }).where(eq(tickets.id, x.id));
+      const MAX = 12;
+      const note = [
+        `Tree of ticket ${x.id}`,
+        `Everything in "${x.title}" and its sub-tasks has stopped: nothing is running, queued or scheduled. Stopped:`,
+        ...s.items.slice(0, MAX).map((i) => `- "${i.title}" (${i.state}), assigned to ${i.assignee}; waits on ${i.waits.length ? i.waits.join(", ") : "nothing: it is just idle"}.`),
+        ...(s.items.length > MAX ? [`- and ${s.items.length - MAX} more.`] : []),
+        "",
+        "Get it moving, inside this tree only: nudge an agent (nudge), reassign a task here to someone who can do it (assign_ticket, if you can: only a CEO or manager may), add a sub-task under it (create_ticket with parent), or tell the owner (ticket_reply) if it needs them. Do not change anything outside this tree: those calls are refused.",
+      ].join("\n");
+      await self.notify(x.watcherAgentId!, { reason: TREE_REASON, note, priority: 1 });
+    }
+  }
+
+  /**
    * Asks each watcher for a report on the tickets that are due (R80): every N minutes while a
    * ticket is open, and once more when it's done. One waiting run per watcher covers them all.
    */
@@ -256,13 +312,14 @@ export function schedulerService(
       await db.update(tickets).set({ watchedAt: t, watchFingerprint: `${unchanged ? Number(skips) + 1 : 0}:${facts}` }).where(eq(tickets.id, x.id));
       if (!unchanged) due.push(x);
     }
-    if (!due.length) return;
     const byWatcher = new Map<string, string[]>();
     for (const x of due) byWatcher.set(x.watcherAgentId!, [...(byWatcher.get(x.watcherAgentId!) ?? []), x.id]);
     for (const [agentId, ids] of byWatcher) {
       const add = ids.map((id) => `Watch ticket ${id}`).join("\n");
       await self.notify(agentId, { reason: WATCH_REASON, note: add, priority: 1 });
     }
+    // After the reports, so a watcher that is both due and stopped reports first.
+    await watchTrees(watched);
   }
 
   /**
@@ -500,7 +557,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -513,6 +570,7 @@ export function schedulerService(
               sql`${wakes.status} <> 'dropped'`,
               sql`not (${wakes.reason} in (${sql.join([...OWNER_REASONS].map((r) => sql`${r}`), sql`, `)}) and (${wakes.reason} <> 'message' or ${wakes.causedByRunId} is null))`,
               sql`${wakes.reason} <> ${WATCH_REASON}`,
+              sql`${wakes.reason} <> ${TREE_REASON}`,
               sql`${wakes.reason} <> ${REVIEW_REASON}`,
               sql`${wakes.reason} <> ${ANSWER_REASON}`,
             ),
@@ -563,8 +621,8 @@ export function schedulerService(
       const note = input.note ?? null;
       const priority = input.priority ?? 2;
       const t = now();
-      // Chat runs have their own tools, and a watch report is built from its wake's note, so neither takes a steer.
-      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON) {
+      // Chat runs have their own tools, and a watch report and a tree-stopped brief are built from their wake's note, so none takes a steer.
+      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON) {
         const [live] = await db
           .select({ id: runs.id })
           .from(runs)

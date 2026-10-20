@@ -4,8 +4,8 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { notifications, runners, tickets, wakes } from "../src/db/schema.js";
-import { WATCH_REASON } from "../src/services/scheduler.js";
+import { notifications, runners, runs, tickets, wakes } from "../src/db/schema.js";
+import { TREE_REASON, WATCH_REASON } from "../src/services/scheduler.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { issueRunToken } from "../src/mcp.js";
@@ -112,7 +112,7 @@ describe("ticket watchers (R80)", () => {
     const c = (ctx = await setup());
     const a = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Ticket A" })).json() as { id: string };
     const b = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Ticket B" })).json() as { id: string };
-    await c.db.update(tickets).set({ watcherAgentId: c.scrum.id, watchEveryMinutes: 15 });
+    await c.db.update(tickets).set({ watcherAgentId: c.scrum.id, watchEveryMinutes: 15, monitorAt: new Date("2030-01-01") }); // a scheduled check keeps the tree from counting as stopped
     // The watcher is busy elsewhere: its waiting run gathers every ticket that falls due.
     await c.req("PATCH", `/api/agents/${c.scrum.id}`, { paused: true });
     await c.scheduler.tick();
@@ -152,6 +152,7 @@ describe("ticket watchers (R80)", () => {
     expect((await c.req("PUT", `/api/tickets/${t.id}/watcher`, { agentId: c.scrum.id, everyMinutes: 5 })).statusCode).toBe(400);
 
     await c.req("PUT", `/api/tickets/${t.id}/watcher`, { agentId: c.scrum.id, everyMinutes: 10 });
+    await c.db.update(tickets).set({ monitorAt: new Date("2030-01-01") }).where(eq(tickets.id, t.id));
     for (let i = 0; i < 8; i++) {
       await c.scheduler.tick();
       const run = c.starts().filter((s) => s.agentId === c.scrum.id).at(-1);
@@ -161,5 +162,99 @@ describe("ticket watchers (R80)", () => {
     }
     expect((await c.watchWakes()).filter((w) => w.status === "dropped")).toEqual([]);
     expect((await c.watchWakes()).length).toBeGreaterThanOrEqual(7);
+  });
+
+  describe("watchdog: the watcher steps in when its whole tree has stopped", () => {
+    const farFuture = new Date("2030-01-01");
+    async function tree(c: Awaited<ReturnType<typeof setup>>) {
+      const root = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Ship checkout" })).json() as { id: string };
+      const kid = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Write payment form" })).json() as { id: string };
+      const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Unrelated chore" })).json() as { id: string };
+      await c.db.update(tickets).set({ parentTicketId: root.id }).where(eq(tickets.id, kid.id));
+      await c.req("PUT", `/api/tickets/${root.id}/watcher`, { agentId: c.scrum.id, everyMinutes: 30 });
+      return { root, kid, other };
+    }
+    const treeWakes = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(wakes).where(eq(wakes.reason, TREE_REASON));
+    const endRuns = async (c: Awaited<ReturnType<typeof setup>>) => {
+      for (const s of c.starts()) await c.emit({ type: "run.ended", runId: s.runId, stopReason: "end_turn", error: null });
+    };
+
+    // The first report is due too and goes first; the tree wake runs once that run has ended.
+    async function treeRun(c: Awaited<ReturnType<typeof setup>>) {
+      const find = () => c.starts().find((x) => x.agentId === c.scrum.id && x.prompt.includes("has stopped"));
+      await c.scheduler.tick();
+      if (!find()) {
+        await endRuns(c);
+        await c.scheduler.tick();
+      }
+      return find();
+    }
+
+    it("wakes once per stopped state, listing what is stopped, and again when the state changes", async () => {
+      const c = (ctx = await setup());
+      const { root, kid } = await tree(c);
+      const run = await treeRun(c);
+      const [w] = await treeWakes(c);
+      expect(w!.note).toContain(`Tree of ticket ${root.id}`);
+      expect(w!.note).toContain('- "Ship checkout" (backlog), assigned to nobody; waits on nothing');
+      expect(w!.note).toContain('- "Write payment form" (backlog)');
+      expect(w!.note).toContain("only a CEO or manager may");
+      expect(run).toBeDefined();
+      await endRuns(c);
+
+      c.advance(5);
+      await c.scheduler.tick();
+      expect(await treeWakes(c)).toHaveLength(1);
+      // The sweep leaves a stopped watched tree to its watcher.
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, root.id)))[0]!.watchStoppedFp).not.toBeNull();
+
+      await c.req("PATCH", `/api/tickets/${kid.id}`, { state: "ready" });
+      c.advance(5);
+      await c.scheduler.tick();
+      expect(await treeWakes(c)).toHaveLength(2);
+    });
+
+    it("is not stopped while anything in the tree runs, is waiting to wake or has a scheduled check, and a done tree is left alone", async () => {
+      const c = (ctx = await setup());
+      const { root, kid } = await tree(c);
+      const [live] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.scrum.id, ticketId: kid.id }).returning();
+      await c.scheduler.tick();
+      expect(await treeWakes(c)).toEqual([]);
+      await c.db.update(runs).set({ endedAt: c.now() }).where(eq(runs.id, live!.id));
+
+      await c.db.update(tickets).set({ monitorAt: farFuture }).where(eq(tickets.id, kid.id));
+      await c.scheduler.tick();
+      expect(await treeWakes(c)).toEqual([]);
+      await c.db.update(tickets).set({ monitorAt: null }).where(eq(tickets.id, kid.id));
+
+      await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.scrum.id, ticketId: root.id, reason: "message", status: "deferred", notBefore: farFuture });
+      await c.scheduler.tick();
+      expect(await treeWakes(c)).toEqual([]);
+      await c.db.delete(wakes);
+
+      await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.watcherAgentId, c.scrum.id));
+      await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, kid.id));
+      await c.scheduler.tick();
+      expect(await treeWakes(c)).toEqual([]);
+    });
+
+    it("refuses a tree-stopped run's changes outside its tree", async () => {
+      const c = (ctx = await setup());
+      const { root, kid, other } = await tree(c);
+      const run = (await treeRun(c))!;
+      const token = await issueRunToken(c.db, { companyId: c.company.id, agentId: c.scrum.id, runId: run.runId });
+      const client = new Client({ name: "t", version: "0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(`http://${c.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+      const call = async (name: string, args: Record<string, unknown>) => ((await client.callTool({ name, arguments: args })) as { content: { text: string }[] }).content[0]!.text;
+      const outside = /outside the tree/;
+      expect(await call("assign_ticket", { ticketId: other.id, agent: "Scrum Master", note: "yours" })).toMatch(outside);
+      expect(await call("nudge", { agent: "Scrum Master", ticketId: other.id, why: "look" })).toMatch(outside);
+      expect(await call("create_ticket", { title: "Loose end" })).toMatch(outside);
+      expect(await call("create_ticket", { title: "Sub of other", parent: other.id })).toMatch(outside);
+      // Inside the tree the guard steps aside (the role check or the tool itself answers).
+      expect(await call("assign_ticket", { ticketId: kid.id, agent: "Scrum Master", note: "yours" })).not.toMatch(outside);
+      expect(await call("create_ticket", { title: "Sub of root", parent: root.id })).not.toMatch(outside);
+      await client.close();
+    });
   });
 });
