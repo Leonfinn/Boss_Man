@@ -1,6 +1,6 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, eq, isNotNull, max, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, max, sql } from "drizzle-orm";
 import type { JournalEntry, RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
@@ -23,6 +23,21 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
 
+  /** Marks a run ended and logs it. */
+  async function markEnded(runId: string, at: Date, outcome: string | null, usage?: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number }) {
+    const [ended] = await db
+      .update(runs)
+      .set({
+        endedAt: at,
+        outcome,
+        ...(usage ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cachedReadTokens: usage.cachedReadTokens, cachedWriteTokens: usage.cachedWriteTokens } : {}),
+      })
+      .where(eq(runs.id, runId))
+      .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
+    if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
+    return ended;
+  }
+
   async function apply(runner: Runner, event: RunnerEvent, at: Date) {
     // Any word from a run counts as a sign of life for stall detection (R32).
     if ("runId" in event && event.type !== "run.started") {
@@ -37,18 +52,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           .onConflictDoUpdate({ target: runs.id, set: { acpSessionId: event.acpSessionId, model: event.model, lastEventAt: at } });
         return;
       case "run.ended":
-        const [ended] = await db
-          .update(runs)
-          .set({
-            endedAt: at,
-            outcome: event.interrupted ? "interrupted" : event.error ? `error: ${event.error}` : event.stopReason,
-            ...(event.usage
-              ? { inputTokens: event.usage.inputTokens, outputTokens: event.usage.outputTokens, cachedReadTokens: event.usage.cachedReadTokens, cachedWriteTokens: event.usage.cachedWriteTokens }
-              : {}),
-          })
-          .where(eq(runs.id, event.runId))
-          .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
-        if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
+        await markEnded(event.runId, at, event.interrupted ? "interrupted" : event.error ? `error: ${event.error}` : event.stopReason, event.usage);
         return;
       case "run.cost": {
         if (event.costMicrosDelta === 0) return;
@@ -151,6 +155,20 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
         for (const l of listeners) l(runner, entry.event);
       }
       return inserted;
+    },
+
+    /**
+     * Ends a run from this side when the runner can't (offline, lost, or didn't confirm a
+     * cancel): the same marking and listeners as the runner's own run.ended. No-op if already ended.
+     */
+    async endRun(runId: string, outcome: string, at: Date = new Date()): Promise<boolean> {
+      const [run] = await db.select().from(runs).where(and(eq(runs.id, runId), isNull(runs.endedAt)));
+      if (!run) return false;
+      await markEnded(runId, at, outcome);
+      const [runner] = await db.select().from(runners).where(eq(runners.companyId, run.companyId));
+      // Listeners only read the event, and the runner's company; a company with no runner row still gets the handling.
+      for (const l of listeners) l(runner ?? ({ companyId: run.companyId } as Runner), { type: "run.ended", runId, stopReason: null, error: null });
+      return true;
     },
 
     async touch(runner: Runner, imageVersion: string | null) {

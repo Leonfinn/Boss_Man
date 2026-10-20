@@ -8,6 +8,7 @@ import { z } from "zod";
 import { effectiveLevel, inQuietHours, NOTIFY_LEVELS, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { companies, decisions, notifications, settings } from "../db/schema.js";
+import type { DecisionContext } from "./decisions.js";
 
 export const NotifySettings = z.object({
   quietHours: z
@@ -51,6 +52,12 @@ export function fitBytes(text: string, max: number): string {
     used += n;
   }
   return `${out}...`;
+}
+/** Where "See the evidence" goes: the run that stalled, the ticket that is blocked, else the decision list. */
+function evidenceLink(ctx: DecisionContext): string {
+  if (ctx.type === "stalled_run") return `#/runs/${ctx.runId}`;
+  if (ctx.type === "stale_blocker") return `#/tickets/${ctx.blockedTicketId}`;
+  return "#/decisions";
 }
 const PRIORITY: Record<NotifyLevel, number> = { note: 2, flag: 3, page: 4, ask: 4 };
 
@@ -144,7 +151,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         const options = d.options as string[];
         const alertOnly = options.length === 1 && options[0] === "Got it";
         const level: NotifyLevel = d.tier === "ceo" ? "note" : alertOnly ? "flag" : "ask";
-        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : `${company} needs a decision`, body: d.question, link: "#/decisions", decisionId: d.id });
+        await notify({ companyId: d.companyId, agentId: null, level, title: d.tier === "ceo" ? `${company}: for the CEO` : `${company} needs a decision`, body: d.question, link: evidenceLink(d.context as DecisionContext), decisionId: d.id });
       }
       return open.length;
     },

@@ -1,7 +1,7 @@
 // Decisions (R19–R22, R32): permission requests the policy engine escalates, questions
 // agents raise, engagement offers, stale blockers and stalled runs. Answering one resumes
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
-import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
@@ -16,7 +16,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runs, ticketArtifacts, ticketDependencies, tickets, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wikiPages } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -107,12 +107,47 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
   return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
 }
 
-export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date()) {
+export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false) {
   let wake: WakeHook | null = null;
+  let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
   let loopHooks: LoopHooks | null = null;
+
+  /** What the owner needs to judge a stalled run, worked out when asked (not stored). The last steps come from the run's own transcript. */
+  async function stallEvidence(runId: string) {
+    const [row] = await db
+      .select({ run: runs, agent: agents.name, ticketTitle: tickets.title, runnerId: runners.id, lastSeenAt: runners.lastSeenAt })
+      .from(runs)
+      .leftJoin(agents, eq(agents.id, runs.agentId))
+      .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+      .leftJoin(runners, eq(runners.companyId, runs.companyId))
+      .where(eq(runs.id, runId));
+    if (!row) return null;
+    const [last] = await db
+      .select({ seq: runnerEvents.seq, type: runnerEvents.type, payload: runnerEvents.payload, at: runnerEvents.occurredAt })
+      .from(runnerEvents)
+      .where(and(sql`(${runnerEvents.payload}->>'runId') = ${runId}`, inArray(runnerEvents.type, ["run.started", "run.update", "run.workspace", "run.permission_request", "run.ended"])))
+      .orderBy(desc(runnerEvents.seq))
+      .limit(1);
+    const [perm] = await db
+      .select({ id: decisions.id })
+      .from(decisions)
+      .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open"), sql`(${decisions.context}->>'runId') = ${runId}`))
+      .limit(1);
+    return {
+      runId,
+      agent: row.agent,
+      ticketId: row.run.ticketId,
+      ticket: row.ticketTitle,
+      startedAt: row.run.startedAt,
+      lastEventAt: row.run.lastEventAt,
+      lastStep: last ? { seq: last.seq, type: last.type, at: last.at, event: last.payload } : null,
+      runner: { connected: !!row.runnerId && isConnected(row.runnerId), lastSeenAt: row.lastSeenAt },
+      waitingOnOwner: !!perm,
+    };
+  }
 
   /** A blocked ticket whose blockers are all resolved moves to ready, and its assignee is woken. */
   async function releaseIfFree(ticketId: string, wakeAssignee = true) {
@@ -381,6 +416,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       wake = hook;
     },
 
+    /** How "Cancel run" stops a run: the runs service, which ends the run itself when the runner can't. */
+    setCancelHook(hook: (runId: string) => Promise<{ endedHere?: boolean }>) {
+      cancelRun = hook;
+    },
+
     async listOpen() {
       return db.select().from(decisions).where(eq(decisions.status, "open")).orderBy(asc(decisions.createdAt));
     },
@@ -482,7 +522,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
         return { ...d, companyName, agentName, blocks: chain, ...rank };
       });
-      return rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
+      const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
+      return Promise.all(sorted.map(async (r) => ((r.context as DecisionContext).type === "stalled_run" ? { ...r, evidence: await stallEvidence((r.context as { runId: string }).runId) } : r)));
     },
 
     /** Records the answer and resumes what was waiting. Returns null if not open. */
@@ -504,6 +545,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(eq(decisions.id, id));
 
       let delivered: boolean | null = null;
+      let endedHere = false;
       if (ctx.type === "permission") {
         const allowed = answer === ALLOW || answer === APPROVE_PLAN;
         if (ctx.plan && allowed && ctx.ticketId) await db.update(tickets).set({ planApprovedAt: now() }).where(eq(tickets.id, ctx.ticketId));
@@ -558,7 +600,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {
-        delivered = send(ctx.runnerId, { type: "run.cancel", runId: ctx.runId });
+        // A run that already ended needs no stopping.
+        const r = await cancelRun?.(ctx.runId).catch(() => null);
+        endedHere = !!r?.endedHere;
+        delivered = !!r && !r.endedHere;
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
@@ -579,7 +624,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
       }
-      return { id, answer, delivered };
+      return { id, answer, delivered, endedHere };
     },
   };
 }

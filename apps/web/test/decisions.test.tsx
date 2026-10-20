@@ -61,4 +61,48 @@ describe("decision queue", () => {
     expect(screen.getByRole("img", { name: "Agents at work, nothing needs you" })).toBeTruthy();
     expect(screen.getByText(/2 agents are working/)).toBeTruthy();
   });
+
+  it("shows the evidence on a stalled run and what each button does", async () => {
+    const ago = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+    const evidence = {
+      runId: "r1",
+      agent: "CEO",
+      ticketId: "t1",
+      ticket: "Checkout error states",
+      startedAt: ago(40),
+      lastEventAt: ago(14),
+      lastStep: { seq: 3, type: "run.update", at: ago(14), event: { update: { kind: "tool_call", title: "Run npm test", status: "in_progress" } } },
+      runner: { connected: false, lastSeenAt: ago(20) },
+      waitingOnOwner: false,
+    };
+    const items = [1, 2, 3, 4, 5, 6].map((n) => ({ seq: n, type: "run.update", at: ago(30 - n), event: { update: { kind: "tool_call", title: `Step ${n}`, status: "done" } } }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ run: { id: "r1", endedAt: null }, items, next: 6, more: false }), { status: 200 })));
+    render(
+      <Decisions
+        decisions={[decision({ kind: "stalled_run", question: "CEO has sent nothing for 14 minutes.", options: ["Keep waiting", "Cancel run"], recommendedOption: "Keep waiting", evidence })]}
+        companies={[company]}
+        loaded
+        agentsWorking={0}
+        onAnswered={() => {}}
+      />,
+    );
+    expect(screen.getByRole("link", { name: "Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
+    expect(screen.getByText("Last activity 14 minutes ago: Run npm test in_progress")).toBeTruthy();
+    expect(screen.getByText("Runner: offline since", { exact: false })).toBeTruthy();
+    expect(screen.getByText("It is not waiting on you.")).toBeTruthy();
+    expect(screen.getByText("Cancel run: stops it; message the agent on the task to start again.")).toBeTruthy();
+    expect(screen.getByText("Keep waiting: you'll be asked again in 30 minutes if it stays quiet.")).toBeTruthy();
+    expect((await screen.findByRole("link", { name: "See the whole run" })).getAttribute("href")).toBe("#/runs/r1");
+    expect(screen.queryByText("Step 1")).toBeNull();
+    expect(screen.getByText("Step 6")).toBeTruthy();
+  });
+
+  it("says when a stalled run never gave a sign of life", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ run: { id: "r1", endedAt: null }, items: [], next: 0, more: false }), { status: 200 })));
+    const evidence = { runId: "r1", agent: "CEO", ticketId: null, ticket: null, startedAt: new Date().toISOString(), lastEventAt: null, lastStep: null, runner: { connected: true, lastSeenAt: null }, waitingOnOwner: true };
+    render(<Decisions decisions={[decision({ kind: "stalled_run", options: ["Cancel run"], evidence })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("No sign of life since it was sent to the runner.")).toBeTruthy();
+    expect(screen.getByText("Runner: connected.")).toBeTruthy();
+    expect(screen.getByText("It is waiting on you for a permission answer.")).toBeTruthy();
+  });
 });

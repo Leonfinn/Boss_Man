@@ -69,6 +69,20 @@ export type Decision = {
   reasons: string[];
   dueDate: string | null;
   context?: { type?: string; planText?: string | null; ticketId?: string | null };
+  /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
+  evidence?: StallEvidence | null;
+};
+
+export type StallEvidence = {
+  runId: string;
+  agent: string | null;
+  ticketId: string | null;
+  ticket: string | null;
+  startedAt: string;
+  lastEventAt: string | null;
+  lastStep: TranscriptItem | null;
+  runner: { connected: boolean; lastSeenAt: string | null };
+  waitingOnOwner: boolean;
 };
 
 export type Ticket = {

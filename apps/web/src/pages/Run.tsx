@@ -25,8 +25,8 @@ function Steer({ runId }: { runId: string }) {
   const stop = async () => {
     setBusy(true);
     try {
-      await api(`/api/runs/${runId}/cancel`, { method: "POST" });
-      setNote({ ok: true, text: "Stopping the run." });
+      const r = await api<{ endedHere?: boolean }>(`/api/runs/${runId}/cancel`, { method: "POST" });
+      setNote({ ok: true, text: r.endedHere ? "The runner is offline, so Boss Man marked the run as stopped." : "Stopping the run." });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
     } finally {
