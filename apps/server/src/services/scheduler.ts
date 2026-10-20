@@ -13,6 +13,7 @@ import { agents, companies, costEvents, decisions, engagements, fundingSources, 
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
+import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy, resolveReviewer } from "./review-policy.js";
 import { buildBrief } from "./brief.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -784,7 +785,7 @@ export function schedulerService(
         const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
         const [wt] = w.ticketId
           ? await db
-              .select({ projectId: tickets.projectId, title: tickets.title, cap: tickets.costCapMicros, projectCap: projects.ticketCostCapMicros })
+              .select({ projectId: tickets.projectId, title: tickets.title, cap: tickets.costCapMicros, projectCap: projects.ticketCostCapMicros, projectName: projects.name, monthlyCap: projects.monthlyCapMicros })
               .from(tickets)
               .innerJoin(projects, eq(projects.id, tickets.projectId))
               .where(eq(tickets.id, w.ticketId))
@@ -802,6 +803,29 @@ export function schedulerService(
         }
         // A soft limit asks the owner once per window and limit; the work carries on meanwhile.
         for (const b of budgets.filter((b) => b.status.action === "ask" && inScope(b))) await askAboutBudget(b, w.companyId);
+
+        // A project's monthly cap holds new runs for its tickets; runs already going finish.
+        if (wt?.monthlyCap != null) {
+          const month = monthStartUtc(t);
+          const spent = await projectSpendMicros(db, wt.projectId, month);
+          if (spent >= wt.monthlyCap) {
+            await db
+              .insert(decisions)
+              .values({
+                companyId: w.companyId,
+                kind: "budget",
+                question: `${wt.projectName} reached its monthly cap of $${(wt.monthlyCap / 1e6).toFixed(2)} ($${(spent / 1e6).toFixed(2)} spent this month). Raise the cap by half, or keep it paused until next month?`,
+                options: ["Raise the cap by half", "Keep it paused"],
+                recommendedOption: "Keep it paused",
+                dedupeKey: `project-cap:${wt.projectId}:${month.toISOString().slice(0, 7)}:${wt.monthlyCap}`,
+                context: { type: "project_cap", projectId: wt.projectId },
+              })
+              .onConflictDoNothing();
+            const next = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth() + 1, 1));
+            await defer("project monthly cap reached", new Date(Math.min(next.getTime(), t.getTime() + 5 * 60_000)));
+            continue;
+          }
+        }
 
         // A ticket's spend across all its runs has a ceiling, because review and retry loops multiply runs (R53).
         const ticketCap = wt?.cap ?? wt?.projectCap;

@@ -1,0 +1,59 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { costEvents, runs } from "../src/db/schema.js";
+import { makeApp, signIn, type TestApp } from "./helpers.js";
+
+let t: TestApp;
+let cookie: string;
+beforeEach(async () => {
+  t = await makeApp();
+  ({ cookie } = await signIn(t));
+});
+afterEach(async () => {
+  await t.close();
+});
+
+const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) =>
+  t.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+
+describe("project page: star and spend", () => {
+  it("stars a project and lists it on the company payload", async () => {
+    const co = (await req("POST", "/api/companies", { name: "Co" })).json().company.id;
+    const p = (await req("POST", `/api/companies/${co}/projects`, { name: "Site" })).json();
+    expect(p.starred).toBe(false);
+    expect((await req("PATCH", `/api/projects/${p.id}`, { starred: true })).json().starred).toBe(true);
+    const c = (await req("GET", "/api/companies")).json().find((x: { id: string }) => x.id === co);
+    expect(c.projects).toEqual([{ id: p.id, companyId: co, name: "Site", starred: true }]);
+  });
+
+  it("sums a project's money spend, this month and all time, and ranks tickets", async () => {
+    const co = (await req("POST", "/api/companies", { name: "Co" })).json();
+    const p = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Site" })).json();
+    const other = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Other" })).json();
+    await req("PATCH", `/api/projects/${p.id}`, { ticketCostCapUsd: 5, monthlyCapUsd: 20 });
+    const big = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Big" })).json();
+    const small = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Small" })).json();
+    const elsewhere = (await req("POST", `/api/projects/${other.id}/tickets`, { title: "Else" })).json();
+    const api = (await req("POST", "/api/funding-sources", { name: "API", kind: "api_credit", provider: "anthropic", monthlyGrantUsd: 100, cycleAnchor: new Date().toISOString() })).json();
+    const sub = (await req("POST", "/api/funding-sources", { name: "Sub", kind: "subscription", provider: "anthropic" })).json();
+    const run = async (ticketId: string) => (await t.db.insert(runs).values({ companyId: co.company.id, ticketId }).returning())[0]!.id;
+    const cost = (runId: string, fundingSourceId: string, costMicros: number, occurredAt = new Date()) => t.db.insert(costEvents).values({ runId, fundingSourceId, companyId: co.company.id, costMicros, occurredAt });
+    const longAgo = new Date(Date.now() - 100 * 86_400_000);
+    const rBig = await run(big.id);
+    await cost(rBig, api.id, 3_000_000);
+    await cost(rBig, api.id, 1_000_000, longAgo);
+    await cost(await run(small.id), api.id, 500_000);
+    await cost(rBig, sub.id, 9_000_000); // subscription is not money
+    await cost(await run(elsewhere.id), api.id, 7_000_000); // another project
+
+    const s = (await req("GET", `/api/projects/${p.id}/spend`)).json();
+    expect(s.monthMicros).toBe(3_500_000);
+    expect(s.totalMicros).toBe(4_500_000);
+    expect(s.ticketCostCapMicros).toBe(5_000_000);
+    expect(s.monthlyCapMicros).toBe(20_000_000);
+    expect(s.topTickets).toEqual([
+      { id: big.id, title: "Big", micros: 4_000_000 },
+      { id: small.id, title: "Small", micros: 500_000 },
+    ]);
+    expect((await req("GET", `/api/projects/${crypto.randomUUID()}/spend`)).statusCode).toBe(404);
+  });
+});

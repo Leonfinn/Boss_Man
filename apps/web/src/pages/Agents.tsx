@@ -127,9 +127,9 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
   );
 }
 
-export function StarButton({ agent, onToggle }: { agent: { name: string; starred: boolean }; onToggle: () => void }) {
+export function StarButton({ agent, onToggle, where = "Chat" }: { agent: { name: string; starred: boolean }; onToggle: () => void; where?: string }) {
   return (
-    <button type="button" className="btn star" aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? "Starred: shown under Chat" : "Star to show under Chat"} onClick={onToggle}>
+    <button type="button" className="btn star" aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? `Starred: shown under ${where}` : `Star to show under ${where}`} onClick={onToggle}>
       <Star size={16} aria-hidden="true" fill={agent.starred ? "currentColor" : "none"} />
     </button>
   );

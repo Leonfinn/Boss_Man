@@ -116,6 +116,7 @@ function CompanySwitcher({ companies, current, waiting, onPick, onCreate }: { co
 export function Sidebar(props: {
   active: string;
   activeAgent?: string;
+  activeProject?: string;
   companies: Company[];
   current: Company | undefined;
   decisions: Decision[];
@@ -129,6 +130,7 @@ export function Sidebar(props: {
 }) {
   const [menu, setMenu] = useState(false);
   const starred = props.current?.agents.filter((a) => a.starred) ?? [];
+  const starredProjects = props.current?.projects?.filter((p) => p.starred) ?? [];
   const waiting = (companyId: string) => props.decisions.filter((d) => d.companyId === companyId).length;
   const decisionsHere = props.current ? waiting(props.current.id) : props.decisions.length;
   const label = GROUPS.flatMap((g) => g.items).find((i) => i.id === props.active || (props.active === "tickets" && i.id === "board"))?.label ?? "Menu";
@@ -163,6 +165,18 @@ export function Sidebar(props: {
                           <a className="nav" href={`#/chat/${a.companyId}/${a.id}`} onClick={() => setMenu(false)} aria-current={props.active === "chat" && props.activeAgent === a.id ? "page" : undefined}>
                             <Star size={14} strokeWidth={1.75} aria-hidden="true" />
                             <span className="nav-label">{a.name}</span>
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {n.id === "projects" && starredProjects.length > 0 && (
+                    <ul className="sub-nav" aria-label="Starred projects">
+                      {starredProjects.map((p) => (
+                        <li key={p.id}>
+                          <a className="nav" href={`#/board/${p.id}`} onClick={() => setMenu(false)} aria-current={props.active === "board" && props.activeProject === p.id ? "page" : undefined}>
+                            <Star size={14} strokeWidth={1.75} aria-hidden="true" />
+                            <span className="nav-label">{p.name}</span>
                           </a>
                         </li>
                       ))}

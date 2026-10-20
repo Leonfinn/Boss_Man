@@ -3,8 +3,9 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
+import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
@@ -13,7 +14,7 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/s
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agents, companies, costEvents, engagements, fundingSources, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { modelsService } from "./services/models.js";
@@ -486,7 +487,8 @@ export async function buildApp(opts: AppOptions) {
       const rows = await db.select().from(companies).orderBy(companies.name);
       // Retired agents (R62) only show on the Agents page, so they can't be given new work.
       const allAgents = await db.select().from(agents).where(isNull(agents.retiredAt));
-      return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id) }));
+      const allProjects = await db.select({ id: projects.id, companyId: projects.companyId, name: projects.name, starred: projects.starred }).from(projects).orderBy(projects.name);
+      return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id), projects: allProjects.filter((p) => p.companyId === c.id) }));
     });
 
     /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
@@ -851,6 +853,8 @@ export async function buildApp(opts: AppOptions) {
           verifyCommand: z.string().trim().min(1).max(1000).nullable(),
           deepVerifyCommand: z.string().trim().min(1).max(1000).nullable(),
           ticketCostCapUsd: z.number().positive().nullable(),
+          starred: z.boolean(),
+          monthlyCapUsd: z.number().positive().nullable(),
           landing: z.enum(["merge", "pull_request"]),
           gitHost: z.enum(["github", "gitea"]).nullable(),
           gitApiBase: z
@@ -862,7 +866,7 @@ export async function buildApp(opts: AppOptions) {
         })
         .partial()
         .parse(req.body);
-      const { ticketCostCapUsd, ...fields } = b;
+      const { ticketCostCapUsd, monthlyCapUsd, ...fields } = b;
       // A new repo address finds its host (R59), unless the owner set one with it.
       if (fields.repoUrl !== undefined && fields.gitHost === undefined) {
         const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
@@ -870,10 +874,33 @@ export async function buildApp(opts: AppOptions) {
       }
       const [p] = await db
         .update(projects)
-        .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}) })
+        .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
         .where(eq(projects.id, id))
         .returning();
       return p ?? reply.code(404).send({ error: "not_found" });
+    });
+
+    // What a project has cost (money only, as on the dashboard: subscription use is excluded). "This month" is the UTC calendar month.
+    owner.get("/api/projects/:id/spend", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [p] = await db.select({ cap: projects.ticketCostCapMicros, monthlyCap: projects.monthlyCapMicros }).from(projects).where(eq(projects.id, id));
+      if (!p) return reply.code(404).send({ error: "not_found" });
+      const t = opts.now ? opts.now() : new Date();
+      const monthStart = monthStartUtc(t);
+      const month = await projectSpendMicros(db, id, monthStart);
+      const all = await projectSpendMicros(db, id);
+      const sum = sql<string>`sum(${costEvents.costMicros})`;
+      const top = await db
+        .select({ id: tickets.id, title: tickets.title, micros: sum })
+        .from(costEvents)
+        .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
+        .innerJoin(runsTable, eq(runsTable.id, costEvents.runId))
+        .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
+        .where(and(eq(tickets.projectId, id), ne(fundingSources.kind, "subscription")))
+        .groupBy(tickets.id, tickets.title)
+        .orderBy(desc(sum))
+        .limit(10);
+      return { monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
     });
 
     // The setup wizard (R56): where the owner is in it, and what's still to do for a company.

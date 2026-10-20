@@ -5,6 +5,16 @@ import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
 import { STATUS_TONE } from "./Features";
+import { StarButton } from "./Agents";
+import { ProjectBudget } from "./ProjectBudget";
+import { ProjectRow } from "./Settings";
+
+const PROJECT_TABS = [
+  { id: "kanban", label: "Kanban" },
+  { id: "budget", label: "Budget" },
+  { id: "config", label: "Config" },
+] as const;
+const projectTab = (s: string | undefined) => PROJECT_TABS.find((t) => t.id === s)?.id ?? "kanban";
 
 function initials(name: string) {
   return name
@@ -221,7 +231,7 @@ function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask:
   );
 }
 
-export function Board({ companies, projectId, go, onCompaniesChanged }: { companies: Company[]; projectId: string | undefined; go: (to: string) => void; onCompaniesChanged: () => void }) {
+export function Board({ companies, projectId, subpage, go, onCompaniesChanged }: { companies: Company[]; projectId: string | undefined; subpage?: string; go: (to: string) => void; onCompaniesChanged: () => void }) {
   const projects = usePoll(
     async (signal) => (await Promise.all(companies.map((c) => api<Project[]>(`/api/companies/${c.id}/projects`, { signal })))).flat(),
     60_000,
@@ -271,7 +281,8 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
 
   const company = companies.find((c) => c.id === current?.companyId);
   const ceo = company?.agents.find((a) => a.role === "ceo");
-  return (
+  const tab = projectTab(subpage);
+  const head = (
     <>
       <header className="page-head">
         <div>
@@ -279,6 +290,13 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
         </div>
+        {current && (
+          <StarButton
+            agent={current}
+            where="Projects"
+            onToggle={() => void api(`/api/projects/${current.id}`, { method: "PATCH", body: { starred: !current.starred } }).then(() => { projects.reload(); onCompaniesChanged(); })}
+          />
+        )}
         {(projects.data?.length ?? 0) > 1 && (
           <div className="field">
             <label htmlFor="project-pick">Project</label>
@@ -292,6 +310,30 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
           </div>
         )}
       </header>
+      {current && (
+        <div className="tabs" role="tablist" aria-label="Project views">
+          {PROJECT_TABS.map((t) => (
+            <button key={t.id} type="button" role="tab" id={`proj-tab-${t.id}`} aria-selected={tab === t.id} aria-controls="proj-panel" onClick={() => go(`board/${current.id}${t.id === "kanban" ? "" : `/${t.id}`}`)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+  if (current && tab !== "kanban") {
+    return (
+      <>
+        {head}
+        <div id="proj-panel" role="tabpanel" aria-labelledby={`proj-tab-${tab}`} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          {tab === "budget" ? <ProjectBudget key={current.id} project={current} /> : <ProjectRow key={current.id} p={current} agents={company?.agents} onChanged={() => { projects.reload(); onCompaniesChanged(); }} />}
+        </div>
+      </>
+    );
+  }
+  return (
+    <>
+      {head}
       {current && !adding && (
         <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} onClick={() => openForm({ mode: view === "features" ? "feature" : "task", featureId: "" })}>
           Add

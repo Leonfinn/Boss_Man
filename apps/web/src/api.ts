@@ -35,7 +35,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 // ---------- Shapes the screens use ----------
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[] };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -48,6 +48,9 @@ export type Project = {
   landing: "merge" | "pull_request";
   gitHost: "github" | "gitea" | null;
   gitApiBase: string | null;
+  starred: boolean;
+  ticketCostCapMicros: number | null;
+  monthlyCapMicros: number | null;
 };
 
 /** Review routing per risk tier (step 1): "ceo", "senior-dev" or an agent id; the plan column also takes "owner" and "none". */
