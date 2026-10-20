@@ -1,5 +1,5 @@
 {
-  "id": "720eb4e8-5430-48e4-b3bd-ff87c15bb676",
+  "id": "079e7f74-d666-4713-a092-7207233d44ea",
   "prevId": "d082d3e1-f93e-4a95-95dd-2f43e99264f8",
   "version": "7",
   "dialect": "postgresql",
@@ -4306,12 +4306,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "cancel_requested_at": {
-          "name": "cancel_requested_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
@@ -6809,7 +6803,9 @@
         "openai",
         "bedrock",
         "foundry",
-        "gateway"
+        "gateway",
+        "openrouter",
+        "ollama"
       ]
     },
     "public.risk_tier": {

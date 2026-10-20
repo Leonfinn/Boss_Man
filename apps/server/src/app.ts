@@ -88,6 +88,8 @@ export type AppOptions = {
   diskLimits?: Partial<DiskLimits>;
   /** Outbound HTTP, e.g. phone pushes; tests replace it. */
   fetch?: typeof fetch;
+  /** The portal's own address for share links, e.g. http://192.168.68.67:3111; without it links use the owner's address. */
+  portalUrl?: string;
   /** Rate limits on the public feedback portal; tests lower them. */
   portalLimits?: Partial<PortalLimits>;
   /** Clock for scheduling, sweeps and ranking; tests move it forward. */
@@ -1176,7 +1178,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/feedback-settings", async (req) => {
       const { id } = IdParam.parse(req.params);
       const s = await feedback.settings(id);
-      return { ...s, drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
+      return { ...s, portalUrl: opts.portalUrl?.replace(/\/+$/, "") || null, drivers: await feedback.drivers(id), areas: await feedback.areas(id) };
     });
     owner.patch("/api/companies/:id/feedback-settings", async (req) => {
       const { id } = IdParam.parse(req.params);

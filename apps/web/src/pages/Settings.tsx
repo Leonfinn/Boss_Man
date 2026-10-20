@@ -170,7 +170,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
 /** A setup-token can only be proved by Claude Code, so its check runs on the runner (R58). */
 const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
-export function Credentials({ company, onChanged }: { company: Company; onChanged?: () => void }) {
+export function Credentials({ company, onChanged, title = "Credentials" }: { company: Company; onChanged?: () => void; title?: string }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   const [choice, setChoice] = useState(0);
@@ -228,7 +228,7 @@ export function Credentials({ company, onChanged }: { company: Company; onChange
   };
 
   return (
-    <Section id="creds-h" title="Credentials">
+    <Section id="creds-h" title={title}>
       <p className="muted" style={{ fontSize: 14 }}>
         Values are encrypted on the server and never shown again; agents get them as environment variables. Each value is checked when saved, e.g. for stray spaces.
       </p>
@@ -343,6 +343,8 @@ const PROVIDERS: Array<[string, string]> = [
   ["bedrock", "Amazon Bedrock"],
   ["foundry", "Microsoft Foundry"],
   ["gateway", "LLM gateway"],
+  ["openrouter", "OpenRouter"],
+  ["ollama", "Ollama"],
 ];
 /** Mirrors the server's rule: a subscription is only a Claude or ChatGPT plan. */
 const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai";
@@ -412,7 +414,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
           <summary>What the provider controls</summary>
           <div className="muted" style={{ fontSize: 14, display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
             <p>
-              The provider decides which service lists models for an API-key source (Anthropic, OpenAI and LLM gateways such as OpenRouter; Bedrock and Foundry use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from Credentials above, as environment variables.
+              The provider decides which service lists models for an API-key source (Anthropic, OpenAI and LLM gateways such as OpenRouter; Bedrock and Foundry use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from the Secrets page, as environment variables.
             </p>
             <ul style={{ margin: 0, paddingLeft: 18 }}>
               <li>Subscription + Anthropic: a Claude Pro or Max plan, run with a setup-token (<code>CLAUDE_CODE_OAUTH_TOKEN</code>).</li>
@@ -753,7 +755,16 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
       ) : (
         <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <Runner company={company} />
-          <Credentials company={company} />
+          <section className="card">
+            <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
+            <p className="muted" style={{ fontSize: 14 }}>
+              Credentials are added, granted and rotated on the{" "}
+              <button type="button" className="linkish" onClick={() => go("secrets")}>
+                Secrets
+              </button>{" "}
+              page.
+            </p>
+          </section>
           <Funding company={company} onChanged={onChanged} />
           <Chapters company={company} />
           <Section id="reviews-h" title="Reviews">

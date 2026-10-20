@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { api } from "../api";
+import { api, type Company } from "../api";
+import { Credentials } from "./Settings";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
@@ -66,7 +67,7 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
             ))}
           </ul>
         ) : (
-          <p className="muted">Not granted to any company. Grant it from a company's Settings.</p>
+          <p className="muted">Not granted to any company. Grant it above, under the company's variables.</p>
         )}
       </div>
       <form onSubmit={rotate} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-end" }}>
@@ -129,8 +130,10 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
   );
 }
 
-export function Secrets() {
+/** The one place for credentials: the chosen company's variables (add, grant, check), then every stored secret. */
+export function Secrets({ companies, companyId, onChanged }: { companies: Company[]; companyId: string | undefined; onChanged?: () => void }) {
   const list = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 60_000, "secrets");
+  const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const [open, setOpen] = useState<string | null>(null);
   return (
     <>
@@ -140,8 +143,10 @@ export function Secrets() {
           <p className="sub">Every stored credential, who gets it, and when it was used. Values are encrypted and never shown.</p>
         </div>
       </header>
+      {company && <Credentials key={company.id} company={company} title={`${company.name}'s variables`} onChanged={() => (list.reload(), onChanged?.())} />}
+      <h2 style={{ fontSize: 17, fontWeight: 600 }}>All stored secrets</h2>
       {list.data && list.data.length === 0 ? (
-        <p className="muted">No secrets yet. Add credentials from a company's Settings.</p>
+        <p className="muted">No secrets yet. Add one above.</p>
       ) : (
         <ul className="secret-list">
           {list.data?.map((s) => (
