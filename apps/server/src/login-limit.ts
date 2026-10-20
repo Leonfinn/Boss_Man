@@ -6,6 +6,7 @@ export type LoginLimits = { maxFailures: number; windowMs: number };
 export const DEFAULT_LOGIN_LIMITS: LoginLimits = { maxFailures: 10, windowMs: 15 * 60_000 };
 
 export function loginLimiter(limits: LoginLimits = DEFAULT_LOGIN_LIMITS, now: () => number = () => Date.now()) {
+  // shortcut: lost on restart, harmless because a reboot only resets what it costs an attacker (see the header).
   const failures = new Map<string, number[]>();
   const recent = (key: string) => {
     const cutoff = now() - limits.windowMs;

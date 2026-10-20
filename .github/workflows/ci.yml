@@ -16,6 +16,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Migration lint and in-memory state check (docs/10-migrations.md)
+        run: |
+          node --test scripts/*.test.mjs
+          node scripts/lint-migrations.mjs
+          node scripts/check-in-memory-state.mjs
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
@@ -32,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build the server image
-        run: docker build -f apps/server/Dockerfile -t boss-man-server:ci .
+        run: docker build -f apps/server/Dockerfile --build-arg BOSSMAN_COMMIT=${{ github.sha }} -t boss-man-server:ci .
       - name: Build the runner image
         run: docker build -f apps/runner/Dockerfile --build-arg BOSSMAN_IMAGE_VERSION=ci -t boss-man-runner:ci .
       - name: Build the launcher image

@@ -343,6 +343,8 @@ const PROVIDERS: Array<[string, string]> = [
   ["bedrock", "Amazon Bedrock"],
   ["foundry", "Microsoft Foundry"],
   ["gateway", "LLM gateway"],
+  ["openrouter", "OpenRouter"],
+  ["ollama", "Ollama"],
 ];
 /** Mirrors the server's rule: a subscription is only a Claude or ChatGPT plan. */
 const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai";

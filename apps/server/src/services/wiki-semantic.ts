@@ -28,6 +28,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
   const log = deps.log ?? (() => {});
   // shortcut: in-process debounce, lost on restart; the next write or "re-embed all" catches up. Use a job table if that hurts.
   const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; companyId: string }>();
+  // shortcut: in-flight embeds in this process only; lost on restart, harmless because drain() waits for them on shutdown.
   const running = new Set<Promise<void>>();
 
   async function settings(companyId: string): Promise<SemanticSettings> {

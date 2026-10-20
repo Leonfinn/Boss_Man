@@ -23,8 +23,6 @@ export const CANCEL_GUARD_MS = 60_000;
 export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersService>; now?: () => Date }) {
   let wake: WakeHook | null = null;
   const now = deps.now ?? (() => new Date());
-  // shortcut: cancels awaiting the runner's run.ended live in memory and are lost on a restart; the lost-run reaper in sweeps.ts covers that, later.
-  const cancelling = new Map<string, Date>();
 
   async function load(runId: string, companyId?: string) {
     const [r] = await db.select().from(runs).where(eq(runs.id, runId));
@@ -132,19 +130,15 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
         await deps.runners.endRun(runId, "stopped: runner offline", now());
         return { cancelled: true, endedHere: true };
       }
-      cancelling.set(runId, now());
+      await db.update(runs).set({ cancelRequestedAt: now() }).where(eq(runs.id, runId));
       return { cancelled: true };
     },
 
     /** Ends runs whose runner was told to stop them but never confirmed within the guard time. Called by the sweep. */
     async endUnconfirmedCancels(t: Date) {
-      for (const [runId, at] of cancelling) {
-        const [run] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, runId));
-        if (run?.endedAt) cancelling.delete(runId);
-        else if (t.getTime() - at.getTime() >= CANCEL_GUARD_MS) {
-          cancelling.delete(runId);
-          await deps.runners.endRun(runId, "stopped: runner didn't confirm", t);
-        }
+      const waiting = await db.select({ id: runs.id, at: runs.cancelRequestedAt }).from(runs).where(and(isNull(runs.endedAt), isNotNull(runs.cancelRequestedAt)));
+      for (const { id, at } of waiting) {
+        if (t.getTime() - at!.getTime() >= CANCEL_GUARD_MS) await deps.runners.endRun(id, "stopped: runner didn't confirm", t);
       }
     },
   };
