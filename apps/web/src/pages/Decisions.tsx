@@ -67,6 +67,18 @@ function kindOf(d: Decision) {
   return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
+/** The score in words: what each part added. */
+function why(d: { score: number; parts: { blocking: number; liveRun: number; urgency: number; age: number } }) {
+  const n = (x: number) => Math.round(x * 10) / 10;
+  const bits = [
+    d.parts.liveRun ? `${n(d.parts.liveRun)} for a paused agent` : null,
+    d.parts.blocking ? `${n(d.parts.blocking)} for the tasks it blocks` : null,
+    d.parts.urgency ? `${n(d.parts.urgency)} for being due soon` : null,
+    `${n(d.parts.age)} for waiting`,
+  ].filter(Boolean);
+  return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
+}
+
 export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
@@ -132,7 +144,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )
       ) : (
         <>
-          <p className="formula">SCORE = WHAT IT BLOCKS + HOW SOON IT'S DUE + HOW LONG IT HAS WAITED</p>
+          <div className="formula">
+            <p>The number is each decision's priority score: the highest comes first. It adds up three things, drawn as the bar under it:</p>
+            <ul className="score-legend">
+              <li>
+                <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer
+              </li>
+              <li>
+                <span className="swatch" style={{ background: "var(--amber)" }} /> how soon it is due
+              </li>
+              <li>
+                <span className="swatch" style={{ background: "#8a94a3" }} /> how long it has waited: 1 a day, up to 7
+              </li>
+            </ul>
+          </div>
           <ol className="queue">
             {shown.map((d) => {
               const k = kindOf(d);
@@ -141,7 +166,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const done = answered[d.id];
               return (
                 <li className="decision" key={d.id}>
-                  <div className="score">
+                  <div className="score" title={why(d)}>
                     <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
                       {Math.round(d.score)}
                     </b>
@@ -161,6 +186,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </span>
                     </div>
                     <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question}</h2>
+                    <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
                       {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
