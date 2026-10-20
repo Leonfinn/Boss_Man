@@ -1,0 +1,4 @@
+ALTER TABLE "companies" ADD COLUMN "review_policy" jsonb DEFAULT '{"trivial":{"planApprover":"none","reviewer":"ceo","ownerSignoff":false},"low":{"planApprover":"ceo","reviewer":"ceo","ownerSignoff":false},"medium":{"planApprover":"ceo","reviewer":"senior-dev","ownerSignoff":false},"high":{"planApprover":"owner","reviewer":"senior-dev","ownerSignoff":true},"critical":{"planApprover":"owner","reviewer":"senior-dev","ownerSignoff":true}}'::jsonb NOT NULL;--> statement-breakpoint
+ALTER TABLE "decisions" ADD COLUMN "for_agent_id" uuid;--> statement-breakpoint
+ALTER TABLE "projects" ADD COLUMN "review_policy" jsonb;--> statement-breakpoint
+ALTER TABLE "decisions" ADD CONSTRAINT "decisions_for_agent_id_agents_id_fk" FOREIGN KEY ("for_agent_id") REFERENCES "public"."agents"("id") ON DELETE set null ON UPDATE no action;

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, type Company, type FundingSource, type Project } from "../api";
+import { api, type Agent, type Company, type FundingSource, type Project } from "../api";
+import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
@@ -505,7 +506,7 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
 }
 
 /** `only`: "repo" hides the check pickers (detection needs the runner and git token), "checks" shows just them. */
-export function ProjectRow({ p, only, onChanged }: { p: Project; only?: "repo" | "checks"; onChanged?: () => void }) {
+export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: "repo" | "checks"; onChanged?: () => void; agents?: Agent[] }) {
   const showRepo = only !== "checks";
   const showChecks = only !== "repo";
   const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
@@ -565,6 +566,7 @@ export function ProjectRow({ p, only, onChanged }: { p: Project; only?: "repo" |
         )}
       </p>
       </>)}
+      {!only && agents && <ProjectReviews projectId={p.id} companyId={p.companyId} agents={agents} />}
       <SaveButton {...sv} busy={act.busy} />
       <div style={{ gridColumn: "1 / -1" }}>{act.view}</div>
     </form>
@@ -578,7 +580,7 @@ function Projects({ company }: { company: Company }) {
       <p className="muted" style={{ fontSize: 14 }}>
         With a repo, each task gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
       </p>
-      {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} />) : <p>No projects yet: create one on the Kanban.</p>}
+      {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} agents={company.agents} />) : <p>No projects yet: create one on the Kanban.</p>}
     </Section>
   );
 }
@@ -714,6 +716,12 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           <Credentials company={company} />
           <Funding company={company} onChanged={onChanged} />
           <Chapters company={company} />
+          <Section id="reviews-h" title="Reviews">
+            <p className="muted" style={{ fontSize: 14 }}>
+              For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this in its own settings below.
+            </p>
+            <CompanyReviews companyId={company.id} agents={company.agents} />
+          </Section>
           <Projects company={company} />
         </div>
       )}

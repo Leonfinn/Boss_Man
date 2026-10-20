@@ -4,8 +4,8 @@ import { usePoll } from "../hooks";
 export type RiskTiers = Array<{ tier: Risk; summary: string }>;
 
 /** The server's own description of each risk tier, fetched once per page. */
-export function useRiskTiers() {
-  return usePoll((signal) => api<RiskTiers>("/api/risk-tiers", { signal }), 3_600_000, "risk-tiers").data ?? [];
+export function useRiskTiers(companyId?: string) {
+  return usePoll((signal) => api<RiskTiers>(`/api/risk-tiers${companyId ? `?companyId=${companyId}` : ""}`, { signal }), 300_000, `risk-tiers-${companyId ?? ""}`).data ?? [];
 }
 
 const label = (r: string) => r[0]!.toUpperCase() + r.slice(1);

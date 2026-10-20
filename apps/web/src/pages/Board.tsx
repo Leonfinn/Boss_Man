@@ -221,7 +221,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
   const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
   const [view, setView] = useState<"all" | "features" | "tasks">("all");
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
-  const tiers = useRiskTiers();
+  const tiers = useRiskTiers(current?.companyId);
 
   if (companies.length === 0) {
     return (

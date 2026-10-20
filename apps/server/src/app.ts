@@ -5,7 +5,7 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import { and, asc, count, eq, gt, inArray, isNull } from "drizzle-orm";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
 import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
@@ -474,7 +474,59 @@ export async function buildApp(opts: AppOptions) {
     });
 
     /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
-    owner.get("/api/risk-tiers", async () => RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) })));
+    // With ?companyId the reviewer and sign-off come from that company's review policy.
+    owner.get("/api/risk-tiers", async (req) => {
+      const { companyId } = z.object({ companyId: Uuid.optional() }).parse(req.query);
+      if (!companyId) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
+      const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
+      if (!c) return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier) }));
+      const names = new Map((await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId))).map((a) => [a.id, a.name]));
+      const who = (ref: string) => (ref === "ceo" ? "the CEO" : ref === SENIOR_DEV ? "the Senior Developer (the CEO until one is hired)" : (names.get(ref) ?? "the CEO"));
+      return RISK_TIERS.map((tier) => ({ tier, summary: riskSummary(tier, c.policy[tier].ownerSignoff, who(c.policy[tier].reviewer)) }));
+    });
+
+    // Review routing: per risk tier, who approves plans, who reviews code and whether the owner signs off.
+    // Validates the policy, and that every agent it names belongs to the company.
+    async function checkPolicy(companyId: string, body: unknown): Promise<ReviewPolicy | string> {
+      const parsed = ReviewPolicySchema.safeParse(body);
+      if (!parsed.success) return parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+      const named = policyAgentIds(parsed.data);
+      if (named.length) {
+        const ok = new Set((await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), inArray(agents.id, named)))).map((a) => a.id));
+        const bad = named.find((a) => !ok.has(a));
+        if (bad) return `Agent ${bad} isn't an active agent of this company.`;
+      }
+      return parsed.data;
+    }
+    owner.get("/api/companies/:id/review-policy", async (req, reply) => {
+      const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, IdParam.parse(req.params).id));
+      return c ? c.policy : reply.code(404).send({ error: "not_found" });
+    });
+    owner.put("/api/companies/:id/review-policy", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const p = await checkPolicy(id, req.body);
+      if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
+      const [c] = await db.update(companies).set({ reviewPolicy: p }).where(eq(companies.id, id)).returning({ policy: companies.reviewPolicy });
+      return c ? c.policy : reply.code(404).send({ error: "not_found" });
+    });
+    /** The project's own policy, or null when it uses the company's. */
+    owner.get("/api/projects/:id/review-policy", async (req, reply) => {
+      const [p] = await db.select({ policy: projects.reviewPolicy }).from(projects).where(eq(projects.id, IdParam.parse(req.params).id));
+      return p ? { policy: p.policy } : reply.code(404).send({ error: "not_found" });
+    });
+    owner.put("/api/projects/:id/review-policy", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [proj] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, id));
+      if (!proj) return reply.code(404).send({ error: "not_found" });
+      const p = await checkPolicy(proj.companyId, req.body);
+      if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
+      await db.update(projects).set({ reviewPolicy: p }).where(eq(projects.id, id));
+      return { policy: p };
+    });
+    owner.delete("/api/projects/:id/review-policy", async (req, reply) => {
+      const [p] = await db.update(projects).set({ reviewPolicy: null }).where(eq(projects.id, IdParam.parse(req.params).id)).returning({ id: projects.id });
+      return p ? { policy: null } : reply.code(404).send({ error: "not_found" });
+    });
 
     // Secrets: values go in, never come out over the API.
     const SecretInput = z.object({

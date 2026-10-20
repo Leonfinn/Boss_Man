@@ -1,6 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
+import { DEFAULT_REVIEW_POLICY, type ReviewPolicy } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -54,6 +55,8 @@ export const companies = pgTable("companies", {
   ownerApprovesEngagements: boolean("owner_approves_engagements").notNull().default(true),
   /** Workspace disk cap (R54); null means the instance default. */
   diskCapBytes: bigint("disk_cap_bytes", { mode: "number" }),
+  /** Who approves plans, who reviews code and whether the owner signs off, per risk tier. */
+  reviewPolicy: jsonb("review_policy").$type<ReviewPolicy>().notNull().default(DEFAULT_REVIEW_POLICY),
   createdAt: createdAt(),
 });
 
@@ -168,6 +171,8 @@ export const projects = pgTable("projects", {
   deepVerifyCommand: text("deep_verify_command"),
   /** Default spend ceiling per ticket across all its runs (R53). */
   ticketCostCapMicros: micros("ticket_cost_cap_micros"),
+  /** Overrides the company's review policy for this project's tickets; null uses the company's. */
+  reviewPolicy: jsonb("review_policy").$type<ReviewPolicy>(),
   createdAt: createdAt(),
 });
 
@@ -304,6 +309,8 @@ export const decisions = pgTable("decisions", {
   recommendedOption: text("recommended_option").notNull(),
   raisedByAgentId: uuid("raised_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
   tier: decisionTier("tier").notNull().default("owner"),
+  /** With tier "ceo": the agent (a plan approver per the review policy) this is put to instead of the CEO; the CEO can still answer. */
+  forAgentId: uuid("for_agent_id").references(() => agents.id, { onDelete: "set null" }),
   status: decisionStatus("status").notNull().default("open"),
   answer: text("answer"),
   /** Collapses repeats, e.g. one stale-blocker row per blocker. */

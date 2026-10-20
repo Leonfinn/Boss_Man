@@ -6,8 +6,6 @@ export type RiskTier = (typeof RISK_TIERS)[number];
 export const riskOf = (risk: RiskTier | null | undefined): RiskTier => risk ?? "medium";
 const serious = (risk: RiskTier | null | undefined) => riskOf(risk) === "high" || riskOf(risk) === "critical";
 
-/** The owner, not the CEO, approves high and critical work (and its plans). */
-export const ownerReviews = serious;
 /** High and critical work also passes the project's deeper check before it merges. */
 export const deepChecks = serious;
 /** High and critical work ships to a staging target before production. */
@@ -17,11 +15,11 @@ export const stagingFirst = serious;
 export const planFirstByDefault = serious;
 
 /** What a tier means for the owner, in one line, built from the same rules the server applies (R61). */
-export function riskSummary(risk: RiskTier | null | undefined): string {
+export function riskSummary(risk: RiskTier | null | undefined, signoff = serious(risk), reviewer = "the CEO"): string {
   const tier = riskOf(risk);
   const plan = { trivial: "no plan needed", low: "a one-line approach first", medium: "a short plan first", high: "a full plan first", critical: "a full plan first" }[tier];
   const parts = [
-    ownerReviews(tier) ? "you review it, not the CEO" : "the CEO reviews it",
+    `${reviewer} reviews it${signoff ? " and you sign it off" : ""}`,
     deepChecks(tier) ? "the project's check and its deeper check run before it merges" : "the project's check runs before it merges",
     ...(stagingFirst(tier) ? ["it goes to staging before production"] : []),
     plan,

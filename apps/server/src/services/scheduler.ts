@@ -13,6 +13,7 @@ import { agents, companies, costEvents, decisions, engagements, fundingSources, 
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
+import { resolveReviewer } from "./review-policy.js";
 import { buildBrief } from "./brief.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
@@ -362,6 +363,7 @@ export function schedulerService(
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date) {
     const me = agentIdentity(agent, companyName);
     const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
+    if (agent.role === "ceo") lines.push("", "Reviews and plan approvals follow the company's review settings, so they may go to someone other than you; you review or approve when the chosen person is unavailable, and you can always overrule.");
     if (w.ticketId) {
       const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {
@@ -881,13 +883,14 @@ export function schedulerService(
       return runner ? deps.runners.send(runner.id, { type: "workspace.release", projectId: t.projectId, ticketId }) : false;
     },
 
-    /** A ticket went to review: the CEO is woken to review it, unless it moved it or has it itself (R85). */
+    /** A ticket went to review: the reviewer the review policy names (the CEO if they're unavailable) is woken, unless they moved it or have it themselves (R85). */
     async onTicketReview(ticketId: string, byAgentId: string | null, causedByRunId?: string | null) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) return;
-      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
-      if (!ceo || ceo.id === byAgentId || ceo.id === t.assigneeAgentId) return;
-      await this.notify(ceo.id, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
+      const { agent: reviewer, note } = await resolveReviewer(db, t);
+      if (note) await record(db, { companyId: t.companyId, kind: "review_fallback", summary: note, ticketId });
+      if (!reviewer || reviewer.id === byAgentId || reviewer.id === t.assigneeAgentId) return;
+      await this.notify(reviewer.id, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
     },
 
     /**
