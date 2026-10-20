@@ -70,6 +70,19 @@ function remember(id: string, set: (id: string) => void) {
   }
 }
 
+type Maintenance = { on: false } | { on: true; reason: string; since: string; deadline: string; runs: number; companies: number };
+
+/** On every page while a runner update is draining (docs/09-self-deploy.md): nothing new starts until the runs below finish. */
+function UpdateBanner({ m }: { m: Maintenance | null }) {
+  if (!m?.on) return null;
+  const waiting = m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"} to finish` : "swapping the runners now";
+  return (
+    <p className="banner" role="status" style={{ margin: "0 0 16px" }}>
+      Update pending: {waiting}. Nothing new starts until it is done.
+    </p>
+  );
+}
+
 function Signed({ onLogout }: { onLogout: () => void }) {
   const [route, go] = useRoute();
   const page = route[0] ?? "dashboard";
@@ -78,6 +91,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(notifySupported() ? Notification.permission : "unsupported");
   const feed = usePoll((signal) => api<NoticeFeed>("/api/notifications", { signal }), 10_000, "notifications");
+  const maintenance = usePoll((signal) => api<Maintenance>("/api/maintenance", { signal }), 5_000, "maintenance");
   const unprocessed = usePoll((signal) => api<Record<string, number>>("/api/feedback/unprocessed", { signal }), 30_000, "unprocessed");
   useFeedNotifications(feed.data);
   // Moving between screens refreshes the company list, so names and agents are never stale.
@@ -148,6 +162,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         onLogout={() => void api("/api/logout", { method: "POST" }).finally(onLogout)}
       />
       <main>
+        <UpdateBanner m={maintenance.data} />
         {lost ? (
           <State img={art.stuck} alt="Lost connection to the server" title="Lost connection to the server">
             <p>Boss Man keeps working on the server; this page will catch up as soon as it can reach it again.</p>

@@ -31,6 +31,8 @@ export type DecisionContext =
   | { type: "deploy"; deployId: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those at the NAS). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; result?: { result: string; message: string; at: string } }
+  /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
+  | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
   | { type: "ticket_cap"; ticketId: string }
   | { type: "project_cap"; projectId: string }
@@ -56,6 +58,9 @@ export const SEND_IT_BACK = "Send it back";
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
 export const NOT_NOW = "Not now";
+export const STOP_AND_UPDATE = "Stop the remaining runs and update now";
+export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${minutes} min`;
+export const CANCEL_UPDATE = "Cancel the update";
 
 export class AnswerError extends Error {}
 
@@ -82,6 +87,7 @@ export type LoopHooks = {
   land(ticketId: string, reviewer: string): Promise<unknown>;
 };
 
+export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
@@ -124,6 +130,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onAgentDecision: AgentDecisionHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
+  let maintenance: MaintenanceHook | null = null;
 
   /** What the owner needs to judge a stalled run, worked out when asked (not stored). The last steps come from the run's own transcript. */
   async function stallEvidence(runId: string) {
@@ -436,6 +443,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       selfDeploy = hook;
     },
 
+    setMaintenanceHook(hook: MaintenanceHook) {
+      maintenance = hook;
+    },
+
     setAgentHook(hook: AgentDecisionHook) {
       onAgentDecision = hook;
     },
@@ -625,6 +636,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             throw new AnswerError(`The request could not be written for the host deployer: ${(err as Error).message}`);
           }
         }
+      } else if (ctx.type === "maintenance") {
+        await maintenance?.answered(answer);
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
         await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
       } else if (ctx.type === "review_loop" || ctx.type === "ticket_cap") {

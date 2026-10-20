@@ -82,7 +82,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     const question =
       target === "runner"
-        ? `Update the runners to ${short(commit)}? This stops every runner and starts it on the new image. Agent runs in progress are cut off and restarted by crash recovery, which can repeat work and spend extra tokens.`
+        ? `Update the runners to ${short(commit)}? The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
           ? `Main has moved to ${short(commit)}, but the change touches deployment files (${a!.infraPaths.slice(0, 5).join(", ")}), so Boss Man cannot deploy it. Run scripts/deploy.sh at the NAS yourself.`
           : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}.${subjects ? `\n${subjects}` : ""}\nThe database is backed up first, then Boss Man restarts (a minute or two).`;
@@ -121,7 +121,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const [d] = z.string().uuid().safeParse(s.id).success ? await db.select().from(decisions).where(eq(decisions.id, s.id)) : [];
     const ctx = d?.context as DecisionContext | undefined;
     const what = s.target === "runner" ? "The runners" : "Boss Man";
-    const title = s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
+    // A runner "deploy" now only builds the image and asks for the drain; the swap's own result is reported by the drain (maintenance.ts).
+    const title = s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
     await deps.notify({ companyId: null, level: LEVEL[s.result], title, body: s.message, link: "#/settings" });
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));

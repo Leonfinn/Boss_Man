@@ -113,7 +113,9 @@ PY
 
 # One function per action, so a later phase can change what "deploy the server" means in one place.
 do_deploy_server() { (cd "$REPO" && scripts/deploy.sh --yes --no-runner --commit "$COMMIT"); }
-do_update_runner() { (cd "$REPO" && scripts/update-runner.sh); }
+# No --now: update-runner.sh builds and checks the image, then asks Boss Man to drain (inbox/drain.json) and returns,
+# so this lock is not held while runs finish. The swap itself is reported by the server.
+do_update_runner() { (cd "$REPO" && BOSSMAN_DEPLOYER="$D" scripts/update-runner.sh); }
 
 # Reads a field of scripts/deploy.sh's own status file.
 deploy_status_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-/mnt/NVME_Apps/Container_files/boss-man}/deploy-status.json}" "$1" 2>/dev/null || true; }
@@ -196,7 +198,7 @@ PY
   fi
   if ((rc == 0)); then
     [[ $result == nothing_new ]] || result=deployed
-    if [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="Runners updated (commit ${COMMIT:0:8})."; fi
+    if [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
   else
     case $result in partial | rolled_back) ;; *) result=failed ;; esac
     msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the NAS."

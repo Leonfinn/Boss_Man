@@ -26,6 +26,7 @@ import { secretGrants } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
+import { maintenanceService } from "./services/maintenance.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -100,6 +101,10 @@ export type AppOptions = {
   launcher?: LauncherOptions;
   /** The folder shared with the host deployer (docs/09-self-deploy.md); self-deploy is off without it. */
   deployerDir?: string;
+  /** How long a runner update waits for runs to finish before asking the owner (default 30). */
+  drainMinutes?: number;
+  /** How long a recreated runner has to reconnect before the update is reported as a problem (ms, default 5 minutes). */
+  drainReconnectMs?: number;
 };
 
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
@@ -212,6 +217,23 @@ export async function buildApp(opts: AppOptions) {
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
   });
   decisionsSvc.setWakeHook((w) => scheduler.notify(w.agentId, w));
+  const maintenance = maintenanceService(db, {
+    fleet: async () => (launch.enabled ? launch.fleet() : []),
+    recreate: (slug) => launch.recreate(slug),
+    connected: async (companyId) => {
+      const [r] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, companyId));
+      return !!r && runners.isConnected(r.id);
+    },
+    settled: () => scheduler.settled(),
+    tick: () => scheduler.tick(),
+    notify: (n) => notes.notify(n),
+    dir: opts.deployerDir,
+    drainMinutes: opts.drainMinutes,
+    reconnectMs: opts.drainReconnectMs,
+    now: opts.now,
+    log: (m) => app.log.warn(m),
+  });
+  decisionsSvc.setMaintenanceHook(maintenance);
   const engagementsSvc = engagementsService(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now });
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
@@ -1434,6 +1456,16 @@ export async function buildApp(opts: AppOptions) {
       return { paused };
     });
 
+    // The runner update hold (docs/09-self-deploy.md, phase 2): the banner's numbers, a manual start, and cancel.
+    owner.get("/api/maintenance", async () => maintenance.status());
+    owner.post("/api/maintenance/start", async (req, reply) => {
+      const { minutes } = z.object({ minutes: z.number().int().min(1).max(1440).optional() }).parse(req.body ?? {});
+      if (!launch.enabled) return reply.code(409).send({ error: "no_launcher", message: "Draining needs the launcher (BOSSMAN_LAUNCHER=1); without it runners are restarted by scripts/update-runner.sh --now." });
+      await maintenance.start({ minutes }); // leader-only
+      return maintenance.status();
+    });
+    owner.post("/api/maintenance/cancel", async () => ({ cancelled: await maintenance.cancel() })); // leader-only
+
     // Self-deploy: what the host deployer last reported, and the "Deploy latest" button.
     owner.get("/api/self-deploy", async () => selfDeploy.overview());
     owner.post("/api/self-deploy/deploy-latest", async (_req, reply) => {
@@ -1594,5 +1626,5 @@ export async function buildApp(opts: AppOptions) {
 
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
-  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki, semantic };
+  return { app, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki, semantic };
 }

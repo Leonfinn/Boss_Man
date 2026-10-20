@@ -170,11 +170,12 @@ main() {
   esac
   if ((do_runner)); then
     step "Updating the runners"
-    say "WARNING: this stops every runner and starts it again on the new image. Agent runs in progress"
-    say "are cut off and restarted by crash recovery, which can repeat work and spend extra tokens."
+    say "This builds the new runner image, then asks Boss Man to drain: nothing new starts, runs in progress finish,"
+    say "and each company's runner is swapped when it is idle. WITHOUT the launcher the runners restart at once and"
+    say "agent runs in progress are cut off and restarted by crash recovery (repeated work, extra tokens)."
     if ((YES || DRY)); then :; else
       [[ -t 0 ]] || { RESULT=deployed; MESSAGE="runners not updated: no terminal to ask on; rerun with --runner --yes"; write_status; die "No terminal to ask on, so the runners were NOT updated (the server is deployed). Run: scripts/deploy.sh --runner --yes"; }
-      read -r -p "Restart the runners now? [y/N] " ans
+      read -r -p "Update the runners now? [y/N] " ans
       [[ $ans == [yY]* ]] || { say "Skipped. Update them later with: scripts/update-runner.sh"; do_runner=0; }
     fi
     if ((do_runner)); then

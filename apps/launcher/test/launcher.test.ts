@@ -12,7 +12,8 @@ const TOKEN = `bmr_${"t".repeat(43)}`;
 
 /** A stand-in Docker that keeps containers in memory and records each call. */
 function fakeDocker() {
-  const containers = new Map<string, { id: string; labels: Record<string, string>; spec: unknown; state: string }>();
+  const containers = new Map<string, { id: string; labels: Record<string, string>; spec: unknown; state: string; imageId: string }>();
+  const image = { current: "img1" };
   const calls: string[] = [];
   let n = 0;
   const docker: Docker = {
@@ -21,17 +22,20 @@ function fakeDocker() {
       const [k, v] = label.split("=");
       return [...containers.entries()]
         .filter(([, c]) => c.labels[k!] === v)
-        .map(([name, c]) => ({ Id: c.id, Names: [`/${name}`], Image: "boss-man-runner:current", State: c.state, Status: c.state, Labels: c.labels, Created: 0 }) as ContainerSummary);
+        .map(([name, c]) => ({ Id: c.id, Names: [`/${name}`], Image: "boss-man-runner:current", ImageID: c.imageId, State: c.state, Status: c.state, Labels: c.labels, Created: 0 }) as ContainerSummary);
     },
     async inspect(name) {
       calls.push(`inspect ${name}`);
       const c = containers.get(name);
       return c ? ({ Id: c.id, Name: `/${name}`, Config: { Labels: c.labels }, State: { Status: c.state } } as ContainerInfo) : null;
     },
+    async imageId() {
+      return image.current;
+    },
     async create(name, spec) {
       calls.push(`create ${name}`);
       const id = `id${++n}`;
-      containers.set(name, { id, labels: (spec as { Labels: Record<string, string> }).Labels, spec, state: "created" });
+      containers.set(name, { id, labels: (spec as { Labels: Record<string, string> }).Labels, spec, state: "created", imageId: image.current });
       return id;
     },
     async start(id) {
@@ -46,7 +50,7 @@ function fakeDocker() {
       for (const [name, c] of containers) if (c.id === id) containers.delete(name);
     },
   };
-  return { docker, containers, calls };
+  return { docker, containers, calls, image };
 }
 
 const config = (): LauncherConfig => ({ dataRoot: mkdtempSync(path.join(tmpdir(), "bm-launch-")), network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4 * 1024 ** 3 });
@@ -120,7 +124,7 @@ describe("the runner launcher (R55)", () => {
 
     await s.call("PUT", "/runners/app-co", { token: TOKEN });
     expect(s.calls.slice(3)).toEqual(["inspect boss-man-runner-app-co", "remove id1", "create boss-man-runner-app-co", "start id2"]);
-    expect(await (await s.call("GET", "/runners")).json()).toEqual([{ slug: "app-co", state: "running", status: "running", image: "boss-man-runner:current" }]);
+    expect(await (await s.call("GET", "/runners")).json()).toEqual([{ slug: "app-co", state: "running", status: "running", image: "boss-man-runner:current", current: true }]);
 
     // Every call is logged, never the token.
     expect(s.log.map((e) => [e.method, e.path, e.status])).toContainEqual(["PUT", "/runners/app-co", 200]);
@@ -145,7 +149,7 @@ describe("the runner launcher (R55)", () => {
 
   it("won't touch a container it didn't make, and removes its own without the data", async () => {
     const s = await serve();
-    s.containers.set("boss-man-runner-app-co", { id: "theirs", labels: {}, spec: {}, state: "running" });
+    s.containers.set("boss-man-runner-app-co", { id: "theirs", labels: {}, spec: {}, state: "running", imageId: "x" });
     expect((await s.call("PUT", "/runners/app-co", { token: TOKEN })).status).toBe(409);
     expect((await s.call("POST", "/runners/app-co/restart")).status).toBe(409);
     expect((await s.call("DELETE", "/runners/app-co")).status).toBe(409);
@@ -166,11 +170,38 @@ describe("the runner launcher (R55)", () => {
     const api = launcher(cfg, fake.docker);
     await api.put("app-co", TOKEN);
     await api.put("homelab", TOKEN);
-    fake.containers.set("someone-else", { id: "x", labels: { "boss-man.launcher": "1", "boss-man.company": "app-co" }, spec: {}, state: "running" });
+    fake.containers.set("someone-else", { id: "x", labels: { "boss-man.launcher": "1", "boss-man.company": "app-co" }, spec: {}, state: "running", imageId: "x" });
     // A folder added to MOUNTS after the runner was first made (e.g. opencode) is created on recreate, not left to Docker.
     rmSync(path.join(cfg.dataRoot, "companies/app-co/opencode"), { recursive: true });
     expect(await api.recreateAll()).toEqual(["app-co", "homelab"]);
     expect(existsSync(path.join(cfg.dataRoot, "companies/app-co/opencode"))).toBe(true);
     expect(fake.containers.get("someone-else")!.id).toBe("x");
+  });
+
+  it("recreates one company's runner and says which runners are on the current image", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    await api.put("app-co", TOKEN);
+    await api.put("homelab", TOKEN);
+    fake.image.current = "img2"; // update-runner.sh tagged a new build
+    expect((await api.list()).map((r) => [r.slug, r.current])).toEqual([["app-co", false], ["homelab", false]]);
+    fake.calls.length = 0;
+    expect(await api.recreate("app-co")).toMatchObject({ slug: "app-co" });
+    expect(fake.calls.filter((c) => c.startsWith("create"))).toEqual(["create boss-man-runner-app-co"]);
+    expect((await api.list()).map((r) => [r.slug, r.current])).toEqual([["homelab", false], ["app-co", true]]);
+    await expect(api.recreate("nobody")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("exposes recreate over HTTP: POST only, no body, only its own containers", async () => {
+    const s = await serve();
+    await s.call("PUT", "/runners/app-co", { token: TOKEN });
+    expect((await s.call("GET", "/runners/app-co/recreate")).status).toBe(405);
+    expect((await s.call("POST", "/runners/app-co/recreate", { image: "alpine" })).status).toBe(400);
+    expect((await s.call("POST", "/runners/nobody/recreate")).status).toBe(404);
+    s.calls.length = 0;
+    expect((await s.call("POST", "/runners/app-co/recreate")).status).toBe(200);
+    expect(s.calls).toContain("create boss-man-runner-app-co");
+    expect((await s.call("POST", "/runners/app-co/recreate", undefined, null)).status).toBe(401);
   });
 });

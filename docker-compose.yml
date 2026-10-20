@@ -85,6 +85,8 @@ services:
       BOSSMAN_MASTER_KEY_FILE: /run/secrets/master_key
       # The runner launcher (R55); see the top of this file.
       BOSSMAN_LAUNCHER: ${BOSSMAN_LAUNCHER:-0}
+      # How long a runner update waits for runs to finish before asking you (minutes).
+      BOSSMAN_DRAIN_MINUTES: ${BOSSMAN_DRAIN_MINUTES:-30}
       BOSSMAN_LAUNCHER_URL: http://launcher:3105
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
       # Session cookies are Secure by default and need HTTPS (e.g. Tailscale Serve or a
