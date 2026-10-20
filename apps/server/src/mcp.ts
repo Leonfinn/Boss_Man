@@ -11,7 +11,7 @@ import { z } from "zod";
 import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, RISK_TIERS, stateNoteLine, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
@@ -29,6 +29,10 @@ import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import { AgentError, type agentsService } from "./services/agents.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
+
+/** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
+export const TREE_REASON = "tree stopped";
+export const TREE_ROOT_LINE = /^Tree of ticket ([0-9a-f-]{36})$/gm;
 
 type Scope = { companyId: string; agentId: string | null; runId: string };
 
@@ -85,6 +89,16 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     return rows.length === 1 ? rows[0]! : null;
   }
 
+  // A run woken with "tree stopped" may act only on the watched ticket and its sub-tasks; returns the refusal text, or null.
+  async function outsideTree(ticketId: string | undefined): Promise<string | null> {
+    const [w] = await db.select({ note: wakes.note }).from(wakes).where(and(eq(wakes.runId, scope.runId), eq(wakes.reason, TREE_REASON)));
+    if (!w) return null;
+    // Wakes for several trees of one watcher can merge, so the note may name more than one root.
+    const roots = [...(w.note ?? "").matchAll(TREE_ROOT_LINE)].map((m) => m[1]!);
+    const inside = roots.length && ticketId ? await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), or(inArray(tickets.id, roots), inArray(tickets.parentTicketId, roots)))) : [];
+    return inside.length ? null : "Refused: this run was woken to watch one task and its sub-tasks, and may only change those. That ticket is outside the tree.";
+  }
+
   async function isManager() {
     const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
     return me?.role === "ceo" || me?.role === "manager";
@@ -110,6 +124,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       inputSchema: { ticketId: z.string().uuid(), agent: z.string().min(1), note: z.string().min(1).max(240), expected_version: z.number().int().optional() },
     },
     async ({ ticketId, agent, note, expected_version }) => {
+      const out = await outsideTree(ticketId);
+      if (out) return fail(out);
       const to = await delegateTarget(agent);
       if ("error" in to) return fail(to.error);
       const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
@@ -172,6 +188,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       },
     },
     async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, ...rest }) => {
+      const out = await outsideTree(parent);
+      if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
       const to = assignee ? await delegateTarget(assignee) : null;
       if (to && "error" in to) return fail(to.error);
       let parentTask: Awaited<ReturnType<typeof work.parentOf>> | null = null;
@@ -357,6 +375,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
     async ({ agent, ticketId, why }) => {
       if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
+      const out = ticketId ? await outsideTree(ticketId) : null;
+      if (out) return fail(out);
       const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
       return r.ok ? text(`Nudged: ${r.delivered}.`) : fail(r.error);
     },

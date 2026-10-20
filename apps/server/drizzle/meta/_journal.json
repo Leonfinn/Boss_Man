@@ -281,6 +281,13 @@
       "when": 1792482792755,
       "tag": "0039_ticket_monitor",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1792486335355,
+      "tag": "0040_watch_stopped_fp",
+      "breakpoints": true
     }
   ]
 }

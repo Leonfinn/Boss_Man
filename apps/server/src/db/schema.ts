@@ -257,6 +257,8 @@ export const tickets = pgTable(
     watchedAt: timestamp("watched_at", { withTimezone: true }),
     /** The ticket's facts as of the last report, so the watcher runs only when something changed (R85). */
     watchFingerprint: text("watch_fingerprint"),
+    /** The stopped state of this ticket's tree the watcher was last woken for; null while the tree is moving. */
+    watchStoppedFp: text("watch_stopped_fp"),
     /** Spend ceiling across all of this ticket's runs (R53); falls back to the project's default. */
     costCapMicros: micros("cost_cap_micros"),
     /** Risk tier (R48): who reviews it, how deep the checks go, staging first. Null is medium. */

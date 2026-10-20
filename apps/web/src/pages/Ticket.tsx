@@ -444,6 +444,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               ) : (
                 <small className="muted">An agent, such as a scrum master, that posts a short status update on this task and what it depends on.</small>
               )}
+              <small className="muted" style={{ display: "block" }}>The watcher reports on this task and its sub-tasks, and steps in when all of them have stalled.</small>
             </dd>
             <dt>Check again</dt>
             <dd>
