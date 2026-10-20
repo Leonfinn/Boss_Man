@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-command deploy for the TrueNAS install: backup, pull, build, restart, health check.
-# Run it from anywhere as root, e.g.  sudo scripts/deploy.sh   (see docs/06-install-truenas.md)
+# Run it as root from the repository, e.g.  scripts/deploy.sh   (see docs/06-install-truenas.md)
 #
 #   scripts/deploy.sh               deploy what is new on the default branch
 #   scripts/deploy.sh --force       rebuild and restart even if nothing is new
