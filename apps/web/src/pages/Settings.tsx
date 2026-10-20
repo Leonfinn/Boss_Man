@@ -409,7 +409,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
           <summary>What the provider controls</summary>
           <div className="muted" style={{ fontSize: 14, display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
             <p>
-              The provider decides which service lists models for an API-key source (Anthropic and OpenAI only; other providers use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from Credentials above, as environment variables.
+              The provider decides which service lists models for an API-key source (Anthropic, OpenAI and LLM gateways such as OpenRouter; Bedrock and Foundry use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from Credentials above, as environment variables.
             </p>
             <ul style={{ margin: 0, paddingLeft: 18 }}>
               <li>Subscription + Anthropic: a Claude Pro or Max plan, run with a setup-token (<code>CLAUDE_CODE_OAUTH_TOKEN</code>).</li>
@@ -422,7 +422,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
                 Microsoft Foundry (API kinds only): <code>CLAUDE_CODE_USE_FOUNDRY</code> = 1, <code>ANTHROPIC_FOUNDRY_RESOURCE</code> (the resource name) and <code>ANTHROPIC_FOUNDRY_API_KEY</code>. Model names are your deployment names.
               </li>
               <li>
-                LLM gateway (API kinds only): <code>ANTHROPIC_BASE_URL</code> and <code>ANTHROPIC_AUTH_TOKEN</code>, for a gateway that serves Claude models in the Anthropic format. Anthropic doesn't support non-Claude models through a gateway.
+                LLM gateway (API kinds only): <code>ANTHROPIC_BASE_URL</code> and <code>ANTHROPIC_AUTH_TOKEN</code>, for a gateway that serves Claude models in the Anthropic format. For OpenRouter: <code>https://openrouter.ai/api</code>, and the OpenRouter key on this funding source; the model list then comes from OpenRouter. Claude Code is only supported on Claude models, so others are marked "may not work".
               </li>
             </ul>
             <p>Claude agents only: Codex runs on OpenAI.</p>
