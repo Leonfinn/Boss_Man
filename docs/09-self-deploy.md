@@ -233,7 +233,7 @@ PGlite (no `DATABASE_URL`) has no cross-process locks, so it is always the leade
 
 **How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings shows it at the top. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
 
-**If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; Postgres frees it when it notices the other connection is dead, which for a half-open TCP connection can take a while) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
+**If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; the leader connection sets `idle_session_timeout = 30s`, so Postgres ends a dead holder within about 30 s) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
 
 ## Open items
 

@@ -118,6 +118,11 @@ export function createLeader(opts: LeaderOptions = {}): Leader {
       if (client === c) void stepDown(`lost the lock connection: ${err.message}`);
     });
     await c.connect();
+    // If this process dies without closing (crash, power cut, network drop), Postgres would keep the session, and
+    // the lock, until TCP keepalive notices: up to 2 h by default. The heartbeat keeps a live session busy every 2 s,
+    // so only a dead one sits idle this long; Postgres then ends it and the lock is free for the next server.
+    // 30 s is above the 20 s a demotion may hold the connection open without heartbeats.
+    await c.query("set idle_session_timeout = '30s'");
     return c;
   };
 
