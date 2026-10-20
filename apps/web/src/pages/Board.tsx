@@ -16,7 +16,7 @@ function initials(name: string) {
 }
 
 /** A one-field form: the board's onboarding steps and "new ticket" all look like this. */
-function QuickAdd({ label, button, onAdd }: { label: string; button: string; onAdd: (value: string) => Promise<unknown> }) {
+export function QuickAdd({ label, button, onAdd }: { label: string; button: string; onAdd: (value: string) => Promise<unknown> }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
