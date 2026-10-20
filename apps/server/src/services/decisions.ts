@@ -29,6 +29,8 @@ export type DecisionContext =
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
+  /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those at the NAS). */
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; result?: { result: string; message: string; at: string } }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
   | { type: "ticket_cap"; ticketId: string }
   | { type: "project_cap"; projectId: string }
@@ -51,6 +53,9 @@ export const APPROVE_PLAN = "Approve plan";
 export const KEEP_PLANNING = "Keep planning";
 export const APPROVE_MERGE = "Approve and merge";
 export const SEND_IT_BACK = "Send it back";
+export const DEPLOY = "Deploy";
+export const UPDATE_RUNNERS = "Update runners";
+export const NOT_NOW = "Not now";
 
 export class AnswerError extends Error {}
 
@@ -76,6 +81,8 @@ export type LoopHooks = {
   /** Merges an approved ticket once the owner has signed off on it (R48). */
   land(ticketId: string, reviewer: string): Promise<unknown>;
 };
+
+export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
 
@@ -116,6 +123,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
   let loopHooks: LoopHooks | null = null;
+  let selfDeploy: SelfDeployHook | null = null;
 
   /** What the owner needs to judge a stalled run, worked out when asked (not stored). The last steps come from the run's own transcript. */
   async function stallEvidence(runId: string) {
@@ -170,6 +178,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   /** Checks an answer's extra input before anything changes. */
   async function validate(d: typeof decisions.$inferSelect, answer: string, extra: AnswerExtra) {
     const ctx = d.context as DecisionContext;
+    if (ctx.type === "self_deploy" && (answer === DEPLOY || answer === UPDATE_RUNNERS)) {
+      if (!selfDeploy) throw new AnswerError("Self-deploy is not set up on this install.");
+      await selfDeploy.check(ctx);
+    }
     if (ctx.type === "stale_blocker" && answer === REASSIGN) {
       if (!ctx.blockerTicketId) throw new AnswerError("Only a ticket can be reassigned.");
       if (!extra.assigneeAgentId) throw new AnswerError("Say who to reassign it to (assigneeAgentId).");
@@ -420,6 +432,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onDeploy = hook;
     },
 
+    setSelfDeployHook(hook: SelfDeployHook) {
+      selfDeploy = hook;
+    },
+
     setAgentHook(hook: AgentDecisionHook) {
       onAgentDecision = hook;
     },
@@ -599,6 +615,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await onEngagement?.(ctx.engagementId, answer === "Approve");
       } else if (ctx.type === "deploy") {
         await onDeploy?.(ctx.deployId, answer === "Approve");
+      } else if (ctx.type === "self_deploy") {
+        if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
+          try {
+            await selfDeploy!.send(ctx, id);
+          } catch (err) {
+            // Nothing reached the host, so the question stays open for another try.
+            await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+            throw new AnswerError(`The request could not be written for the host deployer: ${(err as Error).message}`);
+          }
+        }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
         await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
       } else if (ctx.type === "review_loop" || ctx.type === "ticket_cap") {

@@ -1,0 +1,13 @@
+# Self-deploy (docs/09-self-deploy.md): lets the server hand deploy requests to the host deployer.
+# Optional. Turn it on by adding it to COMPOSE_FILE in .env, after setting BOSSMAN_DEPLOYER and
+# creating the folders (docs/06-install-truenas.md, "Install the host deployer"):
+#   COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml:deploy/truenas-deployer.yml
+# Two plain folders, not the Docker socket: the server writes requests to inbox and reads results
+# from outbox (read-only). Nothing here lets the server run a command on the host.
+services:
+  server:
+    environment:
+      BOSSMAN_DEPLOYER_DIR: /run/deployer
+    volumes:
+      - ${BOSSMAN_DEPLOYER:?Set BOSSMAN_DEPLOYER in .env}/inbox:/run/deployer/inbox
+      - ${BOSSMAN_DEPLOYER:?Set BOSSMAN_DEPLOYER in .env}/outbox:/run/deployer/outbox:ro

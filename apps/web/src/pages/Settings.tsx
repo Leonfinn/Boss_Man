@@ -751,6 +751,49 @@ function Chapters({ company }: { company: Company }) {
   );
 }
 
+type SelfDeployView = {
+  enabled: boolean;
+  pending: boolean;
+  status: { result: string; message: string; target: string; to_commit: string; ended: string; started: string } | null;
+  available: { tip: string; deployed: string; checkedAt: string; commits: unknown[] } | null;
+};
+
+/** What the host deployer last did, and a button to ask for the newest main (docs/09-self-deploy.md). Hidden when self-deploy is off. */
+function SelfDeploy({ go }: { go: (to: string) => void }) {
+  const view = usePoll((signal) => api<SelfDeployView>("/api/self-deploy", { signal }), 10_000, "self-deploy");
+  const act = useAction();
+  const v = view.data;
+  if (!v?.enabled) return null;
+  const s = v.status;
+  const waiting = v.available && v.available.tip && v.available.tip !== v.available.deployed;
+  return (
+    <Section id="deploy-h" title="Updates">
+      <p style={{ fontSize: 14 }}>
+        {s ? `Last deploy: ${s.result.replace(/_/g, " ")}, ${s.target} ${s.to_commit.slice(0, 8)}, ${when(s.ended || s.started)}. ${s.message}` : "No deploy yet."}
+      </p>
+      <p className="muted" style={{ fontSize: 14 }}>
+        {v.pending ? "A request is waiting for the host (it checks every minute)." : v.available ? (waiting ? `Main is ahead: ${v.available.deployed.slice(0, 8)} to ${v.available.tip.slice(0, 8)}.` : `Up to date as of ${when(v.available.checkedAt)}.`) : "The host deployer has not reported yet."}
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || v.pending || s?.result === "running"}
+          onClick={() =>
+            act.run(async () => {
+              await api("/api/self-deploy/deploy-latest", { method: "POST", body: {} });
+              go("decisions");
+            })
+          }
+        >
+          Deploy latest
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 export function Settings({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   return (
@@ -775,6 +818,7 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
       ) : (
         <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <Runner company={company} />
+          <SelfDeploy go={go} />
           <section className="card">
             <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
             <p className="muted" style={{ fontSize: 14 }}>

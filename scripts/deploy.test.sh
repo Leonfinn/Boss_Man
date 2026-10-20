@@ -22,4 +22,30 @@ check apps/launcher/src/m.ts yes
 check packages/shared/i.ts yes
 check pnpm-lock.yaml yes
 check apps/runner-extra/y no
+
+# --commit deploys exactly that commit even when main has moved on, using a fake docker.
+cd /; t="$(mktemp -d)"; trap 'rm -rf "$d" "$t"' EXIT
+git init -q --bare -b main "$t/origin.git"
+git clone -q "$t/origin.git" "$t/src" 2>/dev/null; cd "$t/src"; git config user.email t@t; git config user.name t
+mkdir scripts; cp "$here/deploy.sh" scripts/; echo 1 >f; git add -A; git commit -qm one; git push -q origin HEAD:main 2>/dev/null; git fetch -q
+git branch -q --set-upstream-to=origin/main main; git remote set-head origin main >/dev/null
+one="$(git rev-parse HEAD)"; echo 2 >f; git commit -qam two; two="$(git rev-parse HEAD)"; echo 3 >f; git commit -qam three; three="$(git rev-parse HEAD)"
+git push -q origin HEAD:main 2>/dev/null; git reset -q --hard "$one"
+mkdir "$t/bin"; cat >"$t/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+echo "docker $*" >>"$FAKE_LOG"
+case "$*" in
+  *pg_dump*) echo dump ;; *"config --services"*) echo server ;; *"ps -q"*) echo cid ;; *inspect*) echo healthy ;;
+esac
+FAKE
+chmod +x "$t/bin/docker"
+export FAKE_LOG="$t/docker.log" BOSSMAN_BACKUP_DIR="$t/backups"
+PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null
+[[ $(git rev-parse HEAD) == "$two" ]] || { echo "FAIL: --commit did not land on the requested commit"; exit 1; }
+grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: status result"; exit 1; }
+grep -q "\"to_commit\":\"$two\"" "$t/backups/deploy-status.json" || { echo "FAIL: status commit"; exit 1; }
+grep -q "compose up -d" "$FAKE_LOG" || { echo "FAIL: did not restart"; exit 1; }
+git reset -q --hard "$three"
+if PATH="$t/bin:$PATH" scripts/deploy.sh --no-runner --commit "$two" >/dev/null 2>&1; then echo "FAIL: went backwards"; exit 1; fi
+if scripts/deploy.sh --commit abc >/dev/null 2>&1; then echo "FAIL: short hash accepted"; exit 1; fi
 echo "deploy.test.sh: ok"

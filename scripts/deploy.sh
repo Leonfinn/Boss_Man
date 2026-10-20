@@ -7,6 +7,7 @@
 #   scripts/deploy.sh --runner      also update the runners (default: only if their code changed)
 #   scripts/deploy.sh --no-runner   never update the runners
 #   scripts/deploy.sh --yes         do not ask before restarting the runners
+#   scripts/deploy.sh --commit SHA  deploy exactly this commit (a fast-forward of what runs); used by host-deployer.sh
 #   scripts/deploy.sh --dry-run     show the steps without changing anything
 #   scripts/deploy.sh --rollback    put the previous commit back (code only, never the database)
 #
@@ -34,7 +35,7 @@ needs_runner() { # old new
   git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|packages/shared/|pnpm-lock\.yaml$)'
 }
 
-DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0
+DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0 COMMIT=
 RESULT=running FROM="" TO="" BACKUP="" STARTED="" MESSAGE=""
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -120,10 +121,11 @@ do_rollback() {
 }
 
 main() {
-  for a in "$@"; do case $a in
+  while (($#)); do case $1 in
     --force) FORCE=1 ;; --runner) RUNNER=yes ;; --no-runner) RUNNER=no ;; --yes) YES=1 ;;
-    --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *) die "Unknown option: $a" ;; esac; done
+    --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    --commit) shift; COMMIT="${1:-}"; [[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || die "--commit needs a full 40-character commit hash." ;;
+    *) die "Unknown option: $1" ;; esac; shift; done
 
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
   STARTED="$(now)"; trap on_exit EXIT
@@ -138,12 +140,16 @@ main() {
 
   step "Checking for new commits"
   git fetch --quiet
-  old="$(git rev-parse HEAD)"; new="$(git rev-parse '@{u}')"; FROM="$old"; TO="$new"
+  old="$(git rev-parse HEAD)"; new="${COMMIT:-$(git rev-parse '@{u}')}"; FROM="$old"; TO="$new"
+  if [[ -n $COMMIT ]]; then
+    git cat-file -e "$new^{commit}" 2>/dev/null || die "Commit ${new:0:8} is not in the repository after fetching."
+    git merge-base --is-ancestor "$old" "$new" || die "Commit ${new:0:8} is not a fast-forward of ${old:0:8}."
+  fi
   if [[ $old == "$new" ]]; then
     ((FORCE)) || { say "Nothing new to deploy (at ${old:0:8})."; RESULT=nothing_new; MESSAGE="nothing new"; write_status; exit 0; }
     say "Nothing new, but --force was given: rebuilding what is checked out (${old:0:8})."
   else
-    say "About to deploy these commits:"; git log --oneline 'HEAD..@{u}'
+    say "About to deploy these commits:"; git log --oneline "HEAD..$new"
   fi
 
   step "Backing up the database"
@@ -153,7 +159,7 @@ main() {
   say "Current commit recorded for rollback: ${old:0:8}"
 
   step "Pulling the code"
-  run git pull --ff-only --quiet
+  run git merge --ff-only --quiet "$new"
   rebuild_and_start || { RESULT=failed; MESSAGE="server not healthy after ${HEALTH_TIMEOUT}s"; write_status; print_rollback_help; exit 1; }
   say "The server is healthy."
 

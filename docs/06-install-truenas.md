@@ -333,6 +333,7 @@ It stops if the working tree has uncommitted changes, if you are not on the defa
 
 - `--dry-run` shows the steps without running anything.
 - `--runner` / `--no-runner` force or skip the runner update. Updating runners stops every runner and restarts it, which cuts off agent runs in progress; the script warns and asks first (`--yes` skips the question).
+- `--commit <40-character hash>` deploys exactly that commit (it must be a fast-forward of what runs). The host deployer (step 9a) uses it.
 - `--rollback` puts the previous commit back and rebuilds. It never touches the database. If a deploy fails the health check, the script prints the exact rollback and restore commands and changes nothing by itself.
 
 Database changes apply by themselves when the server starts.
@@ -379,6 +380,155 @@ cd /mnt/NVME_Apps/Container_files/boss-man/src && sudo docker compose down; cd /
 ```sh
 sudo rm -rf /mnt/NVME_Apps/Container_files/boss-man/src /mnt/NVME_Apps/Container_files/boss-man/data
 ```
+
+## 9a. Install the host deployer (optional)
+
+This lets you update Boss Man from its own Decisions page: when `main` moves on GitHub, Boss Man asks "Deploy abc1234?", and on your approval a root script on the NAS runs `scripts/deploy.sh`. How it works and what it refuses is in `docs/09-self-deploy.md`. Nothing here gives a container `docker.sock`.
+
+Everything below is typed in a **root shell** on the NAS (TrueNAS UI > System > Shell, or `su -` over SSH), so there is no `sudo` in front of the commands. Do the steps in this order. Set the folder once in the shell, and use it in every step:
+
+```sh
+D=/mnt/NVME_Apps/Container_files/boss-man/deployer
+```
+
+**Before you start**
+- `main` on GitHub should be branch-protected, so agents can only land reviewed PRs: Repo > Settings > Branches > add a rule for `main` that requires a pull request. The deployer treats the tip of `main` as approved code.
+- The `src` checkout must be on `main`, clean, and able to read GitHub with the deploy key from step 2. Check that the NAS sees the tip of `main`; it prints one line, a hash and `refs/heads/main`:
+
+  ```sh
+  git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main
+  ```
+
+**1. Get this code onto the NAS, by hand.** The change that adds the deployer edits `scripts/` and `deploy/`, which the deployer itself refuses to deploy, so the first time is yours:
+
+```sh
+cd /mnt/NVME_Apps/Container_files/boss-man/src && scripts/deploy.sh
+```
+
+Nothing changes for Boss Man yet: the new compose file is opt-in (step 6).
+
+**2. Create the folders.** The server (uid 1000) may write only `inbox`; it reads `outbox`.
+
+```sh
+mkdir -p $D/inbox $D/outbox $D/state
+chown root:root $D $D/outbox $D/state && chmod 755 $D $D/outbox && chmod 700 $D/state
+chown 1000:1000 $D/inbox && chmod 750 $D/inbox
+ls -ld $D $D/inbox $D/outbox $D/state
+```
+
+**3. Install the script as a copy.** Read it first (`less /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh`). Copy it; do not make a link into the checkout, because a link would let a merged PR change what root runs.
+
+```sh
+cp /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh $D/host-deployer.sh
+chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
+```
+
+When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it (scripts are infra). Read the diff, hand-deploy with `scripts/deploy.sh`, and copy it over again. To see whether your copy is current:
+
+```sh
+diff $D/host-deployer.sh /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh && echo same
+```
+
+**4. The config file, with the alert webhook.** This is the whole alert setup. It lives only here, not in Boss Man, so it still works when Boss Man is down. Keep the single quotes (a URL can contain `?` and `&`). Replace the address with your Home Assistant's, and the last part with the long random ID you will use in the automation (see "Home Assistant" below):
+
+```sh
+cat > $D/host.conf <<'EOF'
+WEBHOOK_URL='http://homeassistant.local:8123/api/webhook/PUT-A-LONG-RANDOM-ID-HERE'
+WEBHOOK_ON_SUCCESS=1
+EOF
+chown root:root $D/host.conf && chmod 600 $D/host.conf
+```
+
+- `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
+- Optional lines: `REPO=` (the checkout; default `$D/../src`) and `RATE_LIMIT_SECONDS=600`.
+- The script refuses to start if this file is not owned by the user running it with mode 600.
+- It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
+
+Test the webhook alone, with the same URL, before anything else:
+
+```sh
+. $D/host.conf && curl -fsS -X POST -H 'Content-Type: application/json' -d '{"result":"failed","message":"Test from the NAS","from_commit":"aaaaaaaa","to_commit":"bbbbbbbb","at":"2026-10-20T12:00:00Z"}' "$WEBHOOK_URL" && echo sent
+```
+
+Your phone should buzz. A `404` from curl means Home Assistant does not know that webhook ID.
+
+**5. Test the script.** First with no request: it reads `main` and writes what is waiting.
+
+```sh
+$D/host-deployer.sh && cat $D/outbox/available.json
+```
+
+Then rehearse a request without running anything. `--dry-run` runs every check and leaves the file where it is:
+
+```sh
+TIP=$(git -C /mnt/NVME_Apps/Container_files/boss-man/src ls-remote origin refs/heads/main | cut -f1)
+printf '{"id":"00000000-0000-4000-8000-000000000001","target":"server","commit":"%s","requestedAt":"2026-10-20T12:00:00Z","approvedBy":"me"}\n' "$TIP" > $D/inbox/request.json
+$D/host-deployer.sh --dry-run
+rm -f $D/inbox/request.json
+```
+
+You should see either `nothing_new: Nothing new: ... already deployed` (you are up to date) or `[dry-run] checks passed: would run: scripts/deploy.sh --yes --no-runner --commit ...`. A `rejected:` line says why.
+
+**6. Let the server see the folders.** This is the one compose change, and it is also yours to apply. Add the opt-in file and the folder to `.env`, then recreate the server:
+
+```sh
+cd /mnt/NVME_Apps/Container_files/boss-man/src
+sed -i 's#^COMPOSE_FILE=.*#&:deploy/truenas-deployer.yml#' .env
+echo "BOSSMAN_DEPLOYER=$D" >> .env
+grep -E '^(COMPOSE_FILE|BOSSMAN_DEPLOYER)=' .env
+docker compose up -d server
+docker compose exec server ls /run/deployer
+```
+
+`COMPOSE_FILE` should now end in `:deploy/truenas-deployer.yml`, and the last command should list `inbox` and `outbox`. Reload Boss Man: **Settings** now has an **Updates** section.
+
+**7. The cron job.** In the TrueNAS UI: **System > Advanced > Cron Jobs > Add** (field names as of 25.10; UNVERIFIED, check them on your version):
+- **Description:** `Boss Man host deployer`
+- **Command:** `/mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh`
+- **Run As User:** `root`
+- **Schedule:** custom, `* * * * *` (every minute)
+- **Hide Standard Output:** ticked (the script keeps its own log). Leave **Hide Standard Error** unticked.
+- **Enabled:** ticked.
+
+Save it. A few minutes later `$D/outbox/available.json` should have a newer `checkedAt`. The log is `$D/deployer.log`.
+
+**8. Try it for real.** When `main` is ahead, a "Deploy abc1234?" decision appears (with a notification); **Settings > Updates > Deploy latest** raises it on demand. Approve it. Within a minute the host starts, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the NAS with `tail -f $D/deployer.log`.
+
+What you may see instead of a deploy:
+- "Rejected: this change touches deployment files": run `scripts/deploy.sh` yourself in the `src` folder.
+- "Rejected: only one server deploy every 10 minutes": wait, then press **Deploy latest**.
+- "is not the tip of main": main moved after you approved; approve the new one.
+- Runner code changed: after the server is deployed, a second decision "Update the runners?" appears. It cuts off runs in progress, so approve it when the agents are quiet.
+
+**Turn it off:** disable the cron job, or remove `:deploy/truenas-deployer.yml` from `COMPOSE_FILE` and run `docker compose up -d server`.
+
+### Home Assistant: a phone alert from the webhook
+
+Create an automation (Settings > Automations & Scenes > Create > Edit in YAML) with a `webhook` trigger. Pick a long random `webhook_id` (for example the output of `openssl rand -hex 24`); anyone who knows it can trigger the automation, so treat it like a password. This uses the current syntax (`triggers:` / `trigger: webhook`, `actions:` / `action:`), which Home Assistant introduced in 2024.10 (**UNVERIFIED** against your version):
+
+```yaml
+alias: Boss Man deploy alert
+description: The NAS posts here when a Boss Man deploy fails or is refused.
+triggers:
+  - trigger: webhook
+    webhook_id: "PUT-A-LONG-RANDOM-ID-HERE"
+    allowed_methods:
+      - POST
+    local_only: true
+actions:
+  - action: notify.mobile_app_YOUR_PHONE
+    data:
+      title: "Boss Man deploy: {{ trigger.json.result }}"
+      message: >-
+        {{ trigger.json.message }}
+        ({{ trigger.json.from_commit[:8] }} to {{ trigger.json.to_commit[:8] }})
+mode: queued
+```
+
+- The webhook's address is `http://<home-assistant>:8123/api/webhook/<webhook_id>`; that is what goes in `WEBHOOK_URL`.
+- `local_only: true` accepts only requests from your local network, so the NAS must reach Home Assistant directly, not through a public URL or a reverse proxy that adds forwarding headers.
+- `trigger.json` is the parsed JSON body of the POST. `notify.mobile_app_YOUR_PHONE` is the notify action Home Assistant makes for your phone's companion app; find its exact name in Developer tools > Actions.
+- Source for the trigger options and `trigger.json`: [Home Assistant, Webhook trigger](https://www.home-assistant.io/docs/automation/trigger/#webhook-trigger). That page could not be opened from where this was written, so the YAML above is from memory of it and not checked; test it with the curl line in step 4.
 
 ## 9b. Upgrading to v1.2
 
