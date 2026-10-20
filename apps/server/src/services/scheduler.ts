@@ -252,6 +252,8 @@ export function schedulerService(
       .where(and(or(eq(tickets.id, root.id), eq(tickets.parentTicketId, root.id)), ne(tickets.systemState, "done")))
       .orderBy(asc(tickets.id));
     if (!tree.length || tree.some((x) => x.t.monitorAt)) return null;
+    // Work in review waits on its reviewer (the review flow wakes them), so the tree hasn't stalled.
+    if (tree.some((x) => x.t.systemState === "review")) return null;
     const ids = tree.map((x) => x.t.id);
     const [busyRun] = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt))).limit(1);
     const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), inArray(wakes.status, ["queued", "deferred"]))).limit(1);

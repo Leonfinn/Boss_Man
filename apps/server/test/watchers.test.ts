@@ -232,6 +232,11 @@ describe("ticket watchers (R80)", () => {
       expect(await treeWakes(c)).toEqual([]);
       await c.db.delete(wakes);
 
+      // Work in review waits on its reviewer.
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, kid.id));
+      await c.scheduler.tick();
+      expect(await treeWakes(c)).toEqual([]);
+
       await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.watcherAgentId, c.scrum.id));
       await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, kid.id));
       await c.scheduler.tick();
