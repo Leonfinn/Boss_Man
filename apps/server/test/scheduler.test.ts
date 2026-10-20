@@ -52,6 +52,7 @@ describe("scheduler", () => {
     expect(cmd).toMatchObject({ agentId: ctx.ceo.id, agentKind: "claude", cwd: `/ws/${t1.id}` });
     expect(cmd.prompt).toContain("Checkout error states");
     expect(cmd.prompt).toContain("set_ticket_state");
+    expect(cmd.prompt).toContain("call schedule_check rather than ending without a plan");
     expect(cmd.prompt).toMatch(/version 2\)[^\n]*Checkout error states/); // started by the launch, so the version it quotes is current (R81)
     expect(cmd.prompt).toContain("expected_version");
     expect(cmd.prompt).toContain("Every ticket_reply starts with 1 to 3 plain sentences");

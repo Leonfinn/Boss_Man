@@ -1059,6 +1059,14 @@ export async function buildApp(opts: AppOptions) {
       return work.setWatcher(id, b);
     });
 
+    // The monitor (wake the assignee to re-check something): no `at` means check now.
+    owner.put("/api/tickets/:id/monitor", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ at: z.string().datetime({ offset: true }).optional(), note: z.string().min(1).max(500), maxChecks: z.number().int().min(1).max(20).optional() }).parse(req.body);
+      return work.setMonitor(id, { at: b.at ? new Date(b.at) : new Date(), note: b.note, maxChecks: b.maxChecks });
+    });
+    owner.delete("/api/tickets/:id/monitor", async (req) => work.clearMonitor(IdParam.parse(req.params).id));
+
     owner.post("/api/tickets/:id/dependencies", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const body = z.object({ ticketId: Uuid.optional(), engagementId: Uuid.optional() }).parse(req.body);

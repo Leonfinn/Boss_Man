@@ -70,6 +70,10 @@ const WATCH_EVERY: Array<[number, string]> = [
   [1440, "Once a day"],
 ];
 
+/** "In 51m", "In 2h 5m", or "Due now". */
+const inText = (ms: number) => (ms <= 0 ? "Due now" : ms < 3_600_000 ? `In ${Math.ceil(ms / 60_000)}m` : `In ${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m`);
+const localInput = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
   const ticket = usePoll((signal) => api<TicketDetail>(`/api/tickets/${id}`, { signal }), 15_000, id);
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
@@ -97,6 +101,17 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const watch = async (agentId: string | null, everyMinutes?: number) => {
     try {
       await api(`/api/tickets/${id}/watcher`, { method: "PUT", body: { agentId, ...(everyMinutes ? { everyMinutes } : {}) } });
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
+  // The monitor (wake the assignee to re-check something): an edit form, or null while not editing.
+  const [mon, setMon] = useState<{ at: string; note: string } | null>(null);
+  const monitor = async (body: Record<string, unknown> | null) => {
+    try {
+      await api(`/api/tickets/${id}/monitor`, body ? { method: "PUT", body } : { method: "DELETE" });
+      setMon(null);
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -413,6 +428,33 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 </>
               ) : (
                 <small className="muted">An agent, such as a scrum master, that posts a short status update on this task and what it depends on.</small>
+              )}
+            </dd>
+            <dt>Check again</dt>
+            <dd>
+              {mon ? (
+                <>
+                  <input type="datetime-local" aria-label="Check again at" value={mon.at} onChange={(e) => setMon({ ...mon, at: e.target.value })} />
+                  <input aria-label="What to re-check" maxLength={500} value={mon.note} onChange={(e) => setMon({ ...mon, note: e.target.value })} style={{ marginTop: 6 }} />
+                  <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                    <button type="button" className="btn" disabled={!mon.at || !mon.note.trim()} onClick={() => void monitor({ at: new Date(mon.at).toISOString(), note: mon.note.trim() })}>Save</button>
+                    <button type="button" className="btn" onClick={() => setMon(null)}>Cancel</button>
+                  </div>
+                </>
+              ) : t.monitorAt ? (
+                <>
+                  {inText(new Date(t.monitorAt).getTime() - Date.now())} · {new Date(t.monitorAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })} · check {t.monitorAttempts + 1} of {t.monitorMax}
+                  <small className="muted" style={{ display: "block" }}>{t.monitorNote}</small>
+                  <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                    <button type="button" className="btn" onClick={() => setMon({ at: localInput(new Date(t.monitorAt!)), note: t.monitorNote ?? "" })}>Edit</button>
+                    <button type="button" className="btn" onClick={() => void monitor({ note: t.monitorNote })}>Check now</button>
+                    <button type="button" className="btn" onClick={() => void monitor(null)}>Clear</button>
+                  </div>
+                </>
+              ) : (
+                (t.systemState === "in_progress" || t.systemState === "review") && t.assigneeAgentId && (
+                  <button type="button" className="btn" onClick={() => setMon({ at: localInput(new Date(Date.now() + 3_600_000)), note: "" })}>Schedule a check</button>
+                )
               )}
             </dd>
             <dt>Project</dt>

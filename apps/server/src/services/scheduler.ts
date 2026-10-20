@@ -265,6 +265,41 @@ export function schedulerService(
     }
   }
 
+  /**
+   * Fires the monitors that are due (see work.setMonitor): wakes the assignee to re-check, up to
+   * monitorMax times, then tells the owner. The clear is conditional on the due time, so two passes can't both fire.
+   */
+  async function monitorDue() {
+    const due = await db.select().from(tickets).where(lte(tickets.monitorAt, now()));
+    if (!due.length) return;
+    const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
+    for (const x of due) {
+      if (paused.has(x.companyId)) continue;
+      const claimed = await db.update(tickets).set({ monitorAt: null }).where(and(eq(tickets.id, x.id), eq(tickets.monitorAt, x.monitorAt!))).returning({ id: tickets.id });
+      if (!claimed.length) continue;
+      const log = (summary: string) => record(db, { companyId: x.companyId, agentId: x.assigneeAgentId, ticketId: x.id, kind: "monitor", summary, at: now() });
+      if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review")) {
+        await log("Cleared the scheduled check: the ticket is no longer being worked");
+        continue;
+      }
+      if (x.monitorAttempts >= x.monitorMax) {
+        const [{ name: agent } = { name: "The agent" }] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, x.assigneeAgentId));
+        await log(`Checked ${x.monitorMax} times and still not resolved: ${x.monitorNote}`);
+        await deps.alert(x.companyId, `${agent} has checked '${x.monitorNote}' ${x.monitorMax} times on '${x.title}' and it still isn't resolved.`);
+        continue;
+      }
+      const n = x.monitorAttempts + 1;
+      await db.update(tickets).set({ monitorAttempts: n }).where(eq(tickets.id, x.id));
+      const w = await self.notify(x.assigneeAgentId, { ticketId: x.id, reason: "check due", note: `Check due (${n} of ${x.monitorMax}): ${x.monitorNote}. Re-check it now. If you still need to wait, call schedule_check again; otherwise carry on or finish.` });
+      if (w.status === "dropped") {
+        // Retry next tick.
+        await db.update(tickets).set({ monitorAt: x.monitorAt, monitorAttempts: x.monitorAttempts }).where(eq(tickets.id, x.id));
+        continue;
+      }
+      await log(`Check ${n} of ${x.monitorMax} fired: ${x.monitorNote}`);
+    }
+  }
+
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date) {
     const me = agentIdentity(agent, companyName);
     const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
@@ -290,6 +325,7 @@ export function schedulerService(
             `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Only do the work yourself when nobody on the team can.${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,
           );
         }
+        if (t.t.systemState === "in_progress") lines.push("", "If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan.");
         lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
@@ -609,7 +645,12 @@ export function schedulerService(
      * (the timer, a run ending, the API) can't both pass the same concurrency check.
      */
     tick() {
-      const pass = lane.then(() => this.tickOnce());
+      // Monitors fire after the pass, so a check's wake is launched by the next one.
+      const pass = lane.then(async () => {
+        const r = await this.tickOnce();
+        if (!r.paused) await monitorDue();
+        return r;
+      });
       lane = pass.catch(() => undefined);
       return pass;
     },

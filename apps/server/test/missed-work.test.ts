@@ -53,6 +53,13 @@ describe("missed-work sweep (R82)", () => {
     expect(await ctx.missed(id)).toHaveLength(1);
   });
 
+  it("leaves alone a ticket waiting on a scheduled check", async () => {
+    ctx = await setup();
+    const id = await ctx.forgotten("Wait for CI", { systemState: "in_progress", monitorAt: new Date(Date.now() + HOUR), monitorNote: "CI on the PR" });
+    expect(await ctx.sweeps.run()).toMatchObject({ missedWork: { woken: 0 } });
+    expect(await ctx.missed(id)).toHaveLength(0);
+  });
+
   it("leaves alone tickets that are queued, running, recent, blocked, in review, awaiting a plan or unassigned", async () => {
     ctx = await setup();
     // The queued and running tickets have agents of their own, so only those tickets are in question.

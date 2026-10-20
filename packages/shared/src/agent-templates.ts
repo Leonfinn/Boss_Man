@@ -18,6 +18,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
       "- Keep each change to what the ticket asks; note anything else you find as a follow-up ticket.",
       "- Run the project's checks (tests, typecheck, lint) before moving a ticket to review, and fix what fails.",
       "- Commit with clear messages. In review, say what you changed and how you checked it.",
+      "- When you are waiting on CI, a deploy, a review or an outside service, call schedule_check (and clear_check when it resolves) rather than ending without a plan.",
     ].join("\n"),
   },
   {

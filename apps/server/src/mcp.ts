@@ -263,7 +263,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
@@ -283,6 +283,45 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
       return text(`Ticket ${ticketId} is now ${state}.`);
+    },
+  );
+
+  server.registerTool(
+    "schedule_check",
+    {
+      description:
+        "Use this when you are waiting on CI, a deploy, a review or an outside service, instead of ending your turn without a plan. It wakes you on this ticket later to re-check (ticketId, note saying what to re-check, and either inMinutes 5 to 1440 or at as an ISO time; maxChecks 1 to 20, default 5). Only the ticket's assignee can use it, while the ticket is in progress or in review. Calling it again replaces the earlier check; when you are woken and still need to wait, call it again. After maxChecks checks the owner is told and you are not woken again.",
+      inputSchema: { ticketId: z.string().uuid(), note: z.string().min(1).max(500), inMinutes: z.number().int().min(5).max(1440).optional(), at: z.string().optional(), maxChecks: z.number().int().min(1).max(20).optional() },
+    },
+    async ({ ticketId, note, inMinutes, at, maxChecks }) => {
+      if (!scope.agentId) return fail("Only an agent can schedule a check.");
+      if ((inMinutes === undefined) === (at === undefined)) return fail("Give exactly one of inMinutes or at.");
+      const when = inMinutes !== undefined ? new Date(Date.now() + inMinutes * 60_000) : new Date(at!);
+      try {
+        const u = await work.setMonitor(ticketId, { at: when, note, maxChecks, by: { agentId: scope.agentId, companyId: scope.companyId } });
+        return text(`You will be woken on ticket ${ticketId} at ${u.monitorAt!.toISOString()} to re-check (check ${u.monitorAttempts + 1} of ${u.monitorMax}).`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "clear_check",
+    {
+      description: "Cancel the check you scheduled on a ticket with schedule_check, for when what you were waiting on has resolved. Only the ticket's assignee can use it.",
+      inputSchema: { ticketId: z.string().uuid() },
+    },
+    async ({ ticketId }) => {
+      if (!scope.agentId) return fail("Only an agent can clear a check.");
+      try {
+        await work.clearMonitor(ticketId, { agentId: scope.agentId, companyId: scope.companyId });
+        return text(`No check is scheduled on ticket ${ticketId}.`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
     },
   );
 
