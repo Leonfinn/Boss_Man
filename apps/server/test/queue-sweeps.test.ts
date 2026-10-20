@@ -4,6 +4,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { runsService } from "../src/services/runs.js";
 import { activity, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
@@ -327,6 +328,16 @@ describe("the server ends runs it can't reach", () => {
     expect((await row(runId)).endedAt).toBeNull();
     ctx.advance(31_000);
     await ctx.sweep();
+    expect(await row(runId)).toMatchObject({ outcome: "stopped: runner didn't confirm", endedAt: expect.any(Date) });
+  });
+
+  it("a cancel survives a restart: a fresh service on the same database still ends the run", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    await ctx.req("POST", `/api/runs/${runId}/cancel`);
+    expect((await row(runId)).cancelRequestedAt).toBeInstanceOf(Date);
+    const restarted = runsService(ctx.db, { runners: ctx.runners, now: ctx.clock });
+    await restarted.endUnconfirmedCancels(new Date(ctx.clock().getTime() + 61_000));
     expect(await row(runId)).toMatchObject({ outcome: "stopped: runner didn't confirm", endedAt: expect.any(Date) });
   });
 

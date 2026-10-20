@@ -33,6 +33,8 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
   }
 
   async function create(slug: string) {
+    // Every bind source must exist first: Docker would make a missing one owned by root, which the runner can't write.
+    for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
     const old = await ours(slug);
     if (old) await docker.remove(old.Id);
     const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
@@ -43,8 +45,7 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
   return {
     /** Writes the token, then creates (or recreates) and starts the runner. Data folders are kept. */
     async put(slug: string, token: string) {
-      const dir = companyDir(cfg, slug);
-      for (const [sub] of MOUNTS) mkdirSync(path.join(dir, sub), { recursive: true, mode: 0o700 });
+      mkdirSync(companyDir(cfg, slug), { recursive: true, mode: 0o700 });
       // Written beside the target and renamed, so a runner never reads half a token.
       const tmp = `${tokenFile(cfg, slug)}.tmp`;
       writeFileSync(tmp, token, { mode: 0o600 });

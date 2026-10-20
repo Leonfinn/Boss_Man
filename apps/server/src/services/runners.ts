@@ -18,8 +18,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
   const connectListeners: Array<(runnerId: string) => unknown> = [];
   const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
+  // shortcut: pending requests and live sockets belong to this process; lost on restart, harmless because runners reconnect and callers time out.
   /** Requests waiting for a runner's reply, by request id. */
   const pending = new Map<string, { resolve: (data: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }>();
+  // shortcut: live sockets belong to this process; lost on restart, harmless because runners reconnect.
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
 

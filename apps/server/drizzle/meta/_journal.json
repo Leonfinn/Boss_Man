@@ -302,6 +302,20 @@
       "when": 1792508527415,
       "tag": "0042_portal_logo",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1792514529903,
+      "tag": "0043_funding_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1792522878379,
+      "tag": "0044_cancel_requested_at",
+      "breakpoints": true
     }
   ]
 }
