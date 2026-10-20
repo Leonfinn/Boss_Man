@@ -90,10 +90,19 @@ export class RunnerConnection {
     ws.on("message", (raw) => {
       this.lastHeard = Date.now();
       let msg: ServerMessage;
+      let data: unknown;
       try {
-        msg = ServerMessage.parse(JSON.parse(String(raw)));
-      } catch {
-        this.opts.log?.("ignored a malformed server message");
+        data = JSON.parse(String(raw));
+        msg = ServerMessage.parse(data);
+      } catch (err) {
+        const issues = (err as { issues?: Array<{ path: PropertyKey[]; message: string }> }).issues;
+        const why = issues ? issues.slice(0, 3).map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : String(err);
+        this.opts.log?.(`ignored a malformed server message: ${why}`);
+        // A run start we can't read would otherwise sit at "starting" forever: say it ended.
+        const cmd = (data as { type?: string; command?: { type?: string; runId?: unknown } } | undefined)?.command;
+        if ((data as { type?: string } | undefined)?.type === "command" && cmd?.type === "run.start" && typeof cmd.runId === "string") {
+          this.emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `This runner couldn't read the run's start command (${why.slice(0, 300)}). The runner and server may be on different versions.` });
+        }
         return;
       }
       switch (msg.type) {
