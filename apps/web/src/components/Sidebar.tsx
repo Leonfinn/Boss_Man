@@ -2,7 +2,7 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, Bell, Gavel, Handshake, KeyRound, Kanban, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Scale, Settings, Sparkles, Star, Users, Wallet, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, KeyRound, Kanban, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Scale, Settings, Sparkles, Star, Users, Wallet, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
@@ -19,6 +19,7 @@ const GROUPS: Array<{ title: string; items: Item[] }> = [
   {
     title: "Work",
     items: [
+      { id: "projects", label: "Projects", icon: FolderGit2 },
       { id: "board", label: "Kanban", icon: Kanban },
       { id: "roadmap", label: "Roadmap", icon: Map },
       { id: "plan", label: "Plan", icon: ListChecks },

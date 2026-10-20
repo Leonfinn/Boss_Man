@@ -5,6 +5,7 @@ import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
+import { QuickAdd } from "./Board";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
@@ -573,15 +574,48 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
   );
 }
 
-function Projects({ company }: { company: Company }) {
-  const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `projects-${company.id}`);
+/** Every project of the chosen company: create one, open its Kanban, set its repo, checks and reviews. */
+export function ProjectsPage({ companies, companyId, go }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void }) {
+  const company = companies.find((c) => c.id === companyId) ?? companies[0];
+  const projects = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([])), 60_000, `projects-${company?.id ?? "none"}`);
   return (
-    <Section id="projects-h" title="Projects">
-      <p className="muted" style={{ fontSize: 14 }}>
-        With a repo, each task gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
-      </p>
-      {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} agents={company.agents} />) : <p>No projects yet: create one on the Kanban.</p>}
-    </Section>
+    <>
+      <header className="page-head">
+        <div>
+          <h1>Projects</h1>
+          <p className="sub">{company ? `${company.name}'s projects. Each has its own Kanban and, optionally, a git repo the agents work in.` : "Create a company first."}</p>
+        </div>
+      </header>
+      {company && (
+        <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          <Section id="new-project-h" title="New project">
+            <QuickAdd
+              label="Project name"
+              button="Create project"
+              onAdd={async (name) => {
+                await api<Project>(`/api/companies/${company.id}/projects`, { method: "POST", body: { name } });
+                projects.reload();
+              }}
+            />
+          </Section>
+          <Section id="projects-h" title={`Projects (${projects.data?.length ?? 0})`}>
+            <p className="muted" style={{ fontSize: 14 }}>
+              With a repo, each task gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
+            </p>
+            {projects.data?.length
+              ? projects.data.map((p) => (
+                  <div key={p.id}>
+                    <button type="button" className="btn small" onClick={() => go(`board/${p.id}`)}>
+                      Open {p.name}'s Kanban
+                    </button>
+                    <ProjectRow p={p} agents={company.agents} />
+                  </div>
+                ))
+              : projects.data && <p>No projects yet.</p>}
+          </Section>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -696,7 +730,7 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
       <header className="page-head">
         <div>
           <h1>Settings</h1>
-          <p className="sub">What each company needs to run: a runner, credentials, funding and its repos.</p>
+          <p className="sub">What each company needs to run: a runner, credentials and funding. Repos are set per project on the Projects page.</p>
         </div>
         <button type="button" className="btn" onClick={() => go("setup")}>
           Run the setup wizard
@@ -718,11 +752,10 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           <Chapters company={company} />
           <Section id="reviews-h" title="Reviews">
             <p className="muted" style={{ fontSize: 14 }}>
-              For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this in its own settings below.
+              For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this on the Projects page.
             </p>
             <CompanyReviews companyId={company.id} agents={company.agents} />
           </Section>
-          <Projects company={company} />
         </div>
       )}
     </>

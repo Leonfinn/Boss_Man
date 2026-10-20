@@ -10,7 +10,7 @@ import { Decisions } from "./pages/Decisions";
 import { Engagement, Engagements } from "./pages/Engagements";
 import { Run } from "./pages/Run";
 import { Runs } from "./pages/Runs";
-import { Settings } from "./pages/Settings";
+import { ProjectsPage, Settings } from "./pages/Settings";
 import { Ticket } from "./pages/Ticket";
 import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
@@ -59,7 +59,7 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 }
 
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
-const COMPANY_SCREENS = new Set(["chat", "wiki", "features", "feedback", "plan", "rules", "settings"]);
+const COMPANY_SCREENS = new Set(["chat", "wiki", "features", "feedback", "plan", "rules", "settings", "projects"]);
 const CHOSEN = "bm-company";
 function remember(id: string, set: (id: string) => void) {
   set(id);
@@ -181,6 +181,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Notifications feed={feed.data} onChanged={feed.reload} />
         ) : page === "secrets" ? (
           <Secrets />
+        ) : page === "projects" ? (
+          <ProjectsPage companies={list} companyId={companyId} go={go} />
         ) : page === "settings" ? (
           <Settings companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "engagements" ? (
