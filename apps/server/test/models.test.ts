@@ -18,6 +18,7 @@ async function setup() {
     const url = String(input);
     calls.push({ url, headers: new Headers(init?.headers) });
     if (url.startsWith("https://api.anthropic.com/v1/models")) return new Response(JSON.stringify({ data: [{ id: "claude-opus-5-5", display_name: "Claude Opus 5.5", type: "model" }, { id: "claude-haiku-5-5", display_name: "Claude Haiku 5.5", type: "model" }], has_more: false }), { status: 200 });
+    if (url === "https://gw.example/api/v1/models") return new Response(JSON.stringify({ data: [{ id: "openai/gpt-5", name: "GPT-5", supported_parameters: ["tools"] }, { id: "some/no-tools", supported_parameters: [] }, { id: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5", supported_parameters: ["tools"] }] }), { status: 200 });
     if (url === "https://api.openai.com/v1/models") return new Response(JSON.stringify({ data: [{ id: "text-embedding-3-large" }, { id: "gpt-5" }, { id: "gpt-5-codex" }] }), { status: 200 });
     return new Response("{}", { status: 404 });
   }) as typeof globalThis.fetch;
@@ -57,5 +58,23 @@ describe("model lists for the picker (R60)", () => {
     expect(c.calls.length).toBe(before);
     await c.req("GET", `/api/companies/${c.company.id}/models?refresh=1`);
     expect(c.calls.length).toBe(before + 2);
+  });
+
+  it("lists a gateway's tool-capable models from its ANTHROPIC_BASE_URL, Claude first", async () => {
+    const c = (ctx = await setup());
+    const { secret: key } = (await c.req("POST", "/api/secrets", { name: "OpenRouter key", kind: "generic", value: "sk-or-v1-example-key" })).json();
+    await c.req("POST", "/api/funding-sources", { name: "OpenRouter", kind: "api_payg", provider: "gateway", secretId: key.id });
+    const { secret: url } = (await c.req("POST", "/api/secrets", { name: "Gateway URL", kind: "generic", value: "https://gw.example/api/" })).json();
+    expect((await c.req("POST", `/api/secrets/${url.id}/grants`, { companyId: c.company.id, envName: "ANTHROPIC_BASE_URL" })).statusCode).toBe(201);
+
+    const lists = (await c.req("GET", `/api/companies/${c.company.id}/models`)).json();
+    expect(lists.api.find((a: { provider: string }) => a.provider === "gateway")).toMatchObject({
+      error: null,
+      models: [
+        { value: "anthropic/claude-sonnet-5.5", name: "Claude Sonnet 5.5" },
+        { value: "openai/gpt-5", name: "GPT-5 (not Claude: may not work)" },
+      ],
+    });
+    expect(c.calls.find((x) => x.url.startsWith("https://gw.example"))!.headers.get("authorization")).toBe("Bearer sk-or-v1-example-key");
   });
 });
