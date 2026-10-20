@@ -168,7 +168,7 @@ describe("portal logo", () => {
     expect(img.headers["content-type"]).toBe("image/png");
     expect(img.headers["x-content-type-options"]).toBe("nosniff");
     expect(img.headers["content-disposition"]).toBe("inline");
-    expect(img.headers["cache-control"]).toMatch(/max-age=\d+/);
+    expect(img.headers["cache-control"]).toBe("private, no-cache");
     expect(img.rawPayload.equals(PNG)).toBe(true);
 
     const del = await c.req("DELETE", `/api/companies/${c.company.id}/feedback/portal-logo`);

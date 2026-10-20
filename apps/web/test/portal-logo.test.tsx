@@ -65,8 +65,9 @@ describe("portal logo", () => {
       );
     vi.stubGlobal("fetch", portal(true));
     render(<PortalApp />);
-    const img = (await screen.findByAltText("What's next")) as HTMLImageElement;
-    expect(img.src.startsWith("data:image/png")).toBe(true);
+    const img = await waitFor(() => document.querySelector("header img") ?? Promise.reject(new Error("no logo yet")));
+    expect((img as HTMLImageElement).alt).toBe("");
+    expect((img as HTMLImageElement).src.startsWith("data:image/png")).toBe(true);
     cleanup();
     vi.stubGlobal("fetch", portal(false));
     render(<PortalApp />);

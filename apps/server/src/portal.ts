@@ -44,7 +44,7 @@ function windowCounter(now: () => number) {
 
 /** The logo's bytes as an inline image the browser may not reinterpret. */
 export function sendLogo(reply: FastifyReply, logo: { bytes: Buffer; type: string }) {
-  return reply.type(logo.type).header("x-content-type-options", "nosniff").header("content-disposition", "inline").header("cache-control", "public, max-age=300").send(logo.bytes);
+  return reply.type(logo.type).header("x-content-type-options", "nosniff").header("content-disposition", "inline").header("cache-control", "private, no-cache").send(logo.bytes);
 }
 
 type Feedback = ReturnType<typeof feedbackService>;
