@@ -11,7 +11,7 @@ afterEach(() => {
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
-const project = { id: "p1", companyId: "c1", name: "App", repoUrl: null, defaultBranch: "main", landing: "merge", gitHost: null, gitApiBase: null, verifyCommand: null, deepVerifyCommand: null, ticketCostCapMicros: 5_000_000, starred: false };
+const project = { id: "p1", companyId: "c1", name: "App", repoUrl: null, defaultBranch: "main", landing: "merge", gitHost: null, gitApiBase: null, verifyCommand: null, deepVerifyCommand: null, ticketCostCapMicros: 5_000_000, monthlyCapMicros: null, starred: false };
 
 function stub(patched: unknown[] = []) {
   vi.stubGlobal(
@@ -20,7 +20,7 @@ function stub(patched: unknown[] = []) {
       if (init?.method === "PATCH") return patched.push(JSON.parse(String(init.body))), json({ ...project, starred: true });
       if (url.endsWith("/projects")) return json([project]);
       if (url.endsWith("/board")) return json({ project, columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [] }] });
-      if (url.endsWith("/spend")) return json({ monthMicros: 3_500_000, totalMicros: 4_500_000, ticketCostCapMicros: 5_000_000, monthStart: "", topTickets: [{ id: "t1", title: "Big job", micros: 4_000_000 }] });
+      if (url.endsWith("/spend")) return json({ monthMicros: 3_500_000, totalMicros: 4_500_000, ticketCostCapMicros: 5_000_000, monthlyCapMicros: 10_000_000, monthStart: "", topTickets: [{ id: "t1", title: "Big job", micros: 4_000_000 }] });
       if (url.endsWith("/check-presets")) return json({ detected: [], standard: [], none: { id: "none", label: "Nothing", command: null, plain: "", needs: [] }, tools: null, error: null });
       return json([]);
     }),
@@ -46,6 +46,7 @@ describe("project page tabs", () => {
     show("budget");
     expect(await screen.findByText("$3.50")).toBeTruthy();
     expect(screen.getByText("$4.50")).toBeTruthy();
+    expect(screen.getByLabelText("$3.50 of the $10.00 monthly cap").getAttribute("max")).toBe("10000000");
     expect(screen.getByRole("link", { name: "Big job" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByRole("tab", { name: "Budget" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.queryByText("Ready")).toBeNull();

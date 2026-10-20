@@ -517,7 +517,7 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
 export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: "repo" | "checks"; onChanged?: () => void; agents?: Agent[] }) {
   const showRepo = only !== "checks";
   const showChecks = only !== "repo";
-  const [form, setForm] = useState({ name: p.name, capUsd: p.ticketCostCapMicros ? String(p.ticketCostCapMicros / 1e6) : "", repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
+  const [form, setForm] = useState({ name: p.name, capUsd: p.ticketCostCapMicros ? String(p.ticketCostCapMicros / 1e6) : "", monthlyUsd: p.monthlyCapMicros ? String(p.monthlyCapMicros / 1e6) : "", repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
   const [host, setHost] = useState(p.gitHost);
   const act = useAction();
   const sv = useSaveState(form);
@@ -530,7 +530,7 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
     void act.run(async () => {
       const saved = await api<Project>(`/api/projects/${p.id}`, {
         method: "PATCH",
-        body: { ...(only ? {} : { name: form.name.trim() || p.name, ticketCostCapUsd: form.capUsd ? Number(form.capUsd) : null }), repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
+        body: { ...(only ? {} : { name: form.name.trim() || p.name, ticketCostCapUsd: form.capUsd ? Number(form.capUsd) : null, monthlyCapUsd: form.monthlyUsd ? Number(form.monthlyUsd) : null }), repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
       });
       setHost(saved.gitHost);
       sv.markSaved();
@@ -551,6 +551,11 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
           <div className="field">
             <label htmlFor={`cap-${p.id}`}>Cost cap per task (USD)</label>
             <input id={`cap-${p.id}`} type="number" min="0.01" step="0.01" placeholder="No cap" value={form.capUsd} onChange={(e) => setForm({ ...form, capUsd: e.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor={`monthly-${p.id}`}>Monthly spend cap (USD)</label>
+            <input id={`monthly-${p.id}`} type="number" min="0.01" step="0.01" placeholder="No cap" value={form.monthlyUsd} onChange={(e) => setForm({ ...form, monthlyUsd: e.target.value })} />
+            <small className="muted">At the cap, no new runs start for this project until next month (UTC) or you raise it.</small>
           </div>
         </>
       )}

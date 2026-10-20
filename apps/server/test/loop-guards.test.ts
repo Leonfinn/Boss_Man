@@ -13,9 +13,9 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup(loopLimits: Record<string, number> = {}) {
+async function setup(loopLimits: Record<string, number> = {}, now?: () => Date) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", loopLimits });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", loopLimits, now });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -108,6 +108,52 @@ describe("spend caps (R53)", () => {
 
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Raise the cap by half" });
     expect((await c.state()).costCapMicros).toBe(1_500_000);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+  });
+
+  it("a project's monthly cap holds its new runs, asks once, leaves other projects alone and resets next month", async () => {
+    let clock = new Date("2026-10-20T10:00:00Z");
+    const c = (ctx = await setup({}, () => clock));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { monthlyCapUsd: 1 });
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Other" })).json() as { id: string };
+    const otherTicket = (await c.req("POST", `/api/projects/${other.id}/tickets`, { title: "Elsewhere", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+    await c.db.delete(wakes);
+    const fs = (await c.req("POST", "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json();
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: c.ticket.id, endedAt: clock });
+    await c.db.insert(costEvents).values({ fundingSourceId: fs.id, companyId: c.company.id, runId, costMicros: 1_200_000, occurredAt: clock });
+
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: c.ticket.id, reason: "assigned" });
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0, deferred: 1 });
+    const asked = () => c.db.select().from(decisions).where(eq(decisions.kind, "budget"));
+    expect((await asked())[0]!.question).toMatch(/^Customer app reached its monthly cap of \$1\.00/);
+
+    clock = new Date(clock.getTime() + 6 * 60_000);
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0, deferred: 1 });
+    expect(await asked()).toHaveLength(1);
+
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: otherTicket.id, reason: "assigned" });
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+
+    // Next month the spend no longer counts.
+    clock = new Date("2026-11-01T00:10:00Z");
+    await c.db.delete(runs).where(eq(runs.ticketId, otherTicket.id));
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
+    expect(await asked()).toHaveLength(1);
+  });
+
+  it("raising a project's monthly cap by half lets it go again", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { monthlyCapUsd: 1 });
+    const fs = (await c.req("POST", "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json();
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: c.ticket.id, endedAt: new Date() });
+    await c.db.insert(costEvents).values({ fundingSourceId: fs.id, companyId: c.company.id, runId, costMicros: 1_100_000 });
+    await c.scheduler.wake({ agentId: c.worker.id, ticketId: c.ticket.id, reason: "assigned" });
+    expect(await c.scheduler.tick()).toMatchObject({ launched: 0, deferred: 1 });
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "budget"));
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Raise the cap by half" });
+    expect(((await c.req("GET", `/api/companies/${c.company.id}/projects`)).json() as Array<{ monthlyCapMicros: number }>)[0]!.monthlyCapMicros).toBe(1_500_000);
     expect(await c.scheduler.tick()).toMatchObject({ launched: 1 });
   });
 

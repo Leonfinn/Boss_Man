@@ -3,7 +3,8 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
@@ -837,6 +838,7 @@ export async function buildApp(opts: AppOptions) {
           deepVerifyCommand: z.string().trim().min(1).max(1000).nullable(),
           ticketCostCapUsd: z.number().positive().nullable(),
           starred: z.boolean(),
+          monthlyCapUsd: z.number().positive().nullable(),
           landing: z.enum(["merge", "pull_request"]),
           gitHost: z.enum(["github", "gitea"]).nullable(),
           gitApiBase: z
@@ -848,7 +850,7 @@ export async function buildApp(opts: AppOptions) {
         })
         .partial()
         .parse(req.body);
-      const { ticketCostCapUsd, ...fields } = b;
+      const { ticketCostCapUsd, monthlyCapUsd, ...fields } = b;
       // A new repo address finds its host (R59), unless the owner set one with it.
       if (fields.repoUrl !== undefined && fields.gitHost === undefined) {
         const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;
@@ -856,7 +858,7 @@ export async function buildApp(opts: AppOptions) {
       }
       const [p] = await db
         .update(projects)
-        .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}) })
+        .set({ ...fields, ...(ticketCostCapUsd !== undefined ? { ticketCostCapMicros: ticketCostCapUsd === null ? null : usdToMicros(ticketCostCapUsd) } : {}), ...(monthlyCapUsd !== undefined ? { monthlyCapMicros: monthlyCapUsd === null ? null : usdToMicros(monthlyCapUsd) } : {}) })
         .where(eq(projects.id, id))
         .returning();
       return p ?? reply.code(404).send({ error: "not_found" });
@@ -865,14 +867,12 @@ export async function buildApp(opts: AppOptions) {
     // What a project has cost (money only, as on the dashboard: subscription use is excluded). "This month" is the UTC calendar month.
     owner.get("/api/projects/:id/spend", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const [p] = await db.select({ cap: projects.ticketCostCapMicros }).from(projects).where(eq(projects.id, id));
+      const [p] = await db.select({ cap: projects.ticketCostCapMicros, monthlyCap: projects.monthlyCapMicros }).from(projects).where(eq(projects.id, id));
       if (!p) return reply.code(404).send({ error: "not_found" });
       const t = opts.now ? opts.now() : new Date();
-      const monthStart = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1));
-      const mine = and(sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}, ${tickets.projectId}) = ${id}`, ne(fundingSources.kind, "subscription"));
-      const from = () => db.select({ micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` }).from(costEvents).innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId)).leftJoin(runsTable, eq(runsTable.id, costEvents.runId)).leftJoin(tickets, eq(tickets.id, runsTable.ticketId));
-      const [all] = await from().where(mine);
-      const [month] = await from().where(and(mine, gte(costEvents.occurredAt, monthStart)));
+      const monthStart = monthStartUtc(t);
+      const month = await projectSpendMicros(db, id, monthStart);
+      const all = await projectSpendMicros(db, id);
       const sum = sql<string>`sum(${costEvents.costMicros})`;
       const top = await db
         .select({ id: tickets.id, title: tickets.title, micros: sum })
@@ -884,7 +884,7 @@ export async function buildApp(opts: AppOptions) {
         .groupBy(tickets.id, tickets.title)
         .orderBy(desc(sum))
         .limit(10);
-      return { monthMicros: Number(month!.micros), totalMicros: Number(all!.micros), ticketCostCapMicros: p.cap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
+      return { monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
     });
 
     // The setup wizard (R56): where the owner is in it, and what's still to do for a company.

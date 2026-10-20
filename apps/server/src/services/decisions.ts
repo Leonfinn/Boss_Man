@@ -17,7 +17,7 @@ import {
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -31,6 +31,7 @@ export type DecisionContext =
   | { type: "deploy"; deployId: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
   | { type: "ticket_cap"; ticketId: string }
+  | { type: "project_cap"; projectId: string }
   | { type: "budget_limit"; policyId: string }
   | { type: "risk_review"; ticketId: string; reviewer: string }
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
@@ -606,6 +607,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (answer === "Stop work on it") await loopHooks?.stopTicket(ctx.ticketId);
         else if (ctx.type === "review_loop") await loopHooks?.sendBack(ctx.ticketId, ctx.message, ctx.reviewer);
         else await loopHooks?.raiseCap(ctx.ticketId);
+      } else if (ctx.type === "project_cap") {
+        if (answer === "Raise the cap by half") {
+          await db.update(projects).set({ monthlyCapMicros: sql`ceil(${projects.monthlyCapMicros} * 1.5)` }).where(eq(projects.id, ctx.projectId));
+          // Work held for the cap can go again.
+          await db
+            .update(wakes)
+            .set({ status: "queued", statusReason: null, notBefore: null })
+            .where(and(eq(wakes.status, "deferred"), eq(wakes.statusReason, "project monthly cap reached"), inArray(wakes.ticketId, db.select({ id: tickets.id }).from(tickets).where(eq(tickets.projectId, ctx.projectId)))));
+        }
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");

@@ -29,7 +29,7 @@ describe("project page: star and spend", () => {
     const co = (await req("POST", "/api/companies", { name: "Co" })).json();
     const p = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Site" })).json();
     const other = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Other" })).json();
-    await req("PATCH", `/api/projects/${p.id}`, { ticketCostCapUsd: 5 });
+    await req("PATCH", `/api/projects/${p.id}`, { ticketCostCapUsd: 5, monthlyCapUsd: 20 });
     const big = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Big" })).json();
     const small = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Small" })).json();
     const elsewhere = (await req("POST", `/api/projects/${other.id}/tickets`, { title: "Else" })).json();
@@ -49,6 +49,7 @@ describe("project page: star and spend", () => {
     expect(s.monthMicros).toBe(3_500_000);
     expect(s.totalMicros).toBe(4_500_000);
     expect(s.ticketCostCapMicros).toBe(5_000_000);
+    expect(s.monthlyCapMicros).toBe(20_000_000);
     expect(s.topTickets).toEqual([
       { id: big.id, title: "Big", micros: 4_000_000 },
       { id: small.id, title: "Small", micros: 500_000 },

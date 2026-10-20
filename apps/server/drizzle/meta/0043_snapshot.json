@@ -1,5 +1,5 @@
 {
-  "id": "25a106d1-1f37-4b02-ad42-023af8a46baf",
+  "id": "fabcb6dd-b01d-4fb5-83fd-abe5c475dcc3",
   "prevId": "d082d3e1-f93e-4a95-95dd-2f43e99264f8",
   "version": "7",
   "dialect": "postgresql",
@@ -3775,6 +3775,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "monthly_cap_micros": {
+          "name": "monthly_cap_micros",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
         },
         "review_policy": {
           "name": "review_policy",

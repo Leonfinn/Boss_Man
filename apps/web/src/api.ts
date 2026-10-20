@@ -50,6 +50,7 @@ export type Project = {
   gitApiBase: string | null;
   starred: boolean;
   ticketCostCapMicros: number | null;
+  monthlyCapMicros: number | null;
 };
 
 /** Review routing per risk tier (step 1): "ceo", "senior-dev" or an agent id; the plan column also takes "owner" and "none". */
