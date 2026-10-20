@@ -1,7 +1,7 @@
 // Drives the real claude-agent-acp adapter (and its bundled Claude Code) against the
 // scripted stub model, so no credentials are used. Same scenario as spike S2.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -112,24 +112,13 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
     const [pgid] = h.manager.processGroups();
     await h.ended;
     // The adapter's whole process group, Claude Code included, is gone once the run ends (S4).
-    // A zombie (killed, but not reaped because PID 1 here isn't an init) is gone for our purposes.
     const alive = () => {
       try {
         process.kill(-pgid!, 0);
+        return true;
       } catch {
         return false;
       }
-      if (!existsSync("/proc/self/stat")) return true;
-      return readdirSync("/proc").some((pid) => {
-        if (!/^\d+$/.test(pid)) return false;
-        try {
-          const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-          const [state, , group] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-          return Number(group) === pgid && state !== "Z";
-        } catch {
-          return false;
-        }
-      });
     };
     const t0 = Date.now();
     while (alive() && Date.now() - t0 < 8000) await new Promise((r) => setTimeout(r, 100));
