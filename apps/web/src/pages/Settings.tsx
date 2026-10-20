@@ -6,6 +6,7 @@ import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { QuickAdd } from "./Board";
+import { StarButton } from "./Agents";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
@@ -516,7 +517,7 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
 export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: "repo" | "checks"; onChanged?: () => void; agents?: Agent[] }) {
   const showRepo = only !== "checks";
   const showChecks = only !== "repo";
-  const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
+  const [form, setForm] = useState({ name: p.name, capUsd: p.ticketCostCapMicros ? String(p.ticketCostCapMicros / 1e6) : "", repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
   const [host, setHost] = useState(p.gitHost);
   const act = useAction();
   const sv = useSaveState(form);
@@ -529,7 +530,7 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
     void act.run(async () => {
       const saved = await api<Project>(`/api/projects/${p.id}`, {
         method: "PATCH",
-        body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
+        body: { ...(only ? {} : { name: form.name.trim() || p.name, ticketCostCapUsd: form.capUsd ? Number(form.capUsd) : null }), repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
       });
       setHost(saved.gitHost);
       sv.markSaved();
@@ -541,6 +542,18 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
   return (
     <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
       <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>{p.name}</p>
+      {!only && (
+        <>
+          <div className="field">
+            <label htmlFor={`name-${p.id}`}>Name</label>
+            <input id={`name-${p.id}`} required maxLength={80} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor={`cap-${p.id}`}>Cost cap per task (USD)</label>
+            <input id={`cap-${p.id}`} type="number" min="0.01" step="0.01" placeholder="No cap" value={form.capUsd} onChange={(e) => setForm({ ...form, capUsd: e.target.value })} />
+          </div>
+        </>
+      )}
       {showRepo && (<>
       <div className="field" style={{ gridColumn: "1 / -1" }}>
         <label htmlFor={`repo-${p.id}`}>Git repo</label>
@@ -581,7 +594,7 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
 }
 
 /** Every project of the chosen company: create one, open its Kanban, set its repo, checks and reviews. */
-export function ProjectsPage({ companies, companyId, go }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void }) {
+export function ProjectsPage({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged?: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const projects = usePoll((signal) => (company ? api<Project[]>(`/api/companies/${company.id}/projects`, { signal }) : Promise.resolve([])), 60_000, `projects-${company?.id ?? "none"}`);
   return (
@@ -611,6 +624,8 @@ export function ProjectsPage({ companies, companyId, go }: { companies: Company[
             {projects.data?.length
               ? projects.data.map((p) => (
                   <div key={p.id}>
+                    <a href={`#/board/${p.id}`} style={{ fontWeight: 600, marginRight: 8 }}>{p.name}</a>
+                    <StarButton agent={p} where="Projects" onToggle={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { starred: !p.starred } }).then(() => { projects.reload(); onChanged?.(); })} />
                     <button type="button" className="btn small" onClick={() => go(`board/${p.id}`)}>
                       Open {p.name}'s Kanban
                     </button>

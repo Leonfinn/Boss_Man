@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
@@ -12,7 +12,7 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/s
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, engagements, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agents, companies, costEvents, engagements, fundingSources, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { modelsService } from "./services/models.js";
@@ -470,7 +470,8 @@ export async function buildApp(opts: AppOptions) {
       const rows = await db.select().from(companies).orderBy(companies.name);
       // Retired agents (R62) only show on the Agents page, so they can't be given new work.
       const allAgents = await db.select().from(agents).where(isNull(agents.retiredAt));
-      return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id) }));
+      const allProjects = await db.select({ id: projects.id, companyId: projects.companyId, name: projects.name, starred: projects.starred }).from(projects).orderBy(projects.name);
+      return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id), projects: allProjects.filter((p) => p.companyId === c.id) }));
     });
 
     /** What each risk tier means, in the server's own words, for the help next to every risk picker (R61). */
@@ -835,6 +836,7 @@ export async function buildApp(opts: AppOptions) {
           verifyCommand: z.string().trim().min(1).max(1000).nullable(),
           deepVerifyCommand: z.string().trim().min(1).max(1000).nullable(),
           ticketCostCapUsd: z.number().positive().nullable(),
+          starred: z.boolean(),
           landing: z.enum(["merge", "pull_request"]),
           gitHost: z.enum(["github", "gitea"]).nullable(),
           gitApiBase: z
@@ -858,6 +860,31 @@ export async function buildApp(opts: AppOptions) {
         .where(eq(projects.id, id))
         .returning();
       return p ?? reply.code(404).send({ error: "not_found" });
+    });
+
+    // What a project has cost (money only, as on the dashboard: subscription use is excluded). "This month" is the UTC calendar month.
+    owner.get("/api/projects/:id/spend", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [p] = await db.select({ cap: projects.ticketCostCapMicros }).from(projects).where(eq(projects.id, id));
+      if (!p) return reply.code(404).send({ error: "not_found" });
+      const t = opts.now ? opts.now() : new Date();
+      const monthStart = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), 1));
+      const mine = and(sql`coalesce(${costEvents.chargedProjectId}, ${costEvents.projectId}, ${tickets.projectId}) = ${id}`, ne(fundingSources.kind, "subscription"));
+      const from = () => db.select({ micros: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` }).from(costEvents).innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId)).leftJoin(runsTable, eq(runsTable.id, costEvents.runId)).leftJoin(tickets, eq(tickets.id, runsTable.ticketId));
+      const [all] = await from().where(mine);
+      const [month] = await from().where(and(mine, gte(costEvents.occurredAt, monthStart)));
+      const sum = sql<string>`sum(${costEvents.costMicros})`;
+      const top = await db
+        .select({ id: tickets.id, title: tickets.title, micros: sum })
+        .from(costEvents)
+        .innerJoin(fundingSources, eq(fundingSources.id, costEvents.fundingSourceId))
+        .innerJoin(runsTable, eq(runsTable.id, costEvents.runId))
+        .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
+        .where(and(eq(tickets.projectId, id), ne(fundingSources.kind, "subscription")))
+        .groupBy(tickets.id, tickets.title)
+        .orderBy(desc(sum))
+        .limit(10);
+      return { monthMicros: Number(month!.micros), totalMicros: Number(all!.micros), ticketCostCapMicros: p.cap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
     });
 
     // The setup wizard (R56): where the owner is in it, and what's still to do for a company.

@@ -172,6 +172,8 @@ export const projects = pgTable("projects", {
   deepVerifyCommand: text("deep_verify_command"),
   /** Default spend ceiling per ticket across all its runs (R53). */
   ticketCostCapMicros: micros("ticket_cost_cap_micros"),
+  /** Starred projects show under Projects in the sidebar. */
+  starred: boolean("starred").notNull().default(false),
   /** Overrides the company's review policy for this project's tickets; null uses the company's. */
   reviewPolicy: jsonb("review_policy").$type<ReviewPolicy>(),
   createdAt: createdAt(),

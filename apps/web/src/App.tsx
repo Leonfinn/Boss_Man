@@ -135,6 +135,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       <Sidebar
         active={page}
         activeAgent={route[2]}
+        activeProject={route[1]}
         companies={list}
         current={current}
         onPickCompany={pick}
@@ -152,7 +153,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
             <p>Boss Man keeps working on the server; this page will catch up as soon as it can reach it again.</p>
           </State>
         ) : page === "board" ? (
-          <Board companies={mine} projectId={route[1]} go={go} onCompaniesChanged={companies.reload} />
+          <Board companies={mine} projectId={route[1]} subpage={route[2]} go={go} onCompaniesChanged={companies.reload} />
         ) : page === "chat" ? (
           <ChatPage companies={list} companyId={companyId} agentId={route[2]} go={go} onChanged={companies.reload} />
         ) : page === "wiki" ? (
@@ -182,7 +183,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "secrets" ? (
           <Secrets />
         ) : page === "projects" ? (
-          <ProjectsPage companies={list} companyId={companyId} go={go} />
+          <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
           <Settings companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "engagements" ? (
