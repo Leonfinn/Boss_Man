@@ -24,6 +24,7 @@ export const DEFAULT_PORTAL_LIMITS: PortalLimits = { writesPerIpPerHour: 40, wri
 
 /** A sliding-window counter per key, bounded in memory. */
 function windowCounter(now: () => number) {
+  // shortcut: rate-limit counters in memory; lost on restart, harmless because it only forgets recent hits.
   const hits = new Map<string, number[]>();
   return {
     /** Records a hit and says whether it was within the limit. */

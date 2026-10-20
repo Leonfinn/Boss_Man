@@ -3,7 +3,8 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { readFileSync } from "node:fs";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
@@ -55,6 +56,8 @@ import { NotifySettings, notificationsService } from "./services/notifications.j
 
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
+
+const SERVER_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export type AppOptions = {
   db: Db;
@@ -377,7 +380,18 @@ export async function buildApp(opts: AppOptions) {
 
   // ---------- Public ----------
 
-  app.get("/api/health", async () => ({ ok: true }));
+  // Public and cheap: no DB. Build facts only, nothing secret. The image HEALTHCHECK and the deploy script read `ok`.
+  const build = { version: SERVER_VERSION, commit: process.env.BOSSMAN_COMMIT || "dev", role: "single" as const };
+  app.get("/api/health", async () => ({ ok: true, ...build }));
+  // Readiness: also proves the database answers.
+  app.get("/api/ready", async (_req, reply) => {
+    try {
+      await db.execute(sql`select 1`);
+      return { ok: true, db: true, ...build };
+    } catch {
+      return reply.code(503).send({ ok: false, db: false, ...build });
+    }
+  });
 
   app.get("/api/setup", async () => {
     const [row] = await db.select({ n: count() }).from(owners);

@@ -19,6 +19,7 @@ const STALE_MS = 24 * 3_600_000;
 
 export function modelProbeService(db: Db, deps: { runners: ReturnType<typeof runnersService>; models: ReturnType<typeof modelsService>; now?: () => Date; log?: (msg: string) => void }) {
   const now = deps.now ?? (() => new Date());
+  // shortcut: in-process dedupe of running probes; lost on restart, harmless because a probe re-runs when the runner reconnects.
   const inFlight = new Set<string>();
 
   async function probe(companyId: string, opts: { force?: boolean; only?: "claude" | "codex" | "opencode" } = {}): Promise<Record<string, { ok: boolean; count?: number; error?: string }>> {

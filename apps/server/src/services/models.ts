@@ -14,6 +14,7 @@ const NOT_FOR_AGENTS = /embedding|whisper|tts|dall-e|moderation|image|audio|real
 export function modelsService(db: Db, deps: { reveal: (secretId: string) => Promise<string | null>; fetch?: typeof fetch; now?: () => Date }) {
   const http = deps.fetch ?? fetch;
   const now = deps.now ?? (() => new Date());
+  // shortcut: provider model lists cached in memory; lost on restart, harmless because the next read refetches (TTL-based).
   const apiCache = new Map<string, ApiList>();
 
   /** The gateway a company's agents use: its ANTHROPIC_BASE_URL credential, else OpenRouter's Anthropic endpoint. */
