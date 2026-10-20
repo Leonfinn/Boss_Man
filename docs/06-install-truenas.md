@@ -323,19 +323,30 @@ sudo docker compose ps
 sudo docker compose logs --tail 100 server
 ```
 
-**Update to the latest code** (it uses the deploy key from step 2). Database changes apply by themselves when the server starts.
+**Update to the latest code** with the deploy script. It backs up the database, pulls, rebuilds, restarts, waits until the server reports healthy, and updates the runners only when their code changed. Run it from the `src` folder:
 
 ```sh
-sudo git pull && sudo docker compose build server && sudo docker compose up -d db server
+sudo scripts/deploy.sh
 ```
 
-With the launcher (step 7b), rebuild it too and start everything:
+It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to `/mnt/NVME_Apps/Container_files/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
+
+- `--dry-run` shows the steps without running anything.
+- `--runner` / `--no-runner` force or skip the runner update. Updating runners stops every runner and restarts it, which cuts off agent runs in progress; the script warns and asks first (`--yes` skips the question).
+- `--rollback` puts the previous commit back and rebuilds. It never touches the database. If a deploy fails the health check, the script prints the exact rollback and restore commands and changes nothing by itself.
+
+Database changes apply by themselves when the server starts.
+
+**The manual steps** (the same thing, by hand, if the script is ever unavailable):
 
 ```sh
+sudo docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F-%H%M).sql.gz
 sudo git pull && sudo docker compose build server launcher && sudo docker compose up -d
 ```
 
-`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. Run it after any update that changes `apps/runner` or `packages/shared`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary, keeps the old one for rollback, and recreates the runners on it.
+Leave `launcher` out of the build if you don't use it (step 7b).
+
+`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. Run it after any update that changes `apps/runner`, `apps/launcher` or `packages/shared`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary, keeps the old one for rollback, and recreates the runners on it.
 
 ```sh
 sudo scripts/update-runner.sh
