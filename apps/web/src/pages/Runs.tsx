@@ -49,7 +49,8 @@ export function outcomeTag(outcome: string | null | undefined) {
   if (!outcome) return <span className="tag blue">Running</span>;
   if (outcome.startsWith("error")) return <span className="tag red">Failed</span>;
   if (outcome === "interrupted") return <span className="tag amber">Interrupted</span>;
-  if (outcome === "cancelled") return <span className="tag">Stopped</span>;
+  if (outcome === "cancelled" || outcome.startsWith("stopped")) return <span className="tag">Stopped</span>;
+  if (outcome.startsWith("lost")) return <span className="tag amber">Lost</span>;
   return <span className="tag green">Finished</span>;
 }
 

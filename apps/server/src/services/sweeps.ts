@@ -133,7 +133,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const idle = t.getTime() - (r.run.lastEventAt ?? r.run.startedAt).getTime();
       if (idle < limits.stallAfterMs + limits.lostAfterMs) continue;
       if (r.runnerId && opts.isConnected(r.runnerId) && r.run.lastEventAt) continue;
-      await opts.endRun(r.run.id, "lost: runner offline", t);
+      await opts.endRun(r.run.id, r.run.lastEventAt ? "lost: runner offline" : "lost: never started", t);
       ended++;
     }
     return ended;
