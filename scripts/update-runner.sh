@@ -40,10 +40,14 @@ restart_runners() { # everything at once: the old behaviour
 request_drain() {
   local d="${BOSSMAN_DEPLOYER:-}"
   if [[ -n $d && -d $d/inbox ]]; then
-    local tmp="$d/inbox/.drain.$$.tmp"
+    # Written in the root-only state folder, then renamed in: the server can write to inbox, so writing
+    # there directly would follow a symlink it planted. A rename replaces whatever is at the name instead.
+    mkdir -p "$d/state" && chmod 700 "$d/state"
+    local tmp
+    tmp="$(mktemp "$d/state/drain.XXXXXX")"
     printf '{"requestedAt":"%s","by":"update-runner.sh"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$tmp"
     chmod 644 "$tmp"; chown 1000:1000 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$d/inbox/drain.json"
+    mv -fT "$tmp" "$d/inbox/drain.json"
     echo "Asked Boss Man to drain: nothing new starts, runs finish, each runner is swapped when its company is idle."
     echo "Boss Man notifies you when it is done. To stop it: Settings > Runner update > Cancel."
   else
