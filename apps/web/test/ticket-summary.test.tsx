@@ -77,4 +77,29 @@ describe("approve and merge", () => {
     expect(await screen.findByText(/the check failed \(exit code 1\)\. It's gone back to Engineer/, undefined, { timeout: 4000 })).toBeTruthy();
     await waitFor(() => expect(screen.queryByText(/Running the pre-merge check/)).toBeNull());
   });
+
+  it("asks for comments only when sending the work back, and sends them", async () => {
+    const posted: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/tickets/t1/review" && init?.method === "POST") return (posted.push(JSON.parse(String(init.body))), json({ verdict: "changes_requested", delivered: "Engineer" }));
+        if (url === "/api/tickets/t1") return json(ticket);
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.endsWith("/artifacts") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json({});
+      }),
+    );
+    render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByRole("button", { name: "Approve and merge" });
+    expect(screen.queryByLabelText("What should the agent change?")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    const send = screen.getByRole("button", { name: "Send it back" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("What should the agent change?"), { target: { value: "Keep the old tests" } });
+    fireEvent.click(send);
+    await waitFor(() => expect(posted).toEqual([{ verdict: "changes_requested", summary: "Keep the old tests" }]));
+  });
 });

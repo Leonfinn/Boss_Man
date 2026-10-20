@@ -75,6 +75,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
+  const [sendingBack, setSendingBack] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
@@ -140,8 +141,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const review = async (verdict: "approved" | "changes_requested") => {
     setBusy(true);
     try {
-      const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(summary.trim() ? { summary: summary.trim() } : {}) } });
+      const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(verdict === "changes_requested" ? { summary: summary.trim() } : {}) } });
       setSummary("");
+      setSendingBack(false);
       if (r.landing) {
         setNow(Date.now());
         setLanding(r.landing);
@@ -313,18 +315,31 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </button>
                 </div>
               )}
-              <div className="field">
-                <label htmlFor="review-summary">Comments for the agent (needed to send it back)</label>
-                <textarea id="review-summary" rows={3} value={summary} onChange={(e) => setSummary(e.target.value)} />
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
-                  {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
-                </button>
-                <button type="button" className="btn" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
-                  Request changes
-                </button>
-              </div>
+              {sendingBack ? (
+                <>
+                  <div className="field">
+                    <label htmlFor="review-summary">What should the agent change?</label>
+                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button type="button" className="btn primary" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
+                      Send it back
+                    </button>
+                    <button type="button" className="btn" disabled={busy} onClick={() => setSendingBack(false)}>
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
+                    {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
+                  </button>
+                  <button type="button" className="btn" disabled={busy || running} onClick={() => setSendingBack(true)}>
+                    Request changes
+                  </button>
+                </div>
+              )}
             </Fold>
           )}
           {note && (
