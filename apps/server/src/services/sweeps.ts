@@ -1,6 +1,7 @@
 // Periodic sweeps that put forgotten work in front of the owner:
 // - stale blockers (R21): a dependency whose blocker has had no activity for too long;
-// - stalled runs (R32): a running agent that has gone quiet. Advisory only: nothing is cancelled;
+// - stalled runs (R32): a running agent that has gone quiet. Advisory only: nothing is cancelled
+//   (but a run the runner has lost, or a cancel it never confirmed, is ended by the server);
 // - missed work (R82): an assigned ticket that is ready to go but that nobody is working on.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
@@ -17,15 +18,19 @@ export type SweepLimits = {
   missedAfterMs: number;
   /** An agent is nudged about the same ticket at most once per this long (R82). */
   missedEveryMs: number;
+  /** "Keep waiting" holds a stall alert off for this long; if the run is still quiet it is raised again. */
+  keepWaitingMs: number;
+  /** A run whose runner is offline (or never reported it) this long past the stall limit is ended by the server. */
+  lostAfterMs: number;
 };
-export const DEFAULT_SWEEP_LIMITS: SweepLimits = { staleAfterMs: 24 * 3_600_000, stallAfterMs: 5 * 60_000, missedAfterMs: 30 * 60_000, missedEveryMs: 4 * 3_600_000 };
+export const DEFAULT_SWEEP_LIMITS: SweepLimits = { staleAfterMs: 24 * 3_600_000, stallAfterMs: 5 * 60_000, missedAfterMs: 30 * 60_000, missedEveryMs: 4 * 3_600_000, keepWaitingMs: 30 * 60_000, lostAfterMs: 30 * 60_000 };
 // After this many nudges in a day the owner is told instead (R82).
 const MISSED_NUDGES_PER_DAY = 2;
 
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -101,33 +106,73 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return { open: stale.size, raised };
   }
 
+  /** A run waiting on a permission decision is waiting on the owner, not stalled or lost. */
+  async function waitingOnOwner() {
+    return new Set(
+      (await db.select({ context: decisions.context }).from(decisions).where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open")))).map(
+        (d) => (d.context as { runId: string }).runId,
+      ),
+    );
+  }
+
+  /**
+   * Runs nobody can vouch for any more: quiet well past the stall limit, and the runner is
+   * offline or never reported the run. The server ends them; the stall alert is then withdrawn.
+   * A run on a connected runner that has sent anything is left alone, however long its command.
+   */
+  async function lostRuns(t: Date) {
+    const live = await db
+      .select({ run: runs, runnerId: runners.id })
+      .from(runs)
+      .leftJoin(runners, eq(runners.companyId, runs.companyId))
+      .where(isNull(runs.endedAt));
+    const waiting = await waitingOnOwner();
+    let ended = 0;
+    for (const r of live) {
+      if (waiting.has(r.run.id)) continue;
+      const idle = t.getTime() - (r.run.lastEventAt ?? r.run.startedAt).getTime();
+      if (idle < limits.stallAfterMs + limits.lostAfterMs) continue;
+      if (r.runnerId && opts.isConnected(r.runnerId) && r.run.lastEventAt) continue;
+      await opts.endRun(r.run.id, "lost: runner offline", t);
+      ended++;
+    }
+    return ended;
+  }
+
   async function stalledRuns(t: Date) {
     const live = await db
-      .select({ run: runs, agentName: agents.name, ticketTitle: tickets.title, runnerId: runners.id })
+      .select({ run: runs, agentName: agents.name, ticketTitle: tickets.title, ticketState: tickets.systemState, runnerId: runners.id })
       .from(runs)
       .leftJoin(agents, eq(agents.id, runs.agentId))
       .leftJoin(tickets, eq(tickets.id, runs.ticketId))
       .leftJoin(runners, eq(runners.companyId, runs.companyId))
       .where(isNull(runs.endedAt));
-    // A run waiting on a permission decision is waiting on the owner, not stalled.
-    const waiting = new Set(
-      (await db.select({ context: decisions.context }).from(decisions).where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open")))).map(
-        (d) => (d.context as { runId: string }).runId,
-      ),
-    );
+    const waiting = await waitingOnOwner();
     const stalled = new Map<string, (typeof live)[number] & { idle: number }>();
     for (const r of live) {
-      if (waiting.has(r.run.id) || !r.runnerId) continue;
+      // A finished ticket needs no alert about its run.
+      if (waiting.has(r.run.id) || !r.runnerId || r.ticketState === "done") continue;
       const idle = t.getTime() - (r.run.lastEventAt ?? r.run.startedAt).getTime();
       if (idle >= limits.stallAfterMs) stalled.set(r.run.id, { ...r, idle });
     }
 
     const open = await openOfKind("stalled_run");
     await withdraw(open.filter((d) => !stalled.has((d.context as { runId: string }).runId)).map((d) => d.id));
+    // An answered alert frees its key when the run stirred (a later stall is reported again), or,
+    // after "Keep waiting", when the run is still quiet this long after the answer.
+    const answered = await db
+      .select({ id: decisions.id, context: decisions.context, answer: decisions.answer, answeredAt: decisions.answeredAt })
+      .from(decisions)
+      .where(and(eq(decisions.kind, "stalled_run"), eq(decisions.status, "answered"), isNotNull(decisions.dedupeKey)));
+    const free = answered
+      .filter((d) => !stalled.has((d.context as { runId: string }).runId) || (d.answer === KEEP_WAITING && d.answeredAt != null && t.getTime() - d.answeredAt.getTime() >= limits.keepWaitingMs))
+      .map((d) => d.id);
+    if (free.length) await db.update(decisions).set({ dedupeKey: null }).where(inArray(decisions.id, free));
+
     let raised = 0;
     for (const [runId, r] of stalled) {
       const ctx: DecisionContext = { type: "stalled_run", runnerId: r.runnerId!, runId };
-      // The key stays after an answer, so "Keep waiting" silences this run until it stirs again.
+      // The key stays after an answer, so "Keep waiting" silences this run for a while (see above).
       const rows = await db
         .insert(decisions)
         .values({
@@ -147,13 +192,6 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .returning({ id: decisions.id });
       raised += rows.length;
     }
-    // A run that stirred frees its key, so a later stall is reported again.
-    const answered = await db
-      .select({ id: decisions.id, context: decisions.context })
-      .from(decisions)
-      .where(and(eq(decisions.kind, "stalled_run"), eq(decisions.status, "answered"), isNotNull(decisions.dedupeKey)));
-    const stirred = answered.filter((d) => !stalled.has((d.context as { runId: string }).runId)).map((d) => d.id);
-    if (stirred.length) await db.update(decisions).set({ dedupeKey: null }).where(inArray(decisions.id, stirred));
     return { open: stalled.size, raised };
   }
 
@@ -260,7 +298,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     /** One pass of every sweep. Safe to call often. */
     async run() {
       const t = now();
-      return { staleBlockers: await staleBlockers(t), stalledRuns: await stalledRuns(t), missedWork: await missedWork(t) };
+      await opts.endUnconfirmedCancels(t);
+      const lost = await lostRuns(t);
+      return { staleBlockers: await staleBlockers(t), stalledRuns: await stalledRuns(t), missedWork: await missedWork(t), lostRuns: lost };
     },
   };
 }

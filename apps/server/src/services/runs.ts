@@ -17,8 +17,14 @@ export class RunError extends Error {
 
 type WakeHook = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
 
-export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersService> }) {
+/** How long a cancel may go unconfirmed by the runner before Boss Man ends the run itself. */
+export const CANCEL_GUARD_MS = 60_000;
+
+export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersService>; now?: () => Date }) {
   let wake: WakeHook | null = null;
+  const now = deps.now ?? (() => new Date());
+  // shortcut: cancels awaiting the runner's run.ended live in memory and are lost on a restart; the lost-run reaper in sweeps.ts covers that, later.
+  const cancelling = new Map<string, Date>();
 
   async function load(runId: string, companyId?: string) {
     const [r] = await db.select().from(runs).where(eq(runs.id, runId));
@@ -121,8 +127,25 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     async cancel(runId: string, companyId?: string) {
       const { run, runnerId } = await load(runId, companyId);
       if (run.endedAt) throw new RunError(409, "That run has already ended.");
-      if (!runnerId || !deps.runners.send(runnerId, { type: "run.cancel", runId })) throw new RunError(409, "The company's runner is offline, so the run can't be stopped from here.");
+      if (!runnerId || !deps.runners.send(runnerId, { type: "run.cancel", runId })) {
+        // Nobody can confirm, so the server ends the run itself.
+        await deps.runners.endRun(runId, "stopped: runner offline", now());
+        return { cancelled: true, endedHere: true };
+      }
+      cancelling.set(runId, now());
       return { cancelled: true };
+    },
+
+    /** Ends runs whose runner was told to stop them but never confirmed within the guard time. Called by the sweep. */
+    async endUnconfirmedCancels(t: Date) {
+      for (const [runId, at] of cancelling) {
+        const [run] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, runId));
+        if (run?.endedAt) cancelling.delete(runId);
+        else if (t.getTime() - at.getTime() >= CANCEL_GUARD_MS) {
+          cancelling.delete(runId);
+          await deps.runners.endRun(runId, "stopped: runner didn't confirm", t);
+        }
+      }
     },
   };
 }

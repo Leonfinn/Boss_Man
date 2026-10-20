@@ -152,7 +152,7 @@ export async function buildApp(opts: AppOptions) {
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
-  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now);
+  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId));
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const deploysSvc = deploysService(db, {
     now: opts.now,
@@ -206,7 +206,8 @@ export async function buildApp(opts: AppOptions) {
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
   deploysSvc.setWakeHook((w) => scheduler.wake(w));
-  const runsSvc = runsService(db, { runners });
+  const runsSvc = runsService(db, { runners, now: opts.now });
+  decisionsSvc.setCancelHook((runId) => runsSvc.cancel(runId));
   runsSvc.setWakeHook((w) => scheduler.wake(w));
   const ticketChat = ticketChatService(db, { runs: runsSvc, notify: (agentId, w) => scheduler.notify(agentId, w) });
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
@@ -284,7 +285,14 @@ export async function buildApp(opts: AppOptions) {
         .catch((err) => app.log.error({ err }, "run-ended handling failed"));
     }
   });
-  const sweeps = sweepService(db, { limits: opts.sweepLimits, now: opts.now, wake: (input) => scheduler.notify(input.agentId, input) });
+  const sweeps = sweepService(db, {
+    limits: opts.sweepLimits,
+    now: opts.now,
+    wake: (input) => scheduler.notify(input.agentId, input),
+    isConnected: (runnerId) => runners.isConnected(runnerId),
+    endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
+    endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
+  });
   const work = workService(db, {
     onAssigned: (t) => scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" }),
     onDone: (t) => scheduler.onTicketDone(t.id),

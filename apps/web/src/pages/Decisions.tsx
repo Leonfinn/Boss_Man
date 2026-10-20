@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from "react";
-import { api, type Company, type Decision } from "../api";
+import { api, type Company, type Decision, type StallEvidence } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
+import { describe, useTranscript } from "../transcript";
+import { when } from "./Runs";
 
 const KIND: Record<string, { label: string; tone: string }> = {
   permission: { label: "Permission", tone: "" },
@@ -15,6 +17,50 @@ const KIND: Record<string, { label: string; tone: string }> = {
   deploy: { label: "Production deploy", tone: "red" },
 };
 
+const OPTION_HELP: Record<string, string> = {
+  "Cancel run": "Cancel run: stops it; message the agent on the task to start again.",
+  "Keep waiting": "Keep waiting: you'll be asked again in 30 minutes if it stays quiet.",
+};
+
+const minutesAgo = (iso: string) => {
+  const m = Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 60_000));
+  return m >= 120 ? `${Math.floor(m / 60)} hours` : m === 1 ? "1 minute" : `${m} minutes`;
+};
+
+/** The facts behind a stalled-run alert, in plain words: who, since when, the last sign of life, the runner, the last steps. */
+function StallEvidenceView({ e }: { e: StallEvidence }) {
+  const { items } = useTranscript(e.runId, 60_000);
+  const steps = items.map((i) => ({ i, d: describe(i) })).filter(({ d }) => d.tone !== "text" || d.body?.trim());
+  const last = e.lastStep ? describe(e.lastStep) : null;
+  return (
+    <div className="stall-evidence" style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
+      <p>
+        {e.agent ?? "An agent"} on {e.ticketId ? <a href={`#/tickets/${e.ticketId}`}>{e.ticket ?? "a task"}</a> : (e.ticket ?? "no task")}. Run started {when(e.startedAt)}.
+      </p>
+      <p>
+        {e.lastEventAt ? `Last activity ${minutesAgo(e.lastEventAt)} ago${last ? `: ${last.label}${last.body && last.tone !== "text" ? ` ${last.body.slice(0, 100)}` : ""}` : "."}` : "No sign of life since it was sent to the runner."}
+      </p>
+      <p>{e.runner.connected ? "Runner: connected." : `Runner: offline${e.runner.lastSeenAt ? ` since ${when(e.runner.lastSeenAt)}` : ""}.`}</p>
+      <p>{e.waitingOnOwner ? "It is waiting on you for a permission answer." : "It is not waiting on you."}</p>
+      {steps.length > 0 && (
+        <>
+          <ol className="run-steps">
+            {steps.slice(-5).map(({ i, d }) => (
+              <li key={i.seq} className={d.tone}>
+                <time className="mono muted">{new Date(i.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</time>
+                <span>{d.label}</span>
+              </li>
+            ))}
+          </ol>
+          <p className="muted" style={{ fontSize: 12 }}>
+            <a href={`#/runs/${e.runId}`}>See the whole run</a>
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function kindOf(d: Decision) {
   const ctx = (d as Decision & { context?: { type?: string } }).context;
   const key = ctx?.type === "deploy" ? "deploy" : d.options.includes("Approve plan") ? "plan" : d.kind;
@@ -26,6 +72,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [endedHere, setEndedHere] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
   // The owner's own answer to an agent's question, being written; absent while not.
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
@@ -36,8 +83,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     setBusy(d.id);
     try {
       const note = notes[d.id]?.trim();
-      await api(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(custom ? { custom: true } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(custom ? { custom: true } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
+      if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
     } catch (err) {
@@ -120,6 +168,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <span key={r}>{r}</span>
                       ))}
                     </div>
+                    {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
                     {d.context?.planText && (
                       <details className="plan" open={!done}>
                         <summary>The plan</summary>
@@ -127,7 +176,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </details>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : (
                       <>
                         {d.recommendedOption && (
@@ -141,6 +190,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <label htmlFor={`note-${d.id}`}>Note for the agent (if you send it back)</label>
                             <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
                           </div>
+                        )}
+                        {d.evidence && (
+                          <ul className="muted" style={{ fontSize: 13, paddingLeft: 18 }}>
+                            {d.options.filter((o) => OPTION_HELP[o]).map((o) => (
+                              <li key={o}>{OPTION_HELP[o]}</li>
+                            ))}
+                          </ul>
                         )}
                         {ownWords[d.id] === undefined ? (
                           <div className="actions">

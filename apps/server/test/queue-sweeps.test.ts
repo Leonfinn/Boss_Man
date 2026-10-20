@@ -4,7 +4,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, tickets, wakes } from "../src/db/schema.js";
+import { activity, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -29,14 +29,16 @@ async function setup() {
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
   const [runnerRow] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const commands: RunnerCommand[] = [];
-  built.runners.connect(reg.runnerId, (c) => (commands.push(c), true));
+  let release = built.runners.connect(reg.runnerId, (c) => (commands.push(c), true));
+  const offline = () => release();
+  const online = () => (release = built.runners.connect(reg.runnerId, (c) => (commands.push(c), true)));
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const ticket = async (body: Record<string, unknown>) => (await req("POST", `/api/projects/${project.id}/tickets`, body)).json() as { id: string };
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
-  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number } };
+  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock };
+  return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
@@ -196,6 +198,72 @@ describe("stalled runs (R32)", () => {
     expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
   });
 
+  it("asks again 30 minutes after keep waiting if the run is still quiet, one open alert at a time", async () => {
+    ctx = await setup();
+    await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Keep waiting" });
+    ctx.advance(29 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    ctx.advance(2 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.queue()).toHaveLength(1);
+  });
+
+  it("closes the alert when the run's ticket is already done", async () => {
+    ctx = await setup();
+    const { ticket } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, ticket.id));
+    await ctx.sweep();
+    expect(await ctx.queue()).toEqual([]);
+  });
+
+  it("links a stall notice to its run and a stale blocker to the blocked ticket", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    const domain = await ctx.ticket({ title: "Buy domain" });
+    const tls = await ctx.ticket({ title: "Set up TLS", state: "blocked", assigneeAgentId: ctx.worker.id });
+    await ctx.req("POST", `/api/tickets/${tls.id}/dependencies`, { ticketId: domain.id });
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    await ctx.notes.syncDecisions();
+    const links = Object.fromEntries((await ctx.db.select({ k: decisions.kind, l: notifications.link }).from(notifications).innerJoin(decisions, eq(decisions.id, notifications.decisionId))).map((r) => [r.k, r.l]));
+    expect(links).toMatchObject({ stalled_run: `#/runs/${runId}`, stale_blocker: `#/tickets/${tls.id}` });
+  });
+
+  it("attaches evidence to a quiet run: last step, runner state, and what it waits on", async () => {
+    ctx = await setup();
+    const { runId, ticket } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "in_progress" } } as unknown as RunnerEvent);
+    ctx.advance(14 * 60_000);
+    await ctx.sweep();
+    const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    expect(row!.evidence).toMatchObject({ runId, agent: "CEO", ticketId: ticket.id, ticket: "Checkout error states", runner: { connected: true }, waitingOnOwner: false });
+    expect(row!.evidence.lastStep).toMatchObject({ type: "run.update", event: { update: { title: "Run npm test" } } });
+    expect(new Date(row!.evidence.lastEventAt).getTime()).toBeLessThan(Date.now() + 1000);
+    ctx.offline();
+    const [off] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    expect(off!.evidence.runner.connected).toBe(false);
+  });
+
+  it("attaches evidence to a run that never started: no events at all", async () => {
+    ctx = await setup();
+    await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
+    expect(row!.evidence).toMatchObject({ lastEventAt: null, lastStep: null, ticket: "Checkout error states" });
+  });
+
   it("doesn't flag a run that is waiting for a permission answer", async () => {
     ctx = await setup();
     const { runId } = await launch();
@@ -206,5 +274,82 @@ describe("stalled runs (R32)", () => {
     expect((await ctx.sweep()).stalledRuns.open).toBe(0);
     // The paused agent outranks other rows.
     expect((await ctx.queue())[0]!.reasons[0]).toBe("An agent is paused until you answer");
+  });
+});
+
+describe("the server ends runs it can't reach", () => {
+  async function launched() {
+    const t = await ctx.ticket({ title: "Checkout error states", assigneeAgentId: ctx.ceo.id });
+    await ctx.scheduler.tick();
+    const start = ctx.commands.find((c) => c.type === "run.start") as Extract<RunnerCommand, { type: "run.start" }>;
+    await ctx.emit({ type: "run.started", runId: start.runId, agentId: ctx.ceo.id, acpSessionId: "s1", model: null });
+    return { ticket: t, runId: start.runId };
+  }
+  const row = async (runId: string) => (await ctx.db.select().from(runs).where(eq(runs.id, runId)))[0]!;
+
+  it("stop with the runner offline ends the run here and runs the end handling", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    ctx.offline();
+    expect((await ctx.req("POST", `/api/runs/${runId}/cancel`)).json()).toEqual({ cancelled: true, endedHere: true });
+    expect(await row(runId)).toMatchObject({ outcome: "stopped: runner offline", endedAt: expect.any(Date) });
+    expect((await ctx.db.select().from(activity)).some((a) => a.kind === "run_ended" && a.summary.includes("stopped: runner offline"))).toBe(true);
+  });
+
+  it("cancelling a stalled run from the alert with the runner offline says so", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    const [d] = await ctx.queue();
+    ctx.offline();
+    expect((await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Cancel run" })).json()).toMatchObject({ delivered: false, endedHere: true });
+    expect((await row(runId)).outcome).toBe("stopped: runner offline");
+  });
+
+  it("with the runner online, ends the run if no run.ended arrives within a minute", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    expect((await ctx.req("POST", `/api/runs/${runId}/cancel`)).json()).toEqual({ cancelled: true });
+    ctx.advance(30_000);
+    await ctx.sweep();
+    expect((await row(runId)).endedAt).toBeNull();
+    ctx.advance(31_000);
+    await ctx.sweep();
+    expect(await row(runId)).toMatchObject({ outcome: "stopped: runner didn't confirm", endedAt: expect.any(Date) });
+  });
+
+  it("leaves a confirmed cancel alone", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    await ctx.req("POST", `/api/runs/${runId}/cancel`);
+    await ctx.emit({ type: "run.ended", runId, stopReason: "cancelled", error: null });
+    ctx.advance(2 * 60_000);
+    await ctx.sweep();
+    expect((await row(runId)).outcome).toBe("cancelled");
+  });
+
+  it("reaps a run whose runner has been offline well past the stall limit, and withdraws its alert", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    ctx.offline();
+    ctx.advance(28 * 60_000);
+    expect((await ctx.sweep()).lostRuns).toBe(0); // 34 minutes in: not yet 30 past the 5-minute limit
+    ctx.advance(2 * 60_000);
+    const res = await ctx.sweep();
+    expect(res.lostRuns).toBe(1);
+    expect(await row(runId)).toMatchObject({ outcome: "lost: runner offline" });
+    expect(await ctx.queue()).toEqual([]);
+  });
+
+  it("never reaps a run on a connected runner that has sent events", async () => {
+    ctx = await setup();
+    const { runId } = await launched();
+    ctx.advance(3 * HOUR);
+    expect((await ctx.sweep()).lostRuns).toBe(0);
+    expect((await row(runId)).endedAt).toBeNull();
   });
 });
