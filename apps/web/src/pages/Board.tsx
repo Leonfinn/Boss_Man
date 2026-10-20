@@ -57,7 +57,7 @@ type NewTicketInput = { title: string; body: string | null; risk: Risk | null; p
 
 /** New ticket (R63): a button that opens a card with everything a ticket needs to start well. */
 function NewTicket({ agents, features, tiers, onAdd }: { agents: Company["agents"]; features: Feature[]; tiers: RiskTiers; onAdd: (t: NewTicketInput) => Promise<unknown> }) {
-  const blank = { title: "", body: "", risk: "medium" as Risk, assignee: "", feature: "" };
+  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: "" };
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
@@ -77,7 +77,7 @@ function NewTicket({ agents, features, tiers, onAdd }: { agents: Company["agents
       await onAdd({
         title: form.title.trim(),
         body: form.body.trim() || null,
-        risk: form.risk === "medium" ? null : form.risk,
+        risk: form.risk === "none" ? null : form.risk,
         planFirst,
         assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
         assignedToOwner: form.assignee === "owner",
@@ -151,14 +151,15 @@ function NewTicket({ agents, features, tiers, onAdd }: { agents: Company["agents
         </div>
         <div className="field" style={{ flex: "1 1 280px" }}>
           <label htmlFor="nt-risk">Risk</label>
-          <select id="nt-risk" value={form.risk} onChange={(e) => setForm({ ...form, risk: e.target.value as Risk })} style={{ maxWidth: 200 }}>
+          <select id="nt-risk" value={form.risk} onChange={(e) => setForm({ ...form, risk: e.target.value as Risk | "none" })} style={{ maxWidth: 200 }}>
+            <option value="none">Let the CEO rate it</option>
             {RISKS.map((r) => (
               <option key={r} value={r}>
                 {r[0]!.toUpperCase() + r.slice(1)}
               </option>
             ))}
           </select>
-          <RiskHelp tiers={tiers} current={form.risk} />
+          <RiskHelp tiers={tiers} current={form.risk === "none" ? null : form.risk} />
         </div>
       </div>
       {agentChosen && (

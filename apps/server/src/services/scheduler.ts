@@ -277,6 +277,7 @@ export function schedulerService(
         if (note) lines.push("", note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
+        if (!t.t.risk && (agent.role === "ceo" || agent.role === "manager")) lines.push("", "This ticket has no risk rating yet. Before you delegate it or start work, read it and rate its risk with set_ticket_risk (ticketId, risk, and a one-line reason). The owner sees your rating and reason.");
         lines.push("", planningGuidance(t.t.risk));
         lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {

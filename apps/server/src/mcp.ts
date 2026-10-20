@@ -85,10 +85,14 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     return rows.length === 1 ? rows[0]! : null;
   }
 
+  async function isManager() {
+    const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+    return me?.role === "ceo" || me?.role === "manager";
+  }
+
   // CEOs and managers hand work to a colleague by name; returns the agent's id or the refusal text.
   async function delegateTarget(name: string): Promise<{ id: string } | { error: string }> {
-    const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-    if (me?.role !== "ceo" && me?.role !== "manager") return { error: "Only your company's CEO or a manager can assign tickets to colleagues." };
+    if (!(await isManager())) return { error: "Only your company's CEO or a manager can assign tickets to colleagues." };
     // The PA only answers the owner from read-only tools, so it can't take ticket work.
     const team_ = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, scope.companyId), isNull(agents.retiredAt), sql`${agents.duty} is distinct from 'assistant'`));
     const a = team_.find((x) => x.name.toLowerCase() === name.trim().toLowerCase());
@@ -116,6 +120,32 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       try {
         const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim() });
         return text(`Ticket ${ticketId} is now assigned to ${agent} (version ${u.version}); they are woken with your note.`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_ticket_risk",
+    {
+      description:
+        "For CEOs and managers: rate the risk of one of your company's tickets (ticketId, risk: trivial, low, medium, high or critical, reason up to 240 characters). Rate unrated tickets when you review them. You can raise a rating but not lower one that is set; only the owner can. High and critical work is reviewed by the owner and planned first. The owner sees your rating and reason on the ticket.",
+      inputSchema: { ticketId: z.string().uuid(), risk: z.enum(RISK_TIERS), reason: z.string().min(1).max(240) },
+    },
+    async ({ ticketId, risk, reason }) => {
+      if (!(await isManager())) return fail("Only your company's CEO or a manager can rate a ticket's risk.");
+      const [t] = await db.select({ risk: tickets.risk }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      if (t.risk && RISK_TIERS.indexOf(risk) < RISK_TIERS.indexOf(t.risk)) return fail(`Nothing changed: it is already rated ${t.risk}, and only the owner can lower a rating. Keep ${t.risk} or raise it.`);
+      if (t.risk === risk) return text(`Ticket ${ticketId} is already rated ${risk}.`);
+      try {
+        // updateTicket also sets planFirst for tasks that haven't started.
+        const u = await work.updateTicket(ticketId, { risk });
+        const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "risk", summary: `${me?.name ?? "An agent"} rated it ${risk}: ${reason.trim()}` });
+        return text(`Ticket ${ticketId} is now rated ${risk} (version ${u.version}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
