@@ -13,6 +13,7 @@ export const MOUNTS = [
   ["workspaces", "/home/node/workspaces"],
   ["runner-data", "/home/node/runner-data"],
   ["claude", "/home/node/.claude"],
+  ["opencode", "/home/node/.local/share/opencode"],
 ] as const;
 export const TOKEN_TARGET = "/run/secrets/runner_token";
 

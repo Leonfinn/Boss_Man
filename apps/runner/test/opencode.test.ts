@@ -41,10 +41,23 @@ describe("opencode agent kind", () => {
     const { events, dump } = await run({ model: "b/two", secrets: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ provider: { x: {} }, permission: { read: "allow" } }) } });
     expect(dump.argv).toEqual(["acp"]);
     expect(dump.autoupdateOff).toBe("1");
-    expect(dump.config).toMatchObject({ autoupdate: false, provider: { x: {} }, permission: { read: "allow", edit: "ask", bash: "ask", webfetch: "ask", external_directory: "ask" } });
+    expect(dump.config).toMatchObject({ autoupdate: false, provider: { x: {} }, permission: { read: "allow", edit: "ask", bash: "ask", webfetch: "ask", external_directory: "ask" }, disabled_providers: ["opencode"] });
     expect(dump.model).toBe("b/two");
     expect(events.find((e) => e.type === "run.started")).toMatchObject({ model: "b/two" });
     expect(events.find((e) => e.type === "run.ended")).toMatchObject({ stopReason: "end_turn", error: null });
+  });
+
+  it("ends the run without quoting a malformed config secret", async () => {
+    const events: RunnerEvent[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({ mcpUrl: "http://127.0.0.1:9/mcp", baseEnv: { PATH: process.env.PATH }, adapterBins: { opencode: fake }, resolveEnv: async () => ({ OPENCODE_CONFIG_CONTENT: '{"apiKey":"sk-secret-value"' }), emit: (e) => (events.push(e), e.type === "run.ended" && done()) });
+    manager.handle({ type: "run.start", runId: "r2", agentId: "a1", agentKind: "opencode", model: null, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t" } as never);
+    await ended;
+    manager.shutdown();
+    const end = events.find((e) => e.type === "run.ended") as { error: string };
+    expect(end.error).toContain("OPENCODE_CONFIG_CONTENT isn't valid JSON");
+    expect(end.error).not.toContain("sk-secret-value");
   });
 
   it("denies edits and commands in board-tools-only chats, and leaves the model alone when it is already selected", async () => {

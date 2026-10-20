@@ -334,11 +334,19 @@ export class SessionManager {
       // The inline config wins over a repo's opencode.json. Provider settings (e.g. a local Ollama
       // endpoint) arrive as a granted OPENCODE_CONFIG_CONTENT secret and are kept.
       const mine = secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT;
-      const existing = mine ? (JSON.parse(mine) as Record<string, unknown>) : {};
+      let existing: Record<string, unknown> = {};
+      try {
+        existing = mine ? (JSON.parse(mine) as Record<string, unknown>) : {};
+      } catch {
+        // JSON.parse quotes the input in its message; this is a secret, so say only which one.
+        throw new Error("OPENCODE_CONFIG_CONTENT isn't valid JSON.");
+      }
       // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
       const verdict = cmd.boardToolsOnly ? "deny" : "ask";
       const permission = { ...(existing.permission as object | undefined), edit: verdict, bash: verdict, webfetch: verdict, external_directory: verdict };
-      env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...existing, autoupdate: false, share: "disabled", permission });
+      // OpenCode's own hosted "opencode" provider needs no key and would send work to opencode.ai, so it's off.
+      const disabled = [...new Set([...((existing.disabled_providers as string[] | undefined) ?? []), "opencode"])];
+      env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ ...existing, autoupdate: false, share: "disabled", permission, disabled_providers: disabled });
       env.OPENCODE_DISABLE_AUTOUPDATE = "1";
       env.OPENCODE_DISABLE_CLAUDE_CODE = "1"; // don't read ~/.claude as OpenCode config
     }
