@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -167,7 +167,10 @@ describe("the runner launcher (R55)", () => {
     await api.put("app-co", TOKEN);
     await api.put("homelab", TOKEN);
     fake.containers.set("someone-else", { id: "x", labels: { "boss-man.launcher": "1", "boss-man.company": "app-co" }, spec: {}, state: "running" });
+    // A folder added to MOUNTS after the runner was first made (e.g. opencode) is created on recreate, not left to Docker.
+    rmSync(path.join(cfg.dataRoot, "companies/app-co/opencode"), { recursive: true });
     expect(await api.recreateAll()).toEqual(["app-co", "homelab"]);
+    expect(existsSync(path.join(cfg.dataRoot, "companies/app-co/opencode"))).toBe(true);
     expect(fake.containers.get("someone-else")!.id).toBe("x");
   });
 });
