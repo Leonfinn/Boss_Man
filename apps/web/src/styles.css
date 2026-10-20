@@ -41,7 +41,7 @@ h1, h2, h3 { margin: 0; }
 p { margin: 0; }
 
 .mono { font-family: var(--mono); }
-.muted { color: var(--muted); }
+.muted { color: var(--muted); overflow-wrap: anywhere; }
 .label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
@@ -520,8 +520,11 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
 .activity-feed { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px; max-height: 70vh; overflow-y: auto; }
 .run-block { border: 1px solid var(--line); border-radius: 10px; background: var(--ground); }
 .run-block.live { border-color: var(--accent); }
-.run-head { width: 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: none; border: 0; text-align: left; font: inherit; font-size: 14px; color: var(--ink); cursor: pointer; }
-.run-body { padding: 0 12px 10px; display: flex; flex-direction: column; gap: 6px; }
+.run-head { width: 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: none; border: 0; text-align: left; font: inherit; font-size: 14px; color: var(--ink); }
+.run-body { padding: 0 12px 10px; font-size: 14px; }
+.run-body > summary { cursor: pointer; color: var(--muted); padding: 2px 0; }
+.chat-msg details { margin-top: 6px; font-size: 14px; }
+.chat-msg details > summary { cursor: pointer; opacity: .75; }
 .run-steps { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
 .run-steps li { display: flex; gap: 8px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
 .run-steps li time { flex: none; font-size: 11px; }

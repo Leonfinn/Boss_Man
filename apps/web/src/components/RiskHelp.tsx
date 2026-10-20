@@ -11,7 +11,7 @@ export function useRiskTiers() {
 const label = (r: string) => r[0]!.toUpperCase() + r.slice(1);
 
 /** Under a risk picker: what the chosen tier means, and every tier to compare (R61). */
-export function RiskHelp({ tiers, current }: { tiers: RiskTiers; current: Risk }) {
+export function RiskHelp({ tiers, current }: { tiers: RiskTiers; current: Risk | null }) {
   const chosen = tiers.find((t) => t.tier === current);
   return (
     <div className="risk-help" style={{ fontSize: 13 }}>

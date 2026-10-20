@@ -76,7 +76,7 @@ type Services = {
   pa: ReturnType<typeof paService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, feedback, ticketChat, wiki, skills, agents: team, pa }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -85,11 +85,79 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     return rows.length === 1 ? rows[0]! : null;
   }
 
+  async function isManager() {
+    const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+    return me?.role === "ceo" || me?.role === "manager";
+  }
+
+  // CEOs and managers hand work to a colleague by name; returns the agent's id or the refusal text.
+  async function delegateTarget(name: string): Promise<{ id: string } | { error: string }> {
+    if (!(await isManager())) return { error: "Only your company's CEO or a manager can assign tickets to colleagues." };
+    // The PA only answers the owner from read-only tools, so it can't take ticket work.
+    const team_ = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, scope.companyId), isNull(agents.retiredAt), sql`${agents.duty} is distinct from 'assistant'`));
+    const a = team_.find((x) => x.name.toLowerCase() === name.trim().toLowerCase());
+    if (!a) return { error: `No active agent called ${name} in your company. Valid names: ${team_.map((x) => x.name).join(", ")}.` };
+    // The work service lets the owner assign to a paused agent, but the wake would sit unanswered; an agent shouldn't hand work to a dead end.
+    if (a.paused) return { error: `${a.name} is paused, so they would not pick it up. Pick someone else.` };
+    return { id: a.id };
+  }
+
+  server.registerTool(
+    "assign_ticket",
+    {
+      description:
+        "For CEOs and managers: hand one of your company's tickets to a colleague by name (ticketId, agent, note up to 240 characters saying why and what you expect). The colleague is woken to work on it and reads your note on the ticket. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      inputSchema: { ticketId: z.string().uuid(), agent: z.string().min(1), note: z.string().min(1).max(240), expected_version: z.number().int().optional() },
+    },
+    async ({ ticketId, agent, note, expected_version }) => {
+      const to = await delegateTarget(agent);
+      if ("error" in to) return fail(to.error);
+      const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      // shortcut: version is checked just before the write, not inside it; fine for one CEO per company, upgrade if two agents assign at once.
+      if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${t.state}, version ${t.version}. Read it again with tickets, then decide.`);
+      if (t.assignee === to.id) return fail(`That ticket is already assigned to ${agent}.`);
+      try {
+        const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim() });
+        return text(`Ticket ${ticketId} is now assigned to ${agent} (version ${u.version}); they are woken with your note.`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_ticket_risk",
+    {
+      description:
+        "For CEOs and managers: rate the risk of one of your company's tickets (ticketId, risk: trivial, low, medium, high or critical, reason up to 240 characters). Rate unrated tickets when you review them. You can raise a rating but not lower one that is set; only the owner can. High and critical work is reviewed by the owner and planned first. The owner sees your rating and reason on the ticket.",
+      inputSchema: { ticketId: z.string().uuid(), risk: z.enum(RISK_TIERS), reason: z.string().min(1).max(240) },
+    },
+    async ({ ticketId, risk, reason }) => {
+      if (!(await isManager())) return fail("Only your company's CEO or a manager can rate a ticket's risk.");
+      const [t] = await db.select({ risk: tickets.risk }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      if (t.risk && RISK_TIERS.indexOf(risk) < RISK_TIERS.indexOf(t.risk)) return fail(`Nothing changed: it is already rated ${t.risk}, and only the owner can lower a rating. Keep ${t.risk} or raise it.`);
+      if (t.risk === risk) return text(`Ticket ${ticketId} is already rated ${risk}.`);
+      try {
+        // updateTicket also sets planFirst for tasks that haven't started.
+        const u = await work.updateTicket(ticketId, { risk });
+        const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "risk", summary: `${me?.name ?? "An agent"} rated it ${risk}: ${reason.trim()}` });
+        return text(`Ticket ${ticketId} is now rated ${risk} (version ${u.version}).`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
   server.registerTool(
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for, and featureId when it delivers a feature request. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
@@ -98,14 +166,34 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         risk: z.enum(RISK_TIERS).optional(),
         planFirst: z.boolean().optional(),
         featureId: z.string().uuid().optional(),
+        feature: z.string().optional(),
+        parent: z.string().uuid().optional(),
+        assignee: z.string().optional(),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst, featureId }) => {
-      if (featureId) {
+    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, ...rest }) => {
+      const to = assignee ? await delegateTarget(assignee) : null;
+      if (to && "error" in to) return fail(to.error);
+      let parentTask: Awaited<ReturnType<typeof work.parentOf>> | null = null;
+      if (parent) {
+        try {
+          parentTask = await work.parentOf(parent, scope.companyId);
+        } catch (err) {
+          if (err instanceof WorkError) return fail(err.message);
+          throw err;
+        }
+      }
+      let featureId: string | null = parentTask ? parentTask.featureId : (rest.featureId ?? null);
+      if (feature && !parentTask) {
+        const fs = await db.select({ id: features.id }).from(features).where(and(eq(features.companyId, scope.companyId), or(sql`${features.id}::text = ${feature}`, sql`lower(${features.title}) = lower(${feature})`)));
+        if (fs.length !== 1) return fail(fs.length ? `More than one feature is called "${feature}"; pass its id.` : `No feature "${feature}" in your company. The features tool lists them.`);
+        featureId = fs[0]!.id;
+      }
+      if (featureId && !parentTask) {
         const [f] = await db.select({ id: features.id }).from(features).where(and(eq(features.id, featureId), eq(features.companyId, scope.companyId)));
         if (!f) return fail("No feature with that id in your company.");
       }
-      const p = await resolveProject(project);
+      const p = parentTask ? (await db.select().from(projects).where(eq(projects.id, parentTask.projectId)))[0] : await resolveProject(project);
       if (!p) {
         const names = (await db.select({ name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId))).map((r) => r.name);
         return fail(names.length ? `Name the project: one of ${names.join(", ")}.` : "Your company has no projects yet; ask your CEO to create one.");
@@ -136,17 +224,20 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId: featureId ?? null })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null })
         .returning({ id: tickets.id });
+      if (parentTask) await work.waitOnSubtask(parentTask, t!.id);
+      await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
-      return text(`Created ticket ${t!.id} in ${p.name}.`);
+      if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id });
+      return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
     },
   );
 
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
     },
     async ({ ticketId, state, outcome, expected_version, summary }) => {
@@ -186,6 +277,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
       }
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}`, at });
+      const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
+      await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
@@ -198,7 +291,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "ticket_reply",
     {
-      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. For a decision you need from them, use raise_decision instead.",
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. For a decision you need from them, use raise_decision instead. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
       inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000) },
     },
     async ({ ticketId, text: body }) => {

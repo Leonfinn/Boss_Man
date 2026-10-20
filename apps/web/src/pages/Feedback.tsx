@@ -4,6 +4,7 @@ import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { STATUS_TONE } from "./Features";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 
 type State = "unprocessed" | "processed" | "archived";
 const TABS: Array<{ id: State; label: string }> = [
@@ -303,6 +304,8 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
   const [form, setForm] = useState<{ title: string; intro: string } | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const d = s.data;
+  const sv = useSaveState(form);
+  const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (d && !form) setForm({ title: d.portalTitle ?? "", intro: d.portalIntro ?? "" });
   }, [d, form]);
@@ -343,7 +346,11 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          run(api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { title: form.title.trim() || null, intro: form.intro.trim() || null } }), "Saved.");
+          setBusy(true);
+          run(
+            api(`/api/companies/${companyId}/portal`, { method: "PATCH", body: { title: form.title.trim() || null, intro: form.intro.trim() || null } }).then(() => sv.markSaved()).finally(() => setBusy(false)),
+            "Saved.",
+          );
         }}
         style={{ display: "flex", flexDirection: "column", gap: 10 }}
       >
@@ -355,9 +362,7 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
           <label htmlFor="portal-intro">Introduction</label>
           <textarea id="portal-intro" rows={2} maxLength={2000} value={form.intro} onChange={(e) => setForm({ ...form, intro: e.target.value })} />
         </div>
-        <button className="btn" type="submit" style={{ alignSelf: "flex-start" }}>
-          Save
-        </button>
+        <SaveButton {...sv} busy={busy} style={{ alignSelf: "flex-start" }} />
       </form>
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"} style={{ fontSize: 14 }}>

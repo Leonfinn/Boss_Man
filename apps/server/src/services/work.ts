@@ -21,6 +21,8 @@ type TicketPatch = {
   state?: SystemState;
   outcome?: "completed" | "cancelled";
   assigneeAgentId?: string | null;
+  /** A note for whoever reads the ticket next. */
+  stateNote?: string;
   assignedToOwner?: boolean;
   milestoneId?: string | null;
   keyResultId?: string | null;
@@ -30,6 +32,10 @@ type TicketPatch = {
   risk?: RiskTier | null;
   /** The feature request this ticket delivers. */
   featureId?: string | null;
+  /** Makes this a sub-task of that task: it joins the parent's feature and the parent waits on it. */
+  parentTicketId?: string;
+  /** The agent that created it, so a repeated call after a resume returns the same task. */
+  createdByAgentId?: string | null;
   /** Start in plan mode until a plan is approved (R40). */
   planFirst?: boolean;
   /** Move past a full column anyway. */
@@ -39,6 +45,8 @@ type TicketPatch = {
 export type WorkHooks = {
   onAssigned?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
   onDone?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
+  /** A task of this feature started, finished, reopened, moved or was added: its status may need to follow. */
+  onFeature?: (featureId: string) => Promise<unknown>;
   now?: () => Date;
 };
 
@@ -73,6 +81,14 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
   async function assertFeatureInCompany(id: string, companyId: string) {
     const [f] = await db.select({ id: features.id }).from(features).where(and(eq(features.id, id), eq(features.companyId, companyId)));
     if (!f) throw new WorkError(422, "That feature isn't in this company.");
+  }
+
+  /** The task a sub-task hangs off: in the same company and not itself a sub-task (one level only). */
+  async function parentOf(parentId: string, companyId: string) {
+    const [p] = await db.select().from(tickets).where(and(eq(tickets.id, parentId), eq(tickets.companyId, companyId)));
+    if (!p) throw new WorkError(422, "That parent task isn't in this company.");
+    if (p.parentTicketId) throw new WorkError(422, "A sub-task can't have sub-tasks.");
+    return p;
   }
 
   /** Resolves where a ticket lands and enforces the column's card limit. */
@@ -132,8 +148,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const deps = rows.length
         ? await db.select().from(ticketDependencies).where(inArray(ticketDependencies.blockedTicketId, rows.map((r) => r.t.id)))
         : [];
+      const fids = [...new Set(rows.map((r) => r.t.featureId).filter((x): x is string => !!x))];
+      const featureTitle = new Map((fids.length ? await db.select({ id: features.id, title: features.title }).from(features).where(inArray(features.id, fids)) : []).map((f) => [f.id, f.title]));
       const cards = rows.map(({ t, milestoneTarget }) => ({
         ...t,
+        featureTitle: t.featureId ? (featureTitle.get(t.featureId) ?? null) : null,
+        parentTitle: rows.find((r) => r.t.id === t.parentTicketId)?.t.title ?? null,
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
@@ -159,6 +179,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (input.milestoneId) await assertLinkInCompany("milestone", input.milestoneId, p.companyId);
       if (input.keyResultId) await assertLinkInCompany("keyResult", input.keyResultId, p.companyId);
       if (input.featureId) await assertFeatureInCompany(input.featureId, p.companyId);
+      const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
+      const featureId = parent ? parent.featureId : (input.featureId ?? null);
       const col = await placement(projectId, { columnId: input.columnId, state: input.state }, { overLimit: input.overLimit });
       const [t] = await db
         .insert(tickets)
@@ -180,13 +202,26 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           risk: input.risk ?? null,
           // Graded planning: high and critical work is planned first unless the creator says otherwise.
           planFirst: input.planFirst ?? (input.risk ? planFirstByDefault(input.risk) : false),
-          featureId: input.featureId ?? null,
+          featureId,
+          parentTicketId: parent?.id ?? null,
+          createdByAgentId: input.createdByAgentId ?? null,
         })
         .returning();
       await record(db, { companyId: p.companyId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${t!.title}" in ${t!.systemState}${t!.assigneeAgentId ? ", assigned" : ""}`, at: now() });
+      if (parent) await this.waitOnSubtask(parent, t!.id);
+      if (featureId) await hooks.onFeature?.(featureId);
       if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);
       return t!;
     },
+
+    /** The parent waits on its new sub-task; the existing unblocked note hands it back when the sub-task is done. */
+    async waitOnSubtask(parent: typeof tickets.$inferSelect, childId: string) {
+      await db.insert(ticketDependencies).values({ blockedTicketId: parent.id, blockerTicketId: childId });
+      if (parent.systemState === "ready" || parent.systemState === "in_progress") await this.updateTicket(parent.id, { state: "blocked", overLimit: true });
+    },
+
+    /** Checks a parent for a new sub-task before it is created. */
+    parentOf,
 
     /**
      * Turns the ticket's watcher on or off (R80). Turning it on asks for a first report straight
@@ -228,6 +263,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           ...fields,
           ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? "completed") : null } : {}),
           lastActivityAt: now(),
+          ...(patch.stateNote ? { stateNoteAt: now() } : {}),
         })
         .where(eq(tickets.id, ticketId))
         .returning();
@@ -238,6 +274,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       }
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
       if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);
+      for (const fid of new Set([t.featureId, updated!.featureId])) if (fid) await hooks.onFeature?.(fid);
       return updated!;
     },
 

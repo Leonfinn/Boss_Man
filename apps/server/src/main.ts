@@ -27,8 +27,6 @@ const { app, scheduler, sweeps, notes, feedback, review } = await buildApp({
 const tick = setInterval(() => void scheduler.tick().catch((err) => app.log.error({ err }, "scheduler tick failed")), Number(env.BOSSMAN_TICK_MS ?? 5000));
 // New decisions reach the owner's notifications (R44).
 const notify = setInterval(() => void notes.syncDecisions().catch((err) => app.log.error({ err }, "notification sync failed")), Number(env.BOSSMAN_NOTIFY_MS ?? 5000));
-// Features follow the tickets that deliver them.
-const featureSync = setInterval(() => void feedback.syncStatuses().catch((err) => app.log.error({ err }, "feature status sync failed")), Number(env.BOSSMAN_FEATURE_SYNC_MS ?? 30_000));
 // Stale-blocker, stalled-run and missed-work sweeps.
 const sweep = setInterval(() => void sweeps.run().catch((err) => app.log.error({ err }, "sweep failed")), Number(env.BOSSMAN_SWEEP_MS ?? 60_000));
 // Pull requests waiting on the git host: merged there, or mergeable now (R59).
@@ -38,7 +36,6 @@ const shutdown = async () => {
   clearInterval(tick);
   clearInterval(sweep);
   clearInterval(prSync);
-  clearInterval(featureSync);
   clearInterval(notify);
   await app.close();
   await close();

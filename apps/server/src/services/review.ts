@@ -20,6 +20,31 @@ export class ReviewError extends Error {
   }
 }
 
+/** What the owner sees while and after an approval lands (B): in plain words. */
+export type LandingStatus = { state: "running"; startedAt: string; command: string | null } | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
+
+/** The plain-words outcome of landing, for a non-developer. */
+export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
+  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string };
+  const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
+  switch (r.outcome) {
+    case "merged":
+      return `Merged into ${ctx.branch}.`;
+    case "done":
+      return "Approved; the ticket is done.";
+    case "pull_request":
+      return `${d.url ? `Pull request opened: ${d.url}.` : "Approved."}${d.note ? ` It hasn't merged yet: ${d.note}` : ""}`;
+    case "verify_failed":
+      return `Approved, but not merged: the check ${d.timedOut ? `timed out after ${Math.max(1, Math.round((d.ms ?? 0) / 60_000))} minutes` : `failed (exit code ${d.exitCode})`}. ${back} to fix; the check's output is in the conversation below.`;
+    case "conflicts":
+      return `Approved, but not merged: the work conflicts with ${ctx.branch} in ${(d.files ?? []).join(", ")}. ${back} to sort out.`;
+    case "uncommitted":
+      return `Approved, but not merged: some work isn't saved to the branch yet (${(d.files ?? []).join(", ")}). ${back} to commit it.`;
+    default:
+      return `Approved, but not merged (${r.outcome.replace(/_/g, " ")}).`;
+  }
+}
+
 export type GitTemplates = { commit: string; pr: string };
 type NotifyHook = (agentId: string, input: { reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
 
@@ -36,6 +61,8 @@ export function reviewService(
   },
 ) {
   let wake: NotifyHook | null = null;
+  // shortcut: in memory, so a server restart mid-landing forgets the status (the ticket itself is unaffected); upgrade to a column if owners need it to survive restarts.
+  const landings = new Map<string, LandingStatus>();
 
   async function ticketWithRepo(ticketId: string, companyId?: string) {
     const [row] = await db
@@ -137,7 +164,7 @@ export function reviewService(
      */
     async submit(
       ticketId: string,
-      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; reviewer: string; reviewerAgentId?: string | null; companyId?: string; causedByRunId?: string | null },
+      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; reviewer: string; reviewerAgentId?: string | null; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
     ) {
       const { t } = await ticketWithRepo(ticketId, input.companyId);
       // The coder doesn't review its own work (R49).
@@ -164,6 +191,7 @@ export function reviewService(
           await db.insert(ticketDependencies).values({ blockedTicketId: ticketId, blockerDecisionId: d!.id });
           return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
         }
+        if (input.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, input.reviewer, input.causedByRunId) };
         return { verdict: "approved" as const, ...(await this.land(ticketId, input.reviewer, input.causedByRunId)) };
       }
       if (!input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
@@ -175,6 +203,33 @@ export function reviewService(
       if (round.escalated) return { verdict: "changes_requested" as const, delivered: `held for the owner (decision ${round.escalated})`, message: text, round: round.round };
       const delivered = await this.sendBack(ticketId, text, input.reviewer, input.causedByRunId);
       return { verdict: "changes_requested" as const, delivered, message: text, round: round.round };
+    },
+
+    landing: (ticketId: string): LandingStatus | null => landings.get(ticketId) ?? null,
+
+    /** Runs land() without holding the request (the check can take minutes); the outcome is kept for the page to poll. */
+    async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null): Promise<LandingStatus> {
+      if (landings.get(ticketId)?.state === "running") throw new ReviewError(409, "This ticket is already being checked and merged.");
+      const { t, defaultBranch, verifyCommand, deepVerifyCommand, repoUrl } = await ticketWithRepo(ticketId);
+      const command = repoUrl ? ([verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter(Boolean) as string[]).join(" && ") || null : null;
+      const running: LandingStatus = { state: "running", startedAt: new Date().toISOString(), command };
+      landings.set(ticketId, running);
+      void (async () => {
+        let text: string;
+        let outcome = "failed";
+        let url: string | null = null;
+        try {
+          const r = await this.land(ticketId, reviewer, causedByRunId);
+          const [a] = t.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId)) : [];
+          outcome = r.outcome;
+          url = (r.detail as { url?: string | null } | undefined)?.url ?? null;
+          text = landingText(r, { branch: defaultBranch, assignee: a?.name ?? null });
+        } catch (err) {
+          text = `Approved, but not merged: ${(err as Error).message}`;
+        }
+        landings.set(ticketId, { state: "finished", outcome, text, url, finishedAt: new Date().toISOString() });
+      })();
+      return running;
     },
 
     /** Moves the ticket back to in progress and gives the agent the review. */

@@ -3,6 +3,7 @@
 // to do each thing. What's still undone shows on Decisions until it's done or dismissed.
 import { useEffect, useState, type FormEvent } from "react";
 import { api, type Company, type FundingSource, type Project } from "../api";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { Credentials, Funding, ProjectRow, Runner } from "./Settings";
 
@@ -17,15 +18,18 @@ const STEPS = [
   { id: "git", title: "A git token", why: "So agents can clone, push, and open pull requests on the project's repo." },
   { id: "checks", title: "Checks before merging", why: "Boss Man looks at the repo, through the runner, and proposes the check that runs before work merges. High-risk work can add a slower one." },
   { id: "funding", title: "What pays for the CEO", why: "Funding sources track cost and quota. Choose the one the CEO runs on; the Agents page sets the rest." },
-  { id: "ticket", title: "A first ticket", why: "Optional: something for the team to start on." },
+  { id: "ticket", title: "A first task", why: "Optional: something for the team to start on." },
 ] as const;
 
 function CompanyStep({ company, onCreated }: { company: Company | undefined; onCreated: (id: string) => void }) {
   const [name, setName] = useState(company?.name ?? "");
   const [mission, setMission] = useState(company?.mission ?? "");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sv = useSaveState({ name, mission });
   const save = async (e: FormEvent) => {
     e.preventDefault();
+    setBusy(true);
     try {
       if (company) {
         await api(`/api/companies/${company.id}`, { method: "PATCH", body: { name: name.trim(), mission: mission.trim() || null } });
@@ -34,9 +38,12 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
         const { company: c } = await api<{ company: Company }>("/api/companies", { method: "POST", body: { name: name.trim(), ...(mission.trim() ? { mission: mission.trim() } : {}) } });
         onCreated(c.id);
       }
+      sv.markSaved();
       setNote({ ok: true, text: "Saved." });
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
     }
   };
   return (
@@ -49,9 +56,13 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
         <label htmlFor="setup-mission">What it's for</label>
         <textarea id="setup-mission" rows={3} maxLength={2000} placeholder="e.g. Build and run Boss Man itself: features from the roadmap, fixes from feedback." value={mission} onChange={(e) => setMission(e.target.value)} />
       </div>
-      <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={!name.trim()}>
-        {company ? "Save" : "Create the company"}
-      </button>
+      {company ? (
+        <SaveButton {...sv} busy={busy} disabled={!name.trim()} style={{ alignSelf: "flex-start" }} />
+      ) : (
+        <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={busy || !name.trim()}>
+          Create the company
+        </button>
+      )}
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>
           {note.text}
@@ -61,7 +72,7 @@ function CompanyStep({ company, onCreated }: { company: Company | undefined; onC
   );
 }
 
-function ProjectStep({ company }: { company: Company }) {
+function ProjectStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 30_000, `setup-projects-${company.id}`);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +82,7 @@ function ProjectStep({ company }: { company: Company }) {
       await api(`/api/companies/${company.id}/projects`, { method: "POST", body: { name: name.trim() } });
       setName("");
       projects.reload();
+      onChanged();
     } catch (err) {
       setError((err as Error).message);
     }
@@ -95,7 +107,7 @@ function ProjectStep({ company }: { company: Company }) {
         </p>
       )}
       {list.map((p) => (
-        <ProjectRow key={p.id} p={p} only="repo" />
+        <ProjectRow key={p.id} p={p} only="repo" onChanged={onChanged} />
       ))}
       <p className="muted" style={{ fontSize: 13, margin: 0 }}>
         The checks that run before merging are chosen at the "Checks before merging" step, once the runner and git token are set up.
@@ -104,14 +116,14 @@ function ProjectStep({ company }: { company: Company }) {
   );
 }
 
-function ChecksStep({ company }: { company: Company }) {
+function ChecksStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-checks-${company.id}`);
   const withRepo = (projects.data ?? []).filter((p) => p.repoUrl);
   if (!withRepo.length) return <p className="muted">No project has a repo yet. Add one in step 2, then come back for this.</p>;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {withRepo.map((p) => (
-        <ProjectRow key={p.id} p={p} only="checks" />
+        <ProjectRow key={p.id} p={p} only="checks" onChanged={onChanged} />
       ))}
     </div>
   );
@@ -154,17 +166,17 @@ function TokenHelp({ projects }: { projects: Project[] }) {
   );
 }
 
-function GitStep({ company }: { company: Company }) {
+function GitStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-git-${company.id}`);
   const [result, setResult] = useState<{ ok: boolean; canPush: boolean; message: string } | null>(null);
   const withRepo = (projects.data ?? []).filter((p) => p.repoUrl);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <Credentials company={company} />
+      <Credentials company={company} onChanged={onChanged} />
       {projects.data && <TokenHelp projects={withRepo} />}
       {withRepo.map((p) => (
         <p key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: 0 }}>
-          <button type="button" className="btn" onClick={() => void api<{ ok: boolean; canPush: boolean; message: string }>(`/api/projects/${p.id}/check-git-token`, { method: "POST" }).then(setResult, (err) => setResult({ ok: false, canPush: false, message: (err as Error).message }))}>
+          <button type="button" className="btn" onClick={() => void api<{ ok: boolean; canPush: boolean; message: string }>(`/api/projects/${p.id}/check-git-token`, { method: "POST" }).then(setResult, (err) => setResult({ ok: false, canPush: false, message: (err as Error).message })).finally(onChanged)}>
             Check the token against {p.name}
           </button>
           {result && (
@@ -250,7 +262,7 @@ function TicketStep({ company }: { company: Company }) {
         </label>
       )}
       <button type="submit" className="btn primary" style={{ alignSelf: "flex-start" }} disabled={!form.title.trim()}>
-        Add the ticket to {project.name}
+        Add the task to {project.name}
       </button>
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>
@@ -305,8 +317,10 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
     }
   }, [progress.data, step]);
   const company = companies.find((c) => c.id === companyId) ?? (companyId ? undefined : companies[0]);
-  const list = usePoll((signal) => (company ? api<ChecklistItem[]>(`/api/companies/${company.id}/setup-checklist`, { signal }) : Promise.resolve([])), 10_000, `setup-steps-${company?.id ?? "none"}`);
+  const list = usePoll((signal) => (company ? api<ChecklistItem[]>(`/api/companies/${company.id}/setup-checklist`, { signal }) : Promise.resolve([])), 3_000, `setup-steps-${company?.id ?? "none"}`);
   if (step === null) return null;
+  // After any save in a step: re-read the checklist (so "Next" appears now) and the companies (the CEO's funding).
+  const refresh = () => (list.reload(), onChanged());
   const save = (patch: Partial<Progress>) => void api("/api/setup-progress", { method: "PUT", body: patch }).catch(() => {});
   const move = (to: number) => {
     setStep(to);
@@ -349,12 +363,12 @@ export function Setup({ companies, go, onChanged }: { companies: Company[]; go: 
             }}
           />
         )}
-        {step === 1 && company && <ProjectStep company={company} />}
-        {step === 2 && company && <Runner company={company} />}
-        {step === 3 && company && <Credentials company={company} />}
-        {step === 4 && company && <GitStep company={company} />}
-        {step === 5 && company && <ChecksStep company={company} />}
-        {step === 6 && company && <FundingStep company={company} onChanged={onChanged} />}
+        {step === 1 && company && <ProjectStep company={company} onChanged={refresh} />}
+        {step === 2 && company && <Runner company={company} onChanged={refresh} />}
+        {step === 3 && company && <Credentials company={company} onChanged={refresh} />}
+        {step === 4 && company && <GitStep company={company} onChanged={refresh} />}
+        {step === 5 && company && <ChecksStep company={company} onChanged={refresh} />}
+        {step === 6 && company && <FundingStep company={company} onChanged={refresh} />}
         {step === 7 && company && <TicketStep company={company} />}
         <div className="setup-nav">
           {step > 0 && (

@@ -6,8 +6,8 @@ import { agents, companies, projects, runners, secretGrants, settings, tickets }
 
 export type SetupProgress = { dismissed: boolean; step: number; companyId: string | null };
 const KEY = "setup";
-/** The variables any agent can run on: a Claude setup-token or an API key. */
-const RUN_CREDENTIALS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
+/** The variables any agent can run on: a Claude setup-token, an API key, or a Bedrock, Foundry or gateway credential. */
+const RUN_CREDENTIALS = ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 
 export function setupService(db: Db, deps: { isConnected: (runnerId: string) => boolean }) {
   return {

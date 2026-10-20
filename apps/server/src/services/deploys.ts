@@ -43,7 +43,7 @@ export function endpointProblem(kind: Target["kind"], endpoint: string): string 
   return null;
 }
 
-export function deploysService(db: Db, deps: { now?: () => Date } = {}) {
+export function deploysService(db: Db, deps: { now?: () => Date; /** A production deploy of this task succeeded: its feature may be released. */ onShipped?: (ticketId: string) => Promise<unknown> } = {}) {
   const now = deps.now ?? (() => new Date());
   let wake: WakeHook | null = null;
 
@@ -199,6 +199,7 @@ export function deploysService(db: Db, deps: { now?: () => Date } = {}) {
         .set({ status: input.outcome, outcome: input.notes ?? null, finishedAt: now() })
         .where(eq(deploys.id, d.id))
         .returning();
+      if (input.outcome === "succeeded" && d.ticketId) await deps.onShipped?.(d.ticketId);
       return row!;
     },
 

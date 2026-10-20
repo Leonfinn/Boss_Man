@@ -17,7 +17,7 @@ export function linked(text: string): ReactNode {
   let at = 0;
   for (const m of text.matchAll(/\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?/g)) {
     const href = (m[2] ?? m[3])!;
-    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[1] ?? (href.startsWith("#/tickets/") ? "ticket" : href.slice(2))}</a>);
+    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[1] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2))}</a>);
     at = m.index + m[0].length;
   }
   out.push(<Fragment key="end">{text.slice(at)}</Fragment>);
@@ -117,7 +117,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
       <header className="page-head">
         <div>
           <h1>Chat</h1>
-          <p className="sub">Message your CEO, or any agent directly. In chat they can look up and change the board, tickets, the wiki and skills, but not code: work that needs code goes on a ticket.</p>
+          <p className="sub">Message your CEO, or any agent directly. In chat they can look up and change the board, tasks, the wiki and skills, but not code: work that needs code goes on a task.</p>
         </div>
       </header>
       {!company ? (

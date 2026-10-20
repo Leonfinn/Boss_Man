@@ -20,16 +20,24 @@ const DELIVERY: Record<string, string> = {
 };
 const STEPS = 60;
 
+/** An agent reply is a plain summary, then "Details:" and the technical report; older replies have no marker. */
+export function splitDetails(text: string): { summary: string; details: string | null } {
+  const m = /^[ \t]*Details:[ \t]*$/m.exec(text);
+  if (!m) return { summary: text, details: null };
+  const details = text.slice(m.index + m[0].length).trim();
+  return { summary: text.slice(0, m.index).trim(), details: details || null };
+}
+
 function byline(m: Message) {
   if (m.author === "owner") return `You${m.delivery && DELIVERY[m.delivery] ? ` · ${DELIVERY[m.delivery]}` : ""}`;
   if (m.author === "agent") return `${m.agent ?? "An agent"}${m.delivery === "end_of_run" ? " · end of run" : ""}`;
   return "Boss Man";
 }
 
-/** A run's steps: tool calls, notes and errors. The agent's words show as messages instead. */
+/** A run's working: the agent's interim messages, tool calls, notes and errors. */
 function Steps({ runId, live }: { runId: string; live: boolean }) {
   const { items, error } = useTranscript(runId, live ? 2000 : 60_000);
-  const steps = items.map((i) => ({ i, d: describe(i) })).filter(({ d }) => d.tone !== "text");
+  const steps = items.map((i) => ({ i, d: describe(i) })).filter(({ d }) => d.tone !== "text" || d.body?.trim());
   const shown = steps.slice(-STEPS);
   const box = useRef<HTMLOListElement>(null);
   useEffect(() => {
@@ -51,7 +59,8 @@ function Steps({ runId, live }: { runId: string; live: boolean }) {
             <span>
               {d.label}
               {d.body && d.tone === "tool" && <span className="tag">{d.body.replace(/_/g, " ")}</span>}
-              {d.body && d.tone !== "tool" && <span className="muted"> {d.body.slice(0, 300)}</span>}
+              {d.body && d.tone === "text" && <span> {d.body.slice(0, 600)}</span>}
+              {d.body && d.tone !== "tool" && d.tone !== "text" && <span className="muted"> {d.body.slice(0, 300)}</span>}
             </span>
           </li>
         ))}
@@ -66,20 +75,18 @@ function RunBlock({ run }: { run: RunRow }) {
   useEffect(() => setOpen(live), [live]);
   return (
     <div className={`run-block${live ? " live" : ""}`}>
-      <button type="button" className="run-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
-        <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+      <div className="run-head">
         <strong>{run.agent ?? "An agent"}</strong>
         <span className="muted">{live ? `is working · started ${when(run.startedAt)}` : `worked on it · ${when(run.startedAt)}`}</span>
         {outcomeTag(live ? null : (run.outcome ?? "end_turn"))}
-      </button>
-      {open && (
-        <div className="run-body">
-          <Steps runId={run.id} live={live} />
-          <a href={`#/runs/${run.id}`} style={{ fontSize: 13 }}>
-            Open the full run
-          </a>
-        </div>
-      )}
+      </div>
+      <details className="run-body" open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
+        <summary>Show working</summary>
+        {open && <Steps runId={run.id} live={live} />}
+        <a href={`#/runs/${run.id}`} style={{ fontSize: 13 }}>
+          See the whole run
+        </a>
+      </details>
     </div>
   );
 }
@@ -132,13 +139,26 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
     <section className="card activity" aria-labelledby="activity-h">
       <h2 id="activity-h">Activity</h2>
       <div className="activity-feed" role="log" aria-live="polite">
-        {feed.length === 0 && convo.data && <p className="muted">No activity yet. When an agent works on this ticket, you'll see what it's doing here, and you can talk to it below.</p>}
+        {feed.length === 0 && convo.data && <p className="muted">No activity yet. When an agent works on this task, you'll see what it's doing here, and you can talk to it below.</p>}
         {feed.map(({ key, m, r }) =>
           r ? (
             <RunBlock key={key} run={r} />
           ) : (
             <div key={key} className={`chat-msg ${m!.author === "agent" ? "assistant" : m!.author}`}>
-              <p>{linked(m!.text)}</p>
+              {(() => {
+                const { summary, details } = m!.author === "agent" ? splitDetails(m!.text) : { summary: m!.text, details: null };
+                return (
+                  <>
+                    <p>{linked(summary)}</p>
+                    {details && (
+                      <details>
+                        <summary>Details</summary>
+                        <p>{linked(details)}</p>
+                      </details>
+                    )}
+                  </>
+                );
+              })()}
               <small>
                 {byline(m!)} · {when(m!.createdAt)}
               </small>
@@ -155,7 +175,7 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
           id="activity-text"
           rows={2}
           maxLength={4000}
-          placeholder={live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the ticket to have an agent pick it up."}
+          placeholder={live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the task to have an agent pick it up."}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}

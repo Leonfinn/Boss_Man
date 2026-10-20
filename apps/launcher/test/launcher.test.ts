@@ -94,6 +94,7 @@ describe("the runner launcher (R55)", () => {
         IpcMode: "private",
         UTSMode: "",
         PidsLimit: 1024,
+        Init: true,
         Memory: 4294967296,
         RestartPolicy: { Name: "unless-stopped" },
       },

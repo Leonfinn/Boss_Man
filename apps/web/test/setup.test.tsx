@@ -51,3 +51,28 @@ describe("setup wizard checks", () => {
     expect(screen.queryByLabelText("Gitea token steps")).toBeNull();
   });
 });
+
+describe("setup wizard refresh", () => {
+  it("shows Next right after the CEO's funding is saved, without waiting for a poll", async () => {
+    let saved = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "PATCH") saved = true;
+        const body =
+          url === "/api/setup-progress" ? { dismissed: false, step: 6, companyId: "c1" }
+          : url.endsWith("/setup-checklist") ? [{ id: "funding", label: "Funding", done: saved }]
+          : url === "/api/funding-sources" ? [{ id: "f1", name: "Max", kind: "subscription", provider: "anthropic" }]
+          : url.endsWith("/projects") ? [project]
+          : {};
+        return new Response(JSON.stringify(body), { status: 200 });
+      }),
+    );
+    const withCeo: Company = { ...company, agents: [{ id: "a1", name: "CEO", role: "ceo", fundingSourceId: null } as Company["agents"][number]] };
+    render(<Setup companies={[withCeo]} go={() => {}} onChanged={() => {}} />);
+    expect(await screen.findByText("Skip for now")).toBeTruthy();
+    await screen.findByRole("option", { name: "Max" });
+    fireEvent.change(await screen.findByLabelText("The CEO runs on"), { target: { value: "f1" } });
+    expect(await screen.findByText("Next")).toBeTruthy();
+  });
+});

@@ -3,6 +3,7 @@ import { api, type Company, type FundingSource, type Project } from "../api";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
@@ -52,7 +53,7 @@ function useAction() {
   return { busy, run, view };
 }
 
-export function Runner({ company }: { company: Company }) {
+export function Runner({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
   const [token, setToken] = useState<string | null>(null);
   const act = useAction();
@@ -62,6 +63,7 @@ export function Runner({ company }: { company: Company }) {
       if (s?.registered && !window.confirm("Issuing a new token disconnects the runner using the old one until you update it. Continue?")) return;
       setToken((await api<{ token: string }>(`/api/companies/${company.id}/runner`, { method: "POST" })).token);
       status.reload();
+      onChanged?.();
     });
   // The compose file's first runner reads this file; R55's launcher replaces the copying.
   const file = "secrets/runner-app-co.token";
@@ -70,6 +72,7 @@ export function Runner({ company }: { company: Company }) {
     act.run(async () => {
       await api(`/api/companies/${company.id}/runner/${what}`, { method });
       status.reload();
+      onChanged?.();
       return done;
     });
   if (launched) {
@@ -163,7 +166,7 @@ export function Runner({ company }: { company: Company }) {
 /** A setup-token can only be proved by Claude Code, so its check runs on the runner (R58). */
 const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
-export function Credentials({ company }: { company: Company }) {
+export function Credentials({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   const [choice, setChoice] = useState(0);
@@ -172,6 +175,7 @@ export function Credentials({ company }: { company: Company }) {
   const [env, setEnv] = useState<string>(CREDENTIALS[0].env);
   const [existing, setExisting] = useState("");
   const act = useAction();
+  const sv = useSaveState({ choice, name, value, env, existing });
   const c = CREDENTIALS[choice]!;
   const describe = (r: { problems?: string[]; live: { ok: boolean; message: string } | null }) => {
     const problems = r.problems?.length ? ` ${r.problems.join(" ")}` : "";
@@ -211,8 +215,10 @@ export function Credentials({ company }: { company: Company }) {
       setValue("");
       setName("");
       setExisting("");
+      sv.markSaved({ choice, name: "", value: "", env, existing: "" });
       grants.reload();
       secrets.reload();
+      onChanged?.();
       return `Saved. ${company.name}'s agents now get it as ${env}.${warnings.length ? ` Note: ${warnings.join(" ")}` : ""}`;
     });
   };
@@ -316,9 +322,7 @@ export function Credentials({ company }: { company: Company }) {
               Check
             </button>
           )}
-          <button className="btn primary" type="submit" disabled={act.busy}>
-            Save
-          </button>
+          <SaveButton {...sv} busy={act.busy} />
         </div>
       </form>
       <p className="muted" style={{ fontSize: 13 }}>
@@ -328,6 +332,16 @@ export function Credentials({ company }: { company: Company }) {
     </Section>
   );
 }
+
+const PROVIDERS: Array<[string, string]> = [
+  ["anthropic", "Anthropic"],
+  ["openai", "OpenAI"],
+  ["bedrock", "Amazon Bedrock"],
+  ["foundry", "Microsoft Foundry"],
+  ["gateway", "LLM gateway"],
+];
+/** Mirrors the server's rule: a subscription is only a Claude or ChatGPT plan. */
+const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai";
 
 export function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 30_000, "sources");
@@ -348,6 +362,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
       });
       setForm({ ...form, name: "", grant: "", anchor: "" });
       sources.reload();
+      onChanged?.();
       return "Added.";
     });
   };
@@ -372,7 +387,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
         </div>
         <div className="field">
           <label htmlFor="fs-kind">Kind</label>
-          <select id="fs-kind" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+          <select id="fs-kind" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value, provider: providerFits(e.target.value, form.provider) ? form.provider : "anthropic" })}>
             <option value="subscription">Subscription (setup-token)</option>
             <option value="api_credit">API credit, monthly grant</option>
             <option value="api_payg">API, pay as you go</option>
@@ -382,10 +397,36 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
         <div className="field">
           <label htmlFor="fs-provider">Provider</label>
           <select id="fs-provider" value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value })}>
-            <option value="anthropic">Anthropic</option>
-            <option value="openai">OpenAI</option>
+            {PROVIDERS.filter(([id]) => providerFits(form.kind, id)).map(([id, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
           </select>
         </div>
+        <details style={{ gridColumn: "1 / -1" }}>
+          <summary>What the provider controls</summary>
+          <div className="muted" style={{ fontSize: 14, display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            <p>
+              The provider decides which service lists models for an API-key source (Anthropic and OpenAI only; other providers use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from Credentials above, as environment variables.
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              <li>Subscription + Anthropic: a Claude Pro or Max plan, run with a setup-token (<code>CLAUDE_CODE_OAUTH_TOKEN</code>).</li>
+              <li>Subscription + OpenAI: a ChatGPT plan, used by Codex agents.</li>
+              <li>API kinds: a key from that provider (Anthropic, OpenAI).</li>
+              <li>
+                Amazon Bedrock (API kinds only): add three credentials with "Other": <code>CLAUDE_CODE_USE_BEDROCK</code> = 1, <code>AWS_REGION</code> and <code>AWS_BEARER_TOKEN_BEDROCK</code> (a Bedrock API key). Name models as Bedrock IDs, e.g. <code>us.anthropic.claude-sonnet-4-6</code>.
+              </li>
+              <li>
+                Microsoft Foundry (API kinds only): <code>CLAUDE_CODE_USE_FOUNDRY</code> = 1, <code>ANTHROPIC_FOUNDRY_RESOURCE</code> (the resource name) and <code>ANTHROPIC_FOUNDRY_API_KEY</code>. Model names are your deployment names.
+              </li>
+              <li>
+                LLM gateway (API kinds only): <code>ANTHROPIC_BASE_URL</code> and <code>ANTHROPIC_AUTH_TOKEN</code>, for a gateway that serves Claude models in the Anthropic format. Anthropic doesn't support non-Claude models through a gateway.
+              </li>
+            </ul>
+            <p>Claude agents only: Codex runs on OpenAI.</p>
+          </div>
+        </details>
         {form.kind === "api_credit" && (
           <>
             <div className="field">
@@ -464,12 +505,13 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
 }
 
 /** `only`: "repo" hides the check pickers (detection needs the runner and git token), "checks" shows just them. */
-export function ProjectRow({ p, only }: { p: Project; only?: "repo" | "checks" }) {
+export function ProjectRow({ p, only, onChanged }: { p: Project; only?: "repo" | "checks"; onChanged?: () => void }) {
   const showRepo = only !== "checks";
   const showChecks = only !== "repo";
   const [form, setForm] = useState({ repoUrl: p.repoUrl ?? "", defaultBranch: p.defaultBranch, verifyCommand: p.verifyCommand ?? "", deepVerifyCommand: p.deepVerifyCommand ?? "", landing: p.landing });
   const [host, setHost] = useState(p.gitHost);
   const act = useAction();
+  const sv = useSaveState(form);
   const [presets, setPresets] = useState<Presets | null>(null);
   const detect = async () => setPresets(await api<Presets>(`/api/projects/${p.id}/check-presets`, { method: "POST" }).catch(() => null));
   // Detected once per project; Re-detect asks again.
@@ -482,6 +524,8 @@ export function ProjectRow({ p, only }: { p: Project; only?: "repo" | "checks" }
         body: { repoUrl: form.repoUrl || null, defaultBranch: form.defaultBranch, verifyCommand: form.verifyCommand || null, deepVerifyCommand: form.deepVerifyCommand || null, landing: form.landing },
       });
       setHost(saved.gitHost);
+      sv.markSaved();
+      onChanged?.();
       if (form.landing === "pull_request" && form.repoUrl && !saved.gitHost) return "Saved, but Boss Man couldn't tell which git host this is, so pull requests won't open. Check the address, and that the host is reachable from the Boss Man server.";
       return saved.gitHost ? `Saved. Git host: ${saved.gitHost === "gitea" ? "Gitea" : "GitHub"} (${saved.gitApiBase}).` : "Saved.";
     });
@@ -521,9 +565,7 @@ export function ProjectRow({ p, only }: { p: Project; only?: "repo" | "checks" }
         )}
       </p>
       </>)}
-      <button className="btn primary" type="submit" disabled={act.busy}>
-        Save
-      </button>
+      <SaveButton {...sv} busy={act.busy} />
       <div style={{ gridColumn: "1 / -1" }}>{act.view}</div>
     </form>
   );
@@ -534,7 +576,7 @@ function Projects({ company }: { company: Company }) {
   return (
     <Section id="projects-h" title="Projects">
       <p className="muted" style={{ fontSize: 14 }}>
-        With a repo, each ticket gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
+        With a repo, each task gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
       </p>
       {projects.data?.length ? projects.data.map((p) => <ProjectRow key={p.id} p={p} />) : <p>No projects yet: create one on the Kanban.</p>}
     </Section>

@@ -57,6 +57,9 @@ export const MISSED_REASON = "missed work";
 export const ANSWER_REASON = "decision answered";
 /** Tickets moved to review, gathered into one CEO run (R85). */
 export const REVIEW_REASON = "review requested";
+/** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
+export const PLAIN_SUMMARY_RULE =
+  "Write to the owner as a non-developer. Every ticket_reply starts with 1 to 3 plain sentences: what changed for them and whether they need to do anything. Then a line that says only \"Details:\" followed by the technical report (files, commits, tests). Ticket state notes (set_ticket_state summary) are plain words too, with no file paths unless essential.";
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
@@ -95,6 +98,8 @@ export function schedulerService(
     chat?: { cwd(companyId: string, agentId: string): string; prompt(companyId: string, agentId: string): Promise<string>; claim(companyId: string, agentId: string, runId: string): Promise<unknown> };
     chapters?: { forLaunch(agent: typeof agents.$inferSelect, runId: string, wake: string): Promise<ChapterLaunch>; onLaunchFailed(runId: string): Promise<unknown> };
     workspaceRoot?: string;
+    /** A task of this feature started, so its status may need to follow. */
+    onFeature?: (featureId: string) => Promise<unknown>;
     limits?: Partial<Limits>;
     now?: () => Date;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
@@ -110,7 +115,7 @@ export function schedulerService(
   const workspaceRoot = deps.workspaceRoot ?? "/home/node/workspaces";
 
   async function startTicket(ticketId: string) {
-    const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, ticketId));
+    const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId, featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
     if (t?.state !== "backlog" && t?.state !== "ready") return;
     const [col] = await db
       .select({ id: workflowColumns.id })
@@ -122,6 +127,7 @@ export function schedulerService(
       .update(tickets)
       .set({ systemState: "in_progress", columnId: col?.id ?? null, lastActivityAt: now() })
       .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "ready"])));
+    if (t.featureId) await deps.onFeature?.(t.featureId);
   }
 
   async function globallyPaused() {
@@ -271,7 +277,20 @@ export function schedulerService(
         if (note) lines.push("", note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) lines.push("", `Risk: ${t.t.risk}.${t.t.risk === "high" || t.t.risk === "critical" ? " The owner reviews it, the project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
+        if (!t.t.risk && (agent.role === "ceo" || agent.role === "manager")) lines.push("", "This ticket has no risk rating yet. Before you delegate it or start work, read it and rate its risk with set_ticket_risk (ticketId, risk, and a one-line reason). The owner sees your rating and reason.");
         lines.push("", planningGuidance(t.t.risk));
+        lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
+        if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
+          const team = await db
+            .select({ name: agents.name, role: agents.role, title: agents.title })
+            .from(agents)
+            .where(and(eq(agents.companyId, agent.companyId), isNull(agents.retiredAt), eq(agents.paused, false), ne(agents.id, agent.id), sql`${agents.duty} is distinct from 'assistant'`));
+          lines.push(
+            "",
+            `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Only do the work yourself when nobody on the team can.${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,
+          );
+        }
+        lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));

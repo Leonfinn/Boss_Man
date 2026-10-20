@@ -5,6 +5,7 @@ import { api, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { SaveButton, useSaveState } from "../components/SaveButton";
 
 type PageRow = { id: string; slug: string; folder: string; title: string; ticketId: string | null; updatedAt: string; updatedBy: string | null };
 type Revision = { id: string; createdAt: string; agent: string | null; runId: string | null };
@@ -202,14 +203,22 @@ function SemanticSettings({ companyId }: { companyId: string }) {
   const secrets = usePoll((signal) => api<Array<{ id: string; name: string }>>("/api/secrets", { signal }), 600_000, "secrets");
   const [v, setV] = useState<Semantic | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
-  useEffect(() => setV(cur.data ?? null), [cur.data]);
+  const sv = useSaveState(v);
+  useEffect(() => {
+    setV(cur.data ?? null);
+    if (cur.data) sv.reset(cur.data);
+  }, [cur.data]);
+  const [busy, setBusy] = useState(false);
   if (!v) return null;
   const save = (e: FormEvent) => {
     e.preventDefault();
-    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId } }).then(
-      () => setMsg(v.enabled ? "Saved. Pages are being embedded in the background." : "Saved."),
-      (err: Error) => setMsg(err.message),
-    );
+    setBusy(true);
+    api(`/api/companies/${companyId}/wiki-semantic`, { method: "PUT", body: { enabled: v.enabled, baseUrl: v.baseUrl, model: v.model, secretId: v.secretId } })
+      .then(
+        () => (sv.markSaved(), setMsg(v.enabled ? "Saved. Pages are being embedded in the background." : "Saved.")),
+        (err: Error) => setMsg(err.message),
+      )
+      .finally(() => setBusy(false));
   };
   return (
     <details className="card">
@@ -238,12 +247,10 @@ function SemanticSettings({ companyId }: { companyId: string }) {
               </option>
             ))}
           </select>
-          <small className="muted">Add the key under Secrets first.</small>
+          {!v.secretId && <small className="muted">Add the key under Secrets first, then pick it here.</small>}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button type="submit" className="btn primary">
-            Save
-          </button>
+          <SaveButton {...sv} busy={busy} />
           <button type="button" className="btn" onClick={() => api(`/api/companies/${companyId}/wiki-semantic/reindex`, { method: "POST" }).then(() => setMsg("Re-embedding all pages."), (err: Error) => setMsg(err.message))}>
             Re-embed all
           </button>
@@ -343,7 +350,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
       <header className="page-head">
         <div>
           <h1>Wiki</h1>
-          <p className="sub">The company's shared pages: research, specs, how-tos. Agents write here too, and a page written for a ticket shows on that ticket.</p>
+          <p className="sub">The company's shared pages: research, specs, how-tos. Agents write here too, and a page written for a task shows on that task.</p>
         </div>
       </header>
       {company?.agents.some((a) => a.duty === "wiki" && a.paused) && (

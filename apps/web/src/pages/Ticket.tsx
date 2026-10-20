@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
@@ -37,7 +37,7 @@ function DiffView({ diff }: { diff: WorkspaceDiff }) {
           </div>
         ))}
       </div>
-      {(lines.length > MAX_DIFF_LINES || diff.truncated) && <p className="muted">The diff is longer than shown here; the full patch is in the ticket's branch.</p>}
+      {(lines.length > MAX_DIFF_LINES || diff.truncated) && <p className="muted">The diff is longer than shown here; the full patch is in the task's branch.</p>}
     </div>
   );
 }
@@ -55,6 +55,8 @@ function Fold({ title, hint, open, children }: { title: string; hint?: string; o
   );
 }
 
+type Landing = { state: "running"; startedAt: string; command: string | null } | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
+const elapsed = (ms: number) => `${Math.floor(Math.max(0, ms) / 60_000)}:${String(Math.floor(Math.max(0, ms) / 1000) % 60).padStart(2, "0")}`;
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
 const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
 
@@ -73,6 +75,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
+  const [sendingBack, setSendingBack] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   // The description being edited; null while it isn't, so polling doesn't overwrite typing.
@@ -114,25 +117,38 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       setDiff(null);
       setDiff(await api<WorkspaceDiff>(`/api/tickets/${id}/diff${which === "last_turn" ? "?range=last_turn" : ""}`));
     } catch (err) {
-      setDiffError(err instanceof ApiError && err.status === 409 ? `${err.message} The diff comes from the runner that holds the ticket's worktree.` : (err as Error).message);
+      setDiffError(err instanceof ApiError && err.status === 409 ? `${err.message} The diff comes from the runner that holds the task's worktree.` : (err as Error).message);
     }
   };
+  // Approval lands in the background; poll its status quickly while it runs.
+  const [landing, setLanding] = useState<Landing | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const running = landing?.state === "running";
+  useEffect(() => {
+    api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`).then((r) => setLanding(r.landing), () => undefined);
+  }, [id]);
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`).then((r) => {
+        if (r.landing && r.landing.state !== "running") ticket.reload();
+        setLanding(r.landing);
+      }, () => undefined);
+    }, 2_000);
+    return () => clearInterval(timer);
+  }, [running, id]);
   const review = async (verdict: "approved" | "changes_requested") => {
     setBusy(true);
     try {
-      const r = await api<{ outcome?: string; delivered?: string | null }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(summary.trim() ? { summary: summary.trim() } : {}) } });
+      const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(verdict === "changes_requested" ? { summary: summary.trim() } : {}) } });
       setSummary("");
-      setNote({
-        ok: true,
-        text:
-          verdict === "changes_requested"
-            ? `Sent back: ${r.delivered ?? "done"}.`
-            : r.outcome === "merged" || r.outcome === "done"
-              ? "Approved and merged; the ticket is done."
-              : r.outcome === "pull_request"
-                ? "Approved. The pull request is open; the host hasn't let Boss Man merge it yet (see Review). Boss Man checks again every couple of minutes."
-                : `Approved, but it couldn't merge yet (${(r.outcome ?? "").replace(/_/g, " ")}); it's gone back to the assignee with what to fix.`,
-      });
+      setSendingBack(false);
+      if (r.landing) {
+        setNow(Date.now());
+        setLanding(r.landing);
+        setNote(null);
+      } else setNote({ ok: true, text: `Sent back: ${r.delivered ?? "done"}.` });
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -145,7 +161,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     setBusy(true);
     try {
       const r = await api<{ outcome: string }>(`/api/tickets/${id}/pull-request/merge`, { method: "POST" });
-      setNote({ ok: true, text: r.outcome === "merged" ? "Merged; the ticket is done." : "Still waiting on the host." });
+      setNote({ ok: true, text: r.outcome === "merged" ? "Merged; the task is done." : "Still waiting on the host." });
       ticket.reload();
     } catch (err) {
       setNote({ ok: false, text: (err as Error).message });
@@ -154,7 +170,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
-  if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such ticket." : ticket.error.message}</p>;
+  if (ticket.error) return <p className="error" role="alert">{ticket.error.status === 404 ? "There's no such task." : ticket.error.message}</p>;
   if (!t) return null;
   const made = outputs.data ?? [];
   // Plan first only matters before anyone starts; once work has begun it's history (R76).
@@ -164,7 +180,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       <header className="page-head">
         <div>
           <p className="label">
-            <a href={`#/board/${t.projectId}`}>{t.project}</a> · ticket
+            <a href={`#/board/${t.projectId}`}>{t.project}</a> · task
           </p>
           <h1>{t.title}</h1>
         </div>
@@ -256,6 +272,29 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </Fold>
           )}
 
+          {landing && (
+            <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
+              {landing.state === "running" ? (
+                <span>
+                  Approved. Running the pre-merge check{landing.command ? ` (${landing.command})` : ""}; this can take several minutes. Elapsed: {elapsed(now - Date.parse(landing.startedAt))}.
+                </span>
+              ) : (
+                <span>
+                  {landing.url && landing.text.includes(landing.url) ? (
+                    <>
+                      {landing.text.split(landing.url)[0]}
+                      <a href={landing.url} target="_blank" rel="noreferrer">
+                        {landing.url}
+                      </a>
+                      {landing.text.split(landing.url).slice(1).join(landing.url)}
+                    </>
+                  ) : (
+                    landing.text
+                  )}
+                </span>
+              )}
+            </div>
+          )}
           {t.systemState === "review" && (
             <Fold title="Review" hint={t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" : "waiting for you"}>
               {t.pullRequestNumber && t.pullRequestNote && (
@@ -276,18 +315,31 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </button>
                 </div>
               )}
-              <div className="field">
-                <label htmlFor="review-summary">Comments for the agent (needed to send it back)</label>
-                <textarea id="review-summary" rows={3} value={summary} onChange={(e) => setSummary(e.target.value)} />
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button type="button" className="btn primary" disabled={busy} onClick={() => void review("approved")}>
-                  {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
-                </button>
-                <button type="button" className="btn" disabled={busy || !summary.trim()} onClick={() => void review("changes_requested")}>
-                  Request changes
-                </button>
-              </div>
+              {sendingBack ? (
+                <>
+                  <div className="field">
+                    <label htmlFor="review-summary">What should the agent change?</label>
+                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button type="button" className="btn primary" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
+                      Send it back
+                    </button>
+                    <button type="button" className="btn" disabled={busy} onClick={() => setSendingBack(false)}>
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
+                    {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
+                  </button>
+                  <button type="button" className="btn" disabled={busy || running} onClick={() => setSendingBack(true)}>
+                    Request changes
+                  </button>
+                </div>
+              )}
             </Fold>
           )}
           {note && (
@@ -325,14 +377,16 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               <label htmlFor="t-risk">Risk</label>
             </dt>
             <dd>
-              <select id="t-risk" value={t.risk ?? "medium"} onChange={(e) => void patch({ risk: e.target.value as Risk })}>
+              <select id="t-risk" value={t.risk ?? ""} onChange={(e) => e.target.value && void patch({ risk: e.target.value as Risk })}>
+                {!t.risk && <option value="">Not rated yet</option>}
                 {RISKS.map((r) => (
                   <option key={r} value={r}>
                     {r[0]!.toUpperCase() + r.slice(1)}
                   </option>
                 ))}
               </select>
-              <RiskHelp tiers={tiers} current={t.risk ?? "medium"} />
+              {!t.risk && <small className="muted" style={{ display: "block" }}>Not rated yet — the CEO rates it when it reviews the task (treated as medium until then).</small>}
+              <RiskHelp tiers={tiers} current={t.risk} />
             </dd>
             <dt>
               <label htmlFor="t-watcher">Watcher</label>
@@ -358,7 +412,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   <small className="muted">{t.watchedAt ? `Last asked for a report ${when(t.watchedAt)}.` : "A first report is on its way."} Updates appear in Activity and your notifications.</small>
                 </>
               ) : (
-                <small className="muted">An agent, such as a scrum master, that posts a short status update on this ticket and what it depends on.</small>
+                <small className="muted">An agent, such as a scrum master, that posts a short status update on this task and what it depends on.</small>
               )}
             </dd>
             <dt>Project</dt>
