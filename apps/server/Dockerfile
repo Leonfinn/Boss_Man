@@ -17,6 +17,14 @@ COPY apps/web apps/web
 COPY assets/brand assets/brand
 RUN pnpm --filter @boss-man/web build
 
+# dist/migrate.js: the separate migration step (`node dist/migrate.js`). Bundled here so the runtime image needs no build tools.
+FROM node:22-bookworm-slim AS migrate
+RUN npm install -g --no-audit --no-fund esbuild@0.28.2
+WORKDIR /app/apps/server
+COPY apps/server/src/migrate.ts apps/server/src/migrate.ts
+COPY apps/server/src/db/migrate-lib.ts apps/server/src/db/migrate-lib.ts
+RUN esbuild src/migrate.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/migrate.js
+
 FROM node:22-bookworm-slim
 
 RUN npm install -g --no-audit --no-fund pnpm@10.28.0
@@ -33,6 +41,7 @@ COPY packages/shared/src packages/shared/src
 COPY apps/server/src apps/server/src
 COPY apps/server/drizzle apps/server/drizzle
 COPY --from=web /app/apps/web/dist /app/web
+COPY --from=migrate /app/apps/server/dist apps/server/dist
 
 # Where the launcher's key volume is mounted (R55). Owned by uid 1000 here too, so the volume
 # is created writable for the launcher whichever container starts first.

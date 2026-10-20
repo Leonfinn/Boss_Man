@@ -11,7 +11,7 @@ export async function runnerSocketRoutes(
   app: FastifyInstance,
   runners: Runners,
   secrets: ReturnType<typeof secretsService>,
-  opts: { heartbeatMs?: number } = {},
+  opts: { heartbeatMs?: number; isLeader?: () => boolean } = {},
 ) {
   const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
 
@@ -35,6 +35,8 @@ export async function runnerSocketRoutes(
       websocket: true,
       // Reject before the upgrade so an unauthenticated client never gets a socket.
       preValidation: async (req, reply) => {
+        // Only the leader holds runners; the runner's backoff retries until it reaches the one in charge.
+        if (opts.isLeader && !opts.isLeader()) return reply.code(503).header("retry-after", "2").send({ error: "standby" });
         const header = req.headers.authorization;
         const runner = await runners.authenticate(header?.startsWith("Bearer ") ? header.slice(7) : undefined);
         if (!runner) return reply.code(401).send({ error: "unknown_runner" });

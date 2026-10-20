@@ -8,6 +8,17 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A real Postgres for the leader-lock and migrate-lock tests (PGlite cannot share locks across connections).
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -49,6 +60,8 @@ jobs:
           docker run --rm --entrypoint sh boss-man-runner:ci -c 'test -x node_modules/.bin/tsx && test "$(id -u)" = 1000 && test -n "$CLAUDE_CODE_EXECUTABLE"'
       - name: Canary - a Claude session works inside the image, with no network (R52)
         run: docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true boss-man-runner:ci node_modules/.bin/tsx src/canary-main.ts
+      - name: Server image ships the separate migrate step
+        run: docker run --rm --entrypoint sh boss-man-server:ci -c 'test -f dist/migrate.js && DATABASE_URL= node dist/migrate.js 2>&1 | grep -q "DATABASE_URL is required"'
       - name: Server image serves the web UI
         run: |
           docker run --rm --entrypoint sh boss-man-server:ci -c 'test -f /app/web/index.html && ls /app/web/assets | grep -q "\.js$"'

@@ -1,6 +1,6 @@
 # Self-deploy: the host deployer (phase 1) and the runner drain (phase 2)
 
-Status: built (phases 1 and 2). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2's runner drain is described in its own section below. The migration step and phase 3 (blue/green) come later and are only touched in the compatibility section. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
+Status: built (phases 1 and 2). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2's runner drain is described in its own section below. The leader lock and the separate migrate step (phase 3, part 1) are built; the proxy and blue/green compose layout (parts 2 and 3) are not. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
 
 ## What it does
 
@@ -206,6 +206,34 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 - The hold is server-wide; there is no "drain only company X".
 - A CEO already mid-run when the hold starts does not see the brief line.
 - The 5-minute reconnect window and the 30-minute drain are defaults, not UNVERIFIED against real runner start-up times on the NAS.
+
+## Phase 3, part 1: one in charge, and a separate migrate step
+
+Built ahead of blue/green; on today's single server nothing changes. Nothing here adds a second server or touches `docker-compose.yml` (that is part 3).
+
+**What changed**
+
+- **Leader lock** (`apps/server/src/leader.ts`). The server holds a Postgres advisory lock (key 5141440001) on its own connection and checks it every 2 s with `select 1`. Any error or lost connection makes it step down at once (background loops stop, runner sockets close with 1013) and it keeps retrying. A server that is not the leader is a **standby**.
+- **What only the leader does:** the four timers plus self-deploy sync and the drain step (`startBackground()`/`stopBackground()` follow leadership), and the runner websocket (`/api/runner/connect` answers 503 with `Retry-After`, so runners retry). Everything marked `// leader-only` is reached only from those loops or from owner writes, which a standby refuses.
+- **A standby still serves reads** (`GET`), `/api/health`, `/api/ready`, login and logout, and the static UI. Every other write under `/api/`, all of `/api/runner/*` and `/mcp` answer `503 {"error":"standby"}`.
+- **Hand-over by host signals only.** `SIGUSR1` = demote (release the lock, stop background work, drop runner sockets, stay out of the contest). `SIGUSR2` = promote (contest the lock). No HTTP endpoint can change the role. Example: `docker kill --signal=USR1 <container>`.
+- **Separate migrate step.** `apps/server/src/migrate.ts` is shipped in the server image as `dist/migrate.js`: `docker run --rm --env DATABASE_URL=... --entrypoint node <server image> dist/migrate.js`. It takes its own advisory lock (key 5141440002), waits at most `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` (default 60000) for another migration, runs the Drizzle migrations and exits non-zero on failure.
+- **Migrate on start stays the default.** With `BOSSMAN_MIGRATE_ON_START=0` the server skips migrating and instead refuses to start (clear error, exit 1) if the database is **older** than its own migrations. A **newer** database is accepted (expand/contract: the previous release runs on the next one's schema).
+
+**Environment variables**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BOSSMAN_ROLE` | `auto` | `auto` contests the lock at boot. `standby` does not contest until `SIGUSR2`. |
+| `BOSSMAN_LEADER_LOCK` | on | `0` is the kill switch: no lock, always the leader, exactly as before. |
+| `BOSSMAN_MIGRATE_ON_START` | on | `0` skips migrating at start (only checks the database is current). |
+| `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` | `60000` | How long `migrate.js` waits for another migration. |
+
+PGlite (no `DATABASE_URL`) has no cross-process locks, so it is always the leader, with the same result as the kill switch.
+
+**How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings shows it at the top. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
+
+**If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; Postgres frees it when it notices the other connection is dead, which for a half-open TCP connection can take a while) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
 
 ## Open items
 
