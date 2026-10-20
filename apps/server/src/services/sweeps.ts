@@ -182,6 +182,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           eq(companies.paused, false),
           or(eq(tickets.planFirst, false), isNotNull(tickets.planApprovedAt)),
           lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs)),
+          // Waiting on a scheduled check is a plan, not missed work.
+          isNull(tickets.monitorAt),
         ),
       );
     // An agent with a live run (chat aside) or any waiting wake is busy: its other tickets are just queued behind that.
