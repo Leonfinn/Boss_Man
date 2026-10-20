@@ -1,0 +1,23 @@
+# The blue/green front door (deploy/truenas-bluegreen.yml). Static: it never changes during a swap.
+# Which colour is live is the one snippet in /etc/caddy-active/active.caddy, which is the host's file
+# ($BOSSMAN_DEPLOYER/proxy/active.caddy, mounted read-only). The host deployer rewrites it, runs
+# `caddy validate`, then `caddy reload` through `docker compose exec`; nothing else changes it.
+{
+	# The admin API listens inside this container only (not published); `docker compose exec proxy caddy reload` talks to it.
+	admin localhost:2019
+	auto_https off
+}
+
+# Defines the snippet (active) = reverse_proxy to the live colour. {args[0]} is the colour's port, {args[1]} the path
+# Caddy polls to see it is up (active health check, every 2 s).
+import /etc/caddy-active/active.caddy
+
+# The owner's UI, the API and the runner websocket (runners dial ws://server:3100/api/runner/connect).
+:3100 {
+	import active 3100 /api/ready
+}
+
+# The feedback portal (BOSSMAN_PORTAL_PORT inside the colours).
+:3101 {
+	import active 3101 /portal.html
+}
