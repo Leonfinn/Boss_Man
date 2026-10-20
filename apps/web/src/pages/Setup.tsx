@@ -129,6 +129,43 @@ function ChecksStep({ company, onChanged }: { company: Company; onChanged: () =>
   );
 }
 
+function TokenHelp({ projects }: { projects: Project[] }) {
+  const hosts = new Set(projects.map((p) => p.gitHost ?? (p.repoUrl ? (/^https?:\/\/(www\.)?github\.com\//i.test(p.repoUrl) ? "github" : "gitea") : null)));
+  hosts.delete(null);
+  const repo = projects.find((p) => p.repoUrl)?.name ?? "the project";
+  const both = hosts.size !== 1;
+  return (
+    <details className="token-help" style={{ fontSize: 14 }}>
+      <summary style={{ cursor: "pointer", color: "var(--accent)" }}>How do I get a token?</summary>
+      {(both || hosts.has("github")) && (
+        <section aria-label="GitHub token steps">
+          <h4 style={{ margin: "8px 0 4px" }}>GitHub (fine-grained personal access token)</h4>
+          <ol style={{ margin: 0, paddingLeft: 20 }}>
+            <li>GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token.</li>
+            <li>Name it (e.g. boss-man) and pick an expiry. 90 days is a sensible default.</li>
+            <li>Repository access: Only select repositories, then pick {repo}'s repo.</li>
+            <li>Repository permissions: Contents read and write; Pull requests read and write; Checks read (so Boss Man can read CI results); Metadata read-only (added automatically).</li>
+            <li>Generate, copy it once, paste it here, then use "Check the token against {repo}".</li>
+          </ol>
+          <p style={{ margin: "4px 0" }}>
+            <a href="https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens" target="_blank" rel="noreferrer">GitHub's own guide</a>
+          </p>
+        </section>
+      )}
+      {(both || hosts.has("gitea")) && (
+        <section aria-label="Gitea token steps">
+          <h4 style={{ margin: "8px 0 4px" }}>Gitea (self-hosted, e.g. http://192.168.68.67:3003)</h4>
+          <ol style={{ margin: 0, paddingLeft: 20 }}>
+            <li>Gitea → Settings → Applications → Generate New Token.</li>
+            <li>Name it and set the repository scope to Read and Write (<span className="mono">write:repository</span>).</li>
+            <li>Generate, copy it once, paste it here, then use "Check the token against {repo}".</li>
+          </ol>
+        </section>
+      )}
+    </details>
+  );
+}
+
 function GitStep({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const projects = usePoll((signal) => api<Project[]>(`/api/companies/${company.id}/projects`, { signal }), 60_000, `setup-git-${company.id}`);
   const [result, setResult] = useState<{ ok: boolean; canPush: boolean; message: string } | null>(null);
@@ -136,6 +173,7 @@ function GitStep({ company, onChanged }: { company: Company; onChanged: () => vo
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <Credentials company={company} onChanged={onChanged} />
+      {projects.data && <TokenHelp projects={withRepo} />}
       {withRepo.map((p) => (
         <p key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: 0 }}>
           <button type="button" className="btn" onClick={() => void api<{ ok: boolean; canPush: boolean; message: string }>(`/api/projects/${p.id}/check-git-token`, { method: "POST" }).then(setResult, (err) => setResult({ ok: false, canPush: false, message: (err as Error).message })).finally(onChanged)}>

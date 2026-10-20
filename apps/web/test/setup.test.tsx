@@ -16,7 +16,7 @@ function mock(step: number) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
-      const body = url === "/api/setup-progress" ? { dismissed: false, step, companyId: "c1" } : url.endsWith("/projects") ? [project] : url.endsWith("/setup-checklist") ? [] : { standard: [], none: { id: "none", label: "Nothing", command: "", needs: [] }, detected: [], tools: null, error: null };
+      const body = url === "/api/setup-progress" ? { dismissed: false, step, companyId: "c1" } : url.endsWith("/projects") ? [project] : url.endsWith("/setup-checklist") || url.endsWith("/grants") || url === "/api/secrets" ? [] : { standard: [], none: { id: "none", label: "Nothing", command: "", needs: [] }, detected: [], tools: null, error: null };
       return new Response(JSON.stringify(body), { status: 200 });
     }),
   );
@@ -37,6 +37,18 @@ describe("setup wizard checks", () => {
     expect(await screen.findByText("Before merging, Boss Man will")).toBeTruthy();
     expect(screen.getByText("For high-risk work, also")).toBeTruthy();
     expect(screen.queryByLabelText("Git repo")).toBeNull();
+  });
+
+  it("explains how to get a git token, for the project's host only", async () => {
+    mock(4);
+    render(<Setup companies={[company]} go={() => {}} onChanged={() => {}} />);
+    const link = await screen.findByText("How do I get a token?");
+    const details = link.closest("details")!;
+    expect(details.open).toBe(false);
+    fireEvent.click(link);
+    details.open = true; // jsdom doesn't toggle <details> on summary click
+    expect(screen.getByLabelText("GitHub token steps")).toBeTruthy();
+    expect(screen.queryByLabelText("Gitea token steps")).toBeNull();
   });
 });
 
