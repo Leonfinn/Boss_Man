@@ -42,6 +42,11 @@ function windowCounter(now: () => number) {
   };
 }
 
+/** The logo's bytes as an inline image the browser may not reinterpret. */
+export function sendLogo(reply: FastifyReply, logo: { bytes: Buffer; type: string }) {
+  return reply.type(logo.type).header("x-content-type-options", "nosniff").header("content-disposition", "inline").header("cache-control", "public, max-age=300").send(logo.bytes);
+}
+
 type Feedback = ReturnType<typeof feedbackService>;
 
 export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean; limits?: Partial<PortalLimits>; now?: () => number }) {
@@ -84,7 +89,16 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
     if (!p) return;
     const voter = voterOf(req, reply);
     reply.header("cache-control", "no-store");
-    return { title: p.title ?? `${p.company}: what's next`, intro: p.intro, features: await deps.feedback.portalView(p.companyId, voter) };
+    return { title: p.title ?? `${p.company}: what's next`, intro: p.intro, hasLogo: p.hasLogo, features: await deps.feedback.portalView(p.companyId, voter) };
+  });
+
+  app.get("/api/portal/logo", async (req, reply) => {
+    if (!counter.take(`read:${req.ip}`, limits.readsPerIpPerMinute, 60_000)) return reply.code(429).send({ error: "too_many", message: "Please slow down a little." });
+    const p = await portalOf(req, reply);
+    const logo = p && p.hasLogo ? await deps.feedback.portalLogo(p.companyId) : null;
+    if (!p) return;
+    if (!logo) return reply.code(404).send({ error: "not_found", message: "No logo." });
+    return sendLogo(reply, logo);
   });
 
   app.post("/api/portal/votes", async (req, reply) => {

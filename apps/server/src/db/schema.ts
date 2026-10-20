@@ -7,6 +7,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   date,
   index,
   integer,
@@ -803,6 +804,7 @@ export const ticketMessages = pgTable(
 
 // ---------- Feature requests ----------
 
+const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
 export const featureStatus = pgEnum("feature_status", ["idea", "considering", "planned", "in_progress", "released", "declined"]);
 export const importance = pgEnum("importance", ["nice_to_have", "important", "critical"]);
 export const noteSource = pgEnum("note_source", ["owner", "chat", "agent", "portal", "email", "import"]);
@@ -819,6 +821,9 @@ export const feedbackSettings = pgTable("feedback_settings", {
   portalToken: text("portal_token").unique(),
   portalTitle: text("portal_title"),
   portalIntro: text("portal_intro"),
+  /** The logo beside the portal heading: png, jpeg or webp bytes, checked on upload. */
+  portalLogo: bytea("portal_logo"),
+  portalLogoType: text("portal_logo_type"),
 });
 
 /** A criterion features are scored on, 0 to 5, e.g. "Fits the mission". */

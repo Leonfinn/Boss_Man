@@ -306,11 +306,20 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
   const d = s.data;
   const sv = useSaveState(form);
   const [busy, setBusy] = useState(false);
+  const [logoV, setLogoV] = useState(0);
   useEffect(() => {
     if (d && !form) setForm({ title: d.portalTitle ?? "", intro: d.portalIntro ?? "" });
   }, [d, form]);
   if (!d || !form) return null;
   const run = (p: Promise<unknown>, ok?: string) => void p.then(() => (setNote(ok ? { ok: true, text: ok } : null), s.reload()), (err: Error) => setNote({ ok: false, text: err.message }));
+  const logoUrl = `/api/companies/${companyId}/feedback/portal-logo`;
+  const pickLogo = (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 256 * 1024) return setNote({ ok: false, text: "The logo must be 256 KB or smaller." });
+    const r = new FileReader();
+    r.onload = () => run(api(`${logoUrl}`, { method: "PUT", body: { data: String(r.result).split(",")[1] ?? "" } }).then(() => setLogoV((v) => v + 1)), "Logo saved.");
+    r.readAsDataURL(file);
+  };
   const link = d.portalToken ? `${window.location.origin}/portal.html#${d.portalToken}` : null;
   return (
     <section className="card" aria-labelledby="portal-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -356,7 +365,22 @@ function PortalSettings({ companyId, shown }: { companyId: string; shown: number
       >
         <div className="field">
           <label htmlFor="portal-title">Heading</label>
-          <input id="portal-title" maxLength={120} placeholder="e.g. What we're building next" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {d.hasLogo && <img src={`${logoUrl}?v=${logoV}`} alt="Current portal logo" style={{ maxHeight: 32, maxWidth: 96 }} />}
+            <input id="portal-title" maxLength={120} placeholder="e.g. What we're building next" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} style={{ flex: 1, minWidth: 160 }} />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <label className="btn small">
+              {d.hasLogo ? "Replace" : "Add logo"}
+              <input type="file" accept=".png,.jpg,.jpeg,.webp" hidden aria-label="Logo file" onChange={(e) => (pickLogo(e.currentTarget.files?.[0]), (e.currentTarget.value = ""))} />
+            </label>
+            {d.hasLogo && (
+              <button type="button" className="btn small" onClick={() => run(api(logoUrl, { method: "DELETE" }), "Logo removed.")}>
+                Remove
+              </button>
+            )}
+            <span className="muted" style={{ fontSize: 13 }}>PNG, JPEG or WebP, up to 256 KB. Shown beside the heading.</span>
+          </div>
         </div>
         <div className="field">
           <label htmlFor="portal-intro">Introduction</label>
