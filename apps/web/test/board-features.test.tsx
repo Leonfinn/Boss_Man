@@ -75,12 +75,69 @@ describe("new task form", () => {
       return base(url, init);
     }));
     render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "New task" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add" }));
     expect((screen.getByLabelText("Risk") as HTMLSelectElement).selectedOptions[0]!.textContent).toBe("Let the CEO rate it");
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Fix login" } });
     fireEvent.click(screen.getByRole("button", { name: "Add to backlog" }));
     await waitFor(() => expect(posts).toHaveLength(1));
     expect((posts[0] as { risk: unknown }).risk ?? null).toBeNull();
+  });
+});
+
+describe("add feature or task", () => {
+  const ceoCompany: Company = { ...company, agents: [{ id: "a1", companyId: "c1", name: "Ada", role: "ceo", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null }] };
+  function record() {
+    const posts: { url: string; body: Record<string, unknown> }[] = [];
+    stub();
+    const base = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        posts.push({ url, body: JSON.parse(String(init.body)) });
+        return json({ id: "f9" });
+      }
+      return base(url, init);
+    }));
+    render(<Board companies={[ceoCompany]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    return posts;
+  }
+
+  it("creates a feature and, when asked, a Plan task for the CEO", async () => {
+    const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Add" }));
+    expect(screen.getByRole("radio", { name: "New feature" })).toBeTruthy();
+    expect(screen.getByRole("radio", { name: "New task" }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("radio", { name: "New feature" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Export" } });
+    fireEvent.change(screen.getByLabelText("What problem does it solve, and for whom?"), { target: { value: "Accountants need CSV" } });
+    expect((screen.getByLabelText("Ask the CEO to plan it") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Add feature" }));
+    expect(await screen.findByText("Feature added. The CEO will plan it and break it into tasks.")).toBeTruthy();
+    expect(posts[0]).toMatchObject({ url: "/api/companies/c1/features", body: { title: "Export", description: "Accountants need CSV", status: "planned" } });
+    expect(posts[1]).toMatchObject({ url: "/api/features/f9/tickets", body: { projectId: "p1", title: "Plan: Export", assigneeAgentId: "a1" } });
+    expect(posts[1]!.body.risk ?? null).toBeNull();
+  });
+
+  it("creates only the feature when the CEO is not asked", async () => {
+    const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Add" }));
+    fireEvent.click(screen.getByRole("radio", { name: "New feature" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Export" } });
+    fireEvent.click(screen.getByLabelText("Ask the CEO to plan it"));
+    fireEvent.click(screen.getByRole("button", { name: "Add feature" }));
+    expect(await screen.findByText("Feature added.")).toBeTruthy();
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.body.status).toBe("idea");
+  });
+
+  it("opens New task with the feature preselected from a feature card", async () => {
+    const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Add task to Dark mode" }));
+    expect(screen.getByRole("radio", { name: "New task" }).getAttribute("aria-checked")).toBe("true");
+    expect((screen.getByLabelText("Part of feature") as HTMLSelectElement).value).toBe("f1");
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Add switch" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to backlog" }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]).toMatchObject({ url: "/api/projects/p1/tickets", body: { featureId: "f1", title: "Add switch" } });
   });
 });
 

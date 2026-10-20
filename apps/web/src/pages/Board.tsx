@@ -54,114 +54,122 @@ function QuickAdd({ label, button, onAdd }: { label: string; button: string; onA
 }
 
 type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null };
+type NewFeatureInput = { title: string; description: string | null; planWithCeo: boolean };
+/** What the add form was opened for: a feature, or a task (optionally inside one feature). */
+type Adding = { mode: "feature" | "task"; featureId: string };
 
-/** New ticket (R63): a button that opens a card with everything a ticket needs to start well. */
-function NewTicket({ agents, features, tiers, onAdd }: { agents: Company["agents"]; features: Feature[]; tiers: RiskTiers; onAdd: (t: NewTicketInput) => Promise<unknown> }) {
-  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: "" };
-  const [open, setOpen] = useState(false);
+/** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
+function AddForm({ initial, agents, features, tiers, hasCeo, onAddTask, onAddFeature, onClose }: { initial: Adding; agents: Company["agents"]; features: Feature[]; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onClose: () => void }) {
+  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo };
+  const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const isFeature = mode === "feature";
   // Plan first follows the risk level: high and critical work is planned and approved first.
   const planFirst = form.risk === "high" || form.risk === "critical";
-  const close = () => {
-    setForm(blank);
-    setError(null);
-    setOpen(false);
-  };
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
     if (!form.title.trim() || busy) return;
     setBusy(true);
     try {
-      await onAdd({
-        title: form.title.trim(),
-        body: form.body.trim() || null,
-        risk: form.risk === "none" ? null : form.risk,
-        planFirst,
-        assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
-        assignedToOwner: form.assignee === "owner",
-        featureId: form.feature || null,
-      });
-      close();
+      if (isFeature) await onAddFeature({ title: form.title.trim(), description: form.body.trim() || null, planWithCeo: form.plan && hasCeo });
+      else
+        await onAddTask({
+          title: form.title.trim(),
+          body: form.body.trim() || null,
+          risk: form.risk === "none" ? null : form.risk,
+          planFirst,
+          assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
+          assignedToOwner: form.assignee === "owner",
+          featureId: form.feature || null,
+        });
+      onClose();
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setBusy(false);
     }
   };
-  if (!open) {
-    return (
-      <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} onClick={() => setOpen(true)}>
-        New task
-      </button>
-    );
-  }
-  const agentChosen = !!form.assignee && form.assignee !== "owner";
+  const agentChosen = !isFeature && !!form.assignee && form.assignee !== "owner";
   return (
     <form
       className="card"
-      aria-label="New task"
+      aria-label={isFeature ? "New feature" : "New task"}
       onSubmit={submit}
       onKeyDown={(e) => {
         if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
-        if (e.key === "Escape") close();
+        if (e.key === "Escape") onClose();
       }}
       style={{ display: "flex", flexDirection: "column", gap: 12 }}
     >
+      <div role="radiogroup" aria-label="What are you adding?" style={{ display: "flex", gap: 8 }}>
+        {(["feature", "task"] as const).map((m) => (
+          <button key={m} type="button" role="radio" aria-checked={mode === m} className={`btn${mode === m ? " primary" : ""}`} onClick={() => setMode(m)}>
+            {m === "feature" ? "New feature" : "New task"}
+          </button>
+        ))}
+      </div>
       <div className="field">
         <label htmlFor="nt-title">Title</label>
         <input id="nt-title" autoFocus required maxLength={200} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
       </div>
       <div className="field">
-        <label htmlFor="nt-body">Description</label>
+        <label htmlFor="nt-body">{isFeature ? "What problem does it solve, and for whom?" : "Description"}</label>
         <textarea
           id="nt-body"
           rows={6}
           maxLength={20_000}
-          placeholder="What should be done, and what counts as finished."
+          placeholder={isFeature ? "" : "What should be done, and what counts as finished."}
           value={form.body}
           onChange={(e) => setForm({ ...form, body: e.target.value })}
           style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
         />
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
-        <div className="field">
-          <label htmlFor="nt-assignee">Assign to</label>
-          <select id="nt-assignee" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })}>
-            <option value="">Nobody yet</option>
-            <option value="owner">You</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
+      {isFeature ? (
+        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="checkbox" checked={form.plan && hasCeo} disabled={!hasCeo} onChange={(e) => setForm({ ...form, plan: e.target.checked })} />
+          Ask the CEO to plan it
+        </label>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
+          <div className="field">
+            <label htmlFor="nt-feature">Part of feature</label>
+            <select id="nt-feature" value={form.feature} onChange={(e) => setForm({ ...form, feature: e.target.value })}>
+              <option value="">None (a standalone task)</option>
+              {features.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.title}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="nt-assignee">Assign to</label>
+            <select id="nt-assignee" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })}>
+              <option value="">Nobody yet</option>
+              <option value="owner">You</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field" style={{ flex: "1 1 280px" }}>
+            <label htmlFor="nt-risk">Risk</label>
+            <select id="nt-risk" value={form.risk} onChange={(e) => setForm({ ...form, risk: e.target.value as Risk | "none" })} style={{ maxWidth: 200 }}>
+              <option value="none">Let the CEO rate it</option>
+              {RISKS.map((r) => (
+                <option key={r} value={r}>
+                  {r[0]!.toUpperCase() + r.slice(1)}
+                </option>
+              ))}
+            </select>
+            <RiskHelp tiers={tiers} current={form.risk === "none" ? null : form.risk} />
+          </div>
         </div>
-        <div className="field">
-          <label htmlFor="nt-feature">Feature</label>
-          <select id="nt-feature" value={form.feature} onChange={(e) => setForm({ ...form, feature: e.target.value })}>
-            <option value="">None</option>
-            {features.map((f) => (
-              <option key={f.id} value={f.id}>
-                {f.title}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className="field" style={{ flex: "1 1 280px" }}>
-          <label htmlFor="nt-risk">Risk</label>
-          <select id="nt-risk" value={form.risk} onChange={(e) => setForm({ ...form, risk: e.target.value as Risk | "none" })} style={{ maxWidth: 200 }}>
-            <option value="none">Let the CEO rate it</option>
-            {RISKS.map((r) => (
-              <option key={r} value={r}>
-                {r[0]!.toUpperCase() + r.slice(1)}
-              </option>
-            ))}
-          </select>
-          <RiskHelp tiers={tiers} current={form.risk === "none" ? null : form.risk} />
-        </div>
-      </div>
+      )}
       {agentChosen && (
         <p role="note" style={{ fontSize: 14, margin: 0 }}>
           <strong>Starts straight away:</strong> {agents.find((a) => a.id === form.assignee)?.name ?? "The agent"} begins as soon as you add the task.
@@ -169,13 +177,13 @@ function NewTicket({ agents, features, tiers, onAdd }: { agents: Company["agents
       )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
         <button className="btn primary" type="submit" disabled={busy || !form.title.trim()}>
-          {agentChosen ? "Add and start" : "Add to backlog"}
+          {isFeature ? "Add feature" : agentChosen ? "Add and start" : "Add to backlog"}
         </button>
-        <button className="btn" type="button" onClick={close}>
+        <button className="btn" type="button" onClick={onClose}>
           Cancel
         </button>
         <span className="muted" style={{ fontSize: 13 }}>
-          Ctrl+Enter (Cmd+Enter on a Mac) adds it. The milestone is set on the task page.
+          Ctrl+Enter (Cmd+Enter on a Mac) adds it.{isFeature ? "" : " The milestone is set on the task page."}
         </span>
       </div>
       {error && (
@@ -188,7 +196,7 @@ function NewTicket({ agents, features, tiers, onAdd }: { agents: Company["agents
 }
 
 /** One card per feature: its status and how many of its tasks are done. */
-function FeatureCards({ features }: { features: Feature[] }) {
+function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask: (featureId: string) => void }) {
   if (!features.length) return null;
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
@@ -199,11 +207,14 @@ function FeatureCards({ features }: { features: Feature[] }) {
           </h3>
           <span className={`tag ${STATUS_TONE[f.status]}`} style={{ alignSelf: "flex-start" }}>{FEATURE_STATUS_LABEL[f.status]}</span>
           <span className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={f.tickets.total} aria-valuenow={f.tickets.done} aria-label={`${f.title} progress`}>
-            <span style={{ width: `${(f.tickets.done / f.tickets.total) * 100}%` }} />
+            <span style={{ width: `${f.tickets.total ? (f.tickets.done / f.tickets.total) * 100 : 0}%` }} />
           </span>
           <span className="mono muted" style={{ fontSize: 12 }}>
             {f.tickets.done} of {f.tickets.total} tasks done
           </span>
+          <button type="button" className="btn" style={{ alignSelf: "flex-start" }} aria-label={`Add task to ${f.title}`} onClick={() => onAddTask(f.id)}>
+            Add task
+          </button>
         </article>
       ))}
     </div>
@@ -220,6 +231,9 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
   const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
   const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
   const [view, setView] = useState<"all" | "features" | "tasks">("all");
+  const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const openForm = (a: Adding) => setAdding({ ...a, n: (adding?.n ?? 0) + 1 });
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
   const tiers = useRiskTiers();
 
@@ -256,6 +270,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
   }
 
   const company = companies.find((c) => c.id === current?.companyId);
+  const ceo = company?.agents.find((a) => a.role === "ceo");
   return (
     <>
       <header className="page-head">
@@ -277,17 +292,39 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
           </div>
         )}
       </header>
-      {current && (
-        <NewTicket
+      {current && !adding && (
+        <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} onClick={() => openForm({ mode: view === "features" ? "feature" : "task", featureId: "" })}>
+          Add
+        </button>
+      )}
+      {current && adding && (
+        <AddForm
+          key={adding.n}
+          initial={adding}
           agents={company?.agents ?? []}
           features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")}
           tiers={tiers}
-          onAdd={async (t) => {
+          hasCeo={!!ceo}
+          onClose={() => setAdding(null)}
+          onAddTask={async (t) => {
             await api(`/api/projects/${current.id}/tickets`, { method: "POST", body: t });
+            setNote(null);
             board.reload();
+          }}
+          onAddFeature={async (f) => {
+            const created = await api<Feature>(`/api/companies/${current.companyId}/features`, { method: "POST", body: { title: f.title, description: f.description, status: f.planWithCeo ? "planned" : "idea" } });
+            if (view === "tasks") setView("features");
+            feats.reload();
+            if (f.planWithCeo) {
+              await api(`/api/features/${created.id}/tickets`, { method: "POST", body: { projectId: current.id, title: `Plan: ${f.title}`, assigneeAgentId: ceo!.id } });
+              board.reload();
+              feats.reload();
+            }
+            setNote(f.planWithCeo ? "Feature added. The CEO will plan it and break it into tasks." : "Feature added.");
           }}
         />
       )}
+      {note && <p role="status">{note}</p>}
       {board.error && (
         <p className="error" role="alert">
           {board.error.message}
@@ -300,7 +337,7 @@ export function Board({ companies, projectId, go, onCompaniesChanged }: { compan
           </button>
         ))}
       </div>
-      {view !== "tasks" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.tickets.total > 0 && f.status !== "declined")} />}
+      {view !== "tasks" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
       {view !== "features" && (
       <>
       <p className="muted" style={{ fontSize: 13 }}>
