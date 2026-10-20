@@ -92,6 +92,8 @@ services:
       BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
       # The feedback portal alone, on its own port: the only port that may ever face the internet.
       BOSSMAN_PORTAL_PORT: "3101"
+      # The portal's address as people reach it, for the share link, e.g. http://192.168.68.67:3111.
+      BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
     secrets:
       - master_key
     volumes:

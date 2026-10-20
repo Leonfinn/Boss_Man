@@ -82,6 +82,7 @@ describe("the runner launcher (R55)", () => {
           "/mnt/data/companies/app-co/workspaces:/home/node/workspaces",
           "/mnt/data/companies/app-co/runner-data:/home/node/runner-data",
           "/mnt/data/companies/app-co/claude:/home/node/.claude",
+          "/mnt/data/companies/app-co/opencode:/home/node/.local/share/opencode",
           "/mnt/data/companies/app-co/runner.token:/run/secrets/runner_token:ro",
         ],
         NetworkMode: "boss-man_default",
@@ -114,7 +115,7 @@ describe("the runner launcher (R55)", () => {
     const file = path.join(s.cfg.dataRoot, "companies/app-co/runner.token");
     expect(readFileSync(file, "utf8")).toBe(TOKEN);
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    for (const sub of ["workspaces", "runner-data", "claude"]) expect(existsSync(path.join(s.cfg.dataRoot, "companies/app-co", sub))).toBe(true);
+    for (const sub of ["workspaces", "runner-data", "claude", "opencode"]) expect(existsSync(path.join(s.cfg.dataRoot, "companies/app-co", sub))).toBe(true);
     expect(s.calls).toEqual(["inspect boss-man-runner-app-co", "create boss-man-runner-app-co", "start id1"]);
 
     await s.call("PUT", "/runners/app-co", { token: TOKEN });

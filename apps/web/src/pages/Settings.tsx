@@ -19,6 +19,8 @@ const CREDENTIALS = [
   { kind: "generic", label: "Git token (GitHub or Gitea)", env: "GIT_TOKEN", help: "GitHub: a fine-grained token for the company's repos, with Contents and Pull requests read and write. Gitea: a token with the write:repository scope." },
   { kind: "anthropic_api_key", label: "Anthropic API key", env: "ANTHROPIC_API_KEY", help: "From the Anthropic Console. Runs on it are billed to your API credit." },
   { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },
+  { kind: "generic", label: "OpenRouter API key", env: "OPENROUTER_API_KEY", help: "For OpenCode agents. Models are named openrouter/<model>." },
+  { kind: "generic", label: "Ollama Cloud API key", env: "OLLAMA_API_KEY", help: "For OpenCode agents. Models are named ollama-cloud/<model>." },
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
 ] as const;
 
@@ -168,7 +170,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
 /** A setup-token can only be proved by Claude Code, so its check runs on the runner (R58). */
 const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
-export function Credentials({ company, onChanged }: { company: Company; onChanged?: () => void }) {
+export function Credentials({ company, onChanged, title = "Credentials" }: { company: Company; onChanged?: () => void; title?: string }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
   const [choice, setChoice] = useState(0);
@@ -226,7 +228,7 @@ export function Credentials({ company, onChanged }: { company: Company; onChange
   };
 
   return (
-    <Section id="creds-h" title="Credentials">
+    <Section id="creds-h" title={title}>
       <p className="muted" style={{ fontSize: 14 }}>
         Values are encrypted on the server and never shown again; agents get them as environment variables. Each value is checked when saved, e.g. for stray spaces.
       </p>
@@ -410,7 +412,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
           <summary>What the provider controls</summary>
           <div className="muted" style={{ fontSize: 14, display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
             <p>
-              The provider decides which service lists models for an API-key source (Anthropic, OpenAI and LLM gateways such as OpenRouter; Bedrock and Foundry use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from Credentials above, as environment variables.
+              The provider decides which service lists models for an API-key source (Anthropic, OpenAI and LLM gateways such as OpenRouter; Bedrock and Foundry use the list Claude Code reports from the runner) and labels the quota readings. It doesn't deliver the credential: agents get that from the Secrets page, as environment variables.
             </p>
             <ul style={{ margin: 0, paddingLeft: 18 }}>
               <li>Subscription + Anthropic: a Claude Pro or Max plan, run with a setup-token (<code>CLAUDE_CODE_OAUTH_TOKEN</code>).</li>
@@ -427,6 +429,10 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
               </li>
             </ul>
             <p>Claude agents only: Codex runs on OpenAI.</p>
+            <p>
+              OpenCode agents (pick "OpenCode" when hiring) read <code>OPENROUTER_API_KEY</code>, <code>OLLAMA_API_KEY</code> (Ollama Cloud), <code>OPENAI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> by themselves; models are named <code>provider/model</code>. A local Ollama has no key: add a credential with "Other" named <code>OPENCODE_CONFIG_CONTENT</code>, whose value is JSON such as{" "}
+              <code>{`{"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","name":"Ollama","options":{"baseURL":"http://host.docker.internal:11434/v1"},"models":{"qwen3:8b":{"name":"Qwen3 8B"}}}}}`}</code>.
+            </p>
           </div>
         </details>
         {form.kind === "api_credit" && (
@@ -791,7 +797,16 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
         <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
           <Runner company={company} />
           <SelfDeploy go={go} />
-          <Credentials company={company} />
+          <section className="card">
+            <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
+            <p className="muted" style={{ fontSize: 14 }}>
+              Credentials are added, granted and rotated on the{" "}
+              <button type="button" className="linkish" onClick={() => go("secrets")}>
+                Secrets
+              </button>{" "}
+              page.
+            </p>
+          </section>
           <Funding company={company} onChanged={onChanged} />
           <Chapters company={company} />
           <Section id="reviews-h" title="Reviews">

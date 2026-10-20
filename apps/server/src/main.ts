@@ -16,6 +16,7 @@ const { app, scheduler, sweeps, notes, feedback, review, selfDeploy } = await bu
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,
   deployerDir: env.BOSSMAN_DEPLOYER_DIR,
+  portalUrl: env.BOSSMAN_PORTAL_URL,
   // The runner launcher (R55): starts each company's runner, so no tokens are copied by hand.
   launcher: env.BOSSMAN_LAUNCHER === "1" ? { url: env.BOSSMAN_LAUNCHER_URL ?? "http://launcher:3105", keyFile: env.BOSSMAN_LAUNCHER_KEY_FILE ?? "/run/launcher/key" } : undefined,
   sweepLimits: {
