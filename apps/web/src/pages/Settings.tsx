@@ -794,7 +794,8 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
   );
 }
 
-type MaintenanceView = { on: false } | { on: true; deadline: string; runs: number; companies: number };
+type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
+type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
 
 /** Drain-then-swap for runner updates: start it by hand (after scripts/update-runner.sh built the image) or cancel one that is running. */
 function RunnerUpdate() {
@@ -808,6 +809,15 @@ function RunnerUpdate() {
         {m.on
           ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
           : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Run scripts/update-runner.sh first to build the image."}
+      </p>
+      <p role="status" style={{ fontSize: 14 }}>
+        {m.last ? (
+          <>
+            <span className={m.last.ok ? "tag" : "tag red"}>{m.last.ok ? "OK" : "PROBLEM"}</span> Last update {when(m.last.at)}: {m.last.title}. {m.last.body}
+          </>
+        ) : (
+          <span className="muted">No runner update has finished here yet.</span>
+        )}
       </p>
       <div>
         <button
