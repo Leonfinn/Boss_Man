@@ -825,12 +825,14 @@ export async function buildApp(opts: AppOptions) {
 
     owner.get("/api/funding-sources", async () => funding.list());
 
-    // Kind and provider only change how future spend is counted; past cost events stay as recorded.
+    // Cost events keep their amounts, but readers use the source's current kind, so a kind change also recounts past spend.
     owner.patch("/api/funding-sources/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = FundingFields.partial().refine((v) => Object.keys(v).length > 0, "Nothing to change.").parse(req.body);
       const [cur] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
       if (!cur) return reply.code(404).send({ error: "not_found" });
+      const [clash] = b.name && b.name !== cur.name ? await db.select({ id: fundingSources.id }).from(fundingSources).where(eq(fundingSources.name, b.name)) : [];
+      if (clash) return reply.code(409).send({ error: "already_exists", message: `There's already a funding source called ${b.name}.` });
       const problem = fundingComboError(b.kind ?? cur.kind, b.provider ?? cur.provider);
       if (problem) return reply.code(400).send({ error: "invalid_request", message: problem });
       const row = await funding.update(id, {

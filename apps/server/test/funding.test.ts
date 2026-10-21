@@ -114,7 +114,9 @@ describe("editing and deleting funding sources", () => {
     expect((await get("/api/funding-sources")).json()[0]).toMatchObject({ kind: "api_payg", provider: "openrouter" });
 
     await source("Other");
-    expect((await send("PATCH", `/api/funding-sources/${s.id}`, { name: "Other" })).statusCode).toBe(409);
+    const dup = await send("PATCH", `/api/funding-sources/${s.id}`, { name: "Other" });
+    expect(dup.statusCode).toBe(409);
+    expect(dup.json().message).toBe("There's already a funding source called Other.");
     expect((await send("PATCH", `/api/funding-sources/${missing}`, { name: "x" })).statusCode).toBe(404);
   });
 

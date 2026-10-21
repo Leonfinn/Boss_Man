@@ -630,7 +630,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
             </div>
           </>
         )}
-        {editing && <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 14 }}>Changing the kind or provider applies to spend from now on; past cost stays as it was recorded.</p>}
+        {editing && <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 14 }}>Spend already recorded stays, but it's counted by this source's current kind, so changing the kind changes how past spend counts too (for example, a subscription's spend never counts toward money caps).</p>}
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn primary" type="submit" disabled={act.busy}>
             {editing ? "Save" : "Add"}
