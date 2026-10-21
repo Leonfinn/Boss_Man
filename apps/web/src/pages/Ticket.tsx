@@ -504,7 +504,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <>
                   <input type="datetime-local" aria-label="Check again at" value={mon.at} onChange={(e) => setMon({ ...mon, at: e.target.value })} />
                   <input aria-label="What to re-check" maxLength={500} value={mon.note} onChange={(e) => setMon({ ...mon, note: e.target.value })} style={{ marginTop: 6 }} />
-                  <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                  <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
                     <button type="button" className="btn" disabled={!mon.at || !mon.note.trim()} onClick={() => void monitor({ at: new Date(mon.at).toISOString(), note: mon.note.trim() })}>Save</button>
                     <button type="button" className="btn" onClick={() => setMon(null)}>Cancel</button>
                   </div>
@@ -513,7 +513,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <>
                   {inText(new Date(t.monitorAt).getTime() - Date.now())} · {new Date(t.monitorAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })} · check {t.monitorAttempts + 1} of {t.monitorMax}
                   <small className="muted" style={{ display: "block" }}>{t.monitorNote}</small>
-                  <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                  <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
                     <button type="button" className="btn" onClick={() => setMon({ at: localInput(new Date(t.monitorAt!)), note: t.monitorNote ?? "" })}>Edit</button>
                     <button type="button" className="btn" onClick={() => void monitor({ note: t.monitorNote })}>Check now</button>
                     <button type="button" className="btn" onClick={() => void monitor(null)}>Clear</button>
