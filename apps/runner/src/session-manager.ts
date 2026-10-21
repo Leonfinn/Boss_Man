@@ -94,6 +94,15 @@ export function modelChoices(configOptions: unknown[] | null | undefined) {
 }
 const currentModel = (configOptions: unknown[] | null | undefined) =>
   ((configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { currentValue?: string } | undefined)?.currentValue;
+/** The end of an agent's stderr, for an exit message: blank lines and Bun's version banner dropped, so the error itself (e.g. EACCES) shows. */
+export const stderrTail = (stderr: string) =>
+  stderr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !/^Bun v\d/.test(l))
+    .join(" ")
+    .slice(-600);
+
 export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"];
 
 const require = createRequire(import.meta.url);
@@ -553,7 +562,7 @@ export class SessionManager {
     };
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
-      if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim());
+      if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderrTail(stderr)}`.trim());
     });
 
     try {
