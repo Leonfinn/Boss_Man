@@ -24,7 +24,7 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-type Answers = { verify?: unknown; merge?: unknown };
+type Answers = { verify?: unknown; merge?: unknown; diff?: unknown };
 
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
@@ -44,7 +44,7 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
     // A fake runner that answers diff requests.
     built.runners.connect(reg.runnerId, (c) => {
       sent.push(c);
-      if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: DIFF }));
+      if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.diff ?? DIFF }));
       if (c.type === "workspace.verify") {
         const reply = () => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.verify });
         if (opts.hold) held.push(reply);
@@ -168,6 +168,16 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(c.sent.find((x) => x.type === "workspace.verify")).toMatchObject({ command: "pnpm test" });
     expect(c.sent.find((x) => x.type === "workspace.merge")).toMatchObject({ target: "develop", message: `Merge "Add rate limiting" (${c.ticket.id})` });
     expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
+  });
+
+  it("closes a ticket that changed nothing in the repository, without running the check or merging", async () => {
+    const c = (ctx = await setup({ answers: { diff: { ...DIFF, commits: [], files: [], diff: "" }, verify: { ok: false, exitCode: 1, timedOut: true, output: "", ms: 660_000 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    expect((await approve(c)).json()).toMatchObject({ verdict: "approved", outcome: "done" });
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.verify");
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
+    expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: null });
+    expect(landingText({ outcome: "done", detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } }, { branch: "main", assignee: null })).toBe("Approved; the ticket is done. Nothing in the repository changed, so there was nothing to check or merge.");
   });
 
   it("sends a failed check back to the agent with its output, without merging", async () => {

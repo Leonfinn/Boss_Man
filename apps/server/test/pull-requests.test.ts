@@ -63,6 +63,8 @@ async function setup(opts: { token?: boolean } = {}) {
   const sent: RunnerCommand[] = [];
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
+    // Landing first asks what changed; these tickets changed code.
+    if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "", truncated: false } }));
     if (c.type === "workspace.push") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "pushed", branch: `bossman/${c.ticketId}`, commit: HEAD } }));
     if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "merged", commit: "c".repeat(40) } }));
     return true;
