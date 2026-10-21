@@ -4,6 +4,7 @@ import { art } from "../brand";
 import { State } from "../components/State";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
+import { OUTCOMES } from "./Rules";
 
 const KIND: Record<string, { label: string; tone: string }> = {
   permission: { label: "Permission", tone: "" },
@@ -16,6 +17,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   question: { label: "Question", tone: "" },
   deploy: { label: "Production deploy", tone: "red" },
   self_deploy: { label: "Boss Man update", tone: "blue" },
+  rule_proposal: { label: "Proposed rule", tone: "blue" },
 };
 
 const EFFECT = {
@@ -73,7 +75,7 @@ function StallEvidenceView({ e }: { e: StallEvidence }) {
 
 function kindOf(d: Decision) {
   const ctx = (d as Decision & { context?: { type?: string } }).context;
-  const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" ? ctx.type : d.options.includes("Approve plan") ? "plan" : d.kind;
+  const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" || ctx?.type === "rule_proposal" ? ctx.type : d.options.includes("Approve plan") ? "plan" : d.kind;
   return KIND[key] ?? { label: d.kind.replace(/_/g, " "), tone: "" };
 }
 
@@ -175,6 +177,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const w = (n: number) => `${Math.round((n / total) * 48)}px`;
               const done = answered[d.id];
               const x = d.context?.explain;
+              const rule = d.context?.rule;
               return (
                 <li className="decision" key={d.id}>
                   <div className="score" title={why(d)}>
@@ -196,7 +199,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
-                    <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : d.question}</h2>
+                    <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : rule ? d.question.split("\n\n")[0] : d.question}</h2>
+                    {rule && (
+                      <>
+                        <p style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n").slice(1).join("\n\n")}</p>
+                        <details>
+                          <summary>The exact rule</summary>
+                          <ul style={{ paddingLeft: 18 }}>
+                            <li>Name: {rule.name}</li>
+                            {rule.match.kinds?.length ? <li>Tool kinds: {rule.match.kinds.join(", ")}</li> : null}
+                            {rule.match.commandPattern && <li>Command pattern: <code className="mono">{rule.match.commandPattern}</code></li>}
+                            {rule.match.titlePattern && <li>Title pattern: <code className="mono">{rule.match.titlePattern}</code></li>}
+                            <li>Then: {OUTCOMES.find((o) => o.value === rule.outcome)?.label ?? rule.outcome}</li>
+                          </ul>
+                        </details>
+                      </>
+                    )}
                     {x && (
                       <>
                         <p>

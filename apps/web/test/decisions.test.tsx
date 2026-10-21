@@ -144,4 +144,23 @@ describe("Allow always", () => {
     render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission", explain: { ...explain, alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText(/doesn't offer 'always'/)).toBeTruthy();
   });
+
+  it("shows a proposed rule's explanation and folds the exact rule away", () => {
+    const d = decision({
+      kind: "question",
+      question: "The CEO proposes a rule: Allow GitHub reads\n\nAgents can read from GitHub without asking you. It would not catch pushes.",
+      options: ["Add this rule", "Don't add"],
+      recommendedOption: "Add this rule",
+      context: { type: "rule_proposal", rule: { name: "Allow GitHub reads", outcome: "allow", match: { titlePattern: "^mcp__github__(get|list)_", safeOnly: true } } },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByRole("heading", { name: "The CEO proposes a rule: Allow GitHub reads" })).toBeTruthy();
+    expect(screen.getByText(/Agents can read from GitHub without asking you/)).toBeTruthy();
+    const fold = screen.getByText("The exact rule").closest("details")!;
+    expect(fold.open).toBe(false);
+    expect(fold.textContent).toContain("^mcp__github__(get|list)_");
+    expect(fold.textContent).toContain("Then: Allow");
+    expect(screen.getByRole("button", { name: "Add this rule" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Write my own answer" })).toBeTruthy();
+  });
 });

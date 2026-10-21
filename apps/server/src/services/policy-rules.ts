@@ -5,7 +5,10 @@
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { DEFAULT_POLICY, evaluatePermission, ruleProblems, type PermissionInfo, type PolicyMatch, type PolicyOutcome, type PolicyRuleSpec } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { policyRules } from "../db/schema.js";
+import { decisions, policyRules } from "../db/schema.js";
+
+export const ADD_RULE = "Add this rule";
+export const DONT_ADD_RULE = "Don't add";
 
 export class RuleError extends Error {
   constructor(
@@ -54,6 +57,26 @@ export function policyRulesService(db: Db) {
         .values({ companyId: input.companyId, name: input.name, trigger: "permission", condition: input.match, outcome: input.outcome, position: (last.at(-1)?.position ?? -1) + 1 })
         .returning();
       return view(row!);
+    },
+
+    /** The CEO's draft of a rule, queued for the owner. An allow rule is always safeOnly, so a drafted rule can't lift the built-in destructive and push gates. */
+    async propose(companyId: string, ceoId: string, input: { name: string; explanation: string; match: PolicyMatch; outcome: PolicyOutcome }) {
+      check(input.match);
+      const match = input.outcome === "allow" ? { ...input.match, safeOnly: true } : input.match;
+      const [d] = await db
+        .insert(decisions)
+        .values({
+          companyId,
+          raisedByAgentId: ceoId,
+          kind: "question",
+          tier: "owner",
+          question: `The CEO proposes a rule: ${input.name}\n\n${input.explanation}${input.outcome === "allow" ? "\n\nBecause it allows things, it never overrides the built-in protection against destructive commands and pushes." : ""}`,
+          options: [ADD_RULE, DONT_ADD_RULE],
+          recommendedOption: ADD_RULE,
+          context: { type: "rule_proposal", rule: { name: input.name, match, outcome: input.outcome } },
+        })
+        .returning({ id: decisions.id });
+      return d!.id;
     },
 
     async update(id: string, patch: { name?: string; match?: PolicyMatch; outcome?: PolicyOutcome }) {

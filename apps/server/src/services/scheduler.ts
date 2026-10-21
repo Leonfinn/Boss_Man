@@ -68,7 +68,7 @@ export { REVIEW_REASON };
 export const PLAIN_SUMMARY_RULE =
   "Write to the owner as a non-developer. Every ticket_reply starts with 1 to 3 plain sentences: what changed for them and whether they need to do anything. A ticket in review waits on its reviewer: when that is the owner, say what they need to do (review and approve, or send it back); never tell them there is nothing to do. Then a line that says only \"Details:\" followed by the technical report (files, commits, tests). Ticket state notes (set_ticket_state summary) are plain words too, with no file paths unless essential.";
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
-const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message"]);
+const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };

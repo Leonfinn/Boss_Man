@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, TOOL_KINDS, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
 import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
@@ -730,6 +730,19 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/policy-rules/order", async (req, reply) => {
       const b = z.object({ companyId: Uuid.nullable(), ids: z.array(Uuid).max(500) }).parse(req.body);
       return rules.reorder(b.companyId, b.ids).catch(ruleErrors(reply));
+    });
+    // The owner asks in plain words; the CEO drafts the rule and it comes back as a decision.
+    owner.post("/api/companies/:id/rule-requests", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { text } = z.object({ text: z.string().trim().min(1).max(1000) }).parse(req.body);
+      const [ceo] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, id), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (!ceo) return reply.code(409).send({ error: "rejected", message: "This company has no CEO to draft the rule." });
+      await scheduler.notify(ceo.id, {
+        reason: "rule request",
+        priority: 3,
+        note: `The owner wants a permission rule. In their words: "${text}"\n\nHow rules work: when an agent asks to use a tool, the first matching rule decides. The company's rules are checked in order, then rules for every company, then the built-in defaults. A rule matches on kinds (${TOOL_KINDS.join(", ")}), commandPattern (a regex on the shell command), titlePattern (a regex on the tool's title; MCP tools are titled mcp__<server>__<tool>), and its outcome is allow, ceo (you decide), owner (they decide) or deny.\n\nCall propose_rule once, with a plain-English explanation for a non-developer: what the rule matches, what happens, and examples of requests it would and wouldn't catch. The owner will add it or answer in their own words.`,
+      });
+      return reply.code(202).send({ ceo });
     });
     owner.post("/api/policy-rules/test", async (req) => {
       const b = z.object({ companyId: Uuid, command: z.string().max(5000).optional(), title: z.string().max(500).optional(), kind: z.string().max(40).optional() }).parse(req.body);
