@@ -1,7 +1,10 @@
 import { api, usd, type Project } from "../api";
 import { usePoll } from "../hooks";
 
-type Spend = { monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; topTickets: { id: string; title: string; micros: number }[] };
+type Tokens = { input: number; output: number };
+type Spend = { tokens?: { month: Tokens; total: Tokens }; monthMicros: number; totalMicros: number; ticketCostCapMicros: number | null; monthlyCapMicros: number | null; monthStart: string; topTickets: { id: string; title: string; micros: number }[] };
+
+const n = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
 
 /** What a project has cost: money only (subscription use isn't counted), the month being the UTC calendar month. */
 export function ProjectBudget({ project }: { project: Project }) {
@@ -25,7 +28,17 @@ export function ProjectBudget({ project }: { project: Project }) {
       ) : (
         <p className="muted">No monthly cap. Set one on the Config tab.</p>
       )}
-      <p className="muted" style={{ fontSize: 13 }}>Pay-as-you-go and API credit only; subscription use isn't money spent. The month is the calendar month (UTC). Set the cap on the Config tab.</p>
+      <p className="muted" style={{ fontSize: 13 }}>Money is pay-as-you-go and API credit only: runs paid from a subscription (such as Claude Max) cost nothing extra, so they aren't in these figures and caps don't stop them. The month is the calendar month (UTC). Set the caps on the Config tab.</p>
+      {s.tokens && (
+        <>
+          <h2 style={{ fontSize: 16 }}>Tokens</h2>
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>Every run on this project's tasks, subscription runs included.</p>
+          <dl style={{ display: "flex", gap: 32, flexWrap: "wrap", margin: 0 }}>
+            <div><dt className="muted">This month in / out</dt><dd style={{ fontSize: 20, margin: 0 }}>{n.format(s.tokens.month.input)} / {n.format(s.tokens.month.output)}</dd></div>
+            <div><dt className="muted">All time in / out</dt><dd style={{ fontSize: 20, margin: 0 }}>{n.format(s.tokens.total.input)} / {n.format(s.tokens.total.output)}</dd></div>
+          </dl>
+        </>
+      )}
       <h2 style={{ fontSize: 16 }}>Most expensive tasks</h2>
       {s.topTickets.length ? (
         <ol>

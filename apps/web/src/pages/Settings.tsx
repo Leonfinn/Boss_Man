@@ -542,7 +542,7 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
     });
   };
   return (
-    <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
+    <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "start", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
       <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>{p.name}</p>
       {!only && (
         <>
@@ -557,8 +557,10 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
           <div className="field">
             <label htmlFor={`monthly-${p.id}`}>Monthly spend cap (USD)</label>
             <input id={`monthly-${p.id}`} type="number" min="0.01" step="0.01" placeholder="No cap" value={form.monthlyUsd} onChange={(e) => setForm({ ...form, monthlyUsd: e.target.value })} />
-            <small className="muted">At the cap, no new runs start for this project until next month (UTC) or you raise it.</small>
           </div>
+          <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 13, margin: 0 }}>
+            At the monthly cap, no new runs start for this project until next month (UTC) or you raise it. Both caps count money only: runs paid from a subscription (such as Claude Max) cost nothing extra, so they don't count and a cap never stops them; the Budget tab shows their tokens.
+          </p>
         </>
       )}
       {showRepo && (<>
