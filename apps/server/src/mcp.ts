@@ -14,6 +14,7 @@ import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
+import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
@@ -976,6 +977,30 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
         return text("hired" in r ? `${r.hired.name} is hired (agent ${r.hired.id}); give them work with create_ticket.` : `The hire is waiting for the owner's approval (decision ${r.decisionId}).`);
       } catch (err) {
         if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+  server.registerTool(
+    "propose_rule",
+    {
+      description:
+        "Draft a permission rule for the owner (CEO only), after they ask for one. Call it once with a plain-English explanation: what the rule matches, what happens, and examples of requests it would and wouldn't catch. The owner sees your explanation with the exact rule and adds it or not. Give at least one of kinds, commandPattern, titlePattern. A rule that allows is always limited to safe requests.",
+      inputSchema: {
+        name: z.string().trim().min(1).max(100),
+        explanation: z.string().trim().min(1).max(2000),
+        outcome: z.enum(["allow", "ceo", "owner", "deny"]),
+        match: z.object({ kinds: z.array(z.string()).max(10).optional(), commandPattern: z.string().min(1).max(500).optional(), titlePattern: z.string().min(1).max(500).optional() }),
+      },
+    },
+    async (input) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can propose rules.");
+      try {
+        const id = await policyRulesService(db).propose(scope.companyId, ceo, input);
+        return text(`The rule is waiting for the owner's answer (decision ${id}).`);
+      } catch (err) {
+        if (err instanceof RuleError) return fail(err.message);
         throw err;
       }
     },

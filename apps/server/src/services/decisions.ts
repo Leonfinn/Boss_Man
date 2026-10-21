@@ -14,12 +14,15 @@ import {
   type AlwaysChoice,
   type PermissionExplanation,
   type PermissionInfo,
+  type PolicyMatch,
+  type PolicyOutcome,
   type PolicyRuleSpec,
   type RunnerCommand,
   type RunnerEvent,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages } from "../db/schema.js";
 
@@ -44,7 +47,9 @@ export type DecisionContext =
   | { type: "risk_review"; ticketId: string; reviewer: string }
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
   | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string }; byAgentId: string }
-  | { type: "instructions"; agentId: string; instructions: string; byAgentId: string };
+  | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
+  /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
+  | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -597,6 +602,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (last?.position ?? -1) + 1 });
         answer = ALLOW;
       }
+      if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
       await db
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again.
@@ -697,7 +703,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       }
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
-      if (wake && d.kind === "question" && d.raisedByAgentId) {
+      // A rule proposal answered with a button needs nothing more from the CEO.
+      if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
         await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `The owner answered your question "${d.question}": ${answer}` });
       }
