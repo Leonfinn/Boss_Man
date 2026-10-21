@@ -45,6 +45,9 @@ describe("board", () => {
     const task = (await screen.findByText("Build the toggle", { selector: "a" })).closest("article")!;
     expect(within(task).getByText("Dark mode")).toBeTruthy();
     expect(screen.getByText("Sub-task of Build the toggle")).toBeTruthy();
+    expect(within(task).getByText("Task")).toBeTruthy();
+    expect(within(screen.getByText("Need infra", { selector: "a" }).closest("article")!).getByText("Sub-task")).toBeTruthy();
+    expect(within(await screen.findByRole("article", { name: "Feature Dark mode" })).getByText("Feature")).toBeTruthy();
     expect(await screen.findByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
     expect(screen.getByText("1 of 2 tasks done")).toBeTruthy();
 

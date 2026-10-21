@@ -212,6 +212,7 @@ function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask:
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
       {features.map((f) => (
         <article className="ticket" key={f.id} aria-label={`Feature ${f.title}`}>
+          <span className="tag" style={{ alignSelf: "flex-start" }}>Feature</span>
           <h3>
             <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
           </h3>
@@ -413,6 +414,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                   const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
                   return (
                     <article className="ticket" key={t.id}>
+                      <span className="tag" style={{ alignSelf: "flex-start" }}>{t.parentTitle ? "Sub-task" : "Task"}</span>
                       <h3>
                         <a href={`#/tickets/${t.id}`}>{t.title}</a>
                       </h3>
