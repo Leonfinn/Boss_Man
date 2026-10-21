@@ -12,6 +12,8 @@ import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.j
 import type { NotifyInput } from "./notifications.js";
 
 export const MAINTENANCE_KEY = "maintenance";
+/** How the last runner update ended, for Settings: {at, startedAt, ok, title, body}. */
+export const MAINTENANCE_LAST_KEY = "maintenance:last";
 /** The status_reason a held wake carries; it stays queued (like a paused company's) and launches once the hold lifts. */
 export const HOLD_REASON = "update pending";
 
@@ -74,6 +76,9 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
   }
 
   async function end(title: string, level: NotifyInput["level"], body: string) {
+    const h = await getHold(db);
+    const last = { at: now().toISOString(), startedAt: h?.since ?? null, ok: level !== "page", title, body };
+    await db.insert(settings).values({ key: MAINTENANCE_LAST_KEY, value: last }).onConflictDoUpdate({ target: settings.key, set: { value: last } });
     await db.delete(settings).where(eq(settings.key, MAINTENANCE_KEY));
     await withdrawQuestion();
     await deps.notify({ companyId: null, level, title, body, link: "#/settings" });
@@ -116,9 +121,11 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
     /** What the banner shows. */
     async status() {
       const h = await getHold(db);
-      if (!h) return { on: false as const };
+      const [l] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, MAINTENANCE_LAST_KEY));
+      const last = (l?.value ?? null) as { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
+      if (!h) return { on: false as const, last };
       const active = await activeByCompany();
-      return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: [...active.values()].reduce((a, b) => a + b, 0), companies: active.size };
+      return { on: true as const, reason: h.reason, since: h.since, deadline: h.deadline, runs: [...active.values()].reduce((a, b) => a + b, 0), companies: active.size, last };
     },
 
     /** Lifts the hold without finishing the swap; runners already swapped stay on the new image. // leader-only */

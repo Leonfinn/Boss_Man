@@ -115,7 +115,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.wake(a);
     await c.scheduler.tick();
     expect(c.commands.map((x) => x.company)).toEqual(["App Co"]);
-    expect(await c.maint()).toEqual({ on: false });
+    expect(await c.maint()).toEqual({ on: false, last: null });
 
     expect((await c.req("POST", "/api/maintenance/start", {})).statusCode).toBe(200);
     // Both companies want a run; neither gets one. The wake says why it waits, and stays queued.
@@ -143,7 +143,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     await c.finish(a);
     await c.maintenance.step();
     expect(await getHold(c.db)).toBeNull();
-    expect(await c.maint()).toEqual({ on: false });
+    expect(await c.maint()).toMatchObject({ on: false, last: { ok: true, title: "Runners updated" } });
     expect(await c.titles()).toContain("note: Runners updated");
     expect(c.commands.map((x) => x.company).sort()).toEqual(["App Co", "App Co", "Home Lab"]);
   });
@@ -198,6 +198,7 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await getHold(c.db)).toBeNull();
     expect(c.commands).toHaveLength(1);
     expect(await c.titles()).toContain("note: Runner update cancelled");
+    expect((await c.req("GET", "/api/maintenance")).json()).toMatchObject({ on: false, last: { ok: true, title: "Runner update cancelled" } });
   });
 
   it("a deadline answer after the hold is gone does nothing", async () => {
