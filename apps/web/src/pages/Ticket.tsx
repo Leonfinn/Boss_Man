@@ -402,7 +402,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                     Waiting for {who}'s review. {t.ownerSignoff ? "When it approves, you'll be asked to sign it off." : "When it approves, this lands automatically, so you don't need to do anything."}
                   </p>
                   <details>
-                    <summary style={{ cursor: "pointer", color: "var(--accent)" }}>Decide now instead</summary>
+                    <summary style={{ cursor: "pointer", color: "var(--link)" }}>Decide now instead</summary>
                     <p className="muted" style={{ fontSize: 14 }}>
                       Deciding now skips the waiting review.
                     </p>

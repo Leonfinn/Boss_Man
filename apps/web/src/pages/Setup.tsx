@@ -136,7 +136,7 @@ function TokenHelp({ projects }: { projects: Project[] }) {
   const both = hosts.size !== 1;
   return (
     <details className="token-help" style={{ fontSize: 14 }}>
-      <summary style={{ cursor: "pointer", color: "var(--accent)" }}>How do I get a token?</summary>
+      <summary style={{ cursor: "pointer", color: "var(--link)" }}>How do I get a token?</summary>
       {(both || hosts.has("github")) && (
         <section aria-label="GitHub token steps">
           <h4 style={{ margin: "8px 0 4px" }}>GitHub (fine-grained personal access token)</h4>

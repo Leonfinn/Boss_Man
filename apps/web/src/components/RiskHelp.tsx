@@ -17,7 +17,7 @@ export function RiskHelp({ tiers, current }: { tiers: RiskTiers; current: Risk |
     <div className="risk-help" style={{ fontSize: 13 }}>
       {chosen && <p className="muted" style={{ margin: 0 }}>{chosen.summary}</p>}
       <details>
-        <summary style={{ cursor: "pointer", color: "var(--accent)" }}>Compare the risk levels</summary>
+        <summary style={{ cursor: "pointer", color: "var(--link)" }}>Compare the risk levels</summary>
         <dl style={{ margin: "6px 0 0", display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 12px" }}>
           {tiers.map((t) => (
             <div key={t.tier} style={{ display: "contents" }}>
