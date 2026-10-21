@@ -19,7 +19,7 @@ const leader = createLeader({
   log: (m) => console.warn(m),
 });
 
-const { app, scheduler, sweeps, notes, feedback, review, semantic, selfDeploy, maintenance } = await buildApp({
+const { app, briefUpkeep, scheduler, sweeps, notes, feedback, review, semantic, selfDeploy, maintenance } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -48,6 +48,8 @@ const bg = createBackground(
     { name: "sweep", everyMs: Number(env.BOSSMAN_SWEEP_MS ?? 60_000), run: () => sweeps.run() },
     // Pull requests waiting on the git host: merged there, or mergeable now (R59).
     { name: "pull request sync", everyMs: Number(env.BOSSMAN_PR_SYNC_MS ?? 120_000), run: () => review.syncPullRequests() },
+    // Project briefs whose branch moved on the git host, merges made outside Boss Man included.
+    { name: "brief upkeep", everyMs: Number(env.BOSSMAN_BRIEF_UPKEEP_MS ?? 30 * 60_000), run: briefUpkeep },
     // What the host deployer reports: raises "Deploy?" when main moves and tells the owner how a deploy went. // leader-only
     { name: "self-deploy sync", everyMs: Number(env.BOSSMAN_SELF_DEPLOY_MS ?? 5000), run: () => selfDeploy.sync() },
     // The runner update drain: starts when update-runner.sh asks, swaps each runner as its company goes idle, lifts the hold at the end. // leader-only

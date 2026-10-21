@@ -4,8 +4,8 @@ import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, runners, wakes } from "../src/db/schema.js";
-import { briefCommitLine, briefFolder, briefSlug, briefTitle, parseCommitLine } from "../src/services/project-brief.js";
+import { agents, projects, runners, tickets, wakes } from "../src/db/schema.js";
+import { briefCommitLine, briefFolder, briefSlug, briefTitle, parseCommitLine, refreshBriefs } from "../src/services/project-brief.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -107,5 +107,59 @@ describe("project brief", () => {
     const prompt = c.commands.find((c) => c.agentId === keeper!.id)!.prompt;
     expect(prompt).toContain(`"Move the server" (completed): nothing attached; project brief: ${briefSlug(c.project.id)}`);
     expect(prompt).toContain("update the affected sections of that brief");
+  });
+});
+
+describe("brief upkeep", () => {
+  const OLD = "abc1234";
+  const NEW = "def5678".padEnd(40, "0");
+  async function upkeepSetup() {
+    const c = (ctx = await setup());
+    await c.db.update(projects).set({ repoUrl: "https://github.com/leon/site.git", gitHost: "github", gitApiBase: "https://api.github.com" }).where(eq(projects.id, c.project.id));
+    await c.writeBrief(BODY);
+    const host = { head: NEW as string | Error };
+    const logs: string[] = [];
+    let at = new Date("2026-01-01T00:00:00Z");
+    const pass = () => refreshBriefs(c.db, { work: c.work, gitHosts: { branchHead: async () => { if (host.head instanceof Error) throw host.head; return host.head; } }, gitToken: async () => "tok", log: (m) => logs.push(m), now: () => at });
+    const refreshes = async () => (await c.db.select().from(tickets).where(eq(tickets.projectId, c.project.id))).filter((t) => t.title === "Refresh the project brief");
+    return { c, host, logs, pass, refreshes, advance: (ms: number) => (at = new Date(at.getTime() + ms)) };
+  }
+
+  it("opens one refresh ticket for the wiki maintainer when the branch moved, then not while it is open or within a day", async () => {
+    const { c, pass, refreshes, advance } = await upkeepSetup();
+    const [keeper] = await c.db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, c.company.id), eq(agents.duty, "wiki")));
+    await pass();
+    const [t] = await refreshes();
+    expect(t).toMatchObject({ assigneeAgentId: keeper!.id });
+    expect(t!.body).toContain(`main moved from ${OLD} to ${NEW}`);
+    expect(t!.body).toContain(`git log --oneline ${OLD}..${NEW}`);
+    await pass();
+    expect(await refreshes()).toHaveLength(1);
+    await c.req("PATCH", `/api/tickets/${t!.id}`, { state: "done" });
+    advance(23 * 3_600_000);
+    await pass();
+    expect(await refreshes()).toHaveLength(1);
+    advance(2 * 3_600_000);
+    await pass();
+    expect(await refreshes()).toHaveLength(2);
+  });
+
+  it("does nothing when the head is the brief's commit, and falls back to the CEO without a maintainer", async () => {
+    const { c, host, pass, refreshes } = await upkeepSetup();
+    host.head = `${OLD}${"0".repeat(33)}`;
+    await pass();
+    expect(await refreshes()).toHaveLength(0);
+    host.head = NEW;
+    await c.db.update(agents).set({ retiredAt: new Date() }).where(and(eq(agents.companyId, c.company.id), eq(agents.duty, "wiki")));
+    await pass();
+    expect((await refreshes())[0]).toMatchObject({ assigneeAgentId: c.ceo.id });
+  });
+
+  it("logs a git host error and carries on", async () => {
+    const { host, logs, pass, refreshes } = await upkeepSetup();
+    host.head = new Error("HTTP 502");
+    await pass();
+    expect(logs).toEqual([expect.stringContaining("HTTP 502")]);
+    expect(await refreshes()).toHaveLength(0);
   });
 });

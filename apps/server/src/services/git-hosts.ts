@@ -133,6 +133,15 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       return { state: failing.length ? "failed" : !rows.length ? "none" : waiting ? "pending" : "passed", failing };
     },
 
+    /** The commit a branch points at: GitHub calls it commit.sha, Gitea commit.id. */
+    async branchHead(cfg: GitHostConfig, token: string, branch: string): Promise<string> {
+      const res = await call(cfg, token, "GET", `/branches/${branch.split("/").map(encodeURIComponent).join("/")}`);
+      const c = res.json && !Array.isArray(res.json) ? (res.json.commit as Record<string, unknown> | undefined) : undefined;
+      const sha = c?.sha ?? c?.id;
+      if (!res.ok || typeof sha !== "string" || !sha) throw new GitHostError(res.status, `Couldn't read branch ${branch}: ${messageOf(res.json, res.status)}`);
+      return sha;
+    },
+
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {
       const res = await call(cfg, token, "GET", `/pulls/${number}`);
       if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't read pull request ${number}: ${messageOf(res.json, res.status)}`);
