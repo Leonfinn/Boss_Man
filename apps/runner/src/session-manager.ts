@@ -551,7 +551,8 @@ export class SessionManager {
       killGroup(child);
       dropSkills();
     };
-    child.on("exit", (code) => {
+    // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
+    child.on("close", (code) => {
       if (this.runs.has(cmd.runId)) finish(null, `The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim());
     });
 
@@ -644,7 +645,9 @@ export class SessionManager {
       }
       finish(result.stopReason, null);
     } catch (err) {
-      finish(null, String((err as Error)?.message ?? err));
+      // A dying agent shows first as "ACP connection closed"; wait briefly so its exit message (with stderr) is reported instead.
+      if (child.exitCode === null && child.signalCode === null) await new Promise((r) => setTimeout(r, 2000));
+      if (this.runs.has(cmd.runId)) finish(null, String((err as Error)?.message ?? err));
     }
   }
 }
