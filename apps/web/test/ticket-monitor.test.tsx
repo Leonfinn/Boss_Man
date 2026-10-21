@@ -28,7 +28,7 @@ describe("Check again", () => {
         if (url === "/api/tickets/t1") return json(ticket);
         if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
         if (url.includes("/features")) return json({ features: [] });
-        if (url.endsWith("/artifacts") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
         if (url.includes("/messages")) return json({ live: null, items: [] });
         return json({});
       }),
