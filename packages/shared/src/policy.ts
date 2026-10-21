@@ -86,7 +86,46 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
   return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern);
 }
 
+/** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
+export function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h.includes(".") && !h.includes(":")) return true; // a bare name like "truenas" or "localhost"
+  if (/(^|\.)(localhost|local|lan|internal|localdomain|home\.arpa)$/.test(h)) return true;
+  // IPv4-mapped IPv6 (the URL parser writes ::ffff:192.168.0.1 as ::ffff:c0a8:1).
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  const v4 = mapped ? [parseInt(mapped[1]!, 16) >> 8, parseInt(mapped[1]!, 16) & 255, parseInt(mapped[2]!, 16) >> 8, parseInt(mapped[2]!, 16) & 255] : /^\d+\.\d+\.\d+\.\d+$/.test(h) ? h.split(".").map(Number) : null;
+  if (v4) {
+    const [a, b] = v4 as [number, number];
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  return h === "::" || h === "::1" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h);
+}
+
+/** Every web address in a tool call's input, to two levels deep (e.g. crawl4ai's url and urls). */
+function urlsIn(rawInput: unknown, depth = 0): string[] {
+  if (typeof rawInput === "string") return /^(https?|wss?):\/\//i.test(rawInput.trim()) ? [rawInput.trim()] : [];
+  if (!rawInput || typeof rawInput !== "object" || depth > 2) return [];
+  return Object.values(rawInput as Record<string, unknown>).flatMap((v) => urlsIn(v, depth + 1));
+}
+
+const LAN_GUARD = "Fetching from your home network or this machine is blocked";
+
+/** True when a fetch, or a call to an outside tool server, aims at a private address. Unparseable addresses count as private. */
+export function reachesPrivateNetwork(info: PermissionInfo): boolean {
+  const outside = /^mcp__(?!bossman__)/.test(info.title ?? "") || info.kind === "fetch";
+  if (!outside) return false;
+  return urlsIn(info.rawInput).some((u) => {
+    try {
+      return isPrivateHost(new URL(u).hostname);
+    } catch {
+      return true;
+    }
+  });
+}
+
 export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string } {
+  // Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
+  if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD };
   for (const rule of [...rules, ...DEFAULT_POLICY]) {
     if (matches(rule.match, info)) return { outcome: rule.outcome, rule: rule.name };
   }
