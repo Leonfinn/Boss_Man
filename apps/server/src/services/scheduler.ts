@@ -23,7 +23,7 @@ import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
-import { briefSlug, findBrief } from "./project-brief.js";
+import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 
 export type Limits = {
   instance: number;
@@ -963,7 +963,7 @@ export function schedulerService(
       // The wiki maintainer files what finished work produced (R73). One waiting run covers
       // every ticket finished before it starts, and a paused maintainer's run waits.
       const [done] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
-      const [keeper] = done ? await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, done.companyId), eq(agents.duty, "wiki"))) : [];
+      const keeper = done ? await findWikiKeeper(db, done.companyId) : null;
       if (keeper) await this.notify(keeper.id, { reason: WIKI_REASON, priority: 1, causedByRunId });
     },
   };

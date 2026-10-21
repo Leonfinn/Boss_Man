@@ -1,8 +1,11 @@
 // The project brief (R-brief): one wiki page per project, written by the CEO from the code, so
 // agents read the section they need instead of exploring the whole codebase.
-import { and, eq, ne, inArray } from "drizzle-orm";
+import { and, eq, isNull, ne, inArray } from "drizzle-orm";
+import { parseRepoUrl } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { tickets, wikiPages } from "../db/schema.js";
+import { agents, projects, settings, tickets, wikiPages } from "../db/schema.js";
+import type { gitHostService } from "./git-hosts.js";
+import type { workService } from "./work.js";
 import { splitSections } from "./wiki.js";
 
 export const BRIEF_HEADINGS = ["Objectives", "Architecture", "Code map", "Conventions", "Build and test", "Gotchas", "Glossary"];
@@ -40,7 +43,13 @@ export async function openBriefTicket(db: Db, projectId: string) {
   return t ?? null;
 }
 
-export function briefTicketBody(p: { id: string; name: string; defaultBranch: string }, exists: boolean) {
+/** The company's wiki maintainer, if it has one. */
+export async function findWikiKeeper(db: Db, companyId: string) {
+  const [keeper] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, "wiki"), isNull(agents.retiredAt)));
+  return keeper ?? null;
+}
+
+export function briefTicketBody(p: { id: string; name: string; defaultBranch: string }, exists: boolean, extra?: string) {
   return [
     `${exists ? "Refresh" : "Write"} the project brief for "${p.name}": a short map of the codebase that other agents read instead of exploring the whole repository.`,
     "",
@@ -54,5 +63,43 @@ export function briefTicketBody(p: { id: string; name: string; defaultBranch: st
     `Then these sections, in this order, each as a level-2 heading: ${BRIEF_HEADINGS.map((h) => `## ${h}`).join(", ")}.`,
     "",
     "Keep each section short and factual, because agents read one section at a time. Say what you could not find out rather than guessing.",
+    ...(extra ? ["", extra] : []),
   ].join("\n");
+}
+
+const REFRESH_EVERY_MS = 24 * 3_600_000;
+
+/**
+ * One pass of the brief upkeep loop: for each project whose brief names a commit, asks the git host
+ * where the default branch is now, and opens a refresh ticket when it moved (merges made outside
+ * Boss Man included). Goes to the wiki maintainer, else the CEO. At most one a day per project.
+ */
+export async function refreshBriefs(
+  db: Db,
+  deps: { work: ReturnType<typeof workService>; gitHosts: Pick<ReturnType<typeof gitHostService>, "branchHead">; gitToken: (companyId: string) => Promise<string | undefined>; log: (m: string) => void; now?: () => Date },
+) {
+  const now = deps.now ?? (() => new Date());
+  for (const p of await db.select().from(projects)) {
+    try {
+      const a = p.repoUrl ? parseRepoUrl(p.repoUrl) : null;
+      if (!a || (p.gitHost !== "github" && p.gitHost !== "gitea") || !p.gitApiBase) continue;
+      const brief = await findBrief(db, p.companyId, p.id);
+      if (!brief?.commit || (await openBriefTicket(db, p.id))) continue;
+      const key = `brief-refresh:${p.id}`;
+      const [last] = await db.select().from(settings).where(eq(settings.key, key));
+      if (last && now().getTime() - new Date(String(last.value)).getTime() < REFRESH_EVERY_MS) continue;
+      const token = await deps.gitToken(p.companyId);
+      if (!token) throw new Error("the company has no GIT_TOKEN");
+      const head = await deps.gitHosts.branchHead({ kind: p.gitHost, apiBase: p.gitApiBase, owner: a.owner, repo: a.repo }, token, p.defaultBranch);
+      if (head.toLowerCase().startsWith(brief.commit.toLowerCase())) continue;
+      const assignee = (await findWikiKeeper(db, p.companyId)) ?? (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, p.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt))))[0];
+      if (!assignee) throw new Error("the company has no wiki maintainer or CEO");
+      const extra = `${p.defaultBranch} moved from ${brief.commit} to ${head}. Run \`git log --oneline ${brief.commit}..${head}\` and \`git diff --stat ${brief.commit}..${head}\` in your workspace, and update only the sections those changes affect. Then set the first line to the new commit. If nothing relevant changed, only update the first line.`;
+      await deps.work.createTicket(p.id, { title: BRIEF_TITLES[1]!, body: briefTicketBody(p, true, extra), assigneeAgentId: assignee.id });
+      const value = now().toISOString();
+      await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+    } catch (err) {
+      deps.log(`brief upkeep for project ${p.id}: ${(err as Error).message}`);
+    }
+  }
 }
