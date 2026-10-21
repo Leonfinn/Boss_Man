@@ -11,6 +11,7 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP } from "./decisions.js";
 import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
 
@@ -26,6 +27,19 @@ export class ReviewError extends Error {
 /** What the owner sees while and after an approval lands (B): in plain words. */
 export type LandingStatus = { state: "running"; startedAt: string; command: string | null } | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
 
+/**
+ * A check that was killed or timed out says nothing about the agent's work (the runner ran out of
+ * memory, say), so it goes to the owner instead of back to the agent. Why it ended, or null if it
+ * simply failed.
+ */
+export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | null; output: string }): "timed_out" | "out_of_memory" | "killed" | null {
+  const tail = v.output.slice(-4000);
+  if (v.timedOut) return "timed_out";
+  if (/JavaScript heap out of memory|out of memory|ENOMEM|Cannot allocate memory/i.test(tail)) return "out_of_memory";
+  if (v.exitCode === 137 || v.exitCode === 143 || v.exitCode === null || /\bSIGKILL\b|\bKilled\b|Worker exited unexpectedly/i.test(tail)) return "killed";
+  return null;
+}
+
 /** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
   const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string };
@@ -39,6 +53,8 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       return `${d.url ? `Pull request opened: ${d.url}.` : "Approved."}${d.note ? ` It hasn't merged yet: ${d.note}` : ""}`;
     case "verify_failed":
       return `Approved, but not merged: the check ${d.timedOut ? `timed out after ${Math.max(1, Math.round((d.ms ?? 0) / 60_000))} minutes` : `failed (exit code ${d.exitCode})`}. ${back} to fix; the check's output is in the conversation below.`;
+    case "check_stuck":
+      return "Approved, but not merged: the check couldn't finish. This isn't a problem with the agent's work; it's in your Decisions.";
     case "conflicts":
       return `Approved, but not merged: the work conflicts with ${ctx.branch} in ${(d.files ?? []).join(", ")}. ${back} to sort out.`;
     case "uncommitted":
@@ -47,6 +63,9 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       return `Approved, but not merged (${r.outcome.replace(/_/g, " ")}).`;
   }
 }
+
+/** Narrow on purpose: only the owner's "Merge without the check" uses skipChecks, for one landing. */
+export type LandOptions = { skipChecks?: boolean };
 
 export type GitTemplates = { commit: string; pr: string };
 type NotifyHook = (agentId: string, input: { reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
@@ -288,7 +307,7 @@ export function reviewService(
     landing: (ticketId: string): LandingStatus | null => landings.get(ticketId) ?? null,
 
     /** Runs land() without holding the request (the check can take minutes); the outcome is kept for the page to poll. */
-    async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null): Promise<LandingStatus> {
+    async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<LandingStatus> {
       if (landings.get(ticketId)?.state === "running") throw new ReviewError(409, "This ticket is already being checked and merged.");
       const { t, defaultBranch, verifyCommand, deepVerifyCommand, repoUrl } = await ticketWithRepo(ticketId);
       const command = repoUrl ? ([verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter(Boolean) as string[]).join(" && ") || null : null;
@@ -299,7 +318,7 @@ export function reviewService(
         let outcome = "failed";
         let url: string | null = null;
         try {
-          const r = await this.land(ticketId, reviewer, causedByRunId);
+          const r = await this.land(ticketId, reviewer, causedByRunId, opts);
           const [a] = t.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, t.assigneeAgentId)) : [];
           outcome = r.outcome;
           url = (r.detail as { url?: string | null } | undefined)?.url ?? null;
@@ -325,7 +344,7 @@ export function reviewService(
      * default branch, and the merge closes the ticket. A failed check, a conflict or
      * uncommitted work sends the ticket back to the agent with what to do.
      */
-    async land(ticketId: string, reviewer: string, causedByRunId?: string | null): Promise<{ outcome: "done" | "merged" | "pull_request" | "verify_failed" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
@@ -354,10 +373,29 @@ export function reviewService(
       }
 
       // The project's check, plus its deeper one for high and critical work (R47, R48).
-      const checks = [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
+      const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
       for (const command of checks) {
         const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), 11 * 60_000);
         if (!v.ok) {
+          const never = checkNeverFinished(v);
+          if (never) {
+            // The ticket stays in review; the owner decides, and the loop detector never hears of it.
+            const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
+            await db
+              .insert(decisions)
+              .values({
+                companyId: t.companyId,
+                kind: "question",
+                question: `"${t.title}": the merge check \`${command}\` couldn't finish (it ${reason}). This isn't a problem with the agent's work.`,
+                options: [CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP],
+                recommendedOption: CHECK_AGAIN,
+                tier: "owner",
+                dedupeKey: `check-stuck:${ticketId}:${command}`,
+                context: { type: "check_stuck", ticketId, command, output: v.output.slice(-1500) },
+              })
+              .onConflictDoNothing();
+            return { outcome: "check_stuck", delivered: null, detail: v };
+          }
           const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
           // The same failing check again and again means the agent is going round in circles (R50).
           const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });

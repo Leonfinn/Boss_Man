@@ -228,6 +228,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <pre>{d.context.planText}</pre>
                       </details>
                     )}
+                    {d.context?.output && (
+                      <details className="plan">
+                        <summary>Last output of the check</summary>
+                        <pre>{d.context.output}</pre>
+                      </details>
+                    )}
                     {done ? (
                       <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : (

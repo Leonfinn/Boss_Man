@@ -4,8 +4,8 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runs, tickets, wakes } from "../src/db/schema.js";
-import { landingText } from "../src/services/review.js";
+import { decisions, runs, tickets, wakes } from "../src/db/schema.js";
+import { checkNeverFinished, landingText } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -190,6 +190,70 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(w).toMatchObject({ reason: "verify failed", agentId: c.worker.id });
     expect(w!.note).toContain("`pnpm test` exited with code 1");
     expect(w!.note).toContain("expected 1000 got 100");
+  });
+
+  it("tells a killed check from a failed one", () => {
+    const v = (o: Partial<{ timedOut: boolean; exitCode: number | null; output: string }>) => ({ timedOut: false, exitCode: 1, output: "", ...o });
+    expect(checkNeverFinished(v({ timedOut: true }))).toBe("timed_out");
+    expect(checkNeverFinished(v({ exitCode: 137 }))).toBe("killed");
+    expect(checkNeverFinished(v({ exitCode: 143 }))).toBe("killed");
+    expect(checkNeverFinished(v({ exitCode: null }))).toBe("killed");
+    expect(checkNeverFinished(v({ output: "FATAL ERROR: JavaScript heap out of memory" }))).toBe("out_of_memory");
+    expect(checkNeverFinished(v({ output: "Error: Worker exited unexpectedly" }))).toBe("killed");
+    expect(checkNeverFinished(v({ output: "FAIL limit.test.ts\n expected 1000 got 100" }))).toBeNull();
+    expect(landingText({ outcome: "check_stuck" }, { branch: "main", assignee: null })).toContain("it's in your Decisions");
+  });
+
+  describe("a check that was killed is the owner's call", () => {
+    const killed = { ok: false, exitCode: 137, timedOut: false, output: "vitest\nKilled", ms: 5000 };
+    const open = (c: Awaited<ReturnType<typeof setup>>) => c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    const answer = (c: Awaited<ReturnType<typeof setup>>, id: string, a: string) => c.req("POST", `/api/decisions/${id}/answer`, { answer: a });
+    const landed = async (c: Awaited<ReturnType<typeof setup>>) => {
+      await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+    };
+    const stuck = async () => {
+      const c = (ctx = await setup({ answers: { verify: killed } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "check_stuck" });
+      return c;
+    };
+
+    it("keeps the ticket in review, asks the owner once, and leaves the agent alone", async () => {
+      const c = await stuck();
+      const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+      expect(t.systemState).toBe("review");
+      expect(await c.db.select().from(wakes)).toHaveLength(0);
+      const [d, ...rest] = await open(c);
+      expect(rest).toHaveLength(0);
+      expect(d).toMatchObject({ tier: "owner", options: ["Run the check again", "Send it back to the agent", "Merge without the check"] });
+      expect(d!.question).toContain("`pnpm test` couldn't finish (it was killed)");
+      // The same stuck check again doesn't pile up a second question.
+      await approveAndWait(c.req, c.ticket.id);
+      expect(await open(c)).toHaveLength(1);
+    });
+
+    it("runs the check again and merges when it passes", async () => {
+      const c = await stuck();
+      c.answers.verify = { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 };
+      expect((await answer(c, (await open(c))[0]!.id, "Run the check again")).statusCode).toBe(200);
+      await landed(c);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
+    });
+
+    it("sends it back to the agent, or merges without the check, when the owner says so", async () => {
+      const c = await stuck();
+      await answer(c, (await open(c))[0]!.id, "Send it back to the agent");
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("in_progress");
+      expect((await c.db.select().from(wakes))[0]!.note).toContain("couldn't finish");
+      await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, c.ticket.id));
+      await approveAndWait(c.req, c.ticket.id);
+      const verifies = c.sent.filter((x) => x.type === "workspace.verify").length;
+      await answer(c, (await open(c))[0]!.id, "Merge without the check");
+      await landed(c);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(verifies);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done");
+    });
   });
 
   it("asks the agent to resolve conflicts, or to commit first", async () => {
