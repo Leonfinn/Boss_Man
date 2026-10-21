@@ -3,7 +3,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { and, asc, count, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
@@ -945,7 +945,16 @@ export async function buildApp(opts: AppOptions) {
         .groupBy(tickets.id, tickets.title)
         .orderBy(desc(sum))
         .limit(10);
-      return { monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
+      // Tokens from every run on the project's tasks, subscription runs included (they have no money cost but still use the plan).
+      const tokenSum = (since?: Date) =>
+        db
+          .select({ input: sql<string>`coalesce(sum(${runsTable.inputTokens}), 0)`, output: sql<string>`coalesce(sum(${runsTable.outputTokens}), 0)` })
+          .from(runsTable)
+          .innerJoin(tickets, eq(tickets.id, runsTable.ticketId))
+          .where(since ? and(eq(tickets.projectId, id), gte(runsTable.startedAt, since)) : eq(tickets.projectId, id))
+          .then(([r]) => ({ input: Number(r?.input ?? 0), output: Number(r?.output ?? 0) }));
+      const tokens = { month: await tokenSum(monthStart), total: await tokenSum() };
+      return { tokens, monthMicros: month, totalMicros: all, ticketCostCapMicros: p.cap, monthlyCapMicros: p.monthlyCap, monthStart: monthStart.toISOString(), topTickets: top.map((r) => ({ id: r.id, title: r.title, micros: Number(r.micros) })) };
     });
 
     // The setup wizard (R56): where the owner is in it, and what's still to do for a company.
