@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, type ReviewPolicy } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
 import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
@@ -34,6 +34,7 @@ import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { ReviewError, reviewService } from "./services/review.js";
+import { effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
@@ -1113,13 +1114,13 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/tickets/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const [row] = await db
-        .select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, landing: projects.landing, assignee: agents.name })
+        .select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, landing: projects.landing, verifyCommand: projects.verifyCommand, assignee: agents.name })
         .from(tickets)
         .innerJoin(projects, eq(projects.id, tickets.projectId))
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
-      return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, assignee: row.assignee };
+      return { ...row.t, project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee };
     });
 
     // The reviews a ticket needs, every round, newest first (review kinds).

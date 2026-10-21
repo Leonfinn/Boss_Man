@@ -105,20 +105,12 @@ describe("review kinds", () => {
 
 describe("ticket reviews", () => {
   it("lists each review with kind, reviewer, status, round, notes and the CEO's overrule reason", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify([
-            { id: "r1", kind: "code", round: 2, seq: 0, status: "approved", reviewer: "Sam", notes: null, overruleReason: null },
-            { id: "r2", kind: "security", round: 2, seq: 0, status: "overruled", reviewer: "Sec", notes: "Escape it.", overruleReason: "Out of scope." },
-            { id: "r3", kind: "infra", round: 1, seq: 0, status: "changes_requested", reviewer: "Ivy", notes: "No rollback.", overruleReason: null },
-          ]),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      ),
-    );
-    render(<TicketReviews ticketId="t1" />);
+    const reviews = [
+      { id: "r1", kind: "code", round: 2, seq: 0, status: "approved", reviewer: "Sam", notes: null, overruleReason: null },
+      { id: "r2", kind: "security", round: 2, seq: 0, status: "overruled", reviewer: "Sec", notes: "Escape it.", overruleReason: "Out of scope." },
+      { id: "r3", kind: "infra", round: 1, seq: 0, status: "changes_requested", reviewer: "Ivy", notes: "No rollback.", overruleReason: null },
+    ];
+    render(<TicketReviews reviews={reviews} />);
     expect(await screen.findByText("Overruled by the CEO: Out of scope.")).toBeTruthy();
     expect(screen.getByText("Escape it.")).toBeTruthy();
     expect(screen.getByText("Changes requested")).toBeTruthy();
@@ -128,9 +120,7 @@ describe("ticket reviews", () => {
   });
 
   it("renders nothing when the ticket has no reviews", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200, headers: { "content-type": "application/json" } })));
-    const { container } = render(<TicketReviews ticketId="t2" />);
-    await waitFor(() => expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0));
+    const { container } = render(<TicketReviews reviews={[]} />);
     expect(container.textContent).toBe("");
   });
 });

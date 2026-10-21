@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
-import { TicketReviews } from "../components/TicketReviews";
+import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
@@ -88,6 +88,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [descOpen, setDescOpen] = useState(false);
   const tiers = useRiskTiers(ticket.data?.companyId);
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
+  const reviews = useTicketReviews(id);
   const t = ticket.data;
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
@@ -193,7 +194,46 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   // Collapsed, a long description still shows its first 8 lines.
   const longBody = (t.body?.split("\n").length ?? 0) > 8 || (t.body?.length ?? 0) > 800;
   // Plan first only matters before anyone starts; once work has begun it's history (R76).
+  // Agent reviews still open (older rounds are settled), and what approving does, from the project's real landing setup.
+  const open = (reviews ?? []).filter((r) => r.status === "pending");
+  const who = names(open);
+  const repo = t.repoUrl?.replace(/\.git$/, "").split(/[/:]/).slice(-2).join("/");
+  const approves = !t.repoUrl
+    ? "Approving marks it done."
+    : t.landing === "pull_request"
+      ? `Approving opens a pull request from ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`
+      : `Approving runs ${t.verifyCommand ? `\`${t.verifyCommand}\`` : "the project's check"} and, if it passes, merges ${t.branch ?? "its branch"} into ${t.defaultBranch} of ${repo}. The change is under Changes above.`;
   const notStarted = t.systemState === "backlog" || t.systemState === "ready";
+  const decide = (
+    <>
+      <p className="muted" style={{ fontSize: 14 }}>{approves}</p>
+      {sendingBack ? (
+                <>
+                  <div className="field">
+                    <label htmlFor="review-summary">What should the agent change?</label>
+                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button type="button" className="btn primary" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
+                      Send it back
+                    </button>
+                    <button type="button" className="btn" disabled={busy} onClick={() => setSendingBack(false)}>
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
+                    {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
+                  </button>
+                  <button type="button" className="btn" disabled={busy || running} onClick={() => setSendingBack(true)}>
+                    Request changes
+                  </button>
+                </div>
+              )}
+    </>
+  );
   return (
     <>
       <header className="page-head">
@@ -326,9 +366,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               )}
             </div>
           )}
-          <TicketReviews ticketId={id} />
+          <TicketReviews reviews={reviews} />
           {t.systemState === "review" && (
-            <Fold title="Review" hint={t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" : "waiting for you"}>
+            <Fold title="Review" hint={t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" : open.length ? `waiting for ${who}${t.ownerSignoff ? ", then you" : ""}` : "waiting for you"}>
               {t.pullRequestNumber && t.pullRequestNote && (
                 <div className="banner" role="status" style={{ flexWrap: "wrap" }}>
                   <span>
@@ -347,30 +387,21 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </button>
                 </div>
               )}
-              {sendingBack ? (
+              {open.length ? (
                 <>
-                  <div className="field">
-                    <label htmlFor="review-summary">What should the agent change?</label>
-                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} />
-                  </div>
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button type="button" className="btn primary" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
-                      Send it back
-                    </button>
-                    <button type="button" className="btn" disabled={busy} onClick={() => setSendingBack(false)}>
-                      Cancel
-                    </button>
-                  </div>
+                  <p>
+                    Waiting for {who}'s review. {t.ownerSignoff ? "When it approves, you'll be asked to sign it off." : "When it approves, this lands automatically, so you don't need to do anything."}
+                  </p>
+                  <details>
+                    <summary style={{ cursor: "pointer", color: "var(--accent)" }}>Decide now instead</summary>
+                    <p className="muted" style={{ fontSize: 14 }}>
+                      Deciding now skips the waiting review.
+                    </p>
+                    {decide}
+                  </details>
                 </>
               ) : (
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
-                    {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
-                  </button>
-                  <button type="button" className="btn" disabled={busy || running} onClick={() => setSendingBack(true)}>
-                    Request changes
-                  </button>
-                </div>
+                decide
               )}
             </Fold>
           )}
@@ -391,7 +422,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               <span className={`tag ${STATE_TONE[t.systemState] ?? ""}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
             </dd>
             <dt>
-              <label htmlFor="t-assignee">Assigned to</label>
+              <label htmlFor="t-assignee">{t.systemState === "review" ? "Written by" : "Assigned to"}</label>
             </dt>
             <dd>
               <select id="t-assignee" value={t.assigneeAgentId ?? (t.assignedToOwner ? "owner" : "")} disabled={t.systemState === "done"} onChange={(e) => void assign(e.target.value)}>
@@ -403,6 +434,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </option>
                 ))}
               </select>
+              {open.length > 0 && t.systemState === "review" && <small className="muted" style={{ display: "block" }}>Being reviewed by {who}.</small>}
               {notStarted && <small className="muted">Assigning an agent starts it straight away.</small>}
             </dd>
             <dt>

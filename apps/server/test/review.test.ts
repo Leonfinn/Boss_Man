@@ -61,6 +61,15 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
 }
 
 describe("review (R39)", () => {
+  it("tells the ticket page the project's check and whether the owner signs off at its risk tier", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    const get = async () => (await c.req("GET", `/api/tickets/${c.ticket.id}`)).json() as { verifyCommand: string; ownerSignoff: boolean };
+    expect(await get()).toMatchObject({ verifyCommand: "pnpm test", ownerSignoff: false });
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { risk: "high" });
+    expect((await get()).ownerSignoff).toBe(true);
+  });
+
   it("fetches the diff from the runner holding the worktree", async () => {
     const c = (ctx = await setup());
     expect((await c.req("GET", `/api/tickets/${c.ticket.id}/diff`)).json()).toEqual(DIFF);
