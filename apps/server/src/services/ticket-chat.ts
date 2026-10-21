@@ -48,8 +48,12 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
     },
 
     /** The owner writes on the ticket; it's stored once it has reached someone (or no one is assigned). */
-    async ownerSays(ticketId: string, text: string, opts: { interrupt?: boolean } = {}) {
+    async ownerSays(ticketId: string, text: string, opts: { interrupt?: boolean; agentId?: string } = {}) {
       const t = await ticket(ticketId);
+      if (opts.agentId) {
+        const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, opts.agentId), eq(agents.companyId, t.companyId), isNull(agents.retiredAt)));
+        if (!a) throw new TicketChatError(404, "No agent with that ID in this ticket's company.");
+      }
       const [live] = await db
         .select({ id: runs.id, agentId: runs.agentId })
         .from(runs)
@@ -59,7 +63,12 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       let delivery: "live" | "woken" | "unassigned" = "unassigned";
       let runId: string | null = null;
       let agentId: string | null = null;
-      if (live) {
+      // The owner can ask someone other than the agent working it, e.g. the CEO.
+      const other = opts.agentId && opts.agentId !== (live ? live.agentId : t.assigneeAgentId) ? opts.agentId : null;
+      if (other) {
+        delivery = "woken";
+        agentId = other;
+      } else if (live) {
         try {
           await deps.runs.message(live.id, { text: `${text}\n\n(Sent on the ticket's conversation. Answer with ticket_reply if a reply is needed before you finish.)`, from: "the owner", interrupt: opts.interrupt ?? false });
           delivery = "live";
@@ -83,7 +92,9 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
           ticketId,
           reason: "message",
           priority: 3,
-          note: "The owner has written to you on this ticket (the conversation is above). Answer with ticket_reply; if they ask for work, do it as usual.",
+          note: other
+            ? "The owner has asked you about this ticket (the conversation is above). You aren't the agent working it: answer with ticket_reply, and don't take over, reassign or change its work unless they ask you to."
+            : "The owner has written to you on this ticket (the conversation is above). Answer with ticket_reply; if they ask for work, do it as usual.",
         });
       }
       return m!;

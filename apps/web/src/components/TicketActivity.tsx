@@ -3,7 +3,7 @@
 // happens; finished runs fold their steps away. The box at the bottom talks to the agent: into
 // its live run (after the current turn, or interrupting it), or as a new run.
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { api } from "../api";
+import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
 import { outcomeTag, when } from "../pages/Runs";
@@ -29,7 +29,7 @@ export function splitDetails(text: string): { summary: string; details: string |
 }
 
 function byline(m: Message) {
-  if (m.author === "owner") return `You${m.delivery && DELIVERY[m.delivery] ? ` · ${DELIVERY[m.delivery]}` : ""}`;
+  if (m.author === "owner") return `You${m.agent ? ` to ${m.agent}` : ""}${m.delivery && DELIVERY[m.delivery] ? ` · ${DELIVERY[m.delivery]}` : ""}`;
   if (m.author === "agent") return `${m.agent ?? "An agent"}${m.delivery === "end_of_run" ? " · end of run" : ""}`;
   return "Boss Man";
 }
@@ -91,14 +91,18 @@ function RunBlock({ run }: { run: RunRow }) {
   );
 }
 
-export function TicketActivity({ ticketId, assignee }: { ticketId: string; assignee: string | null }) {
+export function TicketActivity({ ticketId, assignee, assigneeId = null, agents = [] }: { ticketId: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[] }) {
   const [busy, setBusy] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
   const [text, setText] = useState("");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  // "" is whoever is working the ticket; another agent (e.g. the CEO) can be asked about it instead.
+  const [to, setTo] = useState("");
   const end = useRef<HTMLDivElement>(null);
   const live = convo.data?.live ?? null;
+  const other = agents.find((a) => a.id === to) ?? null;
+  const working = live?.agent ?? assignee;
   useEffect(() => setBusy(live !== null), [live]);
 
   const feed = [
@@ -110,7 +114,7 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
   const send = async (interrupt = false) => {
     if (!text.trim()) return;
     try {
-      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: text.trim(), interrupt } });
+      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: text.trim(), interrupt, ...(other ? { agentId: other.id } : {}) } });
       setText("");
       setNote(null);
       convo.reload();
@@ -168,6 +172,21 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
         <div ref={end} />
       </div>
       <form className="activity-compose" onSubmit={(e: FormEvent) => (e.preventDefault(), void send())}>
+        {agents.length > 0 && (
+          <div className="compose-to">
+            <label htmlFor="activity-to">To</label>
+            <select id="activity-to" value={to} onChange={(e) => setTo(e.target.value)}>
+              <option value="">{working ? `${working} (working on it)` : "Nobody yet (a note only)"}</option>
+              {agents
+                .filter((a) => a.id !== assigneeId && a.name !== live?.agent)
+                .map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+            </select>
+          </div>
+        )}
         <label htmlFor="activity-text" className="sr-only">
           Message to the agent
         </label>
@@ -175,7 +194,7 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
           id="activity-text"
           rows={2}
           maxLength={4000}
-          placeholder={live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the task to have an agent pick it up."}
+          placeholder={other ? `Ask ${other.name} about this task. ${working ? `${working} carries on undisturbed.` : ""}`.trim() : live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the task to have an agent pick it up."}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
@@ -186,7 +205,7 @@ export function TicketActivity({ ticketId, assignee }: { ticketId: string; assig
           </button>
           {live && (
             <>
-              <button className="btn" type="button" disabled={!text.trim()} onClick={() => void send(true)} title="Stops the agent's current turn, then gives it your message">
+              <button className="btn" type="button" disabled={!text.trim() || !!other} onClick={() => void send(true)} title="Stops the agent's current turn, then gives it your message">
                 Interrupt and send
               </button>
               <button className="btn" type="button" onClick={() => void stop()} style={{ color: "var(--red-ink)" }}>

@@ -1156,9 +1156,9 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/tickets/:id/messages", async (req, reply) => ticketChat.list(IdParam.parse(req.params).id).catch(ticketChatErrors(reply)));
     owner.post("/api/tickets/:id/messages", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { text, interrupt } = z.object({ text: z.string().trim().min(1).max(4000), interrupt: z.boolean().optional() }).parse(req.body);
+      const { text, interrupt, agentId } = z.object({ text: z.string().trim().min(1).max(4000), interrupt: z.boolean().optional(), agentId: z.string().uuid().optional() }).parse(req.body);
       return ticketChat
-        .ownerSays(id, text, { interrupt })
+        .ownerSays(id, text, { interrupt, agentId })
         .then((m) => reply.code(201).send(m))
         .catch(ticketChatErrors(reply));
     });

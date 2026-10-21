@@ -47,6 +47,36 @@ describe("ticket conversation", () => {
   });
 });
 
+describe("ticket conversation: who to ask", () => {
+  const agent = (id: string, name: string, role: "ceo" | "worker") => ({ id, companyId: "c1", name, role, agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null });
+
+  it("defaults to the agent working on it, and can ask the CEO instead", async () => {
+    const posts: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") return posts.push(JSON.parse(String(init.body))), json({}, 201);
+        if (url.includes("/messages")) return json({ live: null, items: [msg({ author: "owner", agent: "CEO", text: "Worth it?" })] });
+        return json([]);
+      }),
+    );
+    render(<TicketActivity ticketId="t1" assignee="Engineer" assigneeId="a2" agents={[agent("a1", "CEO", "ceo"), agent("a2", "Engineer", "worker")]} />);
+    expect(await screen.findByText(/^You to CEO/)).toBeTruthy();
+    const to = screen.getByLabelText("To") as HTMLSelectElement;
+    expect([...to.options].map((o) => o.text)).toEqual(["Engineer (working on it)", "CEO"]);
+    const box = screen.getByLabelText("Message to the agent");
+    fireEvent.change(box, { target: { value: "Fix it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(posts).toEqual([{ text: "Fix it", interrupt: false }]));
+
+    fireEvent.change(to, { target: { value: "a1" } });
+    expect(box.getAttribute("placeholder")).toBe("Ask CEO about this task. Engineer carries on undisturbed.");
+    fireEvent.change(box, { target: { value: "Is this worth doing?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(posts.at(-1)).toEqual({ text: "Is this worth doing?", interrupt: false, agentId: "a1" }));
+  });
+});
+
 describe("approve and merge", () => {
   const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
   const ticket = { id: "t1", title: "Add limiter", systemState: "review", risk: "medium", repoUrl: "https://x/y.git", defaultBranch: "main", landing: "merge", projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", createdAt: "2026-10-19T09:00:00Z", lastActivityAt: "2026-10-19T09:00:00Z" };
