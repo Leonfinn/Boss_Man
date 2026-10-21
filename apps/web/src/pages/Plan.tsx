@@ -53,7 +53,7 @@ function Graph({ plan }: { plan: PlanData }) {
           <defs>
             {(["red", "grey"] as const).map((c) => (
               <marker key={c} id={`pl-arrow-${c}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-                <path d="M0,0 L8,4 L0,8 z" fill={c === "red" ? "var(--red-ink)" : "#a8b1bd"} />
+                <path d="M0,0 L8,4 L0,8 z" fill={c === "red" ? "var(--red-ink)" : "var(--muted)"} />
               </marker>
             ))}
           </defs>
@@ -74,7 +74,7 @@ function Graph({ plan }: { plan: PlanData }) {
                 key={e.id}
                 d={`M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`}
                 fill="none"
-                stroke={holding ? "var(--red-ink)" : "#a8b1bd"}
+                stroke={holding ? "var(--red-ink)" : "var(--muted)"}
                 strokeWidth={holding ? 2 : 1.5}
                 strokeDasharray={holding ? undefined : "4 4"}
                 opacity={dim ? 0.15 : 1}

@@ -65,6 +65,71 @@ describe("board", () => {
   });
 });
 
+describe("board lanes", () => {
+  const columns = [
+    { id: "c1", name: "Up next", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Mine to do", assignedToOwner: true }), card({ id: "t2", title: "Agent job", assigneeAgentId: "a1" })] },
+    { id: "c2", name: "In progress", systemState: "in_progress", wipLimit: 3, tickets: [] },
+  ];
+  const withColumns = (puts: unknown[]) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "PUT") return puts.push([url, JSON.parse(String(init.body))]), json([]);
+        if (url.endsWith("/projects")) return json([{ id: "p1", companyId: "c1", name: "App", repoUrl: null }]);
+        if (url.endsWith("/board")) return json({ project: { id: "p1", companyId: "c1", name: "App" }, columns });
+        if (url.endsWith("/features")) return json({ ...scored, features: [] });
+        return json([]);
+      }),
+    );
+  const dev = { id: "a1", name: "Senior Developer", role: "worker", agentKind: "claude" };
+
+  it("renames a column with its pencil by sending the whole column list, and Escape cancels", async () => {
+    const puts: unknown[] = [];
+    withColumns(puts);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    expect(await screen.findByText("Agents see:")).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "Rename the Up next column" }));
+    fireEvent.keyDown(screen.getByLabelText("Column name"), { key: "Escape" });
+    expect(screen.queryByLabelText("Column name")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename the Up next column" }));
+    fireEvent.change(screen.getByLabelText("Column name"), { target: { value: "Soon" } });
+    expect(screen.getByText("Agents still see")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).toEqual(["/api/projects/p1/columns", [{ name: "Soon", systemState: "ready", wipLimit: null }, { name: "In progress", systemState: "in_progress", wipLimit: 3 }]]);
+  });
+
+  it("splits review into agent review and your review, and flags what waits on the owner", async () => {
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low" }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" })] });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const strip = await screen.findByRole("link", { name: /1 task is waiting on you/ });
+    expect(strip.textContent).toContain("Needs your sign-off");
+    expect(strip.getAttribute("href")).toBe("#your-review");
+    const agent = screen.getByRole("region", { name: "Agent review" });
+    expect(within(agent).getByText("Agent still reviewing")).toBeTruthy();
+    expect(within(agent).queryByText("Needs your sign-off")).toBeNull();
+    const mine = screen.getByRole("region", { name: "Your review" });
+    expect(mine.id).toBe("your-review");
+    expect(within(mine).getByText("Senior Developer approved. Needs your sign-off to merge.")).toBeTruthy();
+    expect(within(mine).getByRole("link", { name: "Review and approve" }).getAttribute("href")).toBe("#/tickets/t6");
+    columns.pop();
+  });
+
+  it("filters cards by who they are assigned to", async () => {
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    await screen.findByText("Mine to do");
+    fireEvent.change(screen.getByLabelText("Assigned to"), { target: { value: "owner" } });
+    expect(screen.queryByText("Agent job")).toBeNull();
+    expect(screen.getByText("Mine to do")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Assigned to"), { target: { value: "a1" } });
+    expect(screen.queryByText("Mine to do")).toBeNull();
+    expect(screen.getByText("Agent job")).toBeTruthy();
+  });
+});
+
 describe("new task form", () => {
   it("leaves the risk for the CEO to rate by default and posts no risk", async () => {
     const posts: unknown[] = [];
@@ -78,7 +143,7 @@ describe("new task form", () => {
       return base(url, init);
     }));
     render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Add" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
     expect((screen.getByLabelText("Risk") as HTMLSelectElement).selectedOptions[0]!.textContent).toBe("Let the CEO rate it");
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Fix login" } });
     fireEvent.click(screen.getByRole("button", { name: "Add to backlog" }));
@@ -106,7 +171,7 @@ describe("add feature or task", () => {
 
   it("creates a feature and, when asked, a Plan task for the CEO", async () => {
     const posts = record();
-    fireEvent.click(await screen.findByRole("button", { name: "Add" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
     expect(screen.getByRole("radio", { name: "New feature" })).toBeTruthy();
     expect(screen.getByRole("radio", { name: "New task" }).getAttribute("aria-checked")).toBe("true");
     fireEvent.click(screen.getByRole("radio", { name: "New feature" }));
@@ -122,7 +187,7 @@ describe("add feature or task", () => {
 
   it("creates only the feature when the CEO is not asked", async () => {
     const posts = record();
-    fireEvent.click(await screen.findByRole("button", { name: "Add" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
     fireEvent.click(screen.getByRole("radio", { name: "New feature" }));
     fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Export" } });
     fireEvent.click(screen.getByLabelText("Ask the CEO to plan it"));

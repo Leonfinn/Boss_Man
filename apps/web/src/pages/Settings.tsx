@@ -733,7 +733,7 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
     });
   };
   return (
-    <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "start", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
+    <form onSubmit={save} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "start", paddingTop: 12, borderTop: "1px solid var(--line)" }}>
       <p style={{ gridColumn: "1 / -1", fontWeight: 600 }}>{p.name}</p>
       {!only && (
         <>

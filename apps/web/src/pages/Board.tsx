@@ -9,6 +9,7 @@ import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
 import { ProjectBrief, ProjectRow } from "./Settings";
 
+const DONE_SHOWN = 8;
 const PROJECT_TABS = [
   { id: "kanban", label: "Kanban" },
   { id: "budget", label: "Budget" },
@@ -23,6 +24,65 @@ function initials(name: string) {
     .join("")
     .slice(0, 2)
     .toUpperCase();
+}
+
+/** What a column is called until the owner renames it (the server's DEFAULT_COLUMNS). */
+const DEFAULT_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "Review", done: "Done" };
+const PENCIL = <path d="M4 20h4L19 9l-4-4L4 16z" />;
+const iconProps = { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true } as const;
+
+/** "25m", "3h", "2d": how long since the ticket last moved (there is no per-column timestamp, so this is its last activity). */
+function age(iso: string | undefined, now = Date.now()) {
+  if (!iso) return "";
+  const m = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60_000));
+  return m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+}
+/** "today", "3 days ago": for the done list. */
+function when(iso: string | undefined, now = Date.now()) {
+  if (!iso) return "";
+  const d = Math.floor((now - new Date(iso).getTime()) / 86_400_000);
+  return d < 1 ? "today" : d === 1 ? "yesterday" : `${d} days ago`;
+}
+
+/** One-field inline form that renames a column. Escape cancels. */
+function RenameColumn({ col, onSave, onCancel }: { col: BoardData["columns"][number]; onSave: (name: string) => Promise<unknown>; onCancel: () => void }) {
+  const [name, setName] = useState(col.name);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const id = `rename-${col.id}`;
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || busy) return;
+    setBusy(true);
+    try {
+      await onSave(name.trim());
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <form className="rename" onSubmit={submit} onKeyDown={(e) => e.key === "Escape" && onCancel()}>
+      <label htmlFor={id}>Column name</label>
+      <input id={id} autoFocus required maxLength={60} value={name} onChange={(e) => setName(e.target.value)} />
+      <span className="lane-hint">
+        Agents still see <span className="mono">{col.systemState}</span>
+      </span>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      <div>
+        <button type="submit" className="btn primary" disabled={busy}>
+          Save
+        </button>
+        <button type="button" className="btn" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
 }
 
 /** A one-field form: the board's onboarding steps and "new ticket" all look like this. */
@@ -212,7 +272,7 @@ function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask:
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
       {features.map((f) => (
         <article className="ticket" key={f.id} aria-label={`Feature ${f.title}`}>
-          <span className="tag" style={{ alignSelf: "flex-start" }}>Feature</span>
+          <span className="type feature">Feature</span>
           <h3>
             <a href={`#/features/${f.companyId}/${f.id}`}>{f.title}</a>
           </h3>
@@ -244,6 +304,22 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [view, setView] = useState<"all" | "features" | "tasks">("all");
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [assignee, setAssignee] = useState("anyone");
+  const [allDone, setAllDone] = useState(false);
+  // The review column is two lanes: agent review, and the tickets whose next step is the owner's sign-off.
+  const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
+  const lanes = (board.data?.columns ?? []).flatMap((col) =>
+    col.systemState === "review"
+      ? [{ col, tickets: col.tickets.filter((t) => !t.waitingOnOwner), mine: false }, { col, tickets: col.tickets.filter((t) => t.waitingOnOwner), mine: true }]
+      : [{ col, tickets: col.tickets, mine: false }],
+  );
+  const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
+  const rename = async (columnId: string, name: string) => {
+    // The columns endpoint takes the whole list, so send every column with only this one renamed.
+    await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
+    board.reload();
+  };
   const openForm = (a: Adding) => setAdding({ ...a, n: (adding?.n ?? 0) + 1 });
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
   const tiers = useRiskTiers(current?.companyId);
@@ -335,11 +411,6 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   return (
     <>
       {head}
-      {current && !adding && (
-        <button type="button" className="btn primary" style={{ alignSelf: "flex-start" }} onClick={() => openForm({ mode: view === "features" ? "feature" : "task", featureId: "" })}>
-          Add
-        </button>
-      )}
       {current && adding && (
         <AddForm
           key={adding.n}
@@ -380,77 +451,167 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {board.error.message}
         </p>
       )}
-      <div role="group" aria-label="Show" style={{ display: "flex", gap: 8 }}>
-        {(["all", "features", "tasks"] as const).map((v) => (
-          <button key={v} type="button" className="chip" aria-pressed={view === v} onClick={() => setView(v)}>
-            {v === "all" ? "All" : v === "features" ? "Features" : "Tasks"}
-          </button>
-        ))}
+      {waiting.length > 0 && (
+        <a className="strip" href="#your-review" onClick={(e) => { e.preventDefault(); document.getElementById("your-review")?.scrollIntoView?.({ behavior: "smooth", inline: "center" }); }}>
+          <span>
+            <span className="count-badge">{waiting.length}</span>
+            <span>
+              <strong>{waiting.length === 1 ? "1 task is waiting on you." : `${waiting.length} tasks are waiting on you.`}</strong> {waiting[0]!.title}
+            </span>
+          </span>
+          <strong style={{ whiteSpace: "nowrap" }}>Review it <span aria-hidden="true">→</span></strong>
+        </a>
+      )}
+      <div className="board-bar">
+        <div>
+          {current && !adding && (
+            <button type="button" className="btn primary" onClick={() => openForm({ mode: view === "features" ? "feature" : "task", featureId: "" })}>
+              Add task
+            </button>
+          )}
+          <div className="segmented" role="group" aria-label="Show">
+            {(["all", "features", "tasks"] as const).map((v) => (
+              <button key={v} type="button" className="chip" aria-pressed={view === v} onClick={() => setView(v)}>
+                {v === "all" ? "All" : v === "features" ? "Features" : "Tasks"}
+              </button>
+            ))}
+          </div>
+          {view !== "features" && (
+            <label>
+              Assigned to
+              <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
+                <option value="anyone">Anyone</option>
+                <option value="owner">You</option>
+                {company?.agents.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        {view !== "features" && (
+          <p>
+            <svg width="14" height="14" {...iconProps}>{PENCIL}</svg>
+            Rename a column with its pencil. Agents always see the fixed state.
+          </p>
+        )}
       </div>
       {view !== "tasks" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
       {view !== "features" && (
-      <>
-      <p className="muted" style={{ fontSize: 13 }}>
-        Column names are this project's own. The grey tag under each name is the fixed state agents see, so renaming a column never confuses them.
-      </p>
       <div className="board-scroll">
         <div className="board">
-          {board.data?.columns.map((col) => {
+          {lanes.map(({ col, tickets, mine }) => {
             const full = col.wipLimit != null && col.tickets.length >= col.wipLimit;
+            const shown = tickets.filter((t) => assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee));
+            const named = (t: (typeof shown)[number]) => {
+              const a = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
+              return a ? a.name : t.assignedToOwner ? "You" : "Nobody yet";
+            };
+            const done = col.systemState === "done";
+            const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
+            const visible = done && !allDone ? rows.slice(0, DONE_SHOWN) : rows;
             return (
-              <section className="lane" key={col.id} aria-labelledby={`lane-${col.id}`}>
-                <header>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline" }}>
-                    <h2 id={`lane-${col.id}`}>{col.name}</h2>
-                    {col.wipLimit != null && (
-                      <span className="mono" style={{ fontSize: 12, color: full ? "var(--amber-ink)" : "var(--muted)" }}>
-                        {col.tickets.length} / {col.wipLimit}
+              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : `lane-${col.id}`}>
+                {mine ? (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id="lane-your-review">Your review</h2>
+                      <span className="count-badge">{shown.length}</span>
+                    </div>
+                  </header>
+                ) : renaming === col.id ? (
+                  <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />
+                ) : (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id={`lane-${col.id}`}>{label(col)}</h2>
+                      <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
+                        {col.wipLimit != null ? `${shown.length} / ${col.wipLimit}` : shown.length}
+                      </span>
+                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} onClick={() => setRenaming(col.id)}>
+                        <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
+                      </button>
+                    </div>
+                    {col.name !== DEFAULT_LABEL[col.systemState] && (
+                      <span className="lane-hint">
+                        Agents see: <span className="mono">{col.systemState}</span>
                       </span>
                     )}
-                  </div>
-                  <span className="state-tag">{col.systemState.replace(/_/g, " ")}</span>
-                </header>
-                {col.tickets.map((t) => {
+                  </header>
+                )}
+                {done ? (
+                  <>
+                    <ul className="done-list">
+                      {visible.map((t) => (
+                        <li key={t.id}>
+                          <svg width="16" height="16" {...iconProps} strokeWidth={2.2}><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+                          <span>
+                            <a href={`#/tickets/${t.id}`}>{t.title}</a>
+                            <small>{named(t)} · {when(t.lastActivityAt)}</small>
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    {rows.length > DONE_SHOWN && (
+                      <button type="button" className="linkish" onClick={() => setAllDone(!allDone)}>
+                        {allDone ? "Show fewer" : "Show all done tasks"}
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  shown.map((t) => {
                   const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
                   return (
-                    <article className="ticket" key={t.id}>
-                      <span className="tag" style={{ alignSelf: "flex-start" }}>{t.parentTitle ? "Sub-task" : "Task"}</span>
+                    <article className={`ticket${mine ? " mine" : ""}`} key={t.id}>
+                      <div className="top">
+                        <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
+                        {(t.risk === "high" || t.risk === "critical") && (
+                          <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
+                            {t.risk} risk
+                          </span>
+                        )}
+                      </div>
                       <h3>
                         <a href={`#/tickets/${t.id}`}>{t.title}</a>
                       </h3>
-                      {(t.risk === "high" || t.risk === "critical" || (t.planFirst && !t.planApprovedAt)) && (
-                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                          {(t.risk === "high" || t.risk === "critical") && (
-                            <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
-                              {t.risk} risk
+                      {mine && <span className="note">{t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.</span>}
+                      {mine && (
+                        <a className="btn primary small" href={`#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
+                          Review and approve
+                        </a>
+                      )}
+                      {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}
+                      {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
+                      {t.featureTitle && (
+                        <span className="fchip">
+                          <b>Feature</b>
+                          {t.featureTitle}
+                        </span>
+                      )}
+                      {t.blockedBy.length > 0 && <span className="tag amber" style={{ alignSelf: "flex-start" }}>Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
+                      {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
+                      <div className="row">
+                        <span className="who">
+                          {who && (
+                            <span className="avatar" title={`${who.name} (${who.agentKind})`} style={who.role === "ceo" ? { background: "var(--side)" } : undefined}>
+                              {initials(who.name)}
                             </span>
                           )}
-                          {t.planFirst && !t.planApprovedAt && <span className="tag blue">{t.plan ? "Plan waiting" : "Planning"}</span>}
-                        </div>
-                      )}
-                      {t.parentTitle && <span className="muted" style={{ fontSize: 12 }}>Sub-task of {t.parentTitle}</span>}
-                      {t.featureTitle && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.featureTitle}</span>}
-                      {t.blockedBy.length > 0 && <span className="tag amber">Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
-                      {t.outcome === "cancelled" && <span className="tag">Cancelled</span>}
-                      <div className="row">
-                        <span className="mono">{t.branch ?? (t.dueDate ? `Due ${t.dueDate}` : "")}</span>
-                        {who ? (
-                          <span className="avatar" title={`${who.name} (${who.agentKind})`} style={{ background: who.role === "ceo" ? "var(--ink)" : "var(--accent)" }}>
-                            {initials(who.name)}
-                          </span>
-                        ) : t.assignedToOwner ? (
-                          <span className="tag blue">You</span>
-                        ) : null}
+                          {named(t)}
+                        </span>
+                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : age(t.lastActivityAt)}</span>
                       </div>
                     </article>
                   );
-                })}
+                  })
+                )}
               </section>
             );
           })}
         </div>
       </div>
-      </>
       )}
     </>
   );
