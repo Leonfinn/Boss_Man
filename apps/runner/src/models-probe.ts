@@ -44,7 +44,8 @@ export async function probeModels(
   const agent = connection.agent;
   const exited = new Promise<never>((_, reject) => {
     child.on("error", (err) => reject(new Error(`Couldn't start the ${agentKind} adapter: ${err.message}`)));
-    child.on("exit", (code) => reject(new Error(`The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim())));
+    // "close", not "exit": by then stderr is fully read, and it holds the reason (e.g. opencode's EACCES).
+    child.on("close", (code) => reject(new Error(`The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim())));
   });
   const timeoutMs = opts.timeoutMs ?? 60_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -57,10 +58,15 @@ export async function probeModels(
     return modelChoices((session as { configOptions?: unknown[] | null }).configOptions);
   };
   try {
-    return await Promise.race([work(), exited, timeout]);
+    // A dying agent shows first as "ACP connection closed"; give its exit message a moment to win.
+    const reported = work().catch(async (err) => {
+      await new Promise((r) => setTimeout(r, 2000));
+      throw err;
+    });
+    return await Promise.race([reported, exited, timeout]);
   } finally {
     clearTimeout(timer);
-    child.removeAllListeners("exit");
+    child.removeAllListeners("close");
     child.on("error", () => {});
     connection.close();
     killGroup(child);
