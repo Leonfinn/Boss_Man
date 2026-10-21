@@ -523,6 +523,10 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); tex
 .activity-feed { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px; max-height: 70vh; overflow-y: auto; }
 .run-block { border: 1px solid var(--line); border-radius: 10px; background: var(--ground); }
 .run-block.live { border-color: var(--accent); }
+.activity-mark { display: flex; align-items: center; gap: 10px; margin: 4px 0; font-size: 13px; color: var(--muted); }
+.activity-mark::before, .activity-mark::after { content: ""; flex: 1; border-top: 1px dashed var(--line-strong); }
+.activity-mark.green { color: var(--green-ink); }
+.activity-mark.red { color: var(--red-ink); }
 .run-head { width: 100%; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; background: none; border: 0; text-align: left; font: inherit; font-size: 14px; color: var(--ink); }
 .run-body { padding: 0 12px 10px; font-size: 14px; }
 .run-body > summary { cursor: pointer; color: var(--muted); padding: 2px 0; }

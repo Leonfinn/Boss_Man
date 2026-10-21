@@ -1,12 +1,12 @@
 import { api } from "../api";
 import { usePoll } from "../hooks";
 
-export type TicketReview = { id: string; kind: string; round: number; seq: number; status: string; reviewer: string | null; notes: string | null; overruleReason: string | null };
+export type TicketReview = { id: string; kind: string; round: number; seq: number; status: string; reviewer: string | null; notes: string | null; overruleReason: string | null; createdAt?: string; decidedAt?: string | null };
 
 /** The reviews' names joined for a sentence: "Ada", "Ada and Sam". */
 export const names = (rs: TicketReview[]) => [...new Set(rs.map((r) => r.reviewer ?? "a reviewer"))].join(" and ");
 
-const STATUS: Record<string, string> = { pending: "Waiting", approved: "Approved", changes_requested: "Changes requested", overruled: "Overruled by the CEO", skipped: "Not run" };
+export const STATUS: Record<string, string> = { pending: "Waiting", approved: "Approved", changes_requested: "Changes requested", overruled: "Overruled by the CEO", skipped: "Not run" };
 const TONE: Record<string, string> = { pending: "amber", approved: "green", changes_requested: "red", overruled: "purple", skipped: "" };
 
 export const useTicketReviews = (ticketId: string) => usePoll((signal) => api<TicketReview[]>(`/api/tickets/${ticketId}/reviews`, { signal }), 15_000, `reviews-${ticketId}`).data;
