@@ -1,0 +1,38 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Company } from "../src/api";
+import { Skills } from "../src/pages/Skills";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
+const company: Company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, agents: [] };
+const row = { id: "s1", name: "web-fetch", description: "Fetch pages.", source: "written", sourceUrl: null, sourceRef: null, pack: null, packUrl: null, sizeBytes: 100, fileCount: 1, updatedAt: "2026-10-21T14:26:00Z", agents: [] };
+
+describe("skills", () => {
+  it("edits a written skill and saves it with PUT", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (url.endsWith("/skills/s1")) return init?.method === "PUT" ? json({ id: "s1", name: "web-fetch" }) : json({ ...row, files: [{ path: "SKILL.md", size: 100, text: '---\nname: web-fetch\ndescription: "Fetch pages."\n---\n\n# Rules\n\nOne page per call.\n' }] });
+        if (url.endsWith("/skills")) return json([row]);
+        return json([]);
+      }),
+    );
+    render(<Skills company={company} />);
+    fireEvent.click((await screen.findByText("web-fetch", { selector: "a span" })).closest("a")!);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+    const body = screen.getByLabelText("Instructions, in Markdown") as HTMLTextAreaElement;
+    expect(body.value).toBe("# Rules\n\nOne page per call.");
+    fireEvent.change(body, { target: { value: "# Rules\n\nTwo pages at most." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(calls).toContainEqual({ method: "PUT", url: "/api/companies/c1/skills/s1", body: { name: "web-fetch", description: "Fetch pages.", body: "# Rules\n\nTwo pages at most." } }));
+    expect(await screen.findByText(/Saved\. Agents get the new version/)).toBeTruthy();
+  });
+});
