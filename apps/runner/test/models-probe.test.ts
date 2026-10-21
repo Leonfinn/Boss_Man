@@ -38,6 +38,15 @@ describe("models.probe", () => {
     await expect(probeModels("claude", {}, { adapterBin: "/nonexistent/adapter", timeoutMs: 5000 })).rejects.toBeTruthy();
   });
 
+  it("starts OpenCode with a run's settings, so its hosted provider's models aren't listed", async () => {
+    const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-env.mjs");
+    const granted = JSON.stringify({ provider: { ollama: { options: { baseURL: "http://192.168.1.2:11434/v1" } } } });
+    const err = await probeModels("opencode", { OPENCODE_CONFIG_CONTENT: granted }, { adapterBin: bin, timeoutMs: 10_000 }).catch((e: Error) => e);
+    const config = JSON.parse(String((err as Error).message).split("config=")[1]!);
+    expect(config.disabled_providers).toEqual(["opencode"]);
+    expect(config.provider.ollama.options.baseURL).toBe("http://192.168.1.2:11434/v1");
+  });
+
   it("reports why the agent died, not just that the connection closed", async () => {
     const crash = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-crash.mjs");
     await expect(probeModels("opencode", {}, { adapterBin: crash, timeoutMs: 10_000 })).rejects.toThrow(/exited \(code 1\)\. EACCES: permission denied, mkdir/);
