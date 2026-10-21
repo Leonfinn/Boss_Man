@@ -16,7 +16,7 @@ export const briefCommitLine = (sha: string, branch: string) => `Describes commi
 
 /** Reads the page's first line back: "Describes commit abc123 on release/1.2." */
 export function parseCommitLine(body: string) {
-  const m = /^Describes commit ([0-9a-f]{7,40}) on (\S+)\.\s*$/i.exec(body.split("\n", 1)[0] ?? "");
+  const m = /^Describes commit ([0-9a-f]{7,40}) on ([\w./-]{1,100})\.\s*$/i.exec(body.split("\n", 1)[0] ?? "");
   return m ? { commit: m[1]!, branch: m[2]! } : null;
 }
 
@@ -25,7 +25,8 @@ export async function findBrief(db: Db, companyId: string, projectId: string) {
   const slug = briefSlug(projectId);
   const [p] = await db.select({ body: wikiPages.body, updatedAt: wikiPages.updatedAt }).from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, slug)));
   if (!p) return null;
-  const headings = splitSections(p.body).filter((s) => s.level === 2).map((s) => s.heading);
+  // The headings go into wake prompts and an agent wrote them, so they're capped.
+  const headings = splitSections(p.body).filter((s) => s.level === 2).slice(0, 12).map((s) => s.heading.slice(0, 60));
   return { slug, headings, updatedAt: p.updatedAt, ...(parseCommitLine(p.body) ?? { commit: null, branch: null }) };
 }
 
