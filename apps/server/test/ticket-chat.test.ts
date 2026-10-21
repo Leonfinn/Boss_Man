@@ -24,7 +24,7 @@ async function setup() {
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
-  const { company } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+  const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" })).json() as { id: string };
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json() as { runnerId: string };
@@ -40,7 +40,7 @@ async function setup() {
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, close, req, company, worker, project, sent, emit, starts, mcp };
+  return { ...built, db, close, req, company, ceo, worker, project, sent, emit, starts, mcp };
 }
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
@@ -98,6 +98,24 @@ describe("ticket conversation (R65)", () => {
     ]);
     expect(list.items[2]!.agent).toBe("Engineer");
     expect(list.live?.id).toBe(second.runId);
+  });
+
+  it("asks another agent, e.g. the CEO, without touching the working agent's run", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const [first] = c.starts();
+    const before = c.sent.length;
+    await c.db.delete(wakes);
+
+    expect((await c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Is this worth doing now?", agentId: c.ceo.id })).json()).toMatchObject({ delivery: "woken", agentId: c.ceo.id, runId: null });
+    expect(c.sent.slice(before).filter((m) => m.type === "run.message")).toEqual([]);
+    expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.ceo.id, ticketId: t.id, reason: "message", note: expect.stringContaining("You aren't the agent working it") })]);
+    // Picking the working agent is the same as the default: into its live run.
+    expect((await c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Use navy", agentId: c.worker.id })).json()).toMatchObject({ delivery: "live", runId: first!.runId });
+    expect((await c.req("POST", `/api/tickets/${t.id}/messages`, { text: "Hi", agentId: randomUUID() })).statusCode).toBe(404);
+    const items = (await c.req("GET", `/api/tickets/${t.id}/messages`)).json().items as Array<{ agent: string | null }>;
+    expect(items.map((m) => m.agent)).toEqual(["CEO", "Engineer"]);
   });
 
   it("lets an agent reply on its company's tickets with ticket_reply", async () => {
