@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
@@ -31,6 +32,9 @@ export async function openPglite(dataDir?: string): Promise<{ db: Db; close: () 
   const { vector } = await import("@electric-sql/pglite-pgvector");
   if (dataDir === undefined) {
     migratedTemplate ??= (async () => {
+      // The test run's global setup saves one migrated copy for every test file to share.
+      const saved = process.env.BOSSMAN_PGLITE_TEMPLATE;
+      if (saved) return new Blob([await readFile(saved)]);
       const first = new PGlite({ extensions: { vector } });
       await migrate(drizzle(first, { schema }), { migrationsFolder });
       const dump = await first.dumpDataDir("none");

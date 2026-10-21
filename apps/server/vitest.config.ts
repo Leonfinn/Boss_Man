@@ -7,5 +7,6 @@ export default defineConfig({
     hookTimeout: 30_000,
     // Each worker holds its own Postgres; one per CPU ran a 4 GB runner out of memory on a 16-CPU host.
     maxWorkers: 4,
+    globalSetup: ["test/global-setup.ts"],
   },
 });
