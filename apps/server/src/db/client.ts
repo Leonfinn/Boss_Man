@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
@@ -19,12 +20,32 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
   return { db: db as unknown as Db, close: () => pool.end() };
 }
 
+// A migrated, empty in-memory database to copy, so each test skips running every migration again.
+// Lost on restart, harmless because it's rebuilt from the migrations on the next call.
+let migratedTemplate: Promise<Blob> | undefined;
+
 /** Tests and quick local runs: an in-process Postgres (PGlite), migrated with the same SQL. */
 export async function openPglite(dataDir?: string): Promise<{ db: Db; close: () => Promise<void> }> {
   const { PGlite } = await import("@electric-sql/pglite");
   const { drizzle } = await import("drizzle-orm/pglite");
   const { migrate } = await import("drizzle-orm/pglite/migrator");
   const { vector } = await import("@electric-sql/pglite-pgvector");
+  if (dataDir === undefined) {
+    migratedTemplate ??= (async () => {
+      // The test run's global setup saves one migrated copy for every test file to share.
+      const saved = process.env.BOSSMAN_PGLITE_TEMPLATE;
+      if (saved) return new Blob([await readFile(saved)]);
+      const first = new PGlite({ extensions: { vector } });
+      await migrate(drizzle(first, { schema }), { migrationsFolder });
+      const dump = await first.dumpDataDir("none");
+      await first.close();
+      return dump;
+    })();
+    const client = new PGlite({ extensions: { vector }, loadDataDir: await migratedTemplate });
+    // A copy's first query loads PGlite's array types; a close during that never returns, so do it now.
+    await client.query("select 1");
+    return { db: drizzle(client, { schema }) as unknown as Db, close: () => client.close() };
+  }
   const client = new PGlite({ dataDir, extensions: { vector } });
   const db = drizzle(client, { schema });
   await migrate(db, { migrationsFolder });
