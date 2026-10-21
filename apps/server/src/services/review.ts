@@ -1,15 +1,17 @@
 // Review (R39): the review state carries the ticket's diff against its base, line comments
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, decisions, projects, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy } from "./review-policy.js";
+import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
+import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
 
 export class ReviewError extends Error {
@@ -160,50 +162,127 @@ export function reviewService(
     },
 
     /**
-     * Records a review. Changes requested go to the agent as one message and move the ticket
-     * back to in progress; approval finishes it.
+     * Records a review. Where the ticket has required reviews (see review-kinds.ts) an agent's verdict
+     * fills its own; the ticket moves only when they are all in. Changes requested go to the agent
+     * as one message and move the ticket back to in progress; approval finishes it.
      */
     async submit(
       ticketId: string,
-      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; reviewer: string; reviewerAgentId?: string | null; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
+      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
     ) {
       const { t } = await ticketWithRepo(ticketId, input.companyId);
       // The coder doesn't review its own work (R49).
       if (input.reviewerAgentId && t.assigneeAgentId === input.reviewerAgentId) throw new ReviewError(403, "You can't review a ticket assigned to you.");
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
-      if (input.verdict === "approved") {
-        await deps.loops.approved(ticketId, input.reviewer);
-        // Where the review policy says the owner signs off, an agent's approval asks them (R48).
-        if (input.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
-          const [d] = await db
-            .insert(decisions)
-            .values({
-              companyId: t.companyId,
-              kind: "approval",
-              question: `${input.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?`,
-              options: ["Approve and merge", "Send it back"],
-              recommendedOption: "Approve and merge",
-              raisedByAgentId: input.reviewerAgentId,
-              tier: "owner",
-              dedupeKey: `risk-review:${ticketId}:${Date.now()}`,
-              context: { type: "risk_review", ticketId, reviewer: input.reviewer },
-            })
-            .returning({ id: decisions.id });
-          await db.insert(ticketDependencies).values({ blockedTicketId: ticketId, blockerDecisionId: d!.id });
-          return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
-        }
-        if (input.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, input.reviewer, input.causedByRunId) };
-        return { verdict: "approved" as const, ...(await this.land(ticketId, input.reviewer, input.causedByRunId)) };
-      }
-      if (!input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
+      const rows = input.reviewerAgentId ? await latestRows(db, ticketId) : [];
+      if (input.verdict === "changes_requested" && !input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
       let diffText = "";
-      if (input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
-      const text = formatReviewComments(input.reviewer, input.comments ?? [], diffText, input.summary);
-      // A review that keeps coming back goes to the owner instead of another round (R49).
-      const round = await deps.loops.reviewRound({ ticketId, reviewer: input.reviewer, comments: input.comments ?? [], message: text });
-      if (round.escalated) return { verdict: "changes_requested" as const, delivered: `held for the owner (decision ${round.escalated})`, message: text, round: round.round };
-      const delivered = await this.sendBack(ticketId, text, input.reviewer, input.causedByRunId);
-      return { verdict: "changes_requested" as const, delivered, message: text, round: round.round };
+      if (input.verdict === "changes_requested" && input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
+      if (!rows.length) {
+        if (input.verdict === "approved") return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });
+        // The owner sending it back ends any reviews still open.
+        if (!input.reviewerAgentId) await skipPending(db, await latestRows(db, ticketId));
+        return this.sendBackRound(t, { reviewer: input.reviewer, comments: input.comments ?? [], text: formatReviewComments(input.reviewer, input.comments ?? [], diffText, input.summary), causedByRunId: input.causedByRunId });
+      }
+
+      // An agent's verdict fills one of the ticket's required reviews.
+      const mine = rows.filter((r) => r.reviewerAgentId === input.reviewerAgentId && r.status === "pending" && (!input.kind || r.kind === input.kind));
+      if (!mine.length) throw new ReviewError(rows.some((r) => r.reviewerAgentId === input.reviewerAgentId) ? 409 : 403, "You have no open review on this ticket. The CEO can overrule a review that asked for changes.");
+      const active = activeRows(rows);
+      const ready = mine.filter((r) => active.some((a) => a.id === r.id));
+      if (!ready.length) throw new ReviewError(409, `Not yet: your ${mine[0]!.kind} review waits for an earlier review to finish first. You'll be woken when it's your turn.`);
+      if (ready.length > 1) throw new ReviewError(422, `You hold more than one review here (${ready.map((r) => r.kind).join(", ")}); say which with kind.`);
+      const row = ready[0]!;
+      const who = row.kind === "code" ? input.reviewer : `${input.reviewer}, ${row.kind} review`;
+      if (input.verdict === "approved") {
+        await decide(db, row.id, { status: "approved", notes: input.summary?.trim() || null });
+      } else {
+        await decide(db, row.id, { status: "changes_requested", notes: formatReviewComments(who, input.comments ?? [], diffText, input.summary), comments: input.comments ?? [] });
+      }
+      return this.settle(t, { verdict: input.verdict, reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId!, background: input.background, causedByRunId: input.causedByRunId, before: active });
+    },
+
+    /** After a verdict, an overrule or a new order: wake who is next, send the work back, or approve it. */
+    async settle(t: typeof tickets.$inferSelect, o: { verdict: "approved" | "changes_requested"; reviewer: string; reviewerAgentId: string; background?: boolean; causedByRunId?: string | null; before: ReviewRow[] }) {
+      const rows = await latestRows(db, t.id);
+      const state = evaluate(rows);
+      if (state === "waiting") {
+        const was = new Set(o.before.map((r) => r.id));
+        if (wake) await wakeReviewers(db, t, activeRows(rows).filter((r) => !was.has(r.id)), (id, i) => wake!(id, i), [], o.causedByRunId);
+        return { verdict: o.verdict, outcome: "waiting" as const, delivered: `recorded; waiting for the other reviews (${activeRows(rows).map((r) => r.kind).join(", ")})` };
+      }
+      if (state === "passed") {
+        const names = [...new Set(rows.filter((r) => r.status === "approved").map((r) => r.reviewerAgentId))];
+        const label = names.length > 1 ? (await db.select({ name: agents.name }).from(agents).where(inArray(agents.id, names.filter((n): n is string => !!n)))).map((a) => a.name).join(" and ") : o.reviewer;
+        return await this.approve(t, { reviewer: label, reviewerAgentId: o.reviewerAgentId, background: o.background, causedByRunId: o.causedByRunId });
+      }
+      await skipPending(db, rows);
+      const failed = rows.filter((r) => r.status === "changes_requested");
+      const text = failed.map((r) => r.notes).join("\n\n");
+      const sent = await this.sendBackRound(t, { reviewer: failed.map((r) => (r.kind === "code" ? "the reviewer" : `the ${r.kind} reviewer`)).join(" and "), comments: failed.flatMap((r) => r.comments as ReviewComment[]), text, causedByRunId: o.causedByRunId });
+      return sent;
+    },
+
+    /** Approval is final unless the owner signs off (R48); then it asks them. The CEO cannot stand in for that. */
+    async approve(t: typeof tickets.$inferSelect, o: { reviewer: string; reviewerAgentId?: string | null; background?: boolean; causedByRunId?: string | null }) {
+      const ticketId = t.id;
+      await deps.loops.approved(ticketId, o.reviewer);
+      // Where the review policy says the owner signs off, an agent's approval asks them (R48).
+      if (o.reviewerAgentId && ruleFor(await effectivePolicy(db, t), t.risk).ownerSignoff) {
+        const [d] = await db
+          .insert(decisions)
+          .values({
+            companyId: t.companyId,
+            kind: "approval",
+            question: `${o.reviewer} approved "${t.title}", which is rated ${riskOf(t.risk)} risk. Merge it, or send it back?`,
+            options: ["Approve and merge", "Send it back"],
+            recommendedOption: "Approve and merge",
+            raisedByAgentId: o.reviewerAgentId,
+            tier: "owner",
+            dedupeKey: `risk-review:${ticketId}:${Date.now()}`,
+            context: { type: "risk_review", ticketId, reviewer: o.reviewer },
+          })
+          .returning({ id: decisions.id });
+        await db.insert(ticketDependencies).values({ blockedTicketId: ticketId, blockerDecisionId: d!.id });
+        return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
+      }
+      if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
+      return { verdict: "approved" as const, ...(await this.land(ticketId, o.reviewer, o.causedByRunId)) };
+    },
+
+    /** Changes requested: a review that keeps coming back goes to the owner instead of another round (R49). */
+    async sendBackRound(t: typeof tickets.$inferSelect, o: { reviewer: string; comments: ReviewComment[]; text: string; causedByRunId?: string | null }) {
+      const round = await deps.loops.reviewRound({ ticketId: t.id, reviewer: o.reviewer, comments: o.comments, message: o.text });
+      if (round.escalated) return { verdict: "changes_requested" as const, outcome: "escalated" as const, delivered: `held for the owner (decision ${round.escalated})`, message: o.text, round: round.round };
+      const delivered = await this.sendBack(t.id, o.text, o.reviewer, o.causedByRunId);
+      return { verdict: "changes_requested" as const, outcome: "sent_back" as const, delivered, message: o.text, round: round.round };
+    },
+
+    /** The CEO sets the order of a ticket's reviews, for when one depends on another. */
+    async sequence(ticketId: string, order: string[], byAgentId: string, companyId: string) {
+      const { t } = await ticketWithRepo(ticketId, companyId);
+      const woken = await setReviewOrder(db, t, order, byAgentId);
+      if (wake) await wakeReviewers(db, t, woken, (id, i) => wake!(id, i));
+      return woken.length;
+    },
+
+    /** The CEO overrules a "changes requested", with a reason kept on the ticket. Owner sign-off still applies. */
+    async overrule(ticketId: string, input: { kind: string; reason: string; byAgentId: string; companyId: string; causedByRunId?: string | null; background?: boolean }) {
+      const { t } = await ticketWithRepo(ticketId, input.companyId);
+      if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
+      if (t.systemState === "blocked") throw new ReviewError(409, "That ticket is waiting on a decision from the owner.");
+      const rows = await latestRows(db, ticketId);
+      const row = rows.find((r) => r.kind === input.kind && r.status === "changes_requested");
+      if (!row) throw new ReviewError(409, `There's no ${input.kind} review asking for changes on that ticket.`);
+      if (!input.reason.trim()) throw new ReviewError(422, "Give the reason you're overruling it.");
+      const before = activeRows(rows);
+      await decide(db, row.id, { status: "overruled", overruledByAgentId: input.byAgentId, overruleReason: input.reason.trim() });
+      await record(db, { companyId: t.companyId, agentId: input.byAgentId, ticketId, kind: "review_overruled", summary: `The CEO overruled the ${input.kind} review's changes requested: ${input.reason.trim()}` });
+      await reviveSkipped(db, rows);
+      const after = await latestRows(db, ticketId);
+      // Reviews that never ran now have to: the ticket goes back into review for them.
+      if (evaluate(after) === "waiting" && t.systemState !== "review") await deps.work.updateTicket(ticketId, { state: "review", overLimit: true });
+      return this.settle(t, { verdict: "approved", reviewer: "the CEO", reviewerAgentId: input.byAgentId, background: input.background, causedByRunId: input.causedByRunId, before });
     },
 
     landing: (ticketId: string): LandingStatus | null => landings.get(ticketId) ?? null,

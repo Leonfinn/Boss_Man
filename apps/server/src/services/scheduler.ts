@@ -14,7 +14,8 @@ import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
-import { effectivePolicy, resolveReviewer } from "./review-policy.js";
+import { effectivePolicy } from "./review-policy.js";
+import { REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -61,7 +62,7 @@ export const MISSED_REASON = "missed work";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** Tickets moved to review, gathered into one CEO run (R85). */
-export const REVIEW_REASON = "review requested";
+export { REVIEW_REASON };
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
 export const PLAIN_SUMMARY_RULE =
   "Write to the owner as a non-developer. Every ticket_reply starts with 1 to 3 plain sentences: what changed for them and whether they need to do anything. A ticket in review waits on its reviewer: when that is the owner, say what they need to do (review and approve, or send it back); never tell them there is nothing to do. Then a line that says only \"Details:\" followed by the technical report (files, commits, tests). Ticket state notes (set_ticket_state summary) are plain words too, with no file paths unless essential.";
@@ -923,14 +924,12 @@ export function schedulerService(
       return runner ? deps.runners.send(runner.id, { type: "workspace.release", projectId: t.projectId, ticketId }) : false;
     },
 
-    /** A ticket went to review: the reviewer the review policy names (the CEO if they're unavailable) is woken, unless they moved it or have it themselves (R85). */
+    /** A ticket went to review: every review its tier requires is requested at once (or in the CEO's order); each reviewer is woken, the CEO if theirs is unavailable, unless they moved it or have it themselves (R85). */
     async onTicketReview(ticketId: string, byAgentId: string | null, causedByRunId?: string | null) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) return;
-      const { agent: reviewer, note } = await resolveReviewer(db, t);
-      if (note) await record(db, { companyId: t.companyId, kind: "review_fallback", summary: note, ticketId });
-      if (!reviewer || reviewer.id === byAgentId || reviewer.id === t.assigneeAgentId) return;
-      await this.notify(reviewer.id, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}` });
+      const rows = await requestReviews(db, t);
+      await wakeReviewers(db, t, rows, (id, i) => this.notify(id, i), [byAgentId, t.assigneeAgentId], causedByRunId);
     },
 
     /**

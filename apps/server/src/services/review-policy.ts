@@ -1,7 +1,7 @@
 // Review routing: which policy applies to a ticket, and who it names once paused, retired, missing or
 // conflicted agents are accounted for. The CEO is always the fallback.
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { ruleFor, SENIOR_DEV, SENIOR_DEV_TEMPLATE, type ReviewPolicy, type RiskTier } from "@boss-man/shared";
+import { MARKED, ruleFor, SENIOR_DEV, SENIOR_DEV_TEMPLATE, type ReviewPolicy, type ReviewSlot, type RiskTier } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, projects } from "../db/schema.js";
 
@@ -37,3 +37,20 @@ export async function resolveActor(db: Db, companyId: string, ref: string, autho
 
 export const resolveReviewer = async (db: Db, t: { companyId: string; projectId: string; risk: RiskTier | null; assigneeAgentId: string | null }) =>
   resolveActor(db, t.companyId, ruleFor(await effectivePolicy(db, t), t.risk).reviewer, t.assigneeAgentId);
+
+/**
+ * A review kind's reviewer. "marked" is the agent the owner marked as the company's reviewer of that
+ * kind; with none available the CEO stands in, like any other unavailable pick.
+ */
+export async function resolveKindReviewer(db: Db, companyId: string, kind: ReviewSlot, ref: string, author: string | null): Promise<Resolved> {
+  if (ref !== MARKED) return resolveActor(db, companyId, ref, author);
+  const pool = await db
+    .select({ id: agents.id, name: agents.name, paused: agents.paused })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), eq(agents.reviewKind, kind), isNull(agents.retiredAt)))
+    .orderBy(asc(agents.createdAt));
+  const ok = pool.find((a) => !a.paused && a.id !== author);
+  if (ok) return { agent: { id: ok.id, name: ok.name }, note: null };
+  const { agent } = await resolveActor(db, companyId, "ceo", author);
+  return { agent, note: pool[0] ? `${pool[0].name} is unavailable, so the CEO reviews it (${kind})` : `No ${kind} reviewer is marked, so the CEO reviews it` };
+}

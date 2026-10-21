@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "../src/api";
 import { CompanyReviews, ProjectReviews } from "../src/components/ReviewPolicy";
+import { TicketReviews } from "../src/components/TicketReviews";
 
 afterEach(() => {
   cleanup();
@@ -75,5 +76,61 @@ describe("project reviews", () => {
     stub({ policy: { ...DEFAULTS, low: { ...DEFAULTS.low, reviewer: "a1" } } });
     render(<ProjectReviews projectId="p1" companyId="c1" agents={AGENTS} />);
     expect(((await screen.findByLabelText("Low: code reviewed by")) as HTMLSelectElement).value).toBe("a1");
+  });
+});
+
+describe("review kinds", () => {
+  it("shows a column per kind, off by default, and saves a choice (or Off again)", async () => {
+    const calls = stub();
+    render(<CompanyReviews companyId="c1" agents={AGENTS} />);
+    const sec = (await screen.findByLabelText("High: security review by")) as HTMLSelectElement;
+    for (const k of ["Security review", "Infra review", "Adversarial review"]) expect(screen.getByText(k)).toBeTruthy();
+    expect(sec.value).toBe("");
+    expect([...sec.options].map((o) => o.text)).toEqual(["Off", "The agent marked as security reviewer", "CEO", "Senior Developer (when hired)", "Sam (Senior Developer)"]);
+    fireEvent.change(sec, { target: { value: "marked" } });
+    fireEvent.change(screen.getByLabelText("High: infra review by"), { target: { value: "a1" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(calls.find((c) => c.method === "PUT")).toBeTruthy());
+    expect(calls.find((c) => c.method === "PUT")!.body).toMatchObject({ high: { kinds: { security: "marked", infra: "a1" } }, low: {} });
+    fireEvent.change(screen.getByLabelText("High: security review by"), { target: { value: "" } });
+    expect(((screen.getByLabelText("High: security review by")) as HTMLSelectElement).value).toBe("");
+  });
+
+  it("shows the project's kinds when it customises", async () => {
+    stub({ policy: { ...DEFAULTS, low: { ...DEFAULTS.low, kinds: { adversarial: "a1" } } } });
+    render(<ProjectReviews projectId="p1" companyId="c1" agents={AGENTS} />);
+    expect(((await screen.findByLabelText("Low: adversarial review by")) as HTMLSelectElement).value).toBe("a1");
+  });
+});
+
+describe("ticket reviews", () => {
+  it("lists each review with kind, reviewer, status, round, notes and the CEO's overrule reason", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([
+            { id: "r1", kind: "code", round: 2, seq: 0, status: "approved", reviewer: "Sam", notes: null, overruleReason: null },
+            { id: "r2", kind: "security", round: 2, seq: 0, status: "overruled", reviewer: "Sec", notes: "Escape it.", overruleReason: "Out of scope." },
+            { id: "r3", kind: "infra", round: 1, seq: 0, status: "changes_requested", reviewer: "Ivy", notes: "No rollback.", overruleReason: null },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    render(<TicketReviews ticketId="t1" />);
+    expect(await screen.findByText("Overruled by the CEO: Out of scope.")).toBeTruthy();
+    expect(screen.getByText("Escape it.")).toBeTruthy();
+    expect(screen.getByText("Changes requested")).toBeTruthy();
+    expect(screen.getByText("Approved")).toBeTruthy();
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.getByText(/review by Sam · round 2/)).toBeTruthy();
+  });
+
+  it("renders nothing when the ticket has no reviews", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200, headers: { "content-type": "application/json" } })));
+    const { container } = render(<TicketReviews ticketId="t2" />);
+    await waitFor(() => expect((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0));
+    expect(container.textContent).toBe("");
   });
 });
