@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql, type SQL } from "drizzle-orm";
+import { and, count, desc, eq, gte, sql, type SQL } from "drizzle-orm";
 import {
   budgetStatus,
   creditStatus,
@@ -48,6 +48,24 @@ export function fundingService(db: Db) {
     async create(input: typeof fundingSources.$inferInsert) {
       const [row] = await db.insert(fundingSources).values(input).returning();
       return row!;
+    },
+
+    async update(id: string, patch: Partial<typeof fundingSources.$inferInsert>) {
+      const [row] = await db.update(fundingSources).set(patch).where(eq(fundingSources.id, id)).returning();
+      return row!;
+    },
+
+    /** Deletes a source with no history; agents on it fall back to none. Null: unknown id. */
+    async remove(id: string) {
+      const [source] = await db.select({ id: fundingSources.id }).from(fundingSources).where(eq(fundingSources.id, id));
+      if (!source) return null;
+      // Both tables cascade, so deleting would silently erase them.
+      const [costs] = await db.select({ n: count() }).from(costEvents).where(eq(costEvents.fundingSourceId, id));
+      const [samples] = await db.select({ n: count() }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id));
+      if (costs!.n + samples!.n > 0) return "has_history" as const;
+      const [agentsOn] = await db.select({ n: count() }).from(agents).where(eq(agents.fundingSourceId, id));
+      await db.delete(fundingSources).where(eq(fundingSources.id, id));
+      return { agentsUnlinked: agentsOn!.n };
     },
 
     async list() {

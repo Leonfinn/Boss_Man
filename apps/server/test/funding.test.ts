@@ -97,3 +97,49 @@ describe("funding source provider and kind", () => {
     expect((await post("/api/funding-sources", { name: "Sub on OpenRouter", kind: "subscription", provider: "openrouter" })).statusCode).toBeGreaterThanOrEqual(400);
   });
 });
+
+describe("editing and deleting funding sources", () => {
+  const send = (method: "PATCH" | "DELETE", url: string, payload?: object) => t.app.inject({ method, url, headers: { cookie }, payload });
+  const source = async (name = "Router", provider = "openai") => (await post("/api/funding-sources", { name, kind: "api_payg", provider })).json();
+  const missing = "00000000-0000-4000-8000-000000000000";
+
+  it("changes the provider, checks the kind/provider pair on the merged values, and rejects bad names", async () => {
+    const s = await source();
+    const ok = await send("PATCH", `/api/funding-sources/${s.id}`, { provider: "openrouter" });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({ id: s.id, name: "Router", kind: "api_payg", provider: "openrouter" });
+
+    // Only the kind is sent, but the stored openrouter provider doesn't fit a subscription.
+    expect((await send("PATCH", `/api/funding-sources/${s.id}`, { kind: "subscription" })).statusCode).toBe(400);
+    expect((await get("/api/funding-sources")).json()[0]).toMatchObject({ kind: "api_payg", provider: "openrouter" });
+
+    await source("Other");
+    const dup = await send("PATCH", `/api/funding-sources/${s.id}`, { name: "Other" });
+    expect(dup.statusCode).toBe(409);
+    expect(dup.json().message).toBe("There's already a funding source called Other.");
+    expect((await send("PATCH", `/api/funding-sources/${missing}`, { name: "x" })).statusCode).toBe(404);
+  });
+
+  it("refuses to delete a source with spend, keeping its history", async () => {
+    const s = await source();
+    await post("/api/cost-events", { fundingSourceId: s.id, companyId: await company("Co"), costUsd: 3 });
+    const res = await send("DELETE", `/api/funding-sources/${s.id}`);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toMatch(/Edit it instead/);
+    expect((await get(`/api/funding-sources/${s.id}/status`)).json().totalSpentMicros).toBe(3_000_000);
+  });
+
+  it("deletes a source with no history and unlinks its agents", async () => {
+    const s = await source();
+    const co = await company("Co");
+    const agent = (await post(`/api/companies/${co}/agents`, { name: "Engineer" })).json();
+    await t.app.inject({ method: "PATCH", url: `/api/agents/${agent.id}`, headers: { cookie }, payload: { fundingSourceId: s.id } });
+    const res = await send("DELETE", `/api/funding-sources/${s.id}`);
+    expect(res.json()).toEqual({ agentsUnlinked: 1 });
+    expect((await get("/api/funding-sources")).json()).toEqual([]);
+    const agents = (await get(`/api/companies/${co}/agents`)).json();
+    expect(JSON.stringify(agents)).toContain("Engineer");
+    expect(JSON.stringify(agents)).not.toContain(s.id);
+    expect((await send("DELETE", `/api/funding-sources/${s.id}`)).statusCode).toBe(404);
+  });
+});
