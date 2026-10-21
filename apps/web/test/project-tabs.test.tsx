@@ -13,10 +13,16 @@ const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
 const project = { id: "p1", companyId: "c1", name: "App", repoUrl: null, defaultBranch: "main", landing: "merge", gitHost: null, gitApiBase: null, verifyCommand: null, deepVerifyCommand: null, ticketCostCapMicros: 5_000_000, monthlyCapMicros: null, starred: false };
 
-function stub(patched: unknown[] = []) {
+let briefState: Record<string, unknown> = { slug: "brief-p1", exists: false, commit: null, branch: null, updatedAt: null, ticketId: null };
+
+function stub(patched: unknown[] = [], posted: string[] = []) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/brief")) {
+        if (init?.method === "POST") return posted.push(url), json({ id: "t9" });
+        return json(briefState);
+      }
       if (init?.method === "PATCH") return patched.push(JSON.parse(String(init.body))), json({ ...project, starred: true });
       if (url.endsWith("/projects")) return json([project]);
       if (url.endsWith("/board")) return json({ project, columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [] }] });
@@ -62,5 +68,31 @@ describe("project page tabs", () => {
     expect((screen.getByLabelText("Cost cap per task (USD)") as HTMLInputElement).value).toBe("5");
     fireEvent.click(screen.getByRole("button", { name: "Star App" }));
     await vi.waitFor(() => expect(patched).toEqual([{ starred: true }]));
+  });
+
+  it("config tab offers to write the project brief, and links the page once it exists", async () => {
+    const posted: string[] = [];
+    briefState = { slug: "brief-p1", exists: false, commit: null, branch: null, updatedAt: null, ticketId: null };
+    stub([], posted);
+    show("config");
+    expect(await screen.findByText("No brief yet.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Write brief" }));
+    await vi.waitFor(() => expect(posted).toEqual(["/api/projects/p1/brief"]));
+    cleanup();
+
+    briefState = { slug: "brief-p1", exists: true, commit: "abc1234def", branch: "main", updatedAt: "2026-10-01T12:00:00Z", ticketId: null };
+    stub();
+    show("config");
+    expect(await screen.findByRole("link", { name: "App project brief" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "App project brief" }).getAttribute("href")).toBe("#/wiki/c1/brief-p1");
+    expect(screen.getByText(/Describes commit abc1234 on main, updated/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Refresh brief" })).toBeTruthy();
+    cleanup();
+
+    briefState = { ...briefState, ticketId: "t9" };
+    stub();
+    show("config");
+    expect((await screen.findByRole("link", { name: /open the ticket/ })).getAttribute("href")).toBe("#/tickets/t9");
+    expect(screen.queryByRole("button", { name: "Refresh brief" })).toBeNull();
   });
 });

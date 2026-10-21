@@ -648,6 +648,49 @@ export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: 
   );
 }
 
+/** The project's brief page (a map of the code the CEO writes for other agents), and the button that asks for it. */
+export function ProjectBrief({ p }: { p: Project }) {
+  const brief = usePoll((signal) => api<{ slug: string; exists: boolean; commit: string | null; branch: string | null; updatedAt: string | null; ticketId: string | null }>(`/api/projects/${p.id}/brief`, { signal }), 30_000, `brief-${p.id}`);
+  const act = useAction();
+  const b = brief.data;
+  const ask = () =>
+    act.run(async () => {
+      await api(`/api/projects/${p.id}/brief`, { method: "POST" });
+      brief.reload();
+    });
+  return (
+    <section aria-labelledby={`brief-${p.id}`} style={{ display: "grid", gap: 8 }}>
+      <h3 id={`brief-${p.id}`}>Project brief</h3>
+      {b && (
+        <p>
+          {b.exists ? (
+            <>
+              <a href={`#/wiki/${p.companyId}/${b.slug}`}>{p.name} project brief</a>
+              {b.commit && ` Describes commit ${b.commit.slice(0, 7)} on ${b.branch}, updated ${new Date(b.updatedAt!).toLocaleDateString()}.`}
+            </>
+          ) : (
+            "No brief yet."
+          )}
+        </p>
+      )}
+      <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+        Agents on this project read the brief instead of exploring the whole codebase.
+      </p>
+      {b &&
+        (b.ticketId ? (
+          <p>
+            <a href={`#/tickets/${b.ticketId}`}>The CEO is writing it: open the ticket</a>
+          </p>
+        ) : (
+          <button type="button" disabled={act.busy} onClick={() => void ask()}>
+            {b.exists ? "Refresh brief" : "Write brief"}
+          </button>
+        ))}
+      {act.view}
+    </section>
+  );
+}
+
 /** Every project of the chosen company: create one, open its Kanban, set its repo, checks and reviews. */
 export function ProjectsPage({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged?: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];

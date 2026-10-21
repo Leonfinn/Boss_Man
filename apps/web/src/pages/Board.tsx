@@ -7,7 +7,7 @@ import { usePoll } from "../hooks";
 import { STATUS_TONE } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
-import { ProjectRow } from "./Settings";
+import { ProjectBrief, ProjectRow } from "./Settings";
 
 const PROJECT_TABS = [
   { id: "kanban", label: "Kanban" },
@@ -326,7 +326,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       <>
         {head}
         <div id="proj-panel" role="tabpanel" aria-labelledby={`proj-tab-${tab}`} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          {tab === "budget" ? <ProjectBudget key={current.id} project={current} /> : <ProjectRow key={current.id} p={current} agents={company?.agents} onChanged={() => { projects.reload(); onCompaniesChanged(); }} />}
+          {tab === "budget" ? <ProjectBudget key={current.id} project={current} /> : <><ProjectRow key={current.id} p={current} agents={company?.agents} onChanged={() => { projects.reload(); onCompaniesChanged(); }} /><ProjectBrief key={`brief-${current.id}`} p={current} /></>}
         </div>
       </>
     );
