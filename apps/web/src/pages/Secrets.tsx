@@ -5,7 +5,7 @@ import { usePoll } from "../hooks";
 import { when } from "./Runs";
 
 type Secret = { id: string; name: string; kind: string; hint: string | null; version: number; createdAt: string; updatedAt: string };
-type Grant = { id: string; envName: string; companyId: string; company: string; deployTargetId: string | null; deployTarget: string | null };
+type Grant = { id: string; envName: string; companyId: string; company: string; deployTargetId: string | null; deployTarget: string | null; agentIds: string[] };
 type Access = { id: string; at: string; company: string | null; runId: string | null; purpose: string };
 
 const KIND: Record<string, string> = {
@@ -49,6 +49,7 @@ function Detail({ secret, onChanged }: { secret: Secret; onChanged: () => void }
                 <span>{g.company}</span>
                 <span className="mono muted">as {g.envName}</span>
                 {g.deployTarget && <span className="tag">only for deploys to {g.deployTarget}</span>}
+                {g.agentIds.length > 0 && <span className="tag">{g.agentIds.length === 1 ? "1 agent only" : `${g.agentIds.length} agents only`}</span>}
                 <button
                   type="button"
                   className="btn small"

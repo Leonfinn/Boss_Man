@@ -615,6 +615,16 @@ export const secretGrants = pgTable(
   (t) => [uniqueIndex("secret_grants_company_env").on(t.companyId, t.envName)],
 );
 
+/** Limits a grant to these agents. A grant with no rows here goes to every agent in the company. */
+export const secretGrantAgents = pgTable(
+  "secret_grant_agents",
+  {
+    grantId: uuid("grant_id").notNull().references(() => secretGrants.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.grantId, t.agentId] })],
+);
+
 export const secretAccessLog = pgTable("secret_access_log", {
   id: id(),
   grantId: uuid("grant_id").references(() => secretGrants.id, { onDelete: "set null" }),

@@ -734,6 +734,14 @@ export async function buildApp(opts: AppOptions) {
       return (await secretsSvc.revoke(id)) ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
     });
 
+    owner.put("/api/grants/:id/agents", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { agentIds } = z.object({ agentIds: z.array(Uuid).max(200) }).parse(req.body);
+      const r = await secretsSvc.setGrantAgents(id, agentIds);
+      if (r.ok) return reply.code(204).send();
+      return r.reason === "not_found" ? reply.code(404).send({ error: "not_found" }) : reply.code(400).send({ error: "invalid_agents", message: "Every agent must belong to the grant's company." });
+    });
+
     /** Issues the company's runner token. It is shown once; issuing again replaces it. */
     owner.post("/api/companies/:id/runner", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

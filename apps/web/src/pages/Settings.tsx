@@ -11,7 +11,7 @@ import { StarButton } from "./Agents";
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
 type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null }) & { launcher?: Launched };
-type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null };
+type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
 
 /** What each kind of credential is called inside an agent's environment by default. */
@@ -171,6 +171,28 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
 /** A setup-token can only be proved by Claude Code, so its check runs on the runner (R58). */
 const CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 
+/** Which of the company's agents get a key; none ticked means all of them. */
+function GrantAgents({ grant, agents, busy, onSave }: { grant: Grant; agents: Agent[]; busy: boolean; onSave: (ids: string[]) => void }) {
+  const [picked, setPicked] = useState(grant.agentIds);
+  const names = agents.filter((a) => grant.agentIds.includes(a.id)).map((a) => a.name);
+  return (
+    <details onToggle={(e) => e.currentTarget.open && setPicked(grant.agentIds)}>
+      <summary aria-label={`Agents for ${grant.envName}`}>{names.length ? names.join(", ") : "All agents"}</summary>
+      <fieldset style={{ border: 0, padding: 0, margin: "6px 0" }}>
+        <legend className="muted" style={{ fontSize: 13 }}>Leave all unticked to give the key to every agent in this company.</legend>
+        {agents.map((a) => (
+          <label key={a.id} style={{ display: "block" }}>
+            <input type="checkbox" checked={picked.includes(a.id)} onChange={(e) => setPicked(e.target.checked ? [...picked, a.id] : picked.filter((id) => id !== a.id))} /> {a.name}
+          </label>
+        ))}
+      </fieldset>
+      <button type="button" className="btn small" disabled={busy} onClick={() => onSave(picked)} aria-label={`Save agents for ${grant.envName}`}>
+        Save
+      </button>
+    </details>
+  );
+}
+
 export function Credentials({ company, onChanged, title = "Credentials" }: { company: Company; onChanged?: () => void; title?: string }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
@@ -216,6 +238,13 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       return `${company.name}'s agents no longer get ${g.envName} (from the next run). ${g.secretName} is still stored; delete it under All stored secrets if nothing else uses it.`;
     });
 
+  const setAgents = (g: Grant, ids: string[]) =>
+    void act.run(async () => {
+      await api(`/api/grants/${g.id}/agents`, { method: "PUT", body: { agentIds: ids } });
+      grants.reload();
+      return ids.length ? `${g.envName} now goes only to the agents you ticked (from the next run).` : `${g.envName} goes to every agent in ${company.name} (from the next run).`;
+    });
+
   const add = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
@@ -252,6 +281,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                 <th scope="col">Secret</th>
                 <th scope="col">Ends in</th>
                 <th scope="col">Used for</th>
+                <th scope="col">Agents</th>
                 <th scope="col">
                   <span className="sr-only">Actions</span>
                 </th>
@@ -264,6 +294,9 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                   <td>{g.secretName}</td>
                   <td className="mono muted">{g.hint ?? ""}</td>
                   <td>{g.deployTargetId ? "One deploy target" : "Every run"}</td>
+                  <td>
+                    <GrantAgents key={g.agentIds.join()} grant={g} agents={company.agents} busy={act.busy} onSave={(ids) => setAgents(g, ids)} />
+                  </td>
                   <td>
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => checkSaved(g)} style={{ whiteSpace: "nowrap" }} title={g.envName === CLAUDE_TOKEN_ENV ? "Runs one tiny prompt on the company's runner, using a little of the subscription allowance" : undefined}>
                       {g.envName === CLAUDE_TOKEN_ENV ? "Check with Claude" : "Check"}

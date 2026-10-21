@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decryptSecret, encryptSecret } from "../src/crypto.js";
-import { secretAccessLog, secrets } from "../src/db/schema.js";
+import { agents, runs, secretAccessLog, secrets } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 const TOKEN = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
@@ -113,5 +113,45 @@ describe("secrets store", () => {
     expect(dup.statusCode).toBe(409);
     const badName = await t.app.inject({ method: "POST", url: `/api/secrets/${key}/grants`, headers: { cookie }, payload: { companyId: homelab, envName: "deploy-key" } });
     expect(badName.statusCode).toBe(400);
+  });
+});
+
+describe("which agents get a key", () => {
+  async function setup() {
+    const c = await company("App Co");
+    const other = await company("Homelab Co");
+    const [a, b] = await t.db.insert(agents).values([{ companyId: c, name: "A", role: "worker", agentKind: "claude" }, { companyId: c, name: "B", role: "worker", agentKind: "claude" }]).returning();
+    const [foreign] = await t.db.insert(agents).values({ companyId: other, name: "F", role: "worker", agentKind: "claude" }).returning();
+    const [ra] = await t.db.insert(runs).values({ companyId: c, agentId: a!.id }).returning();
+    const [rb] = await t.db.insert(runs).values({ companyId: c, agentId: b!.id }).returning();
+    const grant = async (name: string, envName: string) => {
+      const sid = (await t.app.inject({ method: "POST", url: "/api/secrets", headers: { cookie }, payload: { name, kind: "generic", value: `v-${envName}` } })).json().secret.id;
+      return (await t.app.inject({ method: "POST", url: `/api/secrets/${sid}/grants`, headers: { cookie }, payload: { companyId: c, envName } })).json().id as string;
+    };
+    const put = (grantId: string, agentIds: string[]) => t.app.inject({ method: "PUT", url: `/api/grants/${grantId}/agents`, headers: { cookie }, payload: { agentIds } });
+    return { c, a: a!.id, b: b!.id, foreign: foreign!.id, ra: ra!.id, rb: rb!.id, grant, put };
+  }
+
+  it("gives a restricted key only to the listed agents' runs, and company jobs still get it", async () => {
+    const s = await setup();
+    const limited = await s.grant("Limited", "LIMITED_KEY");
+    await s.grant("Open", "OPEN_KEY");
+    expect((await s.put(limited, [s.a])).statusCode).toBe(204);
+    expect(await t.secrets.resolveCompanyEnv(s.c, "run", s.ra)).toEqual({ LIMITED_KEY: "v-LIMITED_KEY", OPEN_KEY: "v-OPEN_KEY" });
+    expect(await t.secrets.resolveCompanyEnv(s.c, "run", s.rb)).toEqual({ OPEN_KEY: "v-OPEN_KEY" });
+    expect(await t.secrets.resolveCompanyEnv(s.c, "merge")).toEqual({ LIMITED_KEY: "v-LIMITED_KEY", OPEN_KEY: "v-OPEN_KEY" });
+    const listed = (await t.app.inject({ method: "GET", url: `/api/companies/${s.c}/grants`, headers: { cookie } })).json();
+    expect(listed.find((g: { id: string }) => g.id === limited).agentIds).toEqual([s.a]);
+    // An empty list opens it to every agent again.
+    expect((await s.put(limited, [])).statusCode).toBe(204);
+    expect(await t.secrets.resolveCompanyEnv(s.c, "run", s.rb)).toHaveProperty("LIMITED_KEY");
+  });
+
+  it("refuses an agent from another company, and an unknown grant", async () => {
+    const s = await setup();
+    const g = await s.grant("Key", "SOME_KEY");
+    expect((await s.put(g, [s.a, s.foreign])).statusCode).toBe(400);
+    expect((await t.app.inject({ method: "GET", url: `/api/companies/${s.c}/grants`, headers: { cookie } })).json()[0].agentIds).toEqual([]);
+    expect((await s.put(crypto.randomUUID(), [])).statusCode).toBe(404);
   });
 });
