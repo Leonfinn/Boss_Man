@@ -8,7 +8,7 @@ type Rule = { id: string; companyId: string | null; name: string; match: Match; 
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }> };
 
 const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"];
-const OUTCOMES: Array<{ value: Outcome; label: string; tone: string }> = [
+export const OUTCOMES: Array<{ value: Outcome; label: string; tone: string }> = [
   { value: "allow", label: "Allow", tone: "green" },
   { value: "ceo", label: "Ask the CEO", tone: "blue" },
   { value: "owner", label: "Ask me", tone: "amber" },
@@ -70,6 +70,8 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
   const list = usePoll((signal) => api<RuleList>(`/api/policy-rules${scopeId ? `?companyId=${scopeId}` : ""}`, { signal }), 60_000, scopeId ?? "all");
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", kinds: [] as string[], commandPattern: "", titlePattern: "", outcome: "owner" as Outcome });
+  const [ask, setAsk] = useState("");
+  const [sentTo, setSentTo] = useState<string | null>(null);
   const [probe, setProbe] = useState({ companyId: scopeId ?? companies[0]?.id ?? "", command: "" });
   const [verdict, setVerdict] = useState<{ outcome: Outcome; rule: string } | null>(null);
 
@@ -98,6 +100,14 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
     void act(async () => {
       await api("/api/policy-rules", { method: "POST", body: { companyId: scopeId, name: form.name, match, outcome: form.outcome } });
       setForm({ name: "", kinds: [], commandPattern: "", titlePattern: "", outcome: "owner" });
+    });
+  };
+  const askCeo = (e: FormEvent) => {
+    e.preventDefault();
+    void act(async () => {
+      const r = await api<{ ceo: { name: string } }>(`/api/companies/${scopeId}/rule-requests`, { method: "POST", body: { text: ask } });
+      setSentTo(r.ceo.name);
+      setAsk("");
     });
   };
   const test = (e: FormEvent) => {
@@ -143,7 +153,23 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}
           onDelete={(r) => window.confirm(`Delete "${r.name}"?`) && void act(() => api(`/api/policy-rules/${r.id}`, { method: "DELETE" }))}
         />
-        <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
+        {scopeId && (
+          <form onSubmit={askCeo} style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
+            <div className="field">
+              <label htmlFor="rule-ask">What should this rule do?</label>
+              <textarea id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={(e) => setAsk(e.target.value)} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
+            </div>
+            <div className="actions">
+              <button className="btn primary" type="submit" disabled={!ask.trim()}>
+                Ask the CEO to draft it
+              </button>
+            </div>
+            {sentTo && <p role="status">Sent to {sentTo}. Their proposal will appear in your Decisions queue.</p>}
+          </form>
+        )}
+        <details style={{ paddingTop: 12, borderTop: "1px solid #e3e8ef" }}>
+          <summary>Advanced: write the rule yourself</summary>
+        <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12 }}>
           <div className="field" style={{ gridColumn: "1 / -1" }}>
             <label htmlFor="rule-name">New rule</label>
             <input id="rule-name" required placeholder="Container restarts are fine" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
@@ -179,6 +205,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
             Add rule
           </button>
         </form>
+        </details>
       </section>
 
       {companies.length > 0 && (
