@@ -153,8 +153,14 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}
           onDelete={(r) => window.confirm(`Delete "${r.name}"?`) && void act(() => api(`/api/policy-rules/${r.id}`, { method: "DELETE" }))}
         />
+      </section>
+
+      <section className="card" aria-labelledby="add-rule-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <h2 id="add-rule-h" style={{ fontSize: 17, fontWeight: 600 }}>
+          Add a rule
+        </h2>
         {scopeId && (
-          <form onSubmit={askCeo} style={{ display: "flex", flexDirection: "column", gap: 8, paddingTop: 12, borderTop: "1px solid var(--line)" }}>
+          <form onSubmit={askCeo} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div className="field">
               <label htmlFor="rule-ask">What should this rule do?</label>
               <textarea id="rule-ask" required rows={3} maxLength={1000} placeholder="Let agents read from GitHub without asking me, but ask before they change anything." value={ask} onChange={(e) => setAsk(e.target.value)} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
@@ -167,7 +173,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
             {sentTo && <p role="status">Sent to {sentTo}. Their proposal will appear in your Decisions queue.</p>}
           </form>
         )}
-        <details style={{ paddingTop: 12, borderTop: "1px solid var(--line)" }}>
+        <details style={scopeId ? { paddingTop: 12, borderTop: "1px solid var(--line)" } : undefined}>
           <summary>Advanced: write the rule yourself</summary>
         <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", alignItems: "end", paddingTop: 12 }}>
           <div className="field" style={{ gridColumn: "1 / -1" }}>
