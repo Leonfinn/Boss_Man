@@ -1120,3 +1120,21 @@ export const agentSkills = pgTable(
   },
   (t) => [primaryKey({ columns: [t.agentId, t.skillId] })],
 );
+
+/** Extra MCP servers a company's agents can use. The token stays in the secret store: secret_env names the granted secret. */
+export const mcpServers = pgTable(
+  "mcp_servers",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    transport: text("transport").$type<"http" | "sse">().notNull(),
+    headerName: text("header_name").notNull().default("Authorization"),
+    /** {secret} is replaced by the runner with the value of secret_env. */
+    headerValue: text("header_value").notNull().default("Bearer {secret}"),
+    secretEnv: text("secret_env"),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("mcp_servers_company_name").on(t.companyId, t.name)],
+);

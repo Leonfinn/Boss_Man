@@ -10,7 +10,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
-import type { RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
+import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { gitAuthEnv, type Workspaces } from "./workspace.js";
@@ -579,7 +579,19 @@ export class SessionManager {
         await agent.request(methods.agent.authenticate, { methodId: "api-key" } as never);
       }
 
-      const mcpServers = [{ type: "http" as const, name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
+      const mcpServers: McpServer[] = [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
+      // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
+      const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
+      for (const m of cmd.mcpServers ?? []) {
+        const token = m.secretEnv ? secrets[m.secretEnv] : undefined;
+        if (m.secretEnv && !token) continue;
+        if (!supported?.[m.transport]) {
+          emit({ type: "runner.log", level: "warn", message: `Tool server ${m.name} skipped: this agent doesn't support ${m.transport} MCP servers.` });
+          continue;
+        }
+        const headers = token ? [{ name: m.headerName, value: m.headerValue.replaceAll("{secret}", () => token) }] : [];
+        mcpServers.push({ type: m.transport, name: m.name, url: m.url, headers });
+      }
       // Board tools only (owner chat): Claude's built-in tools are switched off through the
       // adapter's session options, so only the Boss Man MCP tools remain.
       const sessionMeta = cmd.boardToolsOnly && cmd.agentKind === "claude" ? { _meta: { claudeCode: { options: { tools: [] } } } } : {};

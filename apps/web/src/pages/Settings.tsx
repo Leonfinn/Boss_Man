@@ -12,6 +12,7 @@ import { StarButton } from "./Agents";
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
 type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
+type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
 
 /** What each kind of credential is called inside an agent's environment by default. */
@@ -379,6 +380,117 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       <p className="muted" style={{ fontSize: 13 }}>
         {c.help.split("`").map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part))}
       </p>
+      {act.view}
+    </Section>
+  );
+}
+
+/** Extra MCP tool servers on the owner's network. Tokens stay in the secret store: only the name of a granted secret is entered here. */
+export function ToolServers({ company }: { company: Company }) {
+  const servers = usePoll((signal) => api<McpServerRow[]>(`/api/companies/${company.id}/mcp-servers`, { signal }), 30_000, `mcp-${company.id}`);
+  const blank = { name: "", url: "", transport: "http", secretEnv: "", headerName: "Authorization", headerValue: "Bearer {secret}" };
+  const [form, setForm] = useState(blank);
+  const act = useAction();
+  const set = (k: keyof typeof blank) => (e: { target: { value: string } }) => setForm({ ...form, [k]: e.target.value });
+  const add = (e: FormEvent) => {
+    e.preventDefault();
+    void act.run(async () => {
+      const { secretEnv, ...rest } = form;
+      await api(`/api/companies/${company.id}/mcp-servers`, { method: "POST", body: { ...rest, secretEnv: secretEnv || null } });
+      setForm(blank);
+      servers.reload();
+      return "Added. Agents get it from their next run.";
+    });
+  };
+  const remove = (m: McpServerRow) =>
+    window.confirm(`Remove the tool server ${m.name}? Agents stop getting it from their next run.`) &&
+    void act.run(async () => {
+      await api(`/api/mcp-servers/${m.id}`, { method: "DELETE" });
+      servers.reload();
+      return `Removed ${m.name}.`;
+    });
+  return (
+    <Section id="mcp-h" title="Tool servers (MCP)">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Servers apply from the next run. An agent only gets a server if it has been given the server's token secret.
+      </p>
+      {servers.data?.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">URL</th>
+                <th scope="col">Transport</th>
+                <th scope="col">Token secret</th>
+                <th scope="col">
+                  <span className="sr-only">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {servers.data.map((m) => (
+                <tr key={m.id}>
+                  <td className="mono">{m.name}</td>
+                  <td className="mono">{m.url}</td>
+                  <td>{m.transport}</td>
+                  <td className="mono">{m.secretEnv ?? "none"}</td>
+                  <td>
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(m)} aria-label={`Remove tool server ${m.name}`}>
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p>No tool servers yet.</p>
+      )}
+      <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", alignItems: "end" }}>
+        <div className="field">
+          <label htmlFor="mcp-name">Server name</label>
+          <input id="mcp-name" className="mono" required pattern="[a-z][a-z0-9-]{0,31}" placeholder="scrapling" value={form.name} onChange={set("name")} />
+        </div>
+        <div className="field">
+          <label htmlFor="mcp-url">Server URL</label>
+          <input id="mcp-url" type="url" required placeholder="http://192.168.68.67:30301/mcp" value={form.url} onChange={set("url")} />
+        </div>
+        <div className="field">
+          <label htmlFor="mcp-transport">Transport</label>
+          <select id="mcp-transport" value={form.transport} onChange={set("transport")}>
+            <option value="http">Streamable HTTP</option>
+            <option value="sse">SSE</option>
+          </select>
+        </div>
+        <div className="field">
+          <label htmlFor="mcp-secret">Token secret</label>
+          <input id="mcp-secret" className="mono" pattern="[A-Z][A-Z0-9_]{0,63}" placeholder="SCRAPLING_MCP_TOKEN" aria-describedby="mcp-secret-hint" value={form.secretEnv} onChange={set("secretEnv")} />
+          <span id="mcp-secret-hint" className="muted" style={{ fontSize: 13 }}>
+            The name of a secret granted to this company, e.g. SCRAPLING_MCP_TOKEN. Leave empty for a server with no token.
+          </span>
+        </div>
+        <details style={{ gridColumn: "1 / -1" }}>
+          <summary>Advanced</summary>
+          <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", marginTop: 8 }}>
+            <div className="field">
+              <label htmlFor="mcp-header">Header name</label>
+              <input id="mcp-header" className="mono" value={form.headerName} onChange={set("headerName")} />
+            </div>
+            <div className="field">
+              <label htmlFor="mcp-header-value">Header value</label>
+              <input id="mcp-header-value" className="mono" value={form.headerValue} onChange={set("headerValue")} />
+              <span className="muted" style={{ fontSize: 13 }}>{"{secret}"} is replaced by the token when the run starts.</span>
+            </div>
+          </div>
+        </details>
+        <div>
+          <button className="btn" type="submit" disabled={act.busy}>
+            Add tool server
+          </button>
+        </div>
+      </form>
       {act.view}
     </Section>
   );
@@ -980,6 +1092,7 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
               page.
             </p>
           </section>
+          <ToolServers company={company} />
           <Funding company={company} onChanged={onChanged} />
           <Chapters company={company} />
           <Section id="reviews-h" title="Reviews">

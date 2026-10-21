@@ -96,6 +96,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     mode: z.enum(["plan"]).optional(),
     /** Git workspace (R38): the run works in the ticket's worktree instead of cwd. */
     workspace: z.object({ projectId: Uuid, ticketId: Uuid, repoUrl: z.string(), baseRef: z.string() }).optional(),
+    /** The company's extra MCP servers. Only the name of the secret travels, never its value; an older runner ignores this. */
+    mcpServers: z
+      .array(z.object({ name: z.string(), url: z.string(), transport: z.enum(["http", "sse"]), headerName: z.string(), headerValue: z.string(), secretEnv: z.string().nullable() }))
+      .max(50)
+      .optional(),
     /** The agent's skills (R71): Agent Skills folders, file contents in base64. Matches the server's per-skill file limit. */
     skills: z
       .array(z.object({ name: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64), files: z.array(z.object({ path: z.string().min(1).max(500), content: z.string() })).max(1000) }))

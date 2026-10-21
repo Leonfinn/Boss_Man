@@ -337,6 +337,13 @@
       "when": 1792570687668,
       "tag": "0047_grant_agents",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1792576420013,
+      "tag": "0048_mcp_servers",
+      "breakpoints": true
     }
   ]
 }

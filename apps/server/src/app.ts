@@ -14,7 +14,7 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/s
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, costEvents, engagements, fundingSources, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agents, companies, costEvents, engagements, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { modelsService } from "./services/models.js";
@@ -770,6 +770,30 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/grants", async (req) => {
       const { id } = IdParam.parse(req.params);
       return secretsSvc.grantsForCompany(id);
+    });
+
+    // Extra MCP servers (tool servers). A token is only ever named here (secretEnv); the runner looks it up from the run's granted secrets.
+    const McpServerInput = z.object({
+      name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "Use lower-case letters, digits and hyphens, starting with a letter (32 characters at most).").refine((n) => n !== "bossman", "That name is Boss Man's own."),
+      url: z.string().max(500).refine((u) => { try { return ["http:", "https:"].includes(new URL(u).protocol); } catch { return false; } }, "Use an http:// or https:// address."),
+      transport: z.enum(["http", "sse"]),
+      secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, "Use an environment variable name like SCRAPLING_MCP_TOKEN.").nullable().default(null),
+      headerName: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/, "Not a valid header name.").default("Authorization"),
+      headerValue: z.string().max(200).default("Bearer {secret}"),
+    }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), { path: ["headerValue"], message: "The header value must contain {secret}." });
+
+    owner.get("/api/companies/:id/mcp-servers", async (req) => db.select().from(mcpServers).where(eq(mcpServers.companyId, IdParam.parse(req.params).id)).orderBy(mcpServers.name));
+    owner.post("/api/companies/:id/mcp-servers", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = McpServerInput.parse(req.body);
+      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+      if (!c) return reply.code(404).send({ error: "not_found" });
+      const [row] = await db.insert(mcpServers).values({ ...b, companyId: id }).onConflictDoNothing().returning();
+      return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });
+    });
+    owner.delete("/api/mcp-servers/:id", async (req, reply) => {
+      const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id });
+      return row ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
     });
 
     // Funding sources, cost and quota (R27–R29).
