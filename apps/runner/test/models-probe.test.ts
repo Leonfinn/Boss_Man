@@ -40,7 +40,7 @@ describe("models.probe", () => {
 
   it("reports why the agent died, not just that the connection closed", async () => {
     const crash = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-crash.mjs");
-    await expect(probeModels("opencode", {}, { adapterBin: crash, timeoutMs: 10_000 })).rejects.toThrow(/exited \(code 1\).*EACCES/);
+    await expect(probeModels("opencode", {}, { adapterBin: crash, timeoutMs: 10_000 })).rejects.toThrow(/exited \(code 1\)\. EACCES: permission denied, mkdir/);
   });
 
   it("against the real claude-agent-acp, lists models and makes no model request", async () => {

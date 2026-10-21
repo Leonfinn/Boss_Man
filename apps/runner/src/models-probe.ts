@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods, ndJsonStream } from "@agentclientprotocol/sdk";
-import { BASE_ENV_KEYS, adapterArgs, defaultBin, killGroup, modelChoices } from "./session-manager.js";
+import { BASE_ENV_KEYS, adapterArgs, defaultBin, killGroup, modelChoices, stderrTail } from "./session-manager.js";
 
 export type ProbedModels = Array<{ value: string; name: string; description: string | null }>;
 
@@ -45,7 +45,7 @@ export async function probeModels(
   const exited = new Promise<never>((_, reject) => {
     child.on("error", (err) => reject(new Error(`Couldn't start the ${agentKind} adapter: ${err.message}`)));
     // "close", not "exit": by then stderr is fully read, and it holds the reason (e.g. opencode's EACCES).
-    child.on("close", (code) => reject(new Error(`The agent process exited (code ${code}). ${stderr.split("\n").slice(-3).join(" ")}`.trim())));
+    child.on("close", (code) => reject(new Error(`The agent process exited (code ${code}). ${stderrTail(stderr)}`.trim())));
   });
   const timeoutMs = opts.timeoutMs ?? 60_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
