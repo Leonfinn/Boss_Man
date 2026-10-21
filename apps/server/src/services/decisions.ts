@@ -589,12 +589,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (options.length > 0 && !ownWords && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
       const ctx = d.context as DecisionContext;
-      // "Allow always" answers this request and leaves a rule at the top of the company's own rules.
+      // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
-        const [first] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(asc(policyRules.position)).limit(1);
+        const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
         const on = now().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-        await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (first?.position ?? 1) - 1 });
+        await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (last?.position ?? -1) + 1 });
         answer = ALLOW;
       }
       await db

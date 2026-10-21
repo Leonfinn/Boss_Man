@@ -170,6 +170,8 @@ describe("permission requests through the policy engine", () => {
       conn.emit({ type: "run.permission_request", runId, requestId, title, kind: command ? "execute" : "other", rawInput: command ? { command } : { url: "https://x.dev" }, optionKinds: ["allow_once", "reject_once"] });
     const open = async (n: number) => waitFor(async () => (await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json() as Array<{ id: string; question: string; options: string[] }>, (d) => d.length === n);
 
+    // The owner's own deny rule must keep winning over any "always" rule made later.
+    await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "No crawl4ai JS", trigger: "permission", condition: { titlePattern: "^mcp__crawl4ai__execute_js$" }, outcome: "deny", position: 0 });
     ask("r1", "mcp__crawl4ai__md");
     const [d] = await open(1);
     expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Always allow every crawl4ai tool", "Deny"]);
@@ -178,10 +180,11 @@ describe("permission requests through the policy engine", () => {
     expect(ans.json()).toMatchObject({ delivered: true });
     await waitFor(() => commands.length, (n) => n === 1);
     expect(commands[0]).toEqual({ type: "permission.decide", runId, requestId: "r1", verdict: "allow" });
-    const rules = await ctx.db.select().from(policyRules).where(eq(policyRules.companyId, ctx.homelab.company.id));
-    expect(rules).toHaveLength(1);
-    expect(rules[0]).toMatchObject({ outcome: "allow", condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true } });
-    expect(rules[0]!.name).toMatch(/^Allow crawl4ai's md tool \(from a request on \d+ \w+\)$/);
+    const rules = await ctx.db.select().from(policyRules).where(eq(policyRules.companyId, ctx.homelab.company.id)).orderBy(policyRules.position);
+    expect(rules).toHaveLength(2);
+    expect(rules[0]).toMatchObject({ name: "No crawl4ai JS", position: 0 });
+    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true } });
+    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool \(from a request on \d+ \w+\)$/);
 
     ask("r2", "mcp__crawl4ai__md");
     await waitFor(() => commands.length, (n) => n === 2);
