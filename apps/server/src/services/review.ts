@@ -34,7 +34,7 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
     case "merged":
       return `Merged into ${ctx.branch}.`;
     case "done":
-      return "Approved; the ticket is done.";
+      return `Approved; the ticket is done.${d.note ? ` ${d.note}` : ""}`;
     case "pull_request":
       return `${d.url ? `Pull request opened: ${d.url}.` : "Approved."}${d.note ? ` It hasn't merged yet: ${d.note}` : ""}`;
     case "verify_failed":
@@ -344,6 +344,14 @@ export function reviewService(
         await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
         return tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
       };
+
+      // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
+      // merge, and running the check anyway could send the ticket back for a failure it can't fix.
+      const changed = await ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000).catch(() => null);
+      if (changed && !changed.commits.length && !changed.files.length) {
+        await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
+        return { outcome: "done", delivered: null, detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } };
+      }
 
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       const checks = [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
