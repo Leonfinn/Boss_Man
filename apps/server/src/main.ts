@@ -1,19 +1,30 @@
 import { loadMasterKey } from "./crypto.js";
 import { openPglite, openPostgres } from "./db/client.js";
 import { buildApp } from "./app.js";
+import { createLeader } from "./leader.js";
 import { createBackground } from "./background.js";
 import { buildPortalApp } from "./portal.js";
 import { providerLiveValidator } from "./services/secrets.js";
 
 const env = process.env;
 const master = loadMasterKey(env);
-const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
+// BOSSMAN_MIGRATE_ON_START=0: a separate step (node dist/migrate.js) migrates; this server only checks the database is current.
+const { db, close } = env.DATABASE_URL ? await openPostgres(env.DATABASE_URL, { migrate: env.BOSSMAN_MIGRATE_ON_START !== "0" }) : await openPglite(env.BOSSMAN_PGLITE_DIR ?? "./data/pglite");
+
+// Who is in charge (leader.ts). BOSSMAN_LEADER_LOCK=0 turns the lock off; PGlite has none. Both mean "always the leader".
+const leader = createLeader({
+  url: env.DATABASE_URL,
+  enabled: env.BOSSMAN_LEADER_LOCK !== "0",
+  role: env.BOSSMAN_ROLE === "standby" ? "standby" : "auto",
+  log: (m) => console.warn(m),
+});
 
 const { app, scheduler, sweeps, notes, feedback, review, semantic, selfDeploy, maintenance } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
   secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1",
+  leader,
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,
   deployerDir: env.BOSSMAN_DEPLOYER_DIR,
@@ -44,9 +55,15 @@ const bg = createBackground(
   ],
   (err, name) => app.log.error({ err }, `${name} failed`),
 );
-bg.startBackground();
+// Background work follows leadership; runner sockets are closed by buildApp on demotion.
+leader.onPromote(() => bg.startBackground());
+leader.onDemote(() => bg.stopBackground());
+// Host signals only (no HTTP endpoint changes the role): SIGUSR1 = hand over, SIGUSR2 = take over.
+process.on("SIGUSR1", () => void leader.demote());
+process.on("SIGUSR2", () => void leader.promote());
 
 const shutdown = async () => {
+  await leader.stop();
   await bg.stopBackground();
   await semantic.drain(); // embed queued wiki pages instead of dropping them
   await app.close();
@@ -56,6 +73,7 @@ const shutdown = async () => {
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
+await leader.start(); // a lone server leads before it can be asked anything else
 await app.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.PORT ?? 3100) });
 
 // The feedback portal on its own port, serving nothing else, so it can be shared without the owner's side.

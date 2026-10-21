@@ -7,14 +7,15 @@ export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
 
 export const migrationsFolder = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../drizzle");
 
-/** Production: node-postgres, migrated on start. */
-export async function openPostgres(url: string): Promise<{ db: Db; close: () => Promise<void> }> {
+/** Production: node-postgres. Migrated on start unless `migrate: false` (a separate migrate step ran), in which case the database must already be current. */
+export async function openPostgres(url: string, opts: { migrate?: boolean } = {}): Promise<{ db: Db; close: () => Promise<void> }> {
   const { Pool } = await import("pg");
   const { drizzle } = await import("drizzle-orm/node-postgres");
-  const { migrate } = await import("drizzle-orm/node-postgres/migrator");
+  const { runMigrations, assertMigrated } = await import("./migrate-lib.js");
+  if (opts.migrate === false) await assertMigrated(url, migrationsFolder);
+  else await runMigrations(url, { folder: migrationsFolder });
   const pool = new Pool({ connectionString: url });
   const db = drizzle(pool, { schema });
-  await migrate(db, { migrationsFolder });
   return { db: db as unknown as Db, close: () => pool.end() };
 }
 

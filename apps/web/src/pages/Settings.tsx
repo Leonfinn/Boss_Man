@@ -829,6 +829,19 @@ function RunnerUpdate() {
   );
 }
 
+/** Which copy of the server this is: "leader" runs the work, "standby" only serves reads, "single" has no leader lock (docs/09-self-deploy.md). */
+function ServerRole() {
+  const h = usePoll((signal) => api<{ role: "leader" | "standby" | "single"; version: string; commit: string }>("/api/health", { signal }), 10_000, "server-role");
+  if (!h.data) return null;
+  const { role, version, commit } = h.data;
+  return (
+    <p className="muted" style={{ fontSize: 14 }} data-testid="server-role">
+      Server role: <strong>{role}</strong>
+      {role === "standby" ? " (another copy is in charge; changes here are refused)" : role === "single" ? " (no leader lock)" : ""} · version {version} · {commit.slice(0, 7)}
+    </p>
+  );
+}
+
 export function Settings({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   return (
@@ -842,6 +855,7 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           Run the setup wizard
         </button>
       </header>
+      <ServerRole />
       {!company ? (
         <p>
           Create a company on the Kanban first, or{" "}

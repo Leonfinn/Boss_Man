@@ -52,6 +52,7 @@ import { schedulerService, type Limits } from "./services/scheduler.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
+import { createLeader, type Leader } from "./leader.js";
 import { diskService, type DiskLimits } from "./services/disk.js";
 import { loginLimiter, type LoginLimits } from "./login-limit.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
@@ -105,6 +106,8 @@ export type AppOptions = {
   drainMinutes?: number;
   /** How long a recreated runner has to reconnect before the update is reported as a problem (ms, default 5 minutes). */
   drainReconnectMs?: number;
+  /** Who is in charge (leader.ts). Default: a lone server that always leads. */
+  leader?: Leader;
 };
 
 const Credentials = z.object({ username: z.string().trim().min(1).max(64), password: z.string().min(12).max(256) });
@@ -165,7 +168,21 @@ export async function buildApp(opts: AppOptions) {
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
   const notes = notificationsService(db, { reveal: (id) => secretsSvc.reveal(id), now: opts.now, fetch: opts.fetch, log: (m) => app.log.warn(m) });
-  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs });
+  const leader = opts.leader ?? createLeader();
+  // A standby holds no runner: on demotion every runner socket is closed with 1013 ("try again later"), and they retry.
+  leader.onDemote(() => {
+    for (const c of app.websocketServer.clients) c.close(1013, "standby");
+  });
+  // A standby serves reads and login, nothing that changes or sends anything. Runner and agent paths are closed to it entirely.
+  const STANDBY_WRITES = new Set(["/api/login", "/api/logout"]);
+  app.addHook("onRequest", async (req, reply) => {
+    if (leader.isLeader()) return;
+    const path = req.url.split("?")[0]!;
+    const write = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
+    const blocked = path.startsWith("/api/runner/") || path === "/mcp" || (write && path.startsWith("/api/") && !STANDBY_WRITES.has(path));
+    if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
+  });
+  await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader() });
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), log: (m) => app.log.warn(m) });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId));
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
@@ -409,15 +426,15 @@ export async function buildApp(opts: AppOptions) {
   // ---------- Public ----------
 
   // Public and cheap: no DB. Build facts only, nothing secret. The image HEALTHCHECK and the deploy script read `ok`.
-  const build = { version: SERVER_VERSION, commit: process.env.BOSSMAN_COMMIT || "dev", role: "single" as const };
-  app.get("/api/health", async () => ({ ok: true, ...build }));
+  const build = () => ({ version: SERVER_VERSION, commit: process.env.BOSSMAN_COMMIT || "dev", role: leader.role() });
+  app.get("/api/health", async () => ({ ok: true, ...build() }));
   // Readiness: also proves the database answers.
   app.get("/api/ready", async (_req, reply) => {
     try {
       await db.execute(sql`select 1`);
-      return { ok: true, db: true, ...build };
+      return { ok: true, db: true, ...build() };
     } catch {
-      return reply.code(503).send({ ok: false, db: false, ...build });
+      return reply.code(503).send({ ok: false, db: false, ...build() });
     }
   });
 
