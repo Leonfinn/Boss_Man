@@ -797,14 +797,15 @@ export async function buildApp(opts: AppOptions) {
     });
 
     // Funding sources, cost and quota (R27–R29).
-    const FundingInput = z.object({
+    const FundingFields = z.object({
       name: z.string().trim().min(1).max(80),
       kind: z.enum(FUNDING_KINDS),
       provider: z.enum(FUNDING_PROVIDERS),
       monthlyGrantUsd: z.number().nonnegative().optional(),
       cycleAnchor: z.coerce.date().optional(),
       secretId: Uuid.optional(),
-    }).superRefine((v, ctx) => {
+    });
+    const FundingInput = FundingFields.superRefine((v, ctx) => {
       const problem = fundingComboError(v.kind, v.provider);
       if (problem) ctx.addIssue({ code: "custom", path: ["provider"], message: problem });
     });
@@ -823,6 +824,35 @@ export async function buildApp(opts: AppOptions) {
     });
 
     owner.get("/api/funding-sources", async () => funding.list());
+
+    // Kind and provider only change how future spend is counted; past cost events stay as recorded.
+    owner.patch("/api/funding-sources/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = FundingFields.partial().refine((v) => Object.keys(v).length > 0, "Nothing to change.").parse(req.body);
+      const [cur] = await db.select().from(fundingSources).where(eq(fundingSources.id, id));
+      if (!cur) return reply.code(404).send({ error: "not_found" });
+      const problem = fundingComboError(b.kind ?? cur.kind, b.provider ?? cur.provider);
+      if (problem) return reply.code(400).send({ error: "invalid_request", message: problem });
+      const row = await funding.update(id, {
+        name: b.name,
+        kind: b.kind,
+        provider: b.provider,
+        monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : undefined,
+        cycleAnchor: b.cycleAnchor,
+        secretId: b.secretId,
+      });
+      models.forget(id);
+      return row;
+    });
+
+    owner.delete("/api/funding-sources/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const r = await funding.remove(id);
+      if (!r) return reply.code(404).send({ error: "not_found" });
+      if (r === "has_history") return reply.code(409).send({ error: "has_history", message: "This source has recorded spend or quota readings, and deleting it would erase them. Edit it instead, or move its agents to another source." });
+      models.forget(id);
+      return r;
+    });
 
     owner.get("/api/funding-sources/:id/status", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

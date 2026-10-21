@@ -511,12 +511,27 @@ const providerFits = (kind: string, provider: string) => kind !== "subscription"
 export function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 30_000, "sources");
   const [form, setForm] = useState({ name: "", kind: "subscription", provider: "anthropic", grant: "", anchor: "" });
+  const [editing, setEditing] = useState<FundingSource | null>(null);
   const act = useAction();
+  const blank = { name: "", kind: "subscription", provider: "anthropic", grant: "", anchor: "" };
+  const edit = (s: FundingSource) => {
+    setEditing(s);
+    setForm({ name: s.name, kind: s.kind, provider: s.provider, grant: s.monthlyGrantMicros != null ? String(s.monthlyGrantMicros / 1e6) : "", anchor: s.cycleAnchor?.slice(0, 10) ?? "" });
+  };
+  const remove = (s: FundingSource) => {
+    if (!window.confirm(`Delete the funding source "${s.name}"? Agents using it will have no funding source until you choose one.`)) return;
+    void act.run(async () => {
+      const r = await api<{ agentsUnlinked: number }>(`/api/funding-sources/${s.id}`, { method: "DELETE" });
+      sources.reload();
+      onChanged?.();
+      return `Deleted. ${r.agentsUnlinked} agent${r.agentsUnlinked === 1 ? " was" : "s were"} using it.`;
+    });
+  };
   const add = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
-      await api("/api/funding-sources", {
-        method: "POST",
+      await api(editing ? `/api/funding-sources/${editing.id}` : "/api/funding-sources", {
+        method: editing ? "PATCH" : "POST",
         body: {
           name: form.name,
           kind: form.kind,
@@ -525,10 +540,11 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
           ...(form.kind === "api_credit" && form.anchor ? { cycleAnchor: form.anchor } : {}),
         },
       });
-      setForm({ ...form, name: "", grant: "", anchor: "" });
+      setForm(editing ? blank : { ...form, name: "", grant: "", anchor: "" });
+      setEditing(null);
       sources.reload();
       onChanged?.();
-      return "Added.";
+      return editing ? "Saved." : "Added.";
     });
   };
   return (
@@ -540,14 +556,20 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
         <ul style={{ margin: 0, paddingLeft: 18 }}>
           {sources.data.map((s) => (
             <li key={s.id}>
-              {s.name} <span className="muted">· {s.kind.replace(/_/g, " ")} · {s.provider}</span>
+              {s.name} <span className="muted">· {s.kind.replace(/_/g, " ")} · {s.provider}</span>{" "}
+              <button type="button" className="btn small" aria-label={`Edit ${s.name}`} onClick={() => edit(s)}>
+                Edit
+              </button>{" "}
+              <button type="button" className="btn small" aria-label={`Delete ${s.name}`} disabled={act.busy} onClick={() => remove(s)}>
+                Delete
+              </button>
             </li>
           ))}
         </ul>
       )}
       <form onSubmit={add} style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", alignItems: "end" }}>
         <div className="field">
-          <label htmlFor="fs-name">New funding source</label>
+          <label htmlFor="fs-name">{editing ? `Editing ${editing.name}` : "New funding source"}</label>
           <input id="fs-name" required placeholder="Claude Max" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </div>
         <div className="field">
@@ -608,9 +630,17 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
             </div>
           </>
         )}
-        <button className="btn primary" type="submit" disabled={act.busy}>
-          Add
-        </button>
+        {editing && <p className="muted" style={{ gridColumn: "1 / -1", fontSize: 14 }}>Changing the kind or provider applies to spend from now on; past cost stays as it was recorded.</p>}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn primary" type="submit" disabled={act.busy}>
+            {editing ? "Save" : "Add"}
+          </button>
+          {editing && (
+            <button className="btn" type="button" onClick={() => (setEditing(null), setForm(blank))}>
+              Cancel
+            </button>
+          )}
+        </div>
       </form>
       {act.view}
     </Section>
