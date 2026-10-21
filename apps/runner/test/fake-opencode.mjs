@@ -3,12 +3,12 @@
 import { writeFileSync } from "node:fs";
 import readline from "node:readline";
 const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\n");
-const dump = { argv: process.argv.slice(2), config: JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? "null"), autoupdateOff: process.env.OPENCODE_DISABLE_AUTOUPDATE, model: null };
+const dump = { argv: process.argv.slice(2), config: JSON.parse(process.env.OPENCODE_CONFIG_CONTENT ?? "null"), autoupdateOff: process.env.OPENCODE_DISABLE_AUTOUPDATE, model: null, mcpServers: null };
 const save = () => writeFileSync(process.env.DUMP, JSON.stringify(dump));
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const msg = JSON.parse(line);
-  if (msg.method === "initialize") send({ id: msg.id, result: { protocolVersion: 1, authMethods: [{ id: "opencode-login" }], agentCapabilities: {} } });
-  else if (msg.method === "session/new") send({ id: msg.id, result: { sessionId: "s1", configOptions: [{ id: "model", name: "Model", category: "model", type: "select", currentValue: "a/one", options: [{ value: "a/one", name: "One" }, { value: "b/two", name: "Two" }] }] } });
+  if (msg.method === "initialize") send({ id: msg.id, result: { protocolVersion: 1, authMethods: [{ id: "opencode-login" }], agentCapabilities: { mcpCapabilities: JSON.parse(process.env.MCP_CAPS ?? "{}") } } });
+  else if (msg.method === "session/new") (dump.mcpServers = msg.params.mcpServers), send({ id: msg.id, result: { sessionId: "s1", configOptions: [{ id: "model", name: "Model", category: "model", type: "select", currentValue: "a/one", options: [{ value: "a/one", name: "One" }, { value: "b/two", name: "Two" }] }] } });
   else if (msg.method === "session/set_config_option") (dump.model = msg.params.value), save(), send({ id: msg.id, result: { configOptions: [] } });
   else if (msg.method === "session/prompt") save(), send({ id: msg.id, result: { stopReason: "end_turn" } });
   else if (msg.id !== undefined) send({ id: msg.id, result: {} });
