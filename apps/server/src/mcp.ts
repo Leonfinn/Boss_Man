@@ -733,8 +733,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         return text(
           open
             .map((d) => {
-              const plan = (d.context as { planText?: string | null }).planText;
-              return [`${d.id}: ${d.question}`, `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
+              const { planText: plan, explain } = d.context as { planText?: string | null; explain?: { command?: string } };
+              return [`${d.id}: ${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
             })
             .join("\n\n"),
         );

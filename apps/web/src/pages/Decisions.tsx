@@ -18,6 +18,15 @@ const KIND: Record<string, { label: string; tone: string }> = {
   self_deploy: { label: "Boss Man update", tone: "blue" },
 };
 
+const EFFECT = {
+  reads: { label: "Reads only", tone: "" },
+  changes: { label: "Changes files", tone: "amber" },
+  deletes: { label: "Deletes files", tone: "red" },
+  network: { label: "Network", tone: "amber" },
+  pushes: { label: "Pushes code", tone: "red" },
+  unknown: { label: "Unknown", tone: "amber" },
+};
+
 const OPTION_HELP: Record<string, string> = {
   "Cancel run": "Cancel run: stops it; message the agent on the task to start again.",
   "Keep waiting": "Keep waiting: you'll be asked again in 30 minutes if it stays quiet.",
@@ -165,6 +174,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const total = Math.max(1, d.parts.blocking + d.parts.urgency + d.parts.age + d.parts.liveRun);
               const w = (n: number) => `${Math.round((n / total) * 48)}px`;
               const done = answered[d.id];
+              const x = d.context?.explain;
               return (
                 <li className="decision" key={d.id}>
                   <div className="score" title={why(d)}>
@@ -186,7 +196,23 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
-                    <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question}</h2>
+                    <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : d.question}</h2>
+                    {x && (
+                      <>
+                        <p>
+                          <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
+                          {x.effect === "unknown" && " Read the exact command before you allow it."}
+                        </p>
+                        {x.alwaysNote && !done && <p className="muted" style={{ fontSize: 13 }}>{x.alwaysNote}</p>}
+                        {x.reason && <p className="muted">What the agent says it's for: {x.reason}</p>}
+                        {x.command && (
+                          <details>
+                            <summary>Show the exact command</summary>
+                            <pre className="mono" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{x.command}</pre>
+                          </details>
+                        )}
+                      </>
+                    )}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
                       {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
@@ -203,7 +229,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </details>
                     )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : (
                       <>
                         {d.recommendedOption && (
