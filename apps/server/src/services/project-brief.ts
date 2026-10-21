@@ -63,6 +63,8 @@ export function briefTicketBody(p: { id: string; name: string; defaultBranch: st
     `Then these sections, in this order, each as a level-2 heading: ${BRIEF_HEADINGS.map((h) => `## ${h}`).join(", ")}.`,
     "",
     "Keep each section short and factual, because agents read one section at a time. Say what you could not find out rather than guessing.",
+    "",
+    "This is a documentation task: the wiki page is its only output. Don't change, commit or push anything in the repository, tests included; read-only commands are fine. If something looks broken, such as failing tests, note it under Gotchas and tell the owner with notify_owner instead of fixing it here.",
     ...(extra ? ["", extra] : []),
   ].join("\n");
 }

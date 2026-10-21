@@ -51,6 +51,7 @@ describe("project brief", () => {
     expect(first.json().body).toContain(`slug: brief-${c.project.id}`);
     expect(first.json().body).toContain("## Code map");
     expect(first.json().body).toContain("git rev-parse HEAD");
+    expect(first.json().body).toContain("Don't change, commit or push anything in the repository");
     const second = await c.req("POST", url);
     expect(second.json().id).toBe(first.json().id);
     expect((await c.req("GET", url)).json()).toMatchObject({ slug: briefSlug(c.project.id), exists: false, commit: null, ticketId: first.json().id });
