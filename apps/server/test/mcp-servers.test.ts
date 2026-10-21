@@ -33,7 +33,7 @@ describe("tool servers (MCP)", () => {
     const c = (ctx = await setup());
     const url = `/api/companies/${c.company.id}/mcp-servers`;
     for (const bad of [
-      { ...good, name: "Scrapling" },
+      { ...good, name: "my server" },
       { ...good, name: "1st" },
       { ...good, name: "bossman" },
       { ...good, url: "ftp://host/mcp" },
@@ -44,6 +44,14 @@ describe("tool servers (MCP)", () => {
       { ...good, transport: "ws" },
     ]) expect((await c.req("POST", url, bad)).statusCode, JSON.stringify(bad)).toBe(400);
     expect((await c.req("GET", url)).json()).toEqual([]);
+  });
+
+  it("lower-cases the name, and says what's wrong with bad input", async () => {
+    const c = (ctx = await setup());
+    const url = `/api/companies/${c.company.id}/mcp-servers`;
+    expect((await c.req("POST", url, { ...good, name: " Scrapling " })).json().name).toBe("scrapling");
+    expect((await c.req("GET", url)).json()[0].secretGranted).toBe(false);
+    expect((await c.req("POST", url, { ...good, name: "my server" })).json().message).toBe("name: Use lower-case letters, digits and hyphens, starting with a letter (32 characters at most).");
   });
 
   it("creates, lists, refuses a duplicate name and deletes", async () => {

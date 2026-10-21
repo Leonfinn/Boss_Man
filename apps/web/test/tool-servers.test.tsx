@@ -11,7 +11,7 @@ afterEach(() => {
 
 const company: Company = { id: "c1", name: "Boss Man Co", mission: null, paused: false, agents: [] };
 const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
-const row = { id: "m1", name: "scrapling", url: "http://192.168.68.67:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN" };
+const row = { id: "m1", name: "scrapling", url: "http://192.168.68.67:30301/mcp", transport: "http", secretEnv: "SCRAPLING_MCP_TOKEN", secretGranted: true };
 
 function stub(list: unknown[] = [row]) {
   const calls: Array<{ method: string; url: string; body?: unknown }> = [];
@@ -32,6 +32,13 @@ describe("tool servers", () => {
     expect(await screen.findByText("scrapling")).toBeTruthy();
     expect(screen.getByText("SCRAPLING_MCP_TOKEN")).toBeTruthy();
     expect(screen.getByText("none")).toBeTruthy();
+    expect(screen.queryByText(/Not granted/)).toBeNull();
+  });
+
+  it("warns when the token secret isn't granted to the company", async () => {
+    stub([{ ...row, secretEnv: "SCRAPLING_API_TOKEN", secretGranted: false }]);
+    render(<ToolServers company={company} />);
+    expect(await screen.findByText(/Not granted to .*no agent gets this server/)).toBeTruthy();
   });
 
   it("adds a server", async () => {

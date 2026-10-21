@@ -12,7 +12,7 @@ import { StarButton } from "./Agents";
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
 type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
-type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null };
+type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
 
 /** What each kind of credential is called inside an agent's environment by default. */
@@ -434,7 +434,10 @@ export function ToolServers({ company }: { company: Company }) {
                   <td className="mono">{m.name}</td>
                   <td className="mono">{m.url}</td>
                   <td>{m.transport}</td>
-                  <td className="mono">{m.secretEnv ?? "none"}</td>
+                  <td>
+                    <span className="mono">{m.secretEnv ?? "none"}</span>
+                    {!m.secretGranted && <span className="tag amber" style={{ marginLeft: 6 }}>Not granted to {company.name}: no agent gets this server</span>}
+                  </td>
                   <td>
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(m)} aria-label={`Remove tool server ${m.name}`}>
                       Remove

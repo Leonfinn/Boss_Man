@@ -389,7 +389,11 @@ export async function buildApp(opts: AppOptions) {
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
   app.setErrorHandler((err, _req, reply) => {
-    if (err instanceof ZodError) return reply.code(400).send({ error: "invalid_request", issues: err.issues });
+    // `message` is what the web app shows, so it names the first problem and its field.
+    if (err instanceof ZodError) {
+      const i = err.issues[0];
+      return reply.code(400).send({ error: "invalid_request", message: i ? `${i.path.length ? `${i.path.join(".")}: ` : ""}${i.message}` : "The request isn't valid.", issues: err.issues });
+    }
     if (err instanceof SecretRejected) return reply.code(422).send({ error: "secret_rejected", problems: err.problems });
     if (err instanceof WorkError || err instanceof FeedbackError) return reply.code(err.status).send({ error: "rejected", message: err.message });
     const code = pgCode(err);
@@ -775,7 +779,7 @@ export async function buildApp(opts: AppOptions) {
 
     // Extra MCP servers (tool servers). A token is only ever named here (secretEnv); the runner looks it up from the run's granted secrets.
     const McpServerInput = z.object({
-      name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "Use lower-case letters, digits and hyphens, starting with a letter (32 characters at most).").refine((n) => n !== "bossman", "That name is Boss Man's own."),
+      name: z.string().trim().toLowerCase().regex(/^[a-z][a-z0-9-]{0,31}$/, "Use lower-case letters, digits and hyphens, starting with a letter (32 characters at most).").refine((n) => n !== "bossman", "That name is Boss Man's own."),
       url: z.string().max(500).refine((u) => { try { return ["http:", "https:"].includes(new URL(u).protocol); } catch { return false; } }, "Use an http:// or https:// address."),
       transport: z.enum(["http", "sse"]),
       secretEnv: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, "Use an environment variable name like SCRAPLING_MCP_TOKEN.").nullable().default(null),
@@ -783,7 +787,12 @@ export async function buildApp(opts: AppOptions) {
       headerValue: z.string().max(200).default("Bearer {secret}"),
     }).refine((v) => !v.secretEnv || v.headerValue.includes("{secret}"), { path: ["headerValue"], message: "The header value must contain {secret}." });
 
-    owner.get("/api/companies/:id/mcp-servers", async (req) => db.select().from(mcpServers).where(eq(mcpServers.companyId, IdParam.parse(req.params).id)).orderBy(mcpServers.name));
+    owner.get("/api/companies/:id/mcp-servers", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      // Says whether each server's token secret is granted, since a mistyped name silently leaves the server out of every run.
+      const granted = new Set((await db.select({ env: secretGrants.envName }).from(secretGrants).where(eq(secretGrants.companyId, id))).map((g) => g.env));
+      return (await db.select().from(mcpServers).where(eq(mcpServers.companyId, id)).orderBy(mcpServers.name)).map((m) => ({ ...m, secretGranted: !m.secretEnv || granted.has(m.secretEnv) }));
+    });
     owner.post("/api/companies/:id/mcp-servers", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = McpServerInput.parse(req.body);
