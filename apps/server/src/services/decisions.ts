@@ -703,7 +703,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       }
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
-      if (wake && d.kind === "question" && d.raisedByAgentId) {
+      // A rule proposal answered with a button needs nothing more from the CEO.
+      if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
         await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `The owner answered your question "${d.question}": ${answer}` });
       }

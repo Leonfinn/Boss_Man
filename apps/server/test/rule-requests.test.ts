@@ -62,6 +62,8 @@ describe("rule requests", () => {
     expect(await c.db.select().from(policyRules)).toEqual([]);
 
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Add this rule" })).statusCode).toBe(200);
+    // A button answer doesn't wake the CEO again.
+    expect(await c.db.select().from(wakes).where(eq(wakes.reason, "decision answered"))).toEqual([]);
     const [rule] = await c.db.select().from(policyRules);
     expect(rule).toMatchObject({ companyId: c.company.id, name: "Allow GitHub reads", outcome: "allow", condition: { titlePattern: "^mcp__github__(get|list)_", safeOnly: true } });
   });
