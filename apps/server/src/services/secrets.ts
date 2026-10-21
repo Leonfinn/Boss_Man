@@ -2,7 +2,7 @@ import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { checkSecretFormat, normaliseSecret, secretHint, type SecretKind } from "@boss-man/shared";
 import { decryptSecret, encryptSecret, type MasterKey } from "../crypto.js";
 import type { Db } from "../db/client.js";
-import { companies, deploys, deployTargets, secretAccessLog, secretGrants, secrets } from "../db/schema.js";
+import { agents, companies, deploys, deployTargets, runs, secretAccessLog, secretGrantAgents, secretGrants, secrets } from "../db/schema.js";
 
 /** A live check against the provider, e.g. a cheap authenticated call. */
 export type LiveValidator = (kind: SecretKind, value: string) => Promise<{ ok: boolean; message: string } | null>;
@@ -28,6 +28,14 @@ async function prepare(kind: SecretKind, raw: string, opts: { acceptUnusualForma
 }
 
 export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) {
+  /** grantId -> the agents it is limited to; a grant missing from the map goes to every agent. */
+  const agentsByGrant = async (grantIds: string[]) => {
+    const map = new Map<string, string[]>();
+    if (!grantIds.length) return map;
+    for (const r of await db.select().from(secretGrantAgents).where(inArray(secretGrantAgents.grantId, grantIds))) map.set(r.grantId, [...(map.get(r.grantId) ?? []), r.agentId]);
+    return map;
+  };
+
   const publicFields = {
     id: secrets.id,
     name: secrets.name,
@@ -109,13 +117,15 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
 
     /** Who a secret is granted to, for the secrets screen. */
     async grantsForSecret(secretId: string) {
-      return db
+      const rows = await db
         .select({ id: secretGrants.id, envName: secretGrants.envName, companyId: secretGrants.companyId, company: companies.name, deployTargetId: secretGrants.deployTargetId, deployTarget: deployTargets.name })
         .from(secretGrants)
         .innerJoin(companies, eq(companies.id, secretGrants.companyId))
         .leftJoin(deployTargets, eq(deployTargets.id, secretGrants.deployTargetId))
         .where(eq(secretGrants.secretId, secretId))
         .orderBy(companies.name, secretGrants.envName);
+      const limited = await agentsByGrant(rows.map((r) => r.id));
+      return rows.map((r) => ({ ...r, agentIds: limited.get(r.id) ?? [] }));
     },
 
     /** Each time a run was given the secret, newest first. */
@@ -130,12 +140,30 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
     },
 
     async grantsForCompany(companyId: string) {
-      return db
+      const rows = await db
         .select({ id: secretGrants.id, envName: secretGrants.envName, deployTargetId: secretGrants.deployTargetId, secretId: secrets.id, secretName: secrets.name, hint: secrets.hint })
         .from(secretGrants)
         .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
         .where(eq(secretGrants.companyId, companyId))
         .orderBy(secretGrants.envName);
+      const limited = await agentsByGrant(rows.map((r) => r.id));
+      return rows.map((r) => ({ ...r, agentIds: limited.get(r.id) ?? [] }));
+    },
+
+    /** Limits a grant to these agents of its company; none means every agent. Refuses an unknown grant or an agent from another company. */
+    async setGrantAgents(grantId: string, agentIds: string[]): Promise<{ ok: true } | { ok: false; reason: "not_found" | "foreign_agent" }> {
+      const [grant] = await db.select({ companyId: secretGrants.companyId }).from(secretGrants).where(eq(secretGrants.id, grantId));
+      if (!grant) return { ok: false, reason: "not_found" };
+      const ids = [...new Set(agentIds)];
+      if (ids.length) {
+        const mine = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, grant.companyId), inArray(agents.id, ids)));
+        if (mine.length !== ids.length) return { ok: false, reason: "foreign_agent" };
+      }
+      await db.transaction(async (tx) => {
+        await tx.delete(secretGrantAgents).where(eq(secretGrantAgents.grantId, grantId));
+        if (ids.length) await tx.insert(secretGrantAgents).values(ids.map((agentId) => ({ grantId, agentId })));
+      });
+      return { ok: true };
     },
 
     /**
@@ -159,11 +187,15 @@ export function secretsService(db: Db, master: MasterKey, live?: LiveValidator) 
         .from(secretGrants)
         .innerJoin(secrets, eq(secrets.id, secretGrants.secretId))
         .where(and(eq(secretGrants.companyId, companyId), targets.length ? or(isNull(secretGrants.deployTargetId), inArray(secretGrants.deployTargetId, targets)) : isNull(secretGrants.deployTargetId)));
+      // Company-level jobs (merge, check, pull request) have no run and so no agent: they keep every company grant.
+      const [run] = runId ? await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, companyId))) : [];
+      const limited = await agentsByGrant(rows.map((r) => r.grantId));
+      const granted = runId ? rows.filter((r) => !limited.has(r.grantId) || (!!run?.agentId && limited.get(r.grantId)!.includes(run.agentId))) : rows;
       const env: Record<string, string> = {};
-      for (const r of rows) env[r.envName] = decryptSecret(master, r);
-      if (rows.length > 0) {
+      for (const r of granted) env[r.envName] = decryptSecret(master, r);
+      if (granted.length > 0) {
         await db.insert(secretAccessLog).values(
-          rows.map((r) => ({ grantId: r.grantId, secretId: r.secretId, companyId, runId: runId ?? null, purpose: r.deployTargetId ? "deploy" : purpose })),
+          granted.map((r) => ({ grantId: r.grantId, secretId: r.secretId, companyId, runId: runId ?? null, purpose: r.deployTargetId ? "deploy" : purpose })),
         );
       }
       return env;

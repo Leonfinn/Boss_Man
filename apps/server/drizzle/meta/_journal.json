@@ -330,6 +330,13 @@
       "when": 1792526392788,
       "tag": "0046_skinny_roland_deschain",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1792570687668,
+      "tag": "0047_grant_agents",
+      "breakpoints": true
     }
   ]
 }
