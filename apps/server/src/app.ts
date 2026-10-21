@@ -1305,9 +1305,13 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const { state } = z.object({ state: State }).parse(req.body);
       const moved = await work.updateTicket(id, { state });
-      await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${state}`, at: new Date() });
+      const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
+      await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
+      // Nobody should start work on a ticket the owner has parked or closed.
+      if (state === "done" || state === "backlog" || state === "blocked")
+        await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
       if (state === "review") await scheduler.onTicketReview(id, null);
-      if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${state}.` });
+      if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
       return moved;
     });
 

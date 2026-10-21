@@ -39,7 +39,9 @@ describe("owner moves a ticket's state", () => {
     expect(done).toMatchObject({ systemState: "done", outcome: "completed" });
     const [freed] = await c.db.select().from(tickets).where(eq(tickets.id, b.id));
     expect(freed!.systemState).toBe("ready");
-    expect((await c.db.select().from(activity).where(eq(activity.ticketId, a.id))).map((x) => x.summary)).toContain("Owner moved it to done");
+    expect((await c.db.select().from(activity).where(eq(activity.ticketId, a.id))).map((x) => x.summary)).toContain("Owner moved it to Done");
+    // Its waiting wake-ups are dropped, so nobody starts work on a closed ticket.
+    expect((await c.db.select().from(wakes).where(eq(wakes.ticketId, a.id))).filter((w) => w.status === "queued" || w.status === "deferred")).toEqual([]);
   });
 
   it("review requests the reviews", async () => {
@@ -59,7 +61,7 @@ describe("owner moves a ticket's state", () => {
     await c.req("POST", `/api/tickets/${t.id}/state`, { state: "backlog" });
     expect(await c.db.select().from(wakes)).toEqual([]);
     await c.req("POST", `/api/tickets/${t.id}/state`, { state: "in_progress" });
-    expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.worker.id, ticketId: t.id, reason: "woken by owner", note: "The owner moved this ticket to in_progress." })]);
+    expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.worker.id, ticketId: t.id, reason: "woken by owner", note: "The owner moved this ticket to In progress." })]);
   });
 
   it("rejects an unknown state", async () => {
