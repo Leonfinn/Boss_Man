@@ -307,6 +307,14 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [renaming, setRenaming] = useState<string | null>(null);
   const [assignee, setAssignee] = useState("anyone");
   const [allDone, setAllDone] = useState(false);
+  // The review column is two lanes: agent review, and the tickets whose next step is the owner's sign-off.
+  const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
+  const lanes = (board.data?.columns ?? []).flatMap((col) =>
+    col.systemState === "review"
+      ? [{ col, tickets: col.tickets.filter((t) => !t.waitingOnOwner), mine: false }, { col, tickets: col.tickets.filter((t) => t.waitingOnOwner), mine: true }]
+      : [{ col, tickets: col.tickets, mine: false }],
+  );
+  const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
@@ -443,6 +451,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {board.error.message}
         </p>
       )}
+      {waiting.length > 0 && (
+        <a className="strip" href="#your-review" onClick={(e) => { e.preventDefault(); document.getElementById("your-review")?.scrollIntoView?.({ behavior: "smooth", inline: "center" }); }}>
+          <span>
+            <span className="count-badge">{waiting.length}</span>
+            <span>
+              <strong>{waiting.length === 1 ? "1 task is waiting on you." : `${waiting.length} tasks are waiting on you.`}</strong> {waiting[0]!.title}
+            </span>
+          </span>
+          <strong style={{ whiteSpace: "nowrap" }}>Review it <span aria-hidden="true">→</span></strong>
+        </a>
+      )}
       <div className="board-bar">
         <div>
           {current && !adding && (
@@ -483,9 +502,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
-          {board.data?.columns.map((col) => {
+          {lanes.map(({ col, tickets, mine }) => {
             const full = col.wipLimit != null && col.tickets.length >= col.wipLimit;
-            const shown = col.tickets.filter((t) => assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee));
+            const shown = tickets.filter((t) => assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee));
             const named = (t: (typeof shown)[number]) => {
               const a = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
               return a ? a.name : t.assignedToOwner ? "You" : "Nobody yet";
@@ -494,17 +513,24 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
             const visible = done && !allDone ? rows.slice(0, DONE_SHOWN) : rows;
             return (
-              <section className="lane" key={col.id} aria-labelledby={`lane-${col.id}`}>
-                {renaming === col.id ? (
+              <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : `lane-${col.id}`}>
+                {mine ? (
+                  <header className="lane-head">
+                    <div className="lane-title">
+                      <h2 id="lane-your-review">Your review</h2>
+                      <span className="count-badge">{shown.length}</span>
+                    </div>
+                  </header>
+                ) : renaming === col.id ? (
                   <RenameColumn col={col} onCancel={() => setRenaming(null)} onSave={async (name) => { await rename(col.id, name); setRenaming(null); }} />
                 ) : (
                   <header className="lane-head">
                     <div className="lane-title">
-                      <h2 id={`lane-${col.id}`}>{col.name}</h2>
+                      <h2 id={`lane-${col.id}`}>{label(col)}</h2>
                       <span className="mono" style={full ? { color: "var(--amber-ink)" } : undefined}>
                         {col.wipLimit != null ? `${shown.length} / ${col.wipLimit}` : shown.length}
                       </span>
-                      <button type="button" className="icon-btn" aria-label={`Rename the ${col.name} column`} onClick={() => setRenaming(col.id)}>
+                      <button type="button" className="icon-btn" aria-label={`Rename the ${label(col)} column`} onClick={() => setRenaming(col.id)}>
                         <svg width="15" height="15" {...iconProps}>{PENCIL}</svg>
                       </button>
                     </div>
@@ -538,7 +564,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                   shown.map((t) => {
                   const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
                   return (
-                    <article className="ticket" key={t.id}>
+                    <article className={`ticket${mine ? " mine" : ""}`} key={t.id}>
                       <div className="top">
                         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
                         {(t.risk === "high" || t.risk === "critical") && (
@@ -550,6 +576,12 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <h3>
                         <a href={`#/tickets/${t.id}`}>{t.title}</a>
                       </h3>
+                      {mine && <span className="note">{t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.</span>}
+                      {mine && (
+                        <a className="btn primary small" href={`#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
+                          Review and approve
+                        </a>
+                      )}
                       {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}
                       {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
                       {t.featureTitle && (

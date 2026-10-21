@@ -100,6 +100,23 @@ describe("board lanes", () => {
     expect(puts[0]).toEqual(["/api/projects/p1/columns", [{ name: "Soon", systemState: "ready", wipLimit: null }, { name: "In progress", systemState: "in_progress", wipLimit: 3 }]]);
   });
 
+  it("splits review into agent review and your review, and flags what waits on the owner", async () => {
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low" }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" })] });
+    withColumns([]);
+    render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    const strip = await screen.findByRole("link", { name: /1 task is waiting on you/ });
+    expect(strip.textContent).toContain("Needs your sign-off");
+    expect(strip.getAttribute("href")).toBe("#your-review");
+    const agent = screen.getByRole("region", { name: "Agent review" });
+    expect(within(agent).getByText("Agent still reviewing")).toBeTruthy();
+    expect(within(agent).queryByText("Needs your sign-off")).toBeNull();
+    const mine = screen.getByRole("region", { name: "Your review" });
+    expect(mine.id).toBe("your-review");
+    expect(within(mine).getByText("Senior Developer approved. Needs your sign-off to merge.")).toBeTruthy();
+    expect(within(mine).getByRole("link", { name: "Review and approve" }).getAttribute("href")).toBe("#/tickets/t6");
+    columns.pop();
+  });
+
   it("filters cards by who they are assigned to", async () => {
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);

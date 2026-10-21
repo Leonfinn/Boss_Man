@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { decisions, reviewRequests, ticketDependencies } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp;
@@ -74,6 +75,29 @@ describe("boards with custom columns (R17)", () => {
     const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "Customer app" })).json();
     const res = await req("POST", `/api/projects/${p.id}/tickets`, { title: "x", assigneeAgentId: otherCeo.id });
     expect(res.statusCode).toBe(422);
+  });
+});
+
+describe("tickets waiting on the owner", () => {
+  it("flags a review ticket with an open owner sign-off, not one still with an agent reviewer", async () => {
+    const { company: c, ceo } = await company("App Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "Customer app" })).json();
+    const signoff = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Needs you", state: "review", risk: "high" })).json();
+    const agentReview = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Needs the CEO", state: "review" })).json();
+    const [d] = await t.db
+      .insert(decisions)
+      .values({ companyId: c.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: signoff.id, reviewer: "Senior Developer" } })
+      .returning();
+    await t.db.insert(ticketDependencies).values({ blockedTicketId: signoff.id, blockerDecisionId: d!.id });
+    await t.db.insert(reviewRequests).values({ ticketId: agentReview.id, kind: "code", reviewerAgentId: ceo.id, round: 1 });
+
+    const cards = () => req("GET", `/api/projects/${p.id}/board`).then((r) => r.json().columns.flatMap((x: { tickets: Array<{ title: string; waitingOnOwner: boolean; waitingDecisionId: string | null }> }) => x.tickets));
+    const by = (await cards()) as Array<{ title: string; waitingOnOwner: boolean; waitingDecisionId: string | null }>;
+    expect(by.find((x) => x.title === "Needs you")).toMatchObject({ waitingOnOwner: true, waitingDecisionId: d!.id });
+    expect(by.find((x) => x.title === "Needs the CEO")).toMatchObject({ waitingOnOwner: false, waitingDecisionId: null });
+
+    await req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Send it back" });
+    expect(((await cards()) as typeof by).find((x) => x.title === "Needs you")?.waitingOnOwner).toBe(false);
   });
 });
 

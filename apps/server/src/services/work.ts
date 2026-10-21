@@ -3,7 +3,7 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { agents, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
+import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export class WorkError extends Error {
   constructor(
@@ -150,15 +150,28 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         : [];
       const fids = [...new Set(rows.map((r) => r.t.featureId).filter((x): x is string => !!x))];
       const featureTitle = new Map((fids.length ? await db.select({ id: features.id, title: features.title }).from(features).where(inArray(features.id, fids)) : []).map((f) => [f.id, f.title]));
-      const cards = rows.map(({ t, milestoneTarget }) => ({
+      // A ticket in review waits on the owner while the sign-off decision raised after an agent's approval is open (review.approve).
+      const decisionIds = deps.flatMap((d) => (d.blockerDecisionId ? [d.blockerDecisionId] : []));
+      const signoffs = new Map(
+        (decisionIds.length ? await db.select({ id: decisions.id, context: decisions.context }).from(decisions).where(and(inArray(decisions.id, decisionIds), eq(decisions.status, "open"))) : [])
+          .filter((d) => (d.context as { type?: string }).type === "risk_review")
+          .map((d) => [d.id, (d.context as { reviewer?: string }).reviewer ?? null] as const),
+      );
+      const cards = rows.map(({ t, milestoneTarget }) => {
+        const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
+        return {
         ...t,
+        waitingOnOwner: !!waitingDecisionId,
+        waitingDecisionId,
+        approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : null,
         featureTitle: t.featureId ? (featureTitle.get(t.featureId) ?? null) : null,
         parentTitle: rows.find((r) => r.t.id === t.parentTicketId)?.t.title ?? null,
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id).map((d) => ({ ticketId: d.blockerTicketId, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
-      }));
+        };
+      });
       return {
         project: p,
         columns: cols.map((c) => ({
