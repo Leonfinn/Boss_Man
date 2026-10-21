@@ -212,8 +212,8 @@ export function PortalApp() {
   return (
     <main className="portal">
       <header className="page-head">
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {logo && <img src={logo} alt="" style={{ maxHeight: 48, width: "auto" }} />}
+        <div style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
+          {logo && <img src={logo} alt="" style={{ maxHeight: 112, maxWidth: "40vw", width: "auto" }} />}
           <div>
             <h1>{data.title}</h1>
             {data.intro && <p className="sub" style={{ whiteSpace: "pre-wrap" }}>{data.intro}</p>}

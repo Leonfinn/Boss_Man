@@ -717,19 +717,26 @@ ntfy's docs site wasn't reachable when this was written, so these links point at
 
 Each company can have a public feedback portal (see `docs/07-feature-requests.md`). Turn it on under **Feedback > Feedback portal**, and tick **Show on the feedback portal** on the features people may vote on.
 
-The server also has a port that serves only the portal: 3102 on the NAS (`BOSSMAN_PORTAL_HOST_PORT`). By default it's bound to the NAS itself. To let people on your LAN or tailnet reach it, add this line to `.env`:
+The server also has a port that serves only the portal. Inside the container it is 3101; on the NAS it is `BOSSMAN_PORTAL_HOST_PORT`. By default it's bound to the NAS itself (`127.0.0.1`), so nobody else can reach it. To give the portal its own port on your LAN, 3111 here, back up `.env` and set these (check the result with the `grep`):
 
 ```sh
-BOSSMAN_PORTAL_BIND=<nas-ip>
-BOSSMAN_PORTAL_URL=http://<nas-ip>:3102
+cp -p .env .env.before-portal
+setenv() { if grep -q "^$1=" .env; then sed -i "s#^$1=.*#$1=$2#" .env; else echo "$1=$2" >> .env; fi; }
+setenv BOSSMAN_PORTAL_HOST_PORT 3111
+setenv BOSSMAN_PORTAL_BIND <nas-ip>
+setenv BOSSMAN_PORTAL_URL http://<nas-ip>:3111
+grep -E '^BOSSMAN_PORTAL_' .env
 ```
 
-`BOSSMAN_PORTAL_URL` is the portal's address as people reach it. The link to share under **Feedback > Feedback portal** uses it, so it points at the portal's own port rather than your owner UI. Change the port in both lines if you set `BOSSMAN_PORTAL_HOST_PORT` to something else.
+`BOSSMAN_PORTAL_URL` is the portal's address as people reach it. The link to share under **Feedback > Feedback portal** uses it, so it points at the portal's own port rather than your owner UI.
 
-With blue/green (9d) the proxy serves the portal on its own port, 3111 here (`BOSSMAN_PORTAL_HOST_PORT`), and the address in the examples below changes to match. Then restart the server (single-server install):
+Then recreate the server so it picks up the new port (single-server install), and check it:
 
 ```sh
-sudo docker compose up -d server
+docker compose up -d server
+curl -s -o /dev/null -w '%{http_code}\n' http://<nas-ip>:3111/portal.html
 ```
 
-The portal link is `http://<nas-ip>:3102/portal.html#` followed by the secret from the link on the Feedback page; the link the Feedback page shows uses the owner's port, 3101, so swap the port before you share it. To share it more widely, expose port 3102 only, never 3101 (your login), through a reverse proxy or Tailscale Funnel; `docs/07-feature-requests.md` explains what the portal does and doesn't let people do.
+The second line should print `200`. With blue/green (9d), step 4 there sets the same lines and the proxy serves the portal on 3111.
+
+To share it more widely, expose port 3111 only, never 3101 (your login), through a reverse proxy or Tailscale Funnel. `docs/07-feature-requests.md` explains what the portal does and doesn't let people do.
