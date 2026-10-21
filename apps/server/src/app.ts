@@ -373,9 +373,12 @@ export async function buildApp(opts: AppOptions) {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
         if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it" });
       }),
-    landAgain: async (ticketId, skipChecks) => {
-      await review.startLanding(ticketId, "the owner", null, { skipChecks });
-    },
+    // An answer that arrives after the ticket moved on is told to the owner, not thrown back at them.
+    landAgain: (ticketId, skipChecks) =>
+      review.startLanding(ticketId, "the owner", null, { skipChecks }).catch(async (err) => {
+        const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message}`, options: ["Got it"], recommended: "Got it" });
+      }),
     stopTicket: async (ticketId) => {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
       await work.updateTicket(ticketId, { state: "done", outcome: "cancelled", overLimit: true });
