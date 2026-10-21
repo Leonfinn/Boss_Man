@@ -7,6 +7,7 @@ import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
 import { outcomeTag, when } from "../pages/Runs";
+import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
 
 type Message = { id: string; author: "owner" | "agent" | "system"; agent: string | null; runId: string | null; text: string; delivery: string | null; createdAt: string };
@@ -91,7 +92,24 @@ function RunBlock({ run }: { run: RunRow }) {
   );
 }
 
-export function TicketActivity({ ticketId, assignee, assigneeId = null, agents = [] }: { ticketId: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[] }) {
+/** Where the reviews fell in the work: one line when a round was sent for review, one per verdict. The Reviews box keeps the detail. */
+function reviewMarks(reviews: TicketReview[]) {
+  const marks: Array<{ at: string; key: string; text: string; tone: string }> = [];
+  const rounds = new Map<number, TicketReview[]>();
+  for (const r of reviews) rounds.set(r.round, [...(rounds.get(r.round) ?? []), r]);
+  for (const [round, rs] of rounds) {
+    const sent = rs.map((r) => r.createdAt).filter(Boolean).sort()[0];
+    if (sent) marks.push({ at: sent, key: `rs${round}`, text: `Sent for review, round ${round}: ${rs.map((r) => `${r.kind} review by ${r.reviewer ?? "a reviewer"}`).join(", ")}`, tone: "" });
+    for (const r of rs) {
+      if (!r.decidedAt || r.status === "pending" || r.status === "skipped") continue;
+      const note = r.notes?.split("\n").find((l) => l.trim() && !/^Review from /.test(l))?.trim();
+      marks.push({ at: r.decidedAt, key: `rd${r.id}`, text: `${r.reviewer ?? "A reviewer"}, ${r.kind} review round ${round}: ${STATUS[r.status] ?? r.status}${note ? `. ${note.length > 160 ? `${note.slice(0, 160)}…` : note}` : ""}`, tone: r.status === "approved" ? "green" : r.status === "changes_requested" ? "red" : "" });
+    }
+  }
+  return marks;
+}
+
+export function TicketActivity({ ticketId, assignee, assigneeId = null, agents = [], reviews = null }: { ticketId: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null }) {
   const [busy, setBusy] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
@@ -106,8 +124,9 @@ export function TicketActivity({ ticketId, assignee, assigneeId = null, agents =
   useEffect(() => setBusy(live !== null), [live]);
 
   const feed = [
-    ...(convo.data?.items ?? []).map((m) => ({ at: m.createdAt, key: `m${m.id}`, m, r: null as RunRow | null })),
-    ...(runs.data ?? []).map((r) => ({ at: r.startedAt, key: `r${r.id}`, m: null as Message | null, r })),
+    ...(convo.data?.items ?? []).map((m) => ({ at: m.createdAt, key: `m${m.id}`, m, r: null as RunRow | null, mark: null })),
+    ...(runs.data ?? []).map((r) => ({ at: r.startedAt, key: `r${r.id}`, m: null as Message | null, r, mark: null })),
+    ...reviewMarks(reviews ?? []).map((mark) => ({ at: mark.at, key: mark.key, m: null as Message | null, r: null as RunRow | null, mark })),
   ].sort((a, b) => a.at.localeCompare(b.at));
   useEffect(() => end.current?.scrollIntoView({ block: "nearest" }), [feed.length]);
 
@@ -144,8 +163,12 @@ export function TicketActivity({ ticketId, assignee, assigneeId = null, agents =
       <h2 id="activity-h">Activity</h2>
       <div className="activity-feed" role="log" aria-live="polite">
         {feed.length === 0 && convo.data && <p className="muted">No activity yet. When an agent works on this task, you'll see what it's doing here, and you can talk to it below.</p>}
-        {feed.map(({ key, m, r }) =>
-          r ? (
+        {feed.map(({ key, m, r, mark }) =>
+          mark ? (
+            <p key={key} className={`activity-mark ${mark.tone}`}>
+              {mark.text} · {when(mark.at)}
+            </p>
+          ) : r ? (
             <RunBlock key={key} run={r} />
           ) : (
             <div key={key} className={`chat-msg ${m!.author === "agent" ? "assistant" : m!.author}`}>

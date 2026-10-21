@@ -411,7 +411,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </p>
           )}
 
-          <TicketActivity ticketId={t.id} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} />
+          <TicketActivity ticketId={t.id} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">

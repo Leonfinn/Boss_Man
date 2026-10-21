@@ -77,6 +77,33 @@ describe("ticket conversation: who to ask", () => {
   });
 });
 
+describe("ticket activity: where reviews fell", () => {
+  it("puts a line in the feed when a round went to review and when each review was decided, in time order", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/messages")) return json({ live: null, items: [msg({ text: "Both tools check out.", createdAt: "2026-10-21T14:30:00Z" })] });
+        if (url.includes("/runs") && url.includes("/tickets/")) return json([{ id: "r2", agent: "Researcher", startedAt: "2026-10-21T14:27:00Z", endedAt: "2026-10-21T14:29:00Z", outcome: "end_turn" }]);
+        return json([]);
+      }),
+    );
+    const review = (round: number, status: string, createdAt: string, decidedAt: string | null, notes: string | null) => ({ id: `v${round}`, kind: "code", round, seq: 0, status, reviewer: "CEO", notes, overruleReason: null, createdAt, decidedAt });
+    const reviews = [review(2, "approved", "2026-10-21T14:31:00Z", "2026-10-21T14:35:00Z", null), review(1, "changes_requested", "2026-10-21T14:20:00Z", "2026-10-21T14:26:00Z", "Review from CEO (CEO): changes requested.\n\nCrawl4ai is still untested.")];
+    const { container } = render(<TicketActivity ticketId="t1" assignee="Researcher" reviews={reviews} />);
+    await screen.findByText("Both tools check out.");
+    const marks = [...container.querySelectorAll(".activity-mark")].map((e) => e.textContent!.split(" · ")[0]);
+    expect(marks).toEqual([
+      "Sent for review, round 1: code review by CEO",
+      "CEO, code review round 1: Changes requested. Crawl4ai is still untested.",
+      "Sent for review, round 2: code review by CEO",
+      "CEO, code review round 2: Approved",
+    ]);
+    // The rework run sits between the round 1 verdict and round 2.
+    const order = [...container.querySelectorAll(".activity-mark, .run-block")].map((e) => (e.classList.contains("run-block") ? "run" : "mark"));
+    expect(order).toEqual(["mark", "mark", "run", "mark", "mark"]);
+  });
+});
+
 describe("approve and merge", () => {
   const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
   const ticket = { id: "t1", title: "Add limiter", systemState: "review", risk: "medium", repoUrl: "https://x/y.git", defaultBranch: "main", landing: "merge", projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", createdAt: "2026-10-19T09:00:00Z", lastActivityAt: "2026-10-19T09:00:00Z" };

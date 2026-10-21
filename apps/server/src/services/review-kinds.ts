@@ -90,5 +90,5 @@ export async function listReviews(db: Db, ticketId: string) {
     .leftJoin(agents, eq(agents.id, reviewRequests.reviewerAgentId))
     .where(eq(reviewRequests.ticketId, ticketId))
     .orderBy(desc(reviewRequests.round), reviewRequests.seq, reviewRequests.kind)
-    .then((rows) => rows.map(({ r, reviewer }) => ({ id: r.id, kind: r.kind, round: r.round, seq: r.seq, status: r.status, reviewer, reviewerAgentId: r.reviewerAgentId, notes: r.notes, overruleReason: r.overruleReason, decidedAt: r.decidedAt })));
+    .then((rows) => rows.map(({ r, reviewer }) => ({ id: r.id, kind: r.kind, round: r.round, seq: r.seq, status: r.status, reviewer, reviewerAgentId: r.reviewerAgentId, notes: r.notes, overruleReason: r.overruleReason, createdAt: r.createdAt, decidedAt: r.decidedAt })));
 }
