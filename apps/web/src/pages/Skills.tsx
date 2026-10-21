@@ -145,6 +145,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
   const [savedHolders, setSavedHolders] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [open, setOpen] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ name: string; description: string; body: string } | null>(null);
   const s = skill.data;
   if (skill.error) return <p className="error" role="alert">{skill.error.message}</p>;
   if (!s) return null;
@@ -159,6 +160,14 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
     }
   };
   const md = s.files.find((f) => f.path === "SKILL.md")?.text ?? "";
+  // Only a skill that is just its SKILL.md can be edited here; a linked one follows its source.
+  const editable = s.source !== "link" && s.files.length === 1;
+  const save = () =>
+    void run(async () => {
+      await api(`/api/companies/${company.id}/skills/${id}`, { method: "PUT", body: editing });
+      setEditing(null);
+      return "Saved. Agents get the new version from their next run.";
+    });
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }} aria-labelledby="skill-h">
       <header style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -182,6 +191,11 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
+          {editable && !editing && (
+            <button type="button" className="btn" onClick={() => setEditing({ name: s.name, description: s.description, body: stripFrontmatter(md).trim() })}>
+              Edit
+            </button>
+          )}
           {s.source === "link" && (
             <button type="button" className="btn" onClick={() => void run(async () => ((await api<{ changed: boolean }>(`/api/companies/${company.id}/skills/${id}/refresh`, { method: "POST" })).changed ? "Updated to the latest commit." : "Already up to date."))}>
               Check for updates
@@ -225,9 +239,34 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         </p>
       )}
 
-      <section aria-label="SKILL.md">
-        <Markdown text={stripFrontmatter(md)} />
-      </section>
+      {editing ? (
+        <section aria-label="Edit skill" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div className="field">
+            <label htmlFor="edit-skill-name">Name</label>
+            <input id="edit-skill-name" maxLength={64} value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor="edit-skill-desc">What it does and when to use it</label>
+            <input id="edit-skill-desc" maxLength={1024} value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor="edit-skill-body">Instructions, in Markdown</label>
+            <textarea id="edit-skill-body" rows={18} value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" className="btn primary" disabled={!editing.name.trim() || !editing.description.trim()} onClick={save}>
+              Save
+            </button>
+            <button type="button" className="btn" onClick={() => setEditing(null)}>
+              Cancel
+            </button>
+          </div>
+        </section>
+      ) : (
+        <section aria-label="SKILL.md">
+          <Markdown text={stripFrontmatter(md)} />
+        </section>
+      )}
       {s.files.length > 1 && (
         <section aria-labelledby="skill-files-h">
           <h3 id="skill-files-h" style={{ fontWeight: 600, marginBottom: 6 }}>

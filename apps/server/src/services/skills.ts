@@ -244,7 +244,9 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     /** A skill written in Boss Man: its SKILL.md is built from the form. */
     async write(companyId: string, input: { name: string; description: string; body: string; replaceId?: string | null }) {
       const name = skillName(input.name);
-      const md = `---\nname: ${name}\ndescription: ${JSON.stringify(input.description.trim().replace(/\s+/g, " "))}\n---\n\n${input.body.trim()}\n`;
+      // A pasted SKILL.md brings its own front matter; the form's name and description replace it.
+      const body = input.body.trim().replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
+      const md = `---\nname: ${name}\ndescription: ${JSON.stringify(input.description.trim().replace(/\s+/g, " "))}\n---\n\n${body}\n`;
       return save(companyId, { files: [{ path: "SKILL.md", content: b64(md) }], source: "written", name, replaceId: input.replaceId });
     },
 

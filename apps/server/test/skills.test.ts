@@ -159,6 +159,17 @@ describe("skills library (R71)", () => {
     expect(Buffer.from(start.skills![0]!.files[0]!.content, "base64").toString()).toContain("description: \"How we write: short sentences, UK spelling.\"");
   });
 
+  it("edits a written skill, and drops front matter pasted into the instructions", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const [made] = (await c.req("POST", base, { from: "written", name: "web-fetch", description: "Fetch pages.", body: "---\nname: web-fetch\ndescription: old\n---\n# Rules\n\nOne page per call." })).json();
+    const md = async () => (await c.req("GET", `${base}/${made.id}`)).json().files.find((f: { path: string }) => f.path === "SKILL.md").text as string;
+    expect(await md()).toBe('---\nname: web-fetch\ndescription: "Fetch pages."\n---\n\n# Rules\n\nOne page per call.\n');
+    expect((await c.req("PUT", `${base}/${made.id}`, { name: "web-fetch", description: "Fetch public pages as text.", body: "# Rules\n\nTwo pages at most." })).statusCode).toBe(200);
+    expect(await md()).toContain('description: "Fetch public pages as text."');
+    expect(await md()).toContain("Two pages at most.");
+  });
+
   it("lets the CEO give and take skills, and tells the owner", async () => {
     const c = (ctx = await setup());
     await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "triage", description: "Sorts bug reports.", body: "Steps." });
