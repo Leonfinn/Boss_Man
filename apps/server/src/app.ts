@@ -37,6 +37,7 @@ import { ReviewError, reviewService } from "./services/review.js";
 import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { workService, WorkError } from "./services/work.js";
+import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket } from "./services/project-brief.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
@@ -1023,6 +1024,25 @@ export async function buildApp(opts: AppOptions) {
     owner.put("/api/projects/:id/columns", async (req) => {
       const { id } = IdParam.parse(req.params);
       return work.setColumns(id, z.array(Column).parse(req.body));
+    });
+
+    // The project brief: a wiki page the CEO writes from the code. One open brief ticket at a time.
+    const briefStatus = async (projectId: string) => {
+      const [p] = await db.select().from(projects).where(eq(projects.id, projectId));
+      if (!p) return null;
+      const b = await findBrief(db, p.companyId, p.id);
+      return { p, exists: !!b, status: { slug: briefSlug(p.id), exists: !!b, commit: b?.commit ?? null, branch: b?.branch ?? null, updatedAt: b?.updatedAt ?? null, ticketId: (await openBriefTicket(db, p.id))?.id ?? null } };
+    };
+    owner.get("/api/projects/:id/brief", async (req, reply) => (await briefStatus(IdParam.parse(req.params).id))?.status ?? reply.code(404).send({ error: "not_found" }));
+    owner.post("/api/projects/:id/brief", async (req, reply) => {
+      const b = await briefStatus(IdParam.parse(req.params).id);
+      if (!b) return reply.code(404).send({ error: "not_found" });
+      const open = await openBriefTicket(db, b.p.id);
+      if (open) return open;
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, b.p.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (!ceo) throw new WorkError(400, "This company has no CEO to write the brief. Add one first.");
+      const ticket = await work.createTicket(b.p.id, { title: b.exists ? BRIEF_TITLES[1]! : BRIEF_TITLES[0]!, body: briefTicketBody(b.p, b.exists), assigneeAgentId: ceo.id });
+      return reply.code(201).send(ticket);
     });
 
     owner.get("/api/projects/:id/board", async (req) => work.board(IdParam.parse(req.params).id));

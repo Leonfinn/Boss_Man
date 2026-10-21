@@ -254,7 +254,8 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         const clash = slug !== existing.slug ? await bySlug(slug) : undefined;
         if (clash) throw new WikiError(409, `There's already a page at ${slug} ("${clash.title}").`);
       } else {
-        slug = given && input.folder === undefined ? given : pageSlug(folder, given?.split("/").at(-1) ?? title);
+        // An explicit slug is the address, whatever the folder (a project's brief keeps its slug when the project is renamed).
+        slug = given ?? pageSlug(folder, title);
         // Writing a new page where one already is updates that page.
         existing = await bySlug(slug);
       }

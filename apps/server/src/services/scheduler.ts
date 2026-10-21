@@ -23,6 +23,7 @@ import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
+import { briefSlug, findBrief } from "./project-brief.js";
 
 export type Limits = {
   instance: number;
@@ -145,7 +146,7 @@ export function schedulerService(
   async function wikiDuty(agent: typeof agents.$inferSelect) {
     const [last] = await db.select({ at: runs.startedAt }).from(runs).where(eq(runs.agentId, agent.id)).orderBy(desc(runs.startedAt)).limit(1);
     const finished = await db
-      .select({ id: tickets.id, title: tickets.title, outcome: tickets.outcome })
+      .select({ id: tickets.id, title: tickets.title, outcome: tickets.outcome, projectId: tickets.projectId })
       .from(tickets)
       .where(and(eq(tickets.companyId, agent.companyId), eq(tickets.systemState, "done"), last ? gt(tickets.lastActivityAt, last.at) : undefined))
       .orderBy(desc(tickets.lastActivityAt))
@@ -157,18 +158,21 @@ export function schedulerService(
           .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
           .where(inArray(ticketArtifacts.ticketId, finished.map((t) => t.id)))
       : [];
+    const briefs = new Map<string, string>();
+    for (const projectId of new Set(finished.map((t) => t.projectId))) if (await findBrief(db, agent.companyId, projectId)) briefs.set(projectId, briefSlug(projectId));
     return [
       "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
       "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
       "- When finished work produced a document, make sure it's in the wiki, linked to its ticket, and linked from related pages. Read the ticket with tickets read, and a document that's only in the repo with tickets file (it reads the ticket's branch even if it was never merged). Copy it into the wiki with the ticket's id. Write a short summary page if a ticket produced something useful but no page.",
       "- Don't change what a page says is true unless another page or a ticket shows it's out of date; then update it and say what changed at the bottom.",
+      ...(briefs.size ? ["- Some projects have a brief page (listed below with their tickets). When merged work changed a project's objectives, architecture, code structure, conventions or build steps, update the affected sections of that brief by its slug, and update its first line (\"Describes commit <sha> on <branch>.\") to the new commit. Leave it alone if nothing relevant changed."] : []),
       "- Don't create tickets or change code; when something needs doing, tell the owner with notify_owner and a link.",
       "",
       finished.length ? "Tickets finished since your last run, newest first:" : "No tickets have finished since your last run; tidy the wiki and the Index page.",
       ...finished.map((t) => {
         const outs = made.filter((m) => m.ticketId === t.id).map((m) => (m.kind === "wiki_page" ? `wiki page ${m.slug}` : m.kind === "url" ? `link ${m.url}` : `repo file ${m.path}${m.ref ? ` on ${m.ref}` : ""}`));
-        return `- ${t.id} "${t.title}" (${t.outcome ?? "done"})${outs.length ? `: produced ${outs.join("; ")}` : ": nothing attached"}`;
+        return `- ${t.id} "${t.title}" (${t.outcome ?? "done"})${outs.length ? `: produced ${outs.join("; ")}` : ": nothing attached"}${briefs.has(t.projectId) ? `; project brief: ${briefs.get(t.projectId)}` : ""}`;
       }),
     ];
   }
@@ -381,6 +385,9 @@ export function schedulerService(
           lines.push("", `Risk: ${t.t.risk}.${signoff ? " The owner signs it off before it merges." : ""}${serious ? " The project's deeper check runs before it merges, and it deploys to staging before production." : ""}`);
         }
         if (!t.t.risk && (agent.role === "ceo" || agent.role === "manager")) lines.push("", "This ticket has no risk rating yet. Before you delegate it or start work, read it and rate its risk with set_ticket_risk (ticketId, risk, and a one-line reason). The owner sees your rating and reason.");
+        const brief = await findBrief(db, t.t.companyId, t.t.projectId);
+        if (brief)
+          lines.push("", `The project has a brief in the wiki, a map of its code: wiki read slug="${brief.slug}" section="Code map" (sections: ${brief.headings.join(", ")}).${brief.commit ? ` It describes commit ${brief.commit} on ${brief.branch}.` : ""} It is a map, not the source of truth: check the code before you change it, and if the brief is wrong, say so in your ticket.`);
         lines.push("", planningGuidance(t.t.risk));
         lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
