@@ -140,7 +140,7 @@ describe("permission requests through the policy engine", () => {
     ]);
 
     const open = await waitFor(async () => (await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json() as Array<{ id: string; question: string; recommendedOption: string; tier: string }>, (d) => d.length === 1);
-    expect(open[0]).toMatchObject({ question: "CEO wants to run: rm -rf /mnt/tank/apps", recommendedOption: "Deny", tier: "owner" });
+    expect(open[0]).toMatchObject({ question: expect.stringMatching(/^CEO wants to run a command\. Deletes files/), recommendedOption: "Deny", tier: "owner" });
 
     const bad = await ctx.app.inject({ method: "POST", url: `/api/decisions/${open[0]!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Maybe" } });
     expect(bad.statusCode).toBe(422);
@@ -148,6 +148,52 @@ describe("permission requests through the policy engine", () => {
     expect(ans.json()).toMatchObject({ delivered: true });
     await waitFor(() => commands.length, (n) => n === 3);
     expect(commands[2]).toEqual({ type: "permission.decide", runId, requestId: "r3", verdict: "deny" });
+    conn.stop();
+  });
+  it("Allow always answers the request and saves a rule, so the next identical request skips the owner", async () => {
+    const reg = (await ctx.app.inject({ method: "POST", url: `/api/companies/${ctx.homelab.company.id}/runner`, headers: { cookie: ctx.cookie } })).json();
+    const commands: RunnerCommand[] = [];
+    const runId = randomUUID();
+    const conn = new RunnerConnection({
+      url: `ws://${ctx.base}/api/runner/connect`,
+      token: reg.token,
+      journal: new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-")), "j.jsonl")),
+      runnerVersion: "test",
+      heartbeatMs: 200,
+      onCommand: (c) => commands.push(c),
+      pendingPermissions: () => [],
+    });
+    conn.start();
+    await waitFor(() => conn.isLive, Boolean);
+    conn.emit({ type: "run.started", runId, agentId: ctx.homelab.ceo.id, acpSessionId: "s", model: null });
+    const ask = (requestId: string, title: string, command?: string) =>
+      conn.emit({ type: "run.permission_request", runId, requestId, title, kind: command ? "execute" : "other", rawInput: command ? { command } : { url: "https://x.dev" }, optionKinds: ["allow_once", "reject_once"] });
+    const open = async (n: number) => waitFor(async () => (await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json() as Array<{ id: string; question: string; options: string[] }>, (d) => d.length === n);
+
+    // The owner's own deny rule must keep winning over any "always" rule made later.
+    await ctx.db.insert(policyRules).values({ companyId: ctx.homelab.company.id, name: "No crawl4ai JS", trigger: "permission", condition: { titlePattern: "^mcp__crawl4ai__execute_js$" }, outcome: "deny", position: 0 });
+    ask("r1", "mcp__crawl4ai__md");
+    const [d] = await open(1);
+    expect(d!.options).toEqual(["Allow once", "Always allow crawl4ai's md tool", "Always allow every crawl4ai tool", "Deny"]);
+    expect(d!.question).toMatch(/^CEO wants to use a tool/);
+    const ans = await ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Always allow crawl4ai's md tool" } });
+    expect(ans.json()).toMatchObject({ delivered: true });
+    await waitFor(() => commands.length, (n) => n === 1);
+    expect(commands[0]).toEqual({ type: "permission.decide", runId, requestId: "r1", verdict: "allow" });
+    const rules = await ctx.db.select().from(policyRules).where(eq(policyRules.companyId, ctx.homelab.company.id)).orderBy(policyRules.position);
+    expect(rules).toHaveLength(2);
+    expect(rules[0]).toMatchObject({ name: "No crawl4ai JS", position: 0 });
+    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true } });
+    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool \(from a request on \d+ \w+\)$/);
+
+    ask("r2", "mcp__crawl4ai__md");
+    await waitFor(() => commands.length, (n) => n === 2);
+    expect(commands[1]).toEqual({ type: "permission.decide", runId, requestId: "r2", verdict: "allow" });
+    // A different tool of the same server still asks; a command that needs the owner gets no "always".
+    ask("r3", "mcp__crawl4ai__crawl");
+    ask("r4", "rm -rf dist", "rm -rf dist");
+    const all = await open(2);
+    expect(all.find((x) => x.question.includes("Deletes files"))!.options).toEqual(["Allow once", "Deny"]);
     conn.stop();
   });
   it("keeps a policy verdict the runner missed and sends it when the runner reconnects (R22)", async () => {

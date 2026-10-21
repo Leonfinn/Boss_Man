@@ -17,16 +17,20 @@ export type PolicyMatch = {
   commandPattern?: string;
   /** Regular expression tested against the tool call's title. */
   titlePattern?: string;
+  /** Never matches a command the built-in rules send to the owner (destructive, push). Set on rules made by "Allow always". */
+  safeOnly?: boolean;
 };
 
 export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: PolicyOutcome };
 
 const DESTRUCTIVE = String.raw`\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\b|\bmkfs\b|\bdd\s+if=|\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)\b|\bgit\s+push\s+.*--force\b|\bzfs\s+destroy\b|\bshred\b`;
 
+const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
+
 export const DEFAULT_POLICY: PolicyRuleSpec[] = [
   { name: "Boss Man's own tools", match: { titlePattern: String.raw`^(mcp__bossman__|mcp\.bossman\.)` }, outcome: "allow" },
   { name: "Destructive commands go to the owner", match: { commandPattern: DESTRUCTIVE }, outcome: "owner" },
-  { name: "Pushing and publishing go to the owner", match: { commandPattern: String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b` }, outcome: "owner" },
+  { name: "Pushing and publishing go to the owner", match: { commandPattern: PUSHING }, outcome: "owner" },
   { name: "Reading, searching and editing the workspace", match: { kinds: ["read", "search", "edit", "think", "fetch"] }, outcome: "allow" },
   { name: "Other shell commands", match: { kinds: ["execute"] }, outcome: "allow" },
   // Anything else (delete, move, unknown tools) falls through to the owner.
@@ -70,6 +74,10 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);
     const re = safeRegex(rule.commandPattern);
     if (!cmd || !re || !re.test(cmd)) return false;
+  }
+  if (rule.safeOnly) {
+    const cmd = commandOf(info.rawInput) ?? "";
+    if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
   }
   if (rule.titlePattern) {
     const re = safeRegex(rule.titlePattern);

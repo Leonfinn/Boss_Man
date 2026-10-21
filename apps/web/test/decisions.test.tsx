@@ -113,3 +113,35 @@ describe("decision queue", () => {
     expect(screen.getByText("It is waiting on you for a permission answer.")).toBeTruthy();
   });
 });
+
+describe("permission cards", () => {
+  it("lead with plain words and keep the command behind a fold", () => {
+    const explain = { title: "Wiki Maintainer wants to run a command", summary: "Only reads information (the machine's memory); it doesn't change anything.", effect: "reads" as const, command: "grep MemTotal /proc/meminfo", reason: "Check how much memory is available" };
+    render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Allow once", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByRole("heading", { name: explain.title })).toBeTruthy();
+    expect(screen.getByText("Reads only")).toBeTruthy();
+    expect(screen.getByText(explain.summary, { exact: false })).toBeTruthy();
+    expect(screen.getByText("What the agent says it's for: Check how much memory is available")).toBeTruthy();
+    const details = screen.getByText("Show the exact command").closest("details")!;
+    expect(details.hasAttribute("open")).toBe(false);
+    expect(details.textContent).toContain("grep MemTotal /proc/meminfo");
+    expect(document.body.textContent!.split("grep MemTotal").length).toBe(2);
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
+  });
+});
+
+describe("Allow always", () => {
+  const explain = { title: "Researcher wants to use a tool", summary: "Uses the tool.", effect: "unknown" as const };
+  it("offers the scopes as buttons and says where the rule went", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+    const always = [{ label: "Always allow crawl4ai's md tool" }, { label: "Always allow every crawl4ai tool" }];
+    render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", ...always.map((a) => a.label), "Deny"], context: { type: "permission", explain, always } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByRole("button", { name: "Always allow every crawl4ai tool" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Always allow crawl4ai's md tool" }));
+    await waitFor(() => expect(screen.getByText(/Saved as a rule in Settings → Rules\./)).toBeTruthy());
+  });
+  it("says why a command has no always option", () => {
+    render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission", explain: { ...explain, alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText(/doesn't offer 'always'/)).toBeTruthy();
+  });
+});

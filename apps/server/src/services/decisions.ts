@@ -9,6 +9,10 @@ import {
   rankDecision,
   recommendedVerdict,
   type BlockedTicket,
+  alwaysChoices,
+  explainPermission,
+  type AlwaysChoice,
+  type PermissionExplanation,
   type PermissionInfo,
   type PolicyRuleSpec,
   type RunnerCommand,
@@ -23,7 +27,7 @@ type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[] }
   | { type: "engagement"; engagementId: string }
   | { type: "question" }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -334,17 +338,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, event.runId));
       const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
-      const what = (event.rawInput as { command?: unknown } | null)?.command;
-      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId };
+      const explain = explainPermission(info, agent?.name ?? "An agent");
       // A CEO never approves its own request: those go to the owner.
       const tier = outcome === "ceo" && agent?.role === "ceo" ? "owner" : outcome;
+      // Standing rules are the owner's call, never an agent's.
+      const always = tier === "owner" ? alwaysChoices(info, explain) : [];
+      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, explain, ...(always.length ? { always } : {}) };
       const [row] = await db
         .insert(decisions)
         .values({
           companyId: runner.companyId,
           kind: "permission",
-          question: `${agent?.name ?? "An agent"} wants to run: ${typeof what === "string" ? what : (event.title ?? "a tool")}`,
-          options: [ALLOW, DENY],
+          question: `${explain.title}. ${explain.summary}`,
+          options: [ALLOW, ...always.map((a) => a.label), DENY],
           recommendedOption: recommendedVerdict(info) === "deny" ? DENY : ALLOW,
           raisedByAgentId: run?.agentId ?? null,
           tier,
@@ -583,6 +589,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (options.length > 0 && !ownWords && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
       const ctx = d.context as DecisionContext;
+      // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
+      const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
+      if (always) {
+        const [last] = await db.select({ position: policyRules.position }).from(policyRules).where(and(eq(policyRules.trigger, "permission"), eq(policyRules.companyId, d.companyId))).orderBy(desc(policyRules.position)).limit(1);
+        const on = now().toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+        await db.insert(policyRules).values({ companyId: d.companyId, name: `${always.name} (from a request on ${on})`, trigger: "permission", condition: always.match, outcome: "allow", position: (last?.position ?? -1) + 1 });
+        answer = ALLOW;
+      }
       await db
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again.
