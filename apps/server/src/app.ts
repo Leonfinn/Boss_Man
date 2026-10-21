@@ -37,6 +37,7 @@ import { ReviewError, reviewService } from "./services/review.js";
 import { effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
+import { record } from "./services/activity.js";
 import { workService, WorkError } from "./services/work.js";
 import { BRIEF_TITLES, briefSlug, briefTicketBody, findBrief, openBriefTicket, refreshBriefs } from "./services/project-brief.js";
 import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
@@ -1310,6 +1311,21 @@ export async function buildApp(opts: AppOptions) {
       // A per-ticket spend ceiling across all its runs (R53); null falls back to the project's default.
       if (costCapUsd !== undefined) await db.update(tickets).set({ costCapMicros: costCapUsd === null ? null : usdToMicros(costCapUsd) }).where(eq(tickets.id, id));
       return work.updateTicket(id, fields);
+    });
+
+    // The owner moves a ticket by hand (e.g. to unstick it). Done skips the merge: it is the owner's call.
+    owner.post("/api/tickets/:id/state", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const { state } = z.object({ state: State }).parse(req.body);
+      const moved = await work.updateTicket(id, { state });
+      const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
+      await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
+      // Nobody should start work on a ticket the owner has parked or closed.
+      if (state === "done" || state === "backlog" || state === "blocked")
+        await db.update(wakes).set({ status: "dropped", statusReason: `The owner moved the ticket to ${label}.` }).where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"])));
+      if (state === "review") await scheduler.onTicketReview(id, null);
+      if ((state === "in_progress" || state === "ready") && moved.assigneeAgentId) await scheduler.notify(moved.assigneeAgentId, { ticketId: id, reason: "woken by owner", note: `The owner moved this ticket to ${label}.` });
+      return moved;
     });
 
     // A watcher agent that reports the ticket's progress every so often (R80); agentId null turns it off.

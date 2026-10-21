@@ -100,6 +100,15 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  const moveTo = async (state: string) => {
+    if (state === "done" && !window.confirm("Mark done without merging? Any unmerged work on its branch stays on the branch.")) return;
+    try {
+      await api(`/api/tickets/${id}/state`, { method: "POST", body: { state } });
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   /** The watcher (R80): an agent that posts a short status update every so often. */
   const watch = async (agentId: string | null, everyMinutes?: number) => {
     try {
@@ -420,6 +429,15 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dt>Status</dt>
             <dd>
               <span className={`tag ${STATE_TONE[t.systemState] ?? ""}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
+              <select aria-label="Change status" value="" onChange={(e) => e.target.value && void moveTo(e.target.value)}>
+                <option value="">Change…</option>
+                {Object.entries(STATE_LABEL).map(([k, label]) => (
+                  <option key={k} value={k} disabled={k === t.systemState}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+              <small className="muted" style={{ display: "block" }}>Done closes it without merging. In review asks the reviewers; Ready and In progress wake the assignee.</small>
             </dd>
             <dt>
               <label htmlFor="t-assignee">{t.systemState === "review" ? "Written by" : "Assigned to"}</label>

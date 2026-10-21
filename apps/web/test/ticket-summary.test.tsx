@@ -213,3 +213,32 @@ describe("task page", () => {
     expect(screen.queryByRole("button", { name: /Description/ })).toBeNull();
   });
 });
+
+describe("owner moves the status", () => {
+  const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
+  it("posts the chosen state, and asks first before Done", async () => {
+    const posts: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/tickets/t1/state" && init?.method === "POST") return posts.push(JSON.parse(String(init.body))), json({});
+        if (url === "/api/tickets/t1") return json({ id: "t1", title: "Docs", systemState: "in_progress", risk: "low", projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", createdAt: "2026-10-19T09:00:00Z", lastActivityAt: "2026-10-19T09:00:00Z" });
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json({});
+      }),
+    );
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValue(true);
+    render(<Ticket id="t1" companies={[company]} />);
+    const pick = await screen.findByLabelText("Change status");
+    fireEvent.change(pick, { target: { value: "done" } });
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("without merging"));
+    expect(posts).toEqual([]);
+    fireEvent.change(pick, { target: { value: "done" } });
+    await waitFor(() => expect(posts).toEqual([{ state: "done" }]));
+    fireEvent.change(pick, { target: { value: "review" } });
+    await waitFor(() => expect(posts.at(-1)).toEqual({ state: "review" }));
+  });
+});
