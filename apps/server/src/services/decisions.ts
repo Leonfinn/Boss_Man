@@ -45,6 +45,8 @@ export type DecisionContext =
   | { type: "project_cap"; projectId: string }
   | { type: "budget_limit"; policyId: string }
   | { type: "risk_review"; ticketId: string; reviewer: string }
+  /** The merge check was killed or timed out: the owner's call, not the agent's. */
+  | { type: "check_stuck"; ticketId: string; command: string; output: string }
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
   | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string }; byAgentId: string }
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
@@ -64,6 +66,9 @@ export const APPROVE_PLAN = "Approve plan";
 export const KEEP_PLANNING = "Keep planning";
 export const APPROVE_MERGE = "Approve and merge";
 export const SEND_IT_BACK = "Send it back";
+export const CHECK_AGAIN = "Run the check again";
+export const CHECK_SEND_BACK = "Send it back to the agent";
+export const CHECK_SKIP = "Merge without the check";
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
 export const NOT_NOW = "Not now";
@@ -94,6 +99,8 @@ export type LoopHooks = {
   raiseCap(ticketId: string): Promise<unknown>;
   /** Merges an approved ticket once the owner has signed off on it (R48). */
   land(ticketId: string, reviewer: string): Promise<unknown>;
+  /** Lands again in the background after a check that couldn't finish; `skipChecks` merges without it. */
+  landAgain(ticketId: string, skipChecks: boolean): Promise<unknown>;
 };
 
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
@@ -606,7 +613,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       await db
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again.
-        .set({ status: "answered", answer, answeredAt: now(), ...(ctx.type === "stale_blocker" ? { dedupeKey: null } : {}) })
+        .set({ status: "answered", answer, answeredAt: now(), ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" ? { dedupeKey: null } : {}) })
         .where(eq(decisions.id, id));
 
       let delivered: boolean | null = null;
@@ -679,6 +686,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
         if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
+      } else if (ctx.type === "check_stuck") {
+        if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but the check \`${ctx.command}\` couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");
+        else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
       } else if (ctx.type === "budget_limit") {
         const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
         if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));
