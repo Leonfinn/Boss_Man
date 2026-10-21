@@ -128,6 +128,11 @@ main() {
     *) die "Unknown option: $1" ;; esac; shift; done
 
   cd "$(dirname "${BASH_SOURCE[0]}")/.."
+  # With blue/green the server is two colours behind a proxy; this script knows only the single server. Swaps are the host deployer's job.
+  local cf="${COMPOSE_FILE:-$(grep -s '^COMPOSE_FILE=' .env | tail -1 | cut -d= -f2- || true)}"
+  if [[ $cf == *truenas-bluegreen.yml* ]] && ((! DRY)); then
+    die "This install uses blue/green (truenas-bluegreen.yml in COMPOSE_FILE): server swaps are done by the host deployer. For a change to deploy/ or docker-compose.yml, see docs/06-install-truenas.md, 9d. To go back to a single server, see the same section."
+  fi
   STARTED="$(now)"; trap on_exit EXIT
   ((DRY)) && say "DRY RUN: nothing below is actually changed."
   ((ROLLBACK)) && { do_rollback; exit 0; }

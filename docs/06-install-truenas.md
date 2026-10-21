@@ -448,7 +448,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 ```
 
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
-- Optional lines: `REPO=` (the checkout; default `$D/../src`) and `RATE_LIMIT_SECONDS=600`.
+- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`.
 - The script refuses to start if this file is not owned by the user running it with mode 600.
 - It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
 
@@ -577,6 +577,124 @@ Keep the dump from step 1 until you're happy with v1.2. Going back means restori
 
 The `db` image changed from `postgres:17-alpine` to `pgvector/pgvector:0.8.7-pg17-bookworm`, Postgres 17 with the pgvector extension. The two images use different base systems, so start with a **fresh database volume**: there is no dump and restore path (this alpha has one user). Stop the stack, delete the database folder (`$BOSSMAN_DATA/postgres` on TrueNAS, or the `db-data` volume with plain compose), then `docker compose up -d`. Semantic search itself is off until you turn it on in **Wiki > Semantic search**.
 
+## 9d. Switch to blue/green (optional)
+
+With this, a server update has no "Boss Man is down for a minute" gap: the new version starts next to the old one, is checked, and takes over; the old one stays up for 15 minutes so the deployer can switch back by itself if checks fail. How it works, what it checks and what it cannot: `docs/09-self-deploy.md`, "Phase 3, part 2". It needs the host deployer (9a) already working. **Nothing here has been run on a real NAS yet; the steps are written from the repo's tests.** Do them with the stack quiet (no important agent runs), because step 6 is one planned stop of 1 to 2 minutes.
+
+Root shell, no `sudo`. Set the variables once:
+
+```sh
+D=/mnt/NVME_Apps/Container_files/boss-man/deployer
+cd /mnt/NVME_Apps/Container_files/boss-man/src
+```
+
+**1. Get the new files onto the NAS, by hand** (they are in `deploy/` and `scripts/`, which the deployer refuses to deploy). Boss Man keeps running as a single server:
+
+```sh
+scripts/deploy.sh
+cp scripts/host-deployer.sh $D/host-deployer.sh && chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
+ls deploy/truenas-bluegreen.yml deploy/caddy/Caddyfile
+```
+
+(Read the new `host-deployer.sh` first, as in 9a step 3.) Docker Compose must be 2.24 or newer for the compose file: `docker compose version`.
+
+**2. Back up `.env` and the database.**
+
+```sh
+cp -p .env .env.before-bluegreen
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/before-bluegreen.sql.gz
+ls -l .env.before-bluegreen /mnt/NVME_Apps/Container_files/boss-man/before-bluegreen.sql.gz
+```
+
+**3. Create the proxy folder, owned by root, with the first include.** Nothing a container can write to may hold this file:
+
+```sh
+mkdir -p $D/proxy && chown root:root $D/proxy && chmod 755 $D/proxy
+cat > $D/proxy/active.caddy <<'EOF'
+# Written by host-deployer.sh. Do not edit. Live colour: blue
+(active) {
+	reverse_proxy server-blue:{args[0]} {
+		health_uri {args[1]}
+		health_interval 2s
+		health_timeout 2s
+	}
+}
+EOF
+chmod 644 $D/proxy/active.caddy
+```
+
+**4. Settings in `.env`.** UI on 3101 and the portal on 3111 stay settings. This helper replaces a line or adds it; check the result:
+
+```sh
+setenv() { if grep -q "^$1=" .env; then sed -i "s#^$1=.*#$1=$2#" .env; else echo "$1=$2" >> .env; fi; }
+setenv BOSSMAN_HOST_PORT 3101
+setenv BOSSMAN_PORTAL_HOST_PORT 3111
+setenv BOSSMAN_PORTAL_BIND 192.168.68.67
+setenv BOSSMAN_PORTAL_URL http://192.168.68.67:3111
+grep -q '^BOSSMAN_DEPLOYER=' .env || echo "BOSSMAN_DEPLOYER=$D" >> .env
+sed -i 's#^COMPOSE_FILE=.*#&:deploy/truenas-bluegreen.yml#' .env
+grep -E '^(COMPOSE_FILE|BOSSMAN_HOST_PORT|BOSSMAN_PORTAL_HOST_PORT|BOSSMAN_PORTAL_BIND|BOSSMAN_PORTAL_URL|BOSSMAN_DEPLOYER|BOSSMAN_BIND)=' .env
+```
+
+`COMPOSE_FILE` must now end in `:deploy/truenas-bluegreen.yml`. `BOSSMAN_BIND` (the address the UI listens on) is unchanged: it must be the NAS address you use for `http://192.168.68.67:3101` (the proxy uses the same variable the server did). Use the same address in the browser as today, so the login cookie keeps working. Check the compose file renders: `docker compose config -q && echo ok`.
+
+**5. First bring-up, in this order.** The image for blue is built and the database migrated before anything starts. Do not run a bare `docker compose up -d` during this.
+
+```sh
+BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+```
+
+**6. The cutover (the one planned stop).** The old single server and its ports go; the proxy and blue take over. The runners reconnect by themselves (their address, `ws://server:3100`, now points at the proxy):
+
+```sh
+docker ps --filter name=boss-man-server-1 --format '{{.Names}}'     # must print boss-man-server-1
+docker stop boss-man-server-1 && docker rm boss-man-server-1
+docker compose up -d --no-deps proxy server-blue
+docker compose ps proxy server-blue
+```
+
+Wait for both to say `healthy`. Then check, using your NAS address:
+
+```sh
+curl -s http://192.168.68.67:3101/api/ready; echo
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.68.67:3111/portal.html
+grep 'Live colour' $D/proxy/active.caddy
+docker compose logs server-blue | grep 'LEADER: \*\*\*'
+```
+
+The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Runner** should show each company's runner `Connected` within a minute. If it does not: step "Go back" below.
+
+**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in 9a step 5) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`. The status in **Settings > Updates** says which colour is live. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
+
+**Which colour is live?**
+
+```sh
+grep 'Live colour' $D/proxy/active.caddy
+docker compose ps --format '{{.Service}} {{.Status}}' | grep server-
+curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the commit it was built from
+```
+
+**What the deployer will not do for you**
+- A change to `deploy/caddy/Caddyfile`, the compose files or `scripts/` is refused by the deployer (infra) and `scripts/deploy.sh` refuses to run on this install. By hand: `git merge --ff-only origin/main`, then for the Caddyfile `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`; for compose changes, the next swap recreates the idle colour with them, and the proxy with `docker compose up -d --no-deps proxy` (a few seconds without the UI). UNVERIFIED.
+- Copy a changed `host-deployer.sh` over `$D/host-deployer.sh` as in 9a.
+- Runner updates are unchanged (the drain); they never touch the proxy.
+
+**Go back to a single server** (any time, also if step 6 misbehaves):
+
+```sh
+docker compose stop proxy server-blue server-green
+docker compose rm -f proxy server-blue server-green
+rm -f $D/state/soak
+cp -p .env.before-bluegreen .env        # the COMPOSE_FILE and port lines as they were
+docker compose up -d server
+docker compose ps server
+```
+
+If you edited `.env` after the backup, copy those changes back by hand instead of the whole file. Keep `$D/proxy` or delete it; nothing reads it without the opt-in. The images `boss-man-server:blue` and `:green` can be removed with `docker image rm`.
+
+**Things that stay UNVERIFIED until you have done it on the NAS:** the commands in step 6 and the swap on a real Docker (the repo tests use a pretend Docker); `wget` and `caddy reload` inside the Caddy container; whether runners reconnect without being recreated after a swap (they should: their journal replays); the 15-minute and timeout defaults.
+
 ## 10. Phone notifications (optional)
 
 Boss Man can push pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44). Boss Man only makes outbound requests to it, so nothing new is exposed at the router.
@@ -608,7 +726,7 @@ BOSSMAN_PORTAL_URL=http://<nas-ip>:3102
 
 `BOSSMAN_PORTAL_URL` is the portal's address as people reach it. The link to share under **Feedback > Feedback portal** uses it, so it points at the portal's own port rather than your owner UI. Change the port in both lines if you set `BOSSMAN_PORTAL_HOST_PORT` to something else.
 
-Then restart the server:
+With blue/green (9d) the proxy serves the portal on its own port, 3111 here (`BOSSMAN_PORTAL_HOST_PORT`), and the address in the examples below changes to match. Then restart the server (single-server install):
 
 ```sh
 sudo docker compose up -d server

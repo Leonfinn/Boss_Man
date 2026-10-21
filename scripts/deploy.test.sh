@@ -48,4 +48,9 @@ grep -q "compose up -d" "$FAKE_LOG" || { echo "FAIL: did not restart"; exit 1; }
 git reset -q --hard "$three"
 if PATH="$t/bin:$PATH" scripts/deploy.sh --no-runner --commit "$two" >/dev/null 2>&1; then echo "FAIL: went backwards"; exit 1; fi
 if scripts/deploy.sh --commit abc >/dev/null 2>&1; then echo "FAIL: short hash accepted"; exit 1; fi
+# A blue/green install is not deployed by this script.
+git reset -q --hard "$one"; : >"$FAKE_LOG"
+if COMPOSE_FILE=docker-compose.yml:deploy/truenas-bluegreen.yml PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/bg.out" 2>&1; then echo "FAIL: deploy.sh ran on a blue/green install"; exit 1; fi
+grep -q "blue/green" "$t/bg.out" || { echo "FAIL: blue/green guard message"; exit 1; }
+[[ ! -s $FAKE_LOG ]] || { echo "FAIL: blue/green guard ran docker"; exit 1; }
 echo "deploy.test.sh: ok"

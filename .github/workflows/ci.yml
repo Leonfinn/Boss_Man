@@ -91,6 +91,22 @@ jobs:
           grep -q "source: /mnt/tank/boss-man/deployer/inbox" merged-deployer.yml
           grep -q "source: /mnt/tank/boss-man/deployer/outbox" merged-deployer.yml
           grep -q "BOSSMAN_DEPLOYER_DIR: /run/deployer" merged-deployer.yml
+      - name: Blue/green override renders, the proxy owns the name "server", and nothing but the launcher has the Docker socket
+        run: |
+          export POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer
+          docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-bluegreen.yml --profile runners --profile migrate --profile launcher config > merged-bg.yml
+          for s in proxy server-blue server-green migrate; do grep -q "^  $s:" merged-bg.yml; done
+          ! grep -q "^  server:" merged-bg.yml
+          grep -A4 "aliases:" merged-bg.yml | grep -q "^ *- server$"
+          grep -q "source: /mnt/tank/boss-man/deployer/proxy" merged-bg.yml
+          test "$(grep -c 'source: /var/run/docker.sock' merged-bg.yml)" = 1
+          # Without the file the single server is unchanged.
+          docker compose -f docker-compose.yml -f deploy/truenas.yml config | grep -q "^  server:"
+      - name: The Caddyfile and a generated include validate with the pinned Caddy
+        run: |
+          mkdir -p active
+          printf '(active) {\n\treverse_proxy server-blue:{args[0]} {\n\t\thealth_uri {args[1]}\n\t}\n}\n' > active/active.caddy
+          docker run --rm -v "$PWD/deploy/caddy:/etc/caddy:ro" -v "$PWD/active:/etc/caddy-active:ro" caddy:2.11.7 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Shell script tests (deploy.sh and the host deployer)
         run: |
           sudo apt-get install -y shellcheck >/dev/null

@@ -235,6 +235,56 @@ PGlite (no `DATABASE_URL`) has no cross-process locks, so it is always the leade
 
 **If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; the leader connection sets `idle_session_timeout = 30s`, so Postgres ends a dead holder within about 30 s) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
 
+## Phase 3, part 2: blue/green swap (optional)
+
+Opt-in. An install that does not add `deploy/truenas-bluegreen.yml` to `COMPOSE_FILE` runs exactly as before, and the host deployer calls `scripts/deploy.sh` as in phase 1. Install steps: `docs/06-install-truenas.md`, section 9d.
+
+**What is added**
+
+- `deploy/truenas-bluegreen.yml`: a **proxy** (Caddy 2.11.7; the tag exists on Docker Hub, checked 20 Oct 2026) that owns the host ports (UI `BOSSMAN_HOST_PORT`, portal `BOSSMAN_PORTAL_HOST_PORT`) and the network name `server`, so the runners' `ws://server:3100/api/runner/connect` and the launcher's settings are unchanged. Two server services, `server-blue` and `server-green` (images `boss-man-server:blue` and `:green`, both `BOSSMAN_ROLE=auto`, healthcheck on `/api/ready`, `BOSSMAN_MIGRATE_ON_START=0`), and a one-shot `migrate` service. The base `server` service is parked behind a profile. No new service gets `docker.sock`; the launcher is unchanged.
+- `deploy/caddy/Caddyfile` (in the repo, static) with two sites, `:3100` (UI, API, runner websocket) and `:3101` (portal), both importing the snippet `active` from `$BOSSMAN_DEPLOYER/proxy/active.caddy`. That file is **host-owned**: root-owned folder outside the checkout, mounted read-only into the proxy (the folder, not the file, because a rename gives the file a new inode). The snippet names the live colour and turns on Caddy's active health check (`/api/ready` for the UI, `/portal.html` for the portal, every 2 s).
+- Caddy's admin API listens on `localhost:2019` inside the proxy container only and is not published. The host reloads with `docker compose exec proxy caddy reload`, which talks to it from inside. Tested with a real Caddy 2.11.7 binary: validate, reload, and the colour flip all work; a stream open during the reload is not cut.
+
+**A swap** (`target: server`, only when opted in; the same request, approval, rate limit, one-time id and tip-of-main rules as phase 1; the same `flock`)
+
+```
+1. backup (pg_dump, checked)                                        failure: nothing changed
+2. fast-forward the checkout to the vetted commit
+3. build the idle colour at that commit (BOSSMAN_COMMIT build arg)  } failure in 3-7: the idle colour is
+4. migrate (expand-only; the live colour keeps working)             } stopped, the checkout is put back,
+5. start the idle colour (it is a standby: the live one holds the   } status failed + webhook, the live
+   leader lock)                                                     } colour was never touched
+6. wait for /api/ready: role standby, commit = the target
+7. smoke test: login-free read (GET /api/setup) straight from it
+8. SIGUSR1 the live colour (demote); wait until it reports standby  } failure from here: switch back
+9. SIGUSR2 the idle colour (promote); wait until it is leader       }
+10. rewrite active.caddy (tmp in the root-only state folder, rename), caddy validate, caddy reload
+11. verify through the proxy: /api/ready is leader at the target commit; the portal answers
+12. status deployed; the old colour stays up as a standby for 15 minutes (state/soak holds the deadline)
+```
+
+The live colour is whatever `active.caddy` names; no second record exists to disagree with it. A server swap does not touch runners. A runner update stays the phase 2 drain (`update-runner.sh`); the shared `flock` keeps the two from overlapping.
+
+**Rollback**
+
+- **During the swap** (step 8 onwards fails): reverse it: SIGUSR1 the new colour, SIGUSR2 the old, restore the include, reload, check through the proxy, stop the new colour, put the checkout back. Status `rolled_back`, webhook.
+- **During the 15 minutes**: every cron tick re-checks through the proxy (leader, target commit, portal; it retries for 10 s first). If that fails, the same reversal runs on its own. Status `rolled_back`, webhook. After the deadline a tick stops the old colour and the soak ends. Approving a new deploy during the soak ends it (the old colour's container is about to be rebuilt).
+- If the reversal itself fails, status `failed` and the webhook say so: the NAS needs a person.
+- A colour that was demoted (SIGUSR1) does not contest the lock until promoted, so during the soak there is no automatic fail-over from a crashed new colour to the old one; the tick's check is what notices it, within a minute.
+- Rollback is only safe because the previous release runs on the next one's schema (expand-only migrations, phase 3 part 1 and the migration lint). A release that contracts the schema needs a database restore to go back.
+
+**Why both colours are `auto`, not one `standby`:** a container Docker restarts keeps its environment. A colour created as `standby` that was later promoted would come back after a restart with nobody leading. With `auto` a restarted colour contests the lock and gets it if no one has it. The idle colour is still a standby, because the live one holds the lock; step 6 checks exactly that.
+
+**Infra files stay infra.** `deploy/caddy/Caddyfile`, `deploy/truenas-bluegreen.yml` and compose files match the existing infra rule, so a change to them is refused by the deployer and is applied by hand (docs/06, 9d). `scripts/deploy.sh` refuses to run on an opted-in install (it knows only the single server).
+
+**What is verified**
+
+- `scripts/host-deployer.test.sh` (fake docker, fake world, real git and webhook): opt-in detection (environment and `.env`); the happy path order (backup, build at the commit, migrate, start, probe, smoke, USR1, USR2, validate, reload, verify); the include rewritten whole, mode 644, nothing in the server-writable inbox, no stray file in the proxy folder; a world-writable proxy folder refused; a failed smoke test (no demotion, idle stopped, failure webhook); a failed migration; a stopped proxy; a failed check after the flip (full reversal, `rolled_back`, webhook); an automatic switch-back during the soak; the old colour stopped on a later tick after the deadline; the infra rule still refusing a Caddyfile change.
+- CI renders `docker-compose.yml + truenas.yml + truenas-bluegreen.yml`, checks the proxy has the alias `server`, the base `server` is parked, only the launcher has `docker.sock`, the default render is unchanged, and validates the Caddyfile and a generated include with `caddy:2.11.7`.
+- Locally with a real Caddy binary: the Caddyfile and the generated include validate in both colours; reload switches upstream; health URIs and upstream names come out as intended.
+
+**Not verified (no Docker daemon was available)**: anything that needs a running Docker on the NAS: `docker compose kill -s`, `exec`, `run --rm migrate` against a real stack; busybox `wget` and `caddy reload` inside the `caddy:2.11.7` container (used by the healthcheck and the probes); the `!override` / `!reset` compose tags on your Docker Compose version (needs 2.24 or newer; the CI runner renders them); two real servers handing over the lock through the real signals; runners reconnecting through the proxy (the swap does not check this; the design asked for a per-company "Connected" check, which needs a login-free endpoint that does not exist yet); the timing defaults (30 s hand-over wait, 120 s ready wait, 15 minutes).
+
 ## Open items
 
 1. Is the infra list complete? Anything the stack reads at start-up that lives in the repo and is not in step 6 belongs on it.

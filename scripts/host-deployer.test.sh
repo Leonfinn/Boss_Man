@@ -4,7 +4,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d)"; trap 'kill "${hook_pid:-0}" 2>/dev/null || true; rm -rf "$T"' EXIT
-fail() { echo "FAIL: $*"; exit 1; }
+fail() { echo "FAIL: $*"; [[ -z ${DEBUG:-} ]] || { cat "${DL:-/dev/null}" "$D/deployer.log"; }; exit 1; }
 has() { grep -qF -- "$2" "$1" || fail "$1 lacks: $2 (has: $(cat "$1" 2>/dev/null))"; }
 hasnt() { ! grep -qF -- "$2" "$1" 2>/dev/null || fail "$1 should not have: $2"; }
 jget() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
@@ -40,6 +40,7 @@ push() { # file: change a file and push main; prints the new sha
 c1="$(push apps/server/a)"
 
 D="$T/deployer"; mkdir -p "$D/inbox" "$D/outbox"
+unset COMPOSE_FILE
 export BOSSMAN_DEPLOYER="$D" STUB_LOG="$T/stub.log" BOSSMAN_DEPLOY_STATUS="$T/deploy-status.json" BOSSMAN_BACKUP_DIR="$T/backups"
 : >"$STUB_LOG"
 # A webhook listener that appends each POST body to a file, on a free port.
@@ -172,5 +173,164 @@ if "$here/host-deployer.sh" >/dev/null 2>&1; then fail "world-readable config ac
 chmod 600 "$D/host.conf"
 a="$(grep -o "^RUNNER_PATHS='[^']*'" "$here/host-deployer.sh" | sed "s/^RUNNER_PATHS='//; s/'\$//")"
 grep -qF -- "grep -Eq '$a'" "$here/deploy.sh" || fail "runner paths differ between host-deployer.sh and deploy.sh"
+
+# ================= Blue/green (opt-in): fake docker, fake world =================
+# The script resets PATH, so the tests run a copy that looks in our fake bin first.
+mkdir -p "$T/bin"; sed "s#^export PATH=.*#export PATH=$T/bin:\$PATH#" "$here/host-deployer.sh" >"$T/hd.sh"; chmod +x "$T/hd.sh"
+grep -q "$T/bin" "$T/hd.sh" || fail "could not point the script copy at the fake docker"
+W="$T/world"; DL="$T/docker.log"
+cat >"$T/bin/docker" <<'FAKE'
+#!/usr/bin/env bash
+# A tiny pretend Docker: a world of two colours, a proxy, and files for their state.
+[[ $1 == compose ]] || exit 99
+shift; a="$*"; echo "docker $a" >>"$DL"
+role() { cat "$W/role.$1" 2>/dev/null || echo down; }
+ready() { # colour: the JSON /api/ready would print
+  [[ -e $W/running.$1 ]] || exit 1
+  printf '{"ok": true, "db": true, "version": "1", "commit": "%s", "role": "%s"}\n' "$(cat "$W/commit.$1")" "$(role "$1")"
+}
+case "$a" in
+  "ps -q "*) x=${a#ps -q }; x=${x#server-}; [[ -e $W/running.$x ]] && echo cid ;;
+  "exec -T db pg_dump"*) echo dump ;;
+  "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
+  "run --rm migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
+  "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
+  "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
+  "kill -s USR2 server-"*) c=${a##*server-}; echo "signal USR2 $c" >>"$DL"; echo leader >"$W/role.$c" ;;
+  "stop server-"*) c=${a##*server-}; rm -f "$W/running.$c"; echo "stopped $c" >>"$DL" ;;
+  "exec -T server-"*)
+    c=${a#exec -T server-}; c=${c%% *}
+    case "$a" in
+      *"/api/setup"*) [[ -z ${FAKE_SMOKE_FAIL:-} ]] || exit 1; echo '{"needsSetup":false}' ;;
+      *) ready "$c" ;;
+    esac ;;
+  "exec -T proxy wget"*)
+    live=$(sed -n 's/^[[:space:]]*reverse_proxy server-\(blue\|green\):.*/\1/p' "$BOSSMAN_DEPLOYER/proxy/active.caddy")
+    [[ ${FAKE_VERIFY_FAIL:-} != "$live" ]] || exit 1
+    case "$a" in *portal.html*) echo '<html>'; exit 0 ;; esac
+    ready "$live" ;;
+  "exec -T proxy caddy validate"*) [[ -z ${FAKE_VALIDATE_FAIL:-} ]] || exit 1; echo "validate sees $(sed -n 's/.*Live colour: //p' "$BOSSMAN_DEPLOYER/proxy/active.caddy")" >>"$DL" ;;
+  "exec -T proxy caddy reload"*) echo "reload now $(sed -n 's/.*Live colour: //p' "$BOSSMAN_DEPLOYER/proxy/active.caddy")" >>"$DL" ;;
+  *) echo "fake docker: unhandled: $a" >&2; exit 98 ;;
+esac
+FAKE
+chmod +x "$T/bin/docker"
+export DL W
+live_is() { grep -q "Live colour: $1" "$D/proxy/active.caddy" || fail "proxy include should name $1: $(cat "$D/proxy/active.caddy")"; }
+order() { # log-file pattern...: each pattern must appear after the previous one
+  local f=$1 n=0 m; shift
+  for pat in "$@"; do
+    m=$(tail -n +"$((n + 1))" "$f" | grep -n -m1 -- "$pat" | cut -d: -f1) || true
+    [[ -n $m ]] || fail "order: '$pat' not found after line $n in $f"
+    n=$((n + m))
+  done
+}
+reset_world() {  # live colour = $1, leading at commit $2
+  local idle=green; [[ $1 == green ]] && idle=blue
+  rm -rf "$W"; mkdir -p "$W"; touch "$W/running.proxy" "$W/running.$1"; echo leader >"$W/role.$1"; echo "$2" >"$W/commit.$1"
+  rm -rf "$D/proxy" "$D/state/soak"; mkdir -p "$D/proxy"; chmod 755 "$D/proxy"
+  printf '# x\n# Written by host-deployer.sh. Live colour: %s\n(active) {\n\treverse_proxy server-%s:{args[0]} {\n\t}\n}\n' "$1" "$1" >"$D/proxy/active.caddy"
+  : >"$DL"; : >"$T/hook.out"; : >"$D/deployer.log"; echo "$idle" >/dev/null
+}
+bg() { # run the script copy as the cron job would
+  BG_POLL_SECONDS=0 BG_READY_SECONDS=1 BG_HANDOVER_SECONDS=1 "$T/hd.sh" "$@" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (copy) exited non-zero"; }
+}
+bgreq() { rm -f "$D/state/last-server"; req server "$1"; }
+cur="$(git -C "$T/src" rev-parse HEAD)"
+export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
+
+# 14. Opt-in detection: the swap only when COMPOSE_FILE (environment, or the checkout's .env) names the file.
+b1="$(push apps/server/bg1)"
+reset_world blue "$cur"
+bgreq "$b1"; bg --dry-run
+has "$T/out" "would run: a blue/green swap to ${b1:0:8}"
+rm -f "$D/inbox/request.json"
+unset COMPOSE_FILE
+bgreq "$b1"; bg --dry-run; has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --commit ${b1:0:8}"; rm -f "$D/inbox/request.json"
+printf "COMPOSE_FILE='docker-compose.yml:deploy/truenas-bluegreen.yml'\n" >"$T/src/.env.tmp"; mv "$T/src/.env.tmp" "$T/src/.env"
+bgreq "$b1"; bg --dry-run; has "$T/out" "would run: a blue/green swap"; rm -f "$D/inbox/request.json" "$T/src/.env"
+export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
+before="$(calls)"
+
+# 15. Happy path: backup, build idle at the commit, migrate, start, smoke, demote, promote, flip, verify.
+reset_world blue "$cur"; P="$(git -C "$T/src" rev-parse HEAD)"
+bgreq "$b1"; bg
+[[ $(status result) == deployed && $(status to_commit) == "$b1" ]] || fail "bg status: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "green is live"
+order "$DL" "pg_dump" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
+hasnt "$DL" "build blue" # only the idle colour is built
+live_is green
+[[ $(cat "$W/built.green") == "$b1" && $(git -C "$T/src" rev-parse HEAD) == "$b1" ]] || fail "idle colour not built at the commit / checkout not moved"
+[[ -e $W/running.blue && -e $W/running.green ]] || fail "old colour should stay up as a standby"
+[[ $(calls) == "$before" ]] || fail "deploy.sh ran in blue/green mode"
+[[ -z $(ls -A "$D/inbox") ]] || fail "something was written to the server-writable inbox: $(ls -A "$D/inbox")"
+[[ $(ls "$D/proxy") == active.caddy ]] || fail "stray files in the proxy folder: $(ls "$D/proxy")"
+[[ $(stat -c %a "$D/proxy/active.caddy") == 644 ]] || fail "include mode"
+has "$D/state/soak" "old=blue new=green"
+[[ ! -s $T/hook.out ]] || fail "webhook posted for a good swap while success posts are off"
+
+# 16. The next tick, inside the window, only re-checks; after the deadline it stops the old colour.
+: >"$DL"; bg
+[[ -e $W/running.blue && -e $D/state/soak ]] || fail "old colour stopped too early"
+hasnt "$DL" "stopped"
+sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"
+bg
+[[ ! -e $W/running.blue && ! -e $D/state/soak && -e $W/running.green ]] || fail "old colour not stopped after the window"
+has "$DL" "stopped blue"
+live_is green
+
+# 17. Post-swap checks fail inside the window: automatic switch back, rolled_back, webhook.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b2="$(push apps/server/bg2)"; bgreq "$b2"; bg
+[[ $(status result) == deployed ]] || fail "setup swap: $(cat "$D/outbox/status.json")"
+: >"$DL"; : >"$T/hook.out"
+FAKE_VERIFY_FAIL=green bg
+[[ $(status result) == rolled_back ]] || fail "auto switch-back: $(cat "$D/outbox/status.json")"
+live_is blue
+order "$DL" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
+[[ $(cat "$W/role.blue") == leader && ! -e $W/running.green && ! -e $D/state/soak ]] || fail "world after switch-back"
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not put back to the old commit"
+has "$T/hook.out" '"result": "rolled_back"'
+
+# 18. Checks fail right after the flip, during the swap itself: same reversal, same alert.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b3="$(push apps/server/bg3)"; bgreq "$b3"
+FAKE_VERIFY_FAIL=green bg
+[[ $(status result) == rolled_back ]] || fail "swap-time rollback: $(cat "$D/outbox/status.json")"
+order "$DL" "signal USR1 blue" "signal USR2 green" "reload now green" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
+live_is blue; [[ ! -e $D/state/soak ]] || fail "soak recorded for a failed swap"
+has "$T/hook.out" '"result": "rolled_back"'
+
+# 19. A failed smoke test on the idle colour: nobody is demoted, the idle colour is stopped, failure webhook.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b4="$(push apps/server/bg4)"; bgreq "$b4"
+FAKE_SMOKE_FAIL=1 bg
+[[ $(status result) == failed ]] || fail "smoke failure: $(cat "$D/outbox/status.json")"
+has "$D/outbox/status.json" "smoke test"
+hasnt "$DL" "signal"; has "$DL" "stopped green"; live_is blue
+[[ $(cat "$W/role.blue") == leader && $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "live colour touched / checkout not reset"
+has "$T/hook.out" '"result": "failed"'
+# A failed migration stops before anything starts.
+reset_world blue "$cur"; bgreq "$b4"
+FAKE_MIGRATE_RC=1 bg
+has "$D/outbox/status.json" "migration failed"; hasnt "$DL" "up -d"; hasnt "$DL" "signal"
+# A proxy that is not running changes nothing.
+reset_world blue "$cur"; rm "$W/running.proxy"; bgreq "$b4"; bg
+has "$D/outbox/status.json" "proxy container is not running"; hasnt "$DL" "pg_dump"
+
+# 20. The include is only ever written through a folder nobody else can write: a writable one stops the flip.
+reset_world blue "$cur"; chmod 777 "$D/proxy"; bgreq "$b4"
+bg
+chmod 755 "$D/proxy"
+[[ $(status result) != deployed ]] || fail "wrote the include into a world-writable folder"
+has "$D/deployer.log" "nobody else can write to"; live_is blue
+# The temp file is made in the root-only state folder and renamed in (not in the proxy folder, not in inbox).
+# shellcheck disable=SC2016
+grep -q 'mktemp "\$STATE/active' "$here/host-deployer.sh" || fail "include temp file is not made in the state folder"
+
+# 21. Blue/green does not loosen the infra rule: a Caddyfile change is still refused.
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b5="$(push deploy/caddy/Caddyfile)"; bgreq "$b5"; bg
+has "$D/outbox/status.json" "deployment files (deploy/caddy/Caddyfile)"; hasnt "$DL" "pg_dump"
 
 echo "host-deployer.test.sh: ok"
