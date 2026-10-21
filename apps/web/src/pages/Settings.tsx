@@ -206,6 +206,16 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       return `${g.secretName}: ${r.live.message}`;
     });
 
+  // Stops this company getting the value; the secret itself stays, for other companies or to grant again.
+  const remove = (g: Grant) =>
+    window.confirm(`Stop giving ${g.secretName} to ${company.name} as ${g.envName}? The secret itself is kept.`) &&
+    void act.run(async () => {
+      await api(`/api/grants/${g.id}`, { method: "DELETE" });
+      grants.reload();
+      onChanged?.();
+      return `${company.name}'s agents no longer get ${g.envName} (from the next run). ${g.secretName} is still stored; delete it under All stored secrets if nothing else uses it.`;
+    });
+
   const add = (e: FormEvent) => {
     e.preventDefault();
     void act.run(async () => {
@@ -243,7 +253,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                 <th scope="col">Ends in</th>
                 <th scope="col">Used for</th>
                 <th scope="col">
-                  <span className="sr-only">Check</span>
+                  <span className="sr-only">Actions</span>
                 </th>
               </tr>
             </thead>
@@ -257,6 +267,9 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
                   <td>
                     <button type="button" className="btn small" disabled={act.busy} onClick={() => checkSaved(g)} style={{ whiteSpace: "nowrap" }} title={g.envName === CLAUDE_TOKEN_ENV ? "Runs one tiny prompt on the company's runner, using a little of the subscription allowance" : undefined}>
                       {g.envName === CLAUDE_TOKEN_ENV ? "Check with Claude" : "Check"}
+                    </button>{" "}
+                    <button type="button" className="btn small" disabled={act.busy} onClick={() => remove(g)} aria-label={`Remove ${g.envName} from ${company.name}`}>
+                      Remove
                     </button>
                   </td>
                 </tr>
