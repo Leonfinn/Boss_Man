@@ -145,6 +145,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       if (s && s.result !== "running") await finished(s);
       const a = await available();
       if (!a || !a.tip || s?.result === "running" || (await pending())) return;
+      // The host just refused this commit as no longer the tip: the offer is stale until the host rewrites it.
+      if (s?.result === "rejected" && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return;
       if (a.tip === a.deployed) {
         for (const d of await openFor("server")) await db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, d.id));
         return;

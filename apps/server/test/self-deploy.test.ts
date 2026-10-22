@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -40,6 +40,17 @@ async function setup(opts: { deployer?: boolean } = {}) {
 }
 
 describe("self-deploy (docs/09-self-deploy.md)", () => {
+  it("does not offer again a commit the host just refused as no longer the tip, until the host rewrites the offer", async () => {
+    const c = (ctx = await setup());
+    await c.status({ id: randomUUID(), result: "rejected", message: "Rejected: not the tip of main.", to_commit: B, ended: "2026-10-20T12:03:00Z" });
+    await c.available({ checkedAt: "2026-10-20T12:00:00Z" });
+    await c.selfDeploy.sync();
+    expect(await c.open()).toHaveLength(0);
+    await c.available({ checkedAt: "2026-10-20T12:04:00Z" });
+    await c.selfDeploy.sync();
+    expect(await c.open()).toHaveLength(1);
+  });
+
   it("raises one owner decision when main moves, and approving it writes the request file", async () => {
     const c = (ctx = await setup());
     await c.available({ commits: [{ sha: B, subject: "Add rate limiting" }] });
