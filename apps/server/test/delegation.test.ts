@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, projects, runners, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, features, projects, runners, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -100,6 +100,30 @@ describe("CEO delegation", () => {
     await c.close();
   });
 
+  it("a QA task that waitsOn its build waits blocked and wakes its assignee when the build is done", async () => {
+    const build = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id });
+    const c = await agent(ctx.co.ceo.id);
+    expect((await c.callTool({ name: "create_ticket", arguments: { title: "x", waitsOn: randomUUID() } })).isError).toBe(true);
+    const res = await c.callTool({ name: "create_ticket", arguments: { title: "QA the limiter", assignee: "Dev", waitsOn: build.id } });
+    expect(res.isError).toBeFalsy();
+    const [qa] = await ctx.db.select().from(tickets).where(eq(tickets.title, "QA the limiter"));
+    expect(qa).toMatchObject({ systemState: "blocked", assigneeAgentId: ctx.dev.id });
+    expect(await assignedWakes(ctx.dev.id)).toHaveLength(0);
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, build.id));
+    await ctx.scheduler.onTicketDone(build.id);
+    expect((await row(qa!.id)).systemState).toBe("ready");
+    expect(await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.dev.id), eq(wakes.reason, "unblocked")))).toHaveLength(1);
+    await c.close();
+  });
+
+  it("a feature's plan ticket tells the CEO to keep it and make build and QA tasks", async () => {
+    const [f] = await ctx.db.insert(features).values({ companyId: ctx.co.company.id, title: "Empty columns" }).returning();
+    const plan = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id, title: "Plan: Empty columns", featureId: f!.id });
+    await ctx.scheduler.wake({ agentId: ctx.co.ceo.id, reason: "assigned", ticketId: plan.id });
+    await ctx.scheduler.tick();
+    expect(ctx.commands.at(-1)!.prompt).toContain("a QA task that waitsOn the build");
+  });
+
   it("the CEO's ticket prompt has the delegate rule and team; a worker's does not", async () => {
     // The PA is read-only, so it is never offered as someone to delegate to.
     const pa = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/agents`, { name: "Assistant", template: "assistant" })).json() as { id: string };
@@ -115,7 +139,9 @@ describe("CEO delegation", () => {
     expect(ceoPrompt).toMatch(/Your team: Dev \(Engineer\)\./);
     expect(ceoPrompt).not.toContain("Assistant (");
     expect(ceoPrompt).toContain("never as loose files");
+    expect(ceoPrompt).toContain("New functionality is a feature");
     expect(devPrompt).not.toContain("assign_ticket");
+    expect(devPrompt).not.toContain("New functionality is a feature");
     expect(devPrompt).not.toContain("Your team:");
     expect(devPrompt).toContain("never as loose files");
   });

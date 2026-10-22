@@ -176,7 +176,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass waitsOn (a task's id) to make this task wait until that one is done, such as a QA task waiting on its build task: it starts, and its assignee is woken, when that task is done. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
@@ -188,9 +188,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         feature: z.string().optional(),
         parent: z.string().uuid().optional(),
         assignee: z.string().optional(),
+        waitsOn: z.string().uuid().optional(),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, ...rest }) => {
+    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, ...rest }) => {
       const out = await outsideTree(parent);
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
       const to = assignee ? await delegateTarget(assignee) : null;
@@ -227,6 +228,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           throw err;
         }
       }
+      const [blocker] = waitsOn ? await db.select({ state: tickets.systemState }).from(tickets).where(and(eq(tickets.id, waitsOn), eq(tickets.companyId, scope.companyId))) : [];
+      if (waitsOn && !blocker) return fail("No task with that waitsOn id in your company.");
       // Safe to repeat (R42): a resumed run that calls this again gets the same open ticket back.
       if (scope.agentId) {
         const [same] = await db
@@ -245,9 +248,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}) })
         .returning({ id: tickets.id });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id);
+      if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn });
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id });

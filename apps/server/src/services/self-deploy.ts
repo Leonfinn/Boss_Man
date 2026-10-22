@@ -75,8 +75,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const companyId = await homeCompany();
     if (!companyId) return null;
     const infra = target === "server" && (a?.infraPaths.length ?? 0) > 0;
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}) };
-    const subjects = (a?.commits ?? []).slice(0, 5).map((c) => `- ${c.subject ?? short(c.sha)}`).join("\n");
+    // Merge commits only repeat the ticket's title; the commits under them say what changed.
+    const changes = (a?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
+    const subjects = changes.slice(0, 5).map((c) => `- ${c}`).join("\n");
     const n = a?.paths.length ?? 0;
     const migrations = (a?.paths ?? []).filter((p) => p.startsWith("apps/server/drizzle/")).length;
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
@@ -123,7 +125,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const what = s.target === "runner" ? "The runners" : "Boss Man";
     // A runner "deploy" now only builds the image and asks for the drain; the swap's own result is reported by the drain (maintenance.ts).
     const title = s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
-    await deps.notify({ companyId: null, level: LEVEL[s.result], title, body: s.message, link: "#/settings" });
+    const changes = s.result === "deployed" && ctx?.type === "self_deploy" ? (ctx.changes ?? []) : [];
+    await deps.notify({ companyId: null, level: LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });

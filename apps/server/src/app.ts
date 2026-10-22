@@ -348,7 +348,8 @@ export async function buildApp(opts: AppOptions) {
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
   });
   const work = workService(db, {
-    onAssigned: (t) => scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" }),
+    // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
+    onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
     onDone: (t) => scheduler.onTicketDone(t.id),
     onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
