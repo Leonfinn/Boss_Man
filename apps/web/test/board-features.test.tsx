@@ -221,3 +221,26 @@ describe("features page", () => {
     expect(screen.getByText("1/2 tasks")).toBeTruthy();
   });
 });
+
+describe("empty board columns", () => {
+  it("shows one line of guidance in a column with no tasks", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/projects")) return json([{ id: "p1", companyId: "c1", name: "App", repoUrl: null }]);
+        if (url.endsWith("/board"))
+          return json({
+            project: { id: "p1", companyId: "c1", name: "App" },
+            columns: [
+              { id: "b", name: "Backlog", systemState: "backlog", wipLimit: null, tickets: [] },
+              { id: "r", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Do it" })] },
+            ],
+          });
+        return json([]);
+      }),
+    );
+    render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    expect(await screen.findByText("Nothing waiting. Add a task to start.")).toBeTruthy();
+    expect(screen.queryByText(/Nothing ready/)).toBeNull();
+  });
+});
