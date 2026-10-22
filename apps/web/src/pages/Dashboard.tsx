@@ -154,7 +154,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
                       <span className={`rstate ${res!.tone}`} aria-label={res!.label}>
                         {res!.icon}
                       </span>
-                      {r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : <a href={`#/runs/${r.id}`}>{r.purpose === "chat" ? "Answering in chat" : "Work with no task"}</a>}
+                      {r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : <a href={`#/runs/${r.id}`}>{r.purpose === "chat" ? (r.endedAt ? "Answered in chat" : "Answering in chat") : "Work with no task"}</a>}
                     </>
                   ) : (
                     <span className="muted">Hasn't run yet</span>
