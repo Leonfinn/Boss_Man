@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
@@ -163,6 +163,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
       />
       <main>
         <UpdateBanner m={maintenance.data} />
+        <PageGuard key={route.join("/")}>
         {lost ? (
           <State img={art.stuck} alt="Lost connection to the server" title="Lost connection to the server">
             <p>Boss Man keeps working on the server; this page will catch up as soon as it can reach it again.</p>
@@ -210,6 +211,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : (
           <Dashboard company={current} />
         )}
+        </PageGuard>
       </main>
     </div>
   );
@@ -248,5 +250,28 @@ export function App() {
       return <Auth firstRun={session.state === "setup"} onDone={(username) => setSession({ state: "in", username })} />;
     case "in":
       return <Signed onLogout={loggedOut} />;
+  }
+}
+
+/** A page that throws shows what went wrong instead of blanking the whole app; moving to another page resets it. */
+export class PageGuard extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <section className="card" role="alert" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <h2 style={{ fontSize: 17 }}>This page hit an error</h2>
+        <p className="muted">The rest of Boss Man still works. If it happens again, send a screenshot of this message.</p>
+        <pre className="mono" style={{ margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }}>{`${this.state.error.name}: ${this.state.error.message}\n${(this.state.error.stack ?? "").split("\n").slice(0, 4).join("\n")}`}</pre>
+        <div>
+          <button type="button" className="btn" onClick={() => this.setState({ error: null })}>
+            Try again
+          </button>
+        </div>
+      </section>
+    );
   }
 }
