@@ -353,7 +353,8 @@ PY
   if [[ $TARGET == server ]]; then
     tip="$(remote_tip)"
     [[ -n $tip ]] || finish rejected "Rejected: could not read main from GitHub. Try again in a few minutes."
-    [[ $COMMIT == "$tip" ]] || finish rejected "Rejected: ${COMMIT:0:8} is not the tip of main (${tip:0:8}). Approve the latest deploy instead."
+    # The offer the owner approved was stale: drop it, so the next minute writes one for the real tip.
+    [[ $COMMIT == "$tip" ]] || { rm -f "$OUTBOX/available.json"; finish rejected "Rejected: ${COMMIT:0:8} is not the tip of main (${tip:0:8}). Approve the latest deploy instead."; }
   else
     # Runners are built from what is checked out, which is what the server deploy put there.
     [[ $COMMIT == "$head" ]] || finish rejected "Rejected: runners are updated only to the commit that is deployed (${head:0:8}), not ${COMMIT:0:8}."

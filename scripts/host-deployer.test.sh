@@ -107,6 +107,7 @@ rm "$D/state/last-server"
 req server "$c1"
 host
 has "$D/outbox/status.json" "is not the tip of main"
+[[ ! -e $D/outbox/available.json ]] || fail "a stale offer survived a not-the-tip refusal"
 
 # 6. A change to deployment files is refused, however it got to main.
 c3="$(push docker-compose.yml)"
