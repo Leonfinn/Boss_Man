@@ -28,6 +28,15 @@ function initials(name: string) {
 
 /** What a column is called until the owner renames it (the server's DEFAULT_COLUMNS). */
 const DEFAULT_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "Review", done: "Done" };
+/** One line shown in a column with no tasks. */
+const EMPTY_HINT: Record<string, string> = {
+  backlog: "Nothing waiting. Add a task to start.",
+  ready: "Nothing ready. Move a task here when it can start.",
+  in_progress: "Nothing underway right now.",
+  blocked: "Nothing is stuck.",
+  review: "Nothing to review.",
+  done: "Nothing finished yet.",
+};
 const PENCIL = <path d="M4 20h4L19 9l-4-4L4 16z" />;
 const iconProps = { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true } as const;
 
@@ -541,6 +550,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     )}
                   </header>
                 )}
+                {shown.length === 0 && <p className="lane-empty">{EMPTY_HINT[col.systemState] ?? "No tasks here."}</p>}
                 {done ? (
                   <>
                     <ul className="done-list">
