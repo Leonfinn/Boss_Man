@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, companies, decisions, objectives, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
-import { MISSED_REASON } from "../src/services/scheduler.js";
+import { agents, companies, decisions, objectives, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { MISSED_REASON, REVIEW_REASON } from "../src/services/scheduler.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -165,5 +165,42 @@ describe("missed-work sweep (R82)", () => {
     await ctx.db.update(companies).set({ paused: false }).where(eq(companies.id, ctx.company.id));
     await ctx.sweeps.run();
     expect(await ctx.missed(id)).toHaveLength(1);
+  });
+});
+
+describe("stalled review sweep", () => {
+  it("re-wakes a reviewer who never gave a verdict, then tells the owner", async () => {
+    ctx = await setup();
+    const reviewer = await ctx.hire("Senior Developer");
+    const id = await ctx.forgotten("Refresh the brief", { systemState: "review" });
+    const [r] = await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: reviewer.id, round: 1, createdAt: new Date(Date.now() - 2 * HOUR) }).returning();
+    const reviewWakes = () => ctx.db.select().from(wakes).where(and(eq(wakes.agentId, reviewer.id), eq(wakes.reason, REVIEW_REASON)));
+    const settle = () => ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.reason, REVIEW_REASON));
+    const told = () => ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "review-stall:%"));
+
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 1 } });
+    const [w] = await reviewWakes();
+    expect(w!.note).toContain(`- ${id} "Refresh the brief": still waiting for your code review`);
+    // Still queued, then too soon after the last wake.
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0 } });
+    await settle();
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0 } });
+
+    for (const n of [2, 3]) {
+      ctx.advance(HOUR);
+      expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 1 } });
+      await settle();
+      expect(await reviewWakes()).toHaveLength(n);
+    }
+    ctx.advance(HOUR);
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0, gaveUp: 1 } });
+    expect((await told())[0]!.question).toContain("waiting for Senior Developer's code review");
+    ctx.advance(HOUR);
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0, gaveUp: 0 } });
+
+    // A verdict ends it.
+    await ctx.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.id, r!.id));
+    ctx.advance(30 * HOUR);
+    expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0, gaveUp: 0 } });
   });
 });

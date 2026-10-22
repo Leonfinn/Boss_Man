@@ -83,7 +83,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
 
   it("tells the owner how it went once, and offers the runner update as its own decision", async () => {
     const c = (ctx = await setup());
-    await c.available({ runnerChanged: true });
+    await c.available({ runnerChanged: true, commits: [{ sha: B, subject: 'Merge "Plan: rate limits" (x)' }, { sha: A, subject: "Add rate limiting" }] });
     await c.selfDeploy.sync();
     const [d] = await c.open();
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" });
@@ -94,7 +94,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.selfDeploy.sync();
     const told = await c.db.select().from(notifications);
     expect(told).toHaveLength(1);
-    expect(told[0]).toMatchObject({ level: "note", title: `Boss Man updated to ${B.slice(0, 8)}`, decisionId: null });
+    expect(told[0]).toMatchObject({ level: "note", title: `Boss Man updated to ${B.slice(0, 8)}`, decisionId: null, body: "Deployed aaaaaaaa to bbbbbbbb.\n\nWhat changed:\n- Add rate limiting" });
     expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.context).toMatchObject({ result: { result: "deployed" } });
     const [runner] = await c.open();
     expect(runner).toMatchObject({ options: ["Update runners", "Not now"], context: { type: "self_deploy", target: "runner", commit: B } });

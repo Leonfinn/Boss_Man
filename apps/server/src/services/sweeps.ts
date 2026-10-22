@@ -2,15 +2,17 @@
 // - stale blockers (R21): a dependency whose blocker has had no activity for too long;
 // - stalled runs (R32): a running agent that has gone quiet. Advisory only: nothing is cancelled
 //   (but a run the runner has lost, or a cancel it never confirmed, is ended by the server);
-// - missed work (R82): an assigned ticket that is ready to go but that nobody is working on.
+// - missed work (R82): an assigned ticket that is ready to go but that nobody is working on;
+// - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, REASSIGN, type DecisionContext } from "./decisions.js";
 import { getHold } from "./maintenance.js";
-import { MISSED_REASON, type WakeInput } from "./scheduler.js";
+import { activeRows, latestRows } from "./review-kinds.js";
+import { MISSED_REASON, REVIEW_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
   staleAfterMs: number;
@@ -202,6 +204,73 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
    * tickets awaiting approval, and unassigned tickets are left alone. An agent runs one ticket at
    * a time, so only idle agents are considered, and each is woken about one ticket per pass.
    */
+  // An agent with a live run (chat aside) or any waiting wake is busy: its other tickets are just queued behind that.
+  async function busyAgents() {
+    return new Set([
+      ...(await db.select({ id: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), or(isNull(runs.purpose), sql`${runs.purpose} <> 'chat'`)))).map((r) => r.id),
+      ...(await db.select({ id: wakes.agentId }).from(wakes).where(inArray(wakes.status, ["queued", "deferred"]))).map((w) => w.id),
+    ]);
+  }
+
+  /** A review whose turn it is, with an idle reviewer and no verdict: wake the reviewer again, then tell the owner. */
+  async function stalledReviews(t: Date) {
+    const result = { woken: 0, gaveUp: 0 };
+    const pending = await db
+      .selectDistinct({ ticket: tickets })
+      .from(reviewRequests)
+      .innerJoin(tickets, eq(tickets.id, reviewRequests.ticketId))
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(eq(reviewRequests.status, "pending"), eq(tickets.systemState, "review"), eq(companies.paused, false), lte(reviewRequests.createdAt, new Date(t.getTime() - limits.missedAfterMs))));
+    if (!pending.length) return result;
+    const busy = await busyAgents();
+    const done = new Set<string>();
+    for (const { ticket } of pending) {
+      for (const r of activeRows(await latestRows(db, ticket.id))) {
+        const agentId = r.reviewerAgentId;
+        if (!agentId || busy.has(agentId) || done.has(agentId)) continue;
+        const [reviewer] = await db.select({ name: agents.name, paused: agents.paused, retiredAt: agents.retiredAt }).from(agents).where(eq(agents.id, agentId));
+        if (!reviewer || reviewer.paused || reviewer.retiredAt) continue;
+        // A run that ended after the request counts as the reviewer having looked; give it the usual quiet time.
+        const [last] = await db.select({ at: max(runs.endedAt) }).from(runs).where(eq(runs.agentId, agentId));
+        const lastActive = later(r.createdAt, last?.at)!;
+        if (t.getTime() - lastActive.getTime() < limits.missedAfterMs) continue;
+        // Review wakes name the ticket at the start of their note; the first one counts too.
+        const recent = await db
+          .select({ id: wakes.id, createdAt: wakes.createdAt })
+          .from(wakes)
+          .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, REVIEW_REASON), like(wakes.note, `%- ${ticket.id} %`), gt(wakes.createdAt, new Date(t.getTime() - 86_400_000))))
+          .orderBy(desc(wakes.createdAt));
+        if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedAfterMs) continue;
+        if (recent.length > MISSED_NUDGES_PER_DAY) {
+          const rows = await db
+            .insert(decisions)
+            .values({
+              companyId: ticket.companyId,
+              kind: "question",
+              question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
+              options: ["Got it"],
+              recommendedOption: "Got it",
+              dedupeKey: `review-stall:${r.id}`,
+              context: { type: "question" },
+            })
+            .onConflictDoNothing()
+            .returning({ id: decisions.id });
+          result.gaveUp += rows.length;
+          continue;
+        }
+        await opts.wake({
+          agentId,
+          reason: REVIEW_REASON,
+          priority: 3,
+          note: `- ${ticket.id} "${ticket.title}": still waiting for your ${r.kind} review (round ${r.round}), requested ${ago(t.getTime() - r.createdAt.getTime())} ago.\n  Read the changes with the review tool (action diff), then give your verdict with action submit.`,
+        });
+        done.add(agentId);
+        result.woken++;
+      }
+    }
+    return result;
+  }
+
   async function missedWork(t: Date) {
     const msObjective = alias(objectives, "ms_objective");
     const rows = await db
@@ -227,11 +296,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           sql`not exists (select 1 from tickets watch_root where watch_root.watch_stopped_fp is not null and watch_root.id in (${tickets.id}, ${tickets.parentTicketId}))`,
         ),
       );
-    // An agent with a live run (chat aside) or any waiting wake is busy: its other tickets are just queued behind that.
-    const busy = new Set([
-      ...(await db.select({ id: runs.agentId }).from(runs).where(and(isNull(runs.endedAt), or(isNull(runs.purpose), sql`${runs.purpose} <> 'chat'`)))).map((r) => r.id),
-      ...(await db.select({ id: wakes.agentId }).from(wakes).where(inArray(wakes.status, ["queued", "deferred"]))).map((w) => w.id),
-    ]);
+    const busy = await busyAgents();
     // Most important objective first (a lower number is more important; no objective goes last), then idle longest.
     const rank = (c: (typeof rows)[number]) => Math.min(c.krPriority ?? 99, c.msPriority ?? 99);
     const candidates = rows.filter((c) => !busy.has(c.ticket.assigneeAgentId!)).sort((a, b) => rank(a) - rank(b) || a.ticket.lastActivityAt.getTime() - b.ticket.lastActivityAt.getTime());
@@ -308,8 +373,10 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const staleB = await staleBlockers(t);
       const stalled = await stalledRuns(t);
       // While the update hold is on nothing can start, so an idle ticket is not forgotten work.
-      const missed = (await getHold(db)) ? { woken: 0, gaveUp: 0 } : await missedWork(t);
-      return { staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, lostRuns: lost };
+      const held = await getHold(db);
+      const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
+      const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
+      return { staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost };
     },
   };
 }
