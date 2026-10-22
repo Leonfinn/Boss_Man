@@ -267,6 +267,7 @@ export type Feature = {
   effort: number | null;
   driverScores: Record<string, number | null>;
   milestoneId: string | null;
+  objectiveId: string | null;
   portalVisible: boolean;
   createdAt: string;
   updatedAt: string;

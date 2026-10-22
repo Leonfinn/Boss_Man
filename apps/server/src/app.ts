@@ -1388,6 +1388,7 @@ export async function buildApp(opts: AppOptions) {
       effort: z.number().int().min(1).max(5).nullable(),
       driverScores: z.record(Uuid, z.number().int().min(0).max(5).nullable()),
       milestoneId: Uuid.nullable(),
+      objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
     });
     owner.get("/api/companies/:id/feedback-settings", async (req) => {

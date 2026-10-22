@@ -29,6 +29,7 @@ type FeaturePatch = {
   effort?: number | null;
   driverScores?: Record<string, number | null>;
   milestoneId?: string | null;
+  objectiveId?: string | null;
   portalVisible?: boolean;
 };
 
@@ -77,6 +78,10 @@ export function feedbackService(
     if (patch.milestoneId) {
       const [m] = await db.select({ companyId: objectives.companyId }).from(milestones).innerJoin(objectives, eq(objectives.id, milestones.objectiveId)).where(eq(milestones.id, patch.milestoneId));
       if (!m || m.companyId !== companyId) throw new FeedbackError(404, "No such milestone in this company.");
+    }
+    if (patch.objectiveId) {
+      const [o] = await db.select({ companyId: objectives.companyId }).from(objectives).where(eq(objectives.id, patch.objectiveId));
+      if (!o || o.companyId !== companyId) throw new FeedbackError(404, "No such objective in this company.");
     }
     if (patch.driverScores) {
       const ids = Object.keys(patch.driverScores);
@@ -226,6 +231,7 @@ export function feedbackService(
           effort: input.effort ?? null,
           driverScores: input.driverScores ?? {},
           milestoneId: input.milestoneId ?? null,
+          objectiveId: input.objectiveId ?? null,
           portalVisible: input.portalVisible ?? false,
           createdByAgentId: input.createdByAgentId ?? null,
           releasedAt: input.status === "released" ? now() : null,
