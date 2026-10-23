@@ -210,7 +210,9 @@ function GrantAgents({ grant, agents, busy, onSave }: { grant: Grant; agents: Ag
   const names = agents.filter((a) => grant.agentIds.includes(a.id)).map((a) => a.name);
   return (
     <details onToggle={(e) => e.currentTarget.open && setPicked(grant.agentIds)}>
-      <summary aria-label={`Agents for ${grant.envName}`}>{names.length ? names.join(", ") : "All agents"}</summary>
+      <summary aria-label={`Agents for ${grant.envName}`}>
+        {names.length ? `Only ${names.join(", ")}` : "Every agent"} <span className="muted">({names.length ? "change" : "limit to some"})</span>
+      </summary>
       <fieldset style={{ border: 0, padding: 0, margin: "6px 0" }}>
         <legend className="muted" style={{ fontSize: 13 }}>Leave all unticked to give the key to every agent in this company.</legend>
         {agents.map((a) => (
