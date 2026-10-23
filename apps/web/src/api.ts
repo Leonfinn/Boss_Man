@@ -107,7 +107,7 @@ export type Ticket = {
   assigneeAgentId: string | null;
   assignedToOwner: boolean;
   dueDate: string | null;
-  blockedBy: Array<{ ticketId: string | null; engagementId: string | null; decisionId: string | null }>;
+  blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
   branch: string | null;
   risk: Risk | null;
   planFirst: boolean;

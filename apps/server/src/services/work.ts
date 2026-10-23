@@ -169,7 +169,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
-        blockedBy: deps.filter((d) => d.blockedTicketId === t.id).map((d) => ({ ticketId: d.blockerTicketId, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        blockedBy: deps.filter((d) => d.blockedTicketId === t.id).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         };
       });
       return {

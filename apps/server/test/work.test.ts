@@ -151,6 +151,6 @@ describe("dependencies (R25)", () => {
 
     const board = (await req("GET", `/api/projects/${p.id}/board`)).json();
     const ship = board.columns.flatMap((x: { tickets: Array<{ title: string }> }) => x.tickets).find((x: { title: string }) => x.title === "Ship");
-    expect(ship.blockedBy).toEqual([{ ticketId: t2.id, engagementId: null, decisionId: null }]);
+    expect(ship.blockedBy).toEqual([{ ticketId: t2.id, ticketTitle: "Domain", engagementId: null, decisionId: null }]);
   });
 });
