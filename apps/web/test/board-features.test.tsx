@@ -7,6 +7,7 @@ import { Features } from "../src/pages/Features";
 
 afterEach(() => {
   cleanup();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -68,6 +69,38 @@ describe("board", () => {
     fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.getByText("Need infra")).toBeTruthy();
     expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+});
+
+describe("feature state toggles", () => {
+  it("shows every state but Declined at first, toggles each state, and keeps the choice", async () => {
+    sessionStorage.clear();
+    stub();
+    const base = globalThis.fetch;
+    const list = [feature(), feature({ id: "f2", title: "Export", status: "released" }), feature({ id: "f3", title: "Old idea", status: "declined" })];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => (url.endsWith("/features") ? json({ ...scored, features: list }) : base(url, init))));
+    const { unmount } = render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
+    await screen.findByRole("article", { name: "Feature Dark mode" });
+    expect(screen.getByRole("article", { name: "Feature Export" })).toBeTruthy();
+    expect(screen.queryByRole("article", { name: "Feature Old idea" })).toBeNull();
+    const released = screen.getByRole("button", { name: "Released (1)" });
+    expect(released.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Declined (1)" }).getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "In progress (1)" }));
+    expect(screen.queryByRole("article", { name: "Feature Dark mode" })).toBeNull();
+    expect(screen.getByRole("article", { name: "Feature Export" })).toBeTruthy();
+    fireEvent.click(released);
+    expect(screen.getByText(/No features in the states you have switched on/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Declined (1)" }));
+    expect(screen.getByRole("article", { name: "Feature Old idea" })).toBeTruthy();
+
+    unmount();
+    render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
+    expect(await screen.findByRole("article", { name: "Feature Old idea" })).toBeTruthy();
+    expect(screen.queryByRole("article", { name: "Feature Export" })).toBeNull();
   });
 });
 

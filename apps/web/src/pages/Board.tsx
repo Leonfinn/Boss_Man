@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { api, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type Project, type Risk, type ScoredFeatures } from "../api";
+import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -288,6 +288,18 @@ function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, o
   );
 }
 
+const STATES_KEY = "board-feature-states";
+/** Every state but Declined, as before the toggles; the choice is kept for the browser session. */
+function readShownStates(): FeatureStatus[] {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(STATES_KEY) ?? "null") as unknown;
+    if (Array.isArray(saved)) return FEATURE_STATUSES.filter((st) => saved.includes(st));
+  } catch {
+    /* unreadable: use the default */
+  }
+  return FEATURE_STATUSES.filter((st) => st !== "declined");
+}
+
 /** One card per feature: its status and how many of its tasks are done. */
 function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask: (featureId: string) => void }) {
   if (!features.length) return null;
@@ -331,6 +343,19 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [renaming, setRenaming] = useState<string | null>(null);
   const [assignee, setAssignee] = useState("anyone");
   const [allDone, setAllDone] = useState(false);
+  const [shownStates, setShownStates] = useState(readShownStates);
+  const toggleState = (st: FeatureStatus) =>
+    setShownStates((cur) => {
+      const next = cur.includes(st) ? cur.filter((x) => x !== st) : [...cur, st];
+      try {
+        sessionStorage.setItem(STATES_KEY, JSON.stringify(next));
+      } catch {
+        /* storage blocked: the choice lasts until the page reloads */
+      }
+      return next;
+    });
+  const featureList = feats.data?.features ?? [];
+  const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
   // The review column is two lanes: agent review, and the tickets whose next step is the owner's sign-off.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
   const lanes = (board.data?.columns ?? []).flatMap((col) =>
@@ -524,7 +549,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         )}
       </div>
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
-      {view === "features" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
+      {view === "features" && (
+        <div className="segmented state-filter" role="group" aria-label="Show features that are">
+          {FEATURE_STATUSES.map((st) => (
+            <button key={st} type="button" className="chip" aria-pressed={shownStates.includes(st)} onClick={() => toggleState(st)}>
+              {FEATURE_STATUS_LABEL[st]} ({featureList.filter((f) => f.status === st).length})
+            </button>
+          ))}
+        </div>
+      )}
+      {view === "features" && featureList.length > 0 && !visibleFeatures.length && <p className="muted">No features in the states you have switched on. Switch more states on above.</p>}
+      {view === "features" && <FeatureCards features={visibleFeatures} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
