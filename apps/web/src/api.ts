@@ -35,7 +35,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 // ---------- Shapes the screens use ----------
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; reviewKind?: ReviewKindName | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -272,6 +272,10 @@ export type Feature = {
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
+  /** The follow-up after release: when it is due, and what the owner answered (Keep, Change or Drop). */
+  goalCheckDueAt?: string | null;
+  goalCheckAnswer?: string | null;
+  goalCheckAnsweredAt?: string | null;
   demand: number;
   insightCount: number;
   customerCount: number;

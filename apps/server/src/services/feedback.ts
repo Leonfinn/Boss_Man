@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
 
 export class FeedbackError extends Error {
@@ -237,6 +238,7 @@ export function feedbackService(
           releasedAt: input.status === "released" ? now() : null,
         })
         .returning();
+      if (f!.status === "released") await scheduleGoalCheck(db, f!, now());
       return f!;
     },
     async updateFeature(id: string, patch: FeaturePatch, companyId?: string) {
@@ -254,6 +256,7 @@ export function feedbackService(
         })
         .where(eq(features.id, id))
         .returning();
+      if (patch.status === "released" && f.status !== "released") await scheduleGoalCheck(db, u!, now());
       return u!;
     },
     async removeFeature(id: string) {
@@ -421,7 +424,10 @@ export function feedbackService(
         .set({ status: next, updatedAt: now(), releasedAt: next === "released" ? now() : null })
         .where(and(eq(features.id, f.id), eq(features.status, f.status)))
         .returning();
-      if (u && next === "released") await deps.onReleased?.(u);
+      if (u && next === "released") {
+        await scheduleGoalCheck(db, u, now());
+        await deps.onReleased?.(u);
+      }
       return u ?? null;
     },
 
