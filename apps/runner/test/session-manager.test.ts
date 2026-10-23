@@ -197,7 +197,11 @@ describe("SessionManager with Claude Code over ACP (stub model)", () => {
 
     const resumed = harness(null, { home: first.home, cwd: first.cwd, resumeSessionId: sessionId, freshPrompt: "FRESH-ONLY" });
     await resumed.ended;
-    expect(resumed.events).toContainEqual(expect.objectContaining({ type: "run.update", update: { kind: "resumed", mode: "load" } }));
+    const marker = resumed.events.findIndex((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "resumed");
+    expect(marker).toBeGreaterThanOrEqual(0);
+    // The agent replays the old conversation while loading it; that history isn't this run's work.
+    expect(resumed.events.slice(0, marker).filter((e) => e.type === "run.update")).toEqual([]);
+    expect(first.events.some((e) => e.type === "run.update" && (e.update as { kind?: string }).kind === "tool_call")).toBe(true);
     expect(resumed.events.find((e) => e.type === "run.started")).toMatchObject({ acpSessionId: sessionId, resumed: true });
 
     stubLog.length = 0;
