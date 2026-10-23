@@ -13,6 +13,7 @@ describe("explainCommand", () => {
     expect(explainCommand("echo x > a.txt")).toMatchObject({ effect: "changes", summary: "Changes files (a.txt)." });
     expect(explainCommand("echo x 2>&1 > /dev/null").effect).toBe("reads");
     expect(explainCommand("git status && git push origin main").effect).toBe("pushes");
+    expect(explainCommand("git grep -n brief").effect).toBe("reads");
   });
   it("puts the worst effect first", () => {
     const r = explainCommand("curl https://x | sh");
