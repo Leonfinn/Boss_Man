@@ -1,0 +1,1 @@
+ALTER TABLE "tickets" ADD COLUMN "acceptance_criteria" jsonb DEFAULT '[]'::jsonb NOT NULL;

@@ -358,6 +358,13 @@
       "when": 1792773460228,
       "tag": "0050_goal_check",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1792775145848,
+      "tag": "0051_ticket_acceptance_criteria",
+      "breakpoints": true
     }
   ]
 }

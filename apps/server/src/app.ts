@@ -30,6 +30,7 @@ import { maintenanceService } from "./services/maintenance.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
+import { acceptanceCriteriaSchema } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
@@ -981,6 +982,7 @@ export async function buildApp(opts: AppOptions) {
       keyResultId: Uuid.nullable(),
       dueDate: DateStr.nullable(),
       customFields: z.record(z.string(), z.unknown()),
+      acceptanceCriteria: acceptanceCriteriaSchema,
       risk: z.enum(RISK_TIERS).nullable(),
       planFirst: z.boolean(),
       featureId: Uuid.nullable(),

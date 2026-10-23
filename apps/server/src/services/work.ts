@@ -38,6 +38,8 @@ type TicketPatch = {
   createdByAgentId?: string | null;
   /** Start in plan mode until a plan is approved (R40). */
   planFirst?: boolean;
+  /** Acceptance criteria (R?): 1 to 10 non-empty strings; empty means none. */
+  acceptanceCriteria?: string[];
   /** Move past a full column anyway. */
   overLimit?: boolean;
 };
@@ -211,6 +213,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           keyResultId: input.keyResultId ?? null,
           dueDate: input.dueDate ?? null,
           customFields: input.customFields ?? {},
+          acceptanceCriteria: input.acceptanceCriteria ?? [],
           lastActivityAt: now(),
           risk: input.risk ?? null,
           // Graded planning: high and critical work is planned first unless the creator says otherwise.
