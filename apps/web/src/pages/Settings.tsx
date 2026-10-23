@@ -1033,7 +1033,8 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
   const v = view.data;
   if (!v?.enabled) return null;
   const s = v.status;
-  const waiting = v.available && v.available.tip && v.available.tip !== v.available.deployed;
+  // Right after a deploy the host's offer still names the old commit for a few minutes.
+  const waiting = v.available && v.available.tip && v.available.tip !== v.available.deployed && !(s?.result === "deployed" && s.to_commit === v.available.tip);
   return (
     <Section id="deploy-h" title="Updates">
       <p style={{ fontSize: 14 }}>
@@ -1170,8 +1171,15 @@ function ColourRow({ c }: { c: Colour }) {
   );
 }
 
-export function Settings({ companies, companyId, go, onChanged }: { companies: Company[]; companyId: string | undefined; go: (to: string) => void; onChanged: () => void }) {
+const TABS = [
+  { id: "system", label: "Server and runner", help: "This install's server and updates, and the company's runner." },
+  { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts." },
+  { id: "workflow", label: "Reviews and CEO", help: "Who approves and reviews work at each risk level, and the CEO's chapters." },
+] as const;
+
+export function Settings({ companies, companyId, tab, go, onChanged }: { companies: Company[]; companyId: string | undefined; tab: string | undefined; go: (to: string) => void; onChanged: () => void }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
+  const current = TABS.find((t) => t.id === tab) ?? TABS[0];
   return (
     <>
       <header className="page-head">
@@ -1183,9 +1191,23 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           Run the setup wizard
         </button>
       </header>
-      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-        <ServerPanel />
-        <SelfDeploy go={go} />
+      <div className="tabs" role="tablist" aria-label="Settings pages">
+        {TABS.map((t) => (
+          <button key={t.id} type="button" role="tab" id={`set-tab-${t.id}`} aria-selected={current.id === t.id} aria-controls="set-panel" onClick={() => go(company ? `settings/${company.id}/${t.id}` : "settings")}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div id="set-panel" role="tabpanel" aria-labelledby={`set-tab-${current.id}`} style={{ display: "flex", flexDirection: "column", gap: 20, marginTop: 16 }}>
+        <p className="muted" style={{ fontSize: 13 }}>
+          {current.help}
+        </p>
+        {current.id === "system" && (
+          <>
+            <ServerPanel />
+            <SelfDeploy go={go} />
+          </>
+        )}
         {!company ? (
           <p>
             Create a company on the Kanban first, or{" "}
@@ -1194,10 +1216,13 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
             </button>
             .
           </p>
-        ) : (
-          <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        ) : current.id === "system" ? (
+          <div key={company.id} style={{ display: "contents" }}>
             <Runner company={company} />
             <RunnerUpdate />
+          </div>
+        ) : current.id === "access" ? (
+          <div key={company.id} style={{ display: "contents" }}>
             <section className="card">
               <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
               <p className="muted" style={{ fontSize: 14 }}>
@@ -1210,13 +1235,16 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
             </section>
             <ToolServers company={company} />
             <Funding company={company} onChanged={onChanged} />
-            <Chapters company={company} />
+          </div>
+        ) : (
+          <div key={company.id} style={{ display: "contents" }}>
             <Section id="reviews-h" title="Reviews">
               <p className="muted" style={{ fontSize: 14 }}>
                 For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this on the Projects page.
               </p>
               <CompanyReviews companyId={company.id} agents={company.agents} />
             </Section>
+            <Chapters company={company} />
           </div>
         )}
       </div>

@@ -34,6 +34,8 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
     set(tier, { kinds: ref ? { ...rest, [kind]: ref } : rest });
   };
   return (
+    // Seven columns of selects are wider than a card: scroll inside it rather than past its edge.
+    <div style={{ overflowX: "auto" }}>
     <table style={{ width: "100%", borderCollapse: "collapse" }}>
       <thead>
         <tr style={{ textAlign: "left" }}>
@@ -78,6 +80,7 @@ export function ReviewPolicyTable({ value, onChange, agents, idPrefix }: { value
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 

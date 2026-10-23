@@ -51,6 +51,14 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(await c.open()).toHaveLength(1);
   });
 
+  it("does not offer the commit it just deployed while the host's offer still names it", async () => {
+    const c = (ctx = await setup());
+    await c.status({ id: randomUUID(), result: "deployed", to_commit: B, ended: "2026-10-20T12:03:00Z" });
+    await c.available({ checkedAt: "2026-10-20T12:00:00Z" });
+    await c.selfDeploy.sync();
+    expect(await c.open()).toHaveLength(0);
+  });
+
   it("raises one owner decision when main moves, and approving it writes the request file", async () => {
     const c = (ctx = await setup());
     await c.available({ commits: [{ sha: B, subject: "Add rate limiting" }], paths: ["apps/server/src/x.ts", "apps/server/drizzle/0049_x.sql", "apps/server/drizzle/meta/_journal.json", "apps/server/drizzle/meta/0049_snapshot.json"] });

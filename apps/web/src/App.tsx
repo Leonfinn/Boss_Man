@@ -201,7 +201,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
-          <Settings companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
+          <Settings companies={list} companyId={companyId} tab={route[2]} go={go} onChanged={companies.reload} />
         ) : page === "engagements" ? (
           route[1] ? <Engagement id={route[1]} /> : <Engagements />
         ) : page === "setup" ? (
