@@ -47,13 +47,16 @@ describe("board", () => {
     expect(screen.getByText("Sub-task of Build the toggle")).toBeTruthy();
     expect(within(task).getByText("Task")).toBeTruthy();
     expect(within(screen.getByText("Need infra", { selector: "a" }).closest("article")!).getByText("Sub-task")).toBeTruthy();
-    expect(within(await screen.findByRole("article", { name: "Feature Dark mode" })).getByText("Feature")).toBeTruthy();
-    expect(await screen.findByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
-    expect(screen.getByText("1 of 2 tasks done")).toBeTruthy();
+    // The chip names the feature in one line; its full title is the tooltip.
+    expect(within(task).getByTitle("Dark mode")).toBeTruthy();
+    // All shows the columns only: the feature cards would grow above them.
+    expect(screen.queryByRole("progressbar")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Features" }));
     expect(screen.queryByText("Need infra")).toBeNull();
+    expect(within(await screen.findByRole("article", { name: "Feature Dark mode" })).getByText("Feature")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
+    expect(screen.getByText("1 of 2 tasks done")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     expect(screen.getByText("Need infra")).toBeTruthy();
@@ -61,7 +64,7 @@ describe("board", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.getByText("Need infra")).toBeTruthy();
-    expect(screen.getByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
+    expect(screen.queryByRole("progressbar")).toBeNull();
   });
 });
 
@@ -199,6 +202,7 @@ describe("add feature or task", () => {
 
   it("opens New task with the feature preselected from a feature card", async () => {
     const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
     fireEvent.click(await screen.findByRole("button", { name: "Add task to Dark mode" }));
     expect(screen.getByRole("radio", { name: "New task" }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByLabelText("Part of feature") as HTMLSelectElement).value).toBe("f1");

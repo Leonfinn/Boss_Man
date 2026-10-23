@@ -507,7 +507,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           </p>
         )}
       </div>
-      {view !== "tasks" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
+      {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
+      {view === "features" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
@@ -595,9 +596,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}
                       {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
                       {t.featureTitle && (
-                        <span className="fchip">
+                        <span className="fchip" title={t.featureTitle}>
                           <b>Feature</b>
-                          {t.featureTitle}
+                          <span>{t.featureTitle}</span>
                         </span>
                       )}
                       {t.blockedBy.length > 0 && <span className="tag amber" style={{ alignSelf: "flex-start" }}>Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
