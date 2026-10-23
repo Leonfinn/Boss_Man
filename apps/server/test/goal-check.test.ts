@@ -115,6 +115,24 @@ describe("did it move the goal? follow-up", () => {
     expect((await ctx.row(f.id)).goalCheckDueAt).not.toBeNull();
   });
 
+  it("schedules a feature linked only through its milestone, and does not re-ask after the answer", async () => {
+    ctx = await setup();
+    const m = (await ctx.req("POST", `/api/objectives/${ctx.objective.id}/milestones`, { title: "Beta" })).body;
+    const f = await ctx.feature({ milestoneId: m.id });
+    await ctx.req("PATCH", `/api/features/${f.id}`, { status: "released" });
+    expect((await ctx.row(f.id)).goalCheckDueAt).not.toBeNull();
+    ctx.advance(15 * DAY);
+    await ctx.req("POST", "/api/sweep");
+    const [d] = await ctx.open();
+    expect(d).toBeDefined();
+    expect((await ctx.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Keep" })).status).toBe(200);
+    ctx.advance(10 * DAY);
+    await ctx.req("POST", "/api/sweep");
+    await ctx.req("POST", "/api/sweep");
+    expect(await ctx.open()).toHaveLength(0);
+    expect((await ctx.row(f.id)).goalCheckAnswer).toBe("Keep");
+  });
+
   it("rejects a nonsense delay", async () => {
     ctx = await setup();
     expect((await ctx.req("PATCH", `/api/companies/${ctx.company.id}`, { goalCheckDays: 0 })).status).toBe(400);
