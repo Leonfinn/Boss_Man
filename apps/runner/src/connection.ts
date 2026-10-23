@@ -2,7 +2,7 @@
 // server hasn't stored, then stream live. Reconnects with backoff; a connection that
 // goes quiet for three heartbeats is dropped and redialled.
 import WebSocket from "ws";
-import { HEARTBEAT_MS, PROTOCOL_VERSION, ServerMessage, type RunnerCommand, type RunnerEvent, type RunnerMessage } from "@boss-man/shared";
+import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type RunnerCommand, type RunnerEvent, type RunnerMessage } from "@boss-man/shared";
 import type { Journal } from "./journal.js";
 
 export type ConnectionOptions = {
@@ -76,7 +76,7 @@ export class RunnerConnection {
     ws.on("open", () => {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(pending.length ? { pending } : {}) });
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, features: [...RUNNER_FEATURES], ...(pending.length ? { pending } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

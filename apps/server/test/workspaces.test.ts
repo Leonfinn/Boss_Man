@@ -4,7 +4,8 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, tickets } from "../src/db/schema.js";
+import { runners, tickets, wakes } from "../src/db/schema.js";
+import { REVIEW_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -50,6 +51,27 @@ describe("git workspaces on the server (R38)", () => {
 
     await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
     expect(c.sent.at(-1)).toEqual({ type: "workspace.release", projectId: c.project.id, ticketId: t.id });
+  });
+
+  it("gives a reviewer its own copy of the first ticket's work", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Checkout error states" })).json();
+    const review = async () => {
+      await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.ceo.id, reason: REVIEW_REASON, note: `- ${t.id} "Checkout error states": ready\n  Your code review, round 1.` });
+      await c.scheduler.tick();
+      return c.sent.filter((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start").at(-1)!;
+    };
+    // A runner that doesn't say it can make a review copy keeps today's behaviour.
+    const old = await review();
+    expect(old.workspace).toBeUndefined();
+    expect(old.prompt).not.toContain("your own copy");
+    await c.runners.ingest(c.runnerRow, { seq: 1, at: new Date().toISOString(), event: { type: "run.ended", runId: old.runId, stopReason: "end_turn", error: null } });
+
+    c.runners.connect(c.runnerRow.id, (cmd) => (c.sent.push(cmd), true), ["review-copy"]);
+    const start = await review();
+    expect(start.workspace).toEqual({ projectId: c.project.id, ticketId: t.id, repoUrl: "https://github.com/Leonfinn/customer-app.git", baseRef: "main", review: true });
+    expect(start.prompt).toContain('your own copy of "Checkout error states"');
   });
 
   it("leaves projects without a repo in a plain directory", async () => {

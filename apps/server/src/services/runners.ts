@@ -1,7 +1,7 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
 import { and, eq, inArray, isNotNull, isNull, max, sql } from "drizzle-orm";
-import type { JournalEntry, RunnerCommand, RunnerEvent } from "@boss-man/shared";
+import type { JournalEntry, RUNNER_FEATURES, RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -24,6 +24,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   // shortcut: live sockets belong to this process; lost on restart, harmless because runners reconnect.
   /** Live connections, so commands can reach a runner. */
   const connected = new Map<string, CommandSender>();
+  // shortcut: per live socket; lost on restart, harmless because a runner sends its features again in hello.
+  const features = new Map<string, string[]>();
 
   /** Marks a run ended and logs it. */
   async function markEnded(runId: string, at: Date, outcome: string | null, usage?: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number }) {
@@ -182,13 +184,17 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       await db.update(runners).set({ lastSeenAt: new Date(), imageVersion }).where(eq(runners.id, runner.id));
     },
 
-    connect(runnerId: string, send: CommandSender) {
+    connect(runnerId: string, send: CommandSender, feats: string[] = []) {
       connected.set(runnerId, send);
+      features.set(runnerId, feats);
       for (const l of connectListeners) void Promise.resolve(l(runnerId)).catch(() => {});
       return () => {
         if (connected.get(runnerId) === send) connected.delete(runnerId);
       };
     },
+
+    /** Whether the connected runner said it can do this (hello.features). */
+    can: (runnerId: string, feature: (typeof RUNNER_FEATURES)[number]) => !!features.get(runnerId)?.includes(feature),
 
     send(runnerId: string, command: RunnerCommand): boolean {
       return connected.get(runnerId)?.(command) ?? false;
