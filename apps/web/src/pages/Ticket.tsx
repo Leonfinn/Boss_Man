@@ -6,8 +6,12 @@ import { names, TicketReviews, useTicketReviews } from "../components/TicketRevi
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
+import { readVerdicts } from "@boss-man/shared";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+
+/** The mark for one verdict on a "Done when" checklist row. */
+const VERDICT_MARK: Record<string, string> = { pass: "✓ pass", fail: "✗ fail", none: "not reported" };
 
 /** At most this many diff lines are drawn; the rest is summarised. */
 const MAX_DIFF_LINES = 4000;
@@ -53,6 +57,75 @@ function Fold({ title, hint, open, children }: { title: string; hint?: string; o
       </summary>
       <div className="fold-body">{children}</div>
     </details>
+  );
+}
+
+/** The ticket's acceptance criteria with how the author reported each, plus the owner's editor. */
+function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<string, unknown>) => void; busy: boolean }) {
+  const criteria = t.acceptanceCriteria ?? [];
+  const rows = readVerdicts(criteria, t.stateNote);
+  return (
+    <Fold title="Done when" hint={criteria.length ? `${criteria.length} criterion${criteria.length === 1 ? "" : "a"}` : undefined}>
+      {rows.length > 0 && (
+        <ul data-testid="criteria" style={{ margin: 0, paddingLeft: 18 }}>
+          {rows.map((r) => (
+            <li key={r.criterion} data-testid="criterion" data-verdict={r.verdict ?? "none"}>
+              <span data-testid="verdict" style={{ color: r.verdict === "pass" ? "var(--green-ink)" : r.verdict === "fail" ? "var(--red-ink)" : undefined, fontWeight: 600 }}>{VERDICT_MARK[r.verdict ?? "none"]}</span> {r.criterion}
+            </li>
+          ))}
+        </ul>
+      )}
+      {t.systemState === "review" && criteria.length > 0 && rows.some((r) => !r.verdict) && (
+        <p className="muted" style={{ fontSize: 14, margin: 0 }}>Not every criterion has the author's pass or fail; the reviewer has been told that.</p>
+      )}
+      <CriteriaEdit
+        key={criteria.join("\n")}
+        initial={criteria}
+        busy={busy}
+        save={(csv) => patch({ acceptanceCriteria: csv.map((l) => l.trim()).filter(Boolean) })}
+      />
+    </Fold>
+  );
+}
+
+/** One non-empty line per criterion; saving nothing clears them. */
+function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines: string[]) => void; busy: boolean }) {
+  const [text, setText] = useState(initial.join("\n"));
+  const [open, setOpen] = useState(initial.length === 0);
+  const next = () => setText((p) => (p ? `${p}\n` : ""));
+  return open ? (
+    <div className="field">
+      <label htmlFor="t-criteria" style={{ fontWeight: 600 }}>
+        Acceptance criteria, one per line
+      </label>
+      <textarea
+        id="t-criteria"
+        rows={4}
+        maxLength={2_000}
+        placeholder={"Health check returns 200\nMigration is expand-only"}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
+      />
+      <small className="muted">Up to 10; leave empty to set none. The agent must report pass or fail for each when it asks for review.</small>
+      <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+        <button type="button" className="btn primary" disabled={busy || text === initial.join("\n")} onClick={() => save(text.split("\n"))}>
+          Save criteria
+        </button>
+        {initial.length > 0 && (
+          <button type="button" className="btn" onClick={() => setOpen(false)}>
+            Done
+          </button>
+        )}
+      </div>
+      <button type="button" className="link" style={{ marginTop: 4, padding: 0 }} onClick={next}>
+        Add a line
+      </button>
+    </div>
+  ) : (
+    <button type="button" className="link" style={{ alignSelf: "flex-start", padding: 0 }} onClick={() => setOpen(true)}>
+      Edit criteria
+    </button>
   );
 }
 
@@ -220,7 +293,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 <>
                   <div className="field">
                     <label htmlFor="review-summary">What should the agent change?</label>
-                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} />
+                    <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button type="button" className="btn primary" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
@@ -307,6 +380,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </>
             )}
           </section>
+
+          <DoneWhen t={t} patch={patch} busy={busy} />
 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "code on its branch" : "nothing yet"}>
             <TicketOutputs items={made} companyId={t.companyId} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch ? { branch: t.branch } : null} />

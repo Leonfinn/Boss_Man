@@ -6,6 +6,7 @@ import { KIND_FOCUS, REVIEW_KINDS, ruleFor, type ReviewSlot } from "@boss-man/sh
 import type { Db } from "../db/client.js";
 import { agents, reviewRequests, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
+import { readVerdicts } from "@boss-man/shared";
 import { effectivePolicy, resolveKindReviewer } from "./review-policy.js";
 
 export type ReviewRow = typeof reviewRequests.$inferSelect;
@@ -37,10 +38,16 @@ const seqOf = (order: string[] | null | undefined, kind: string) => (order?.inde
 export async function wakeReviewers(db: Db, t: Ticket, rows: ReviewRow[], notify: Notify, skip: Array<string | null> = [], causedByRunId?: string | null) {
   const byAgent: Record<string, ReviewRow[]> = {};
   for (const r of rows) if (r.reviewerAgentId && !skip.includes(r.reviewerAgentId)) (byAgent[r.reviewerAgentId] ??= []).push(r);
+  // The ticket's criteria with the author's pass/fail, so the reviewer checks the work against them.
+  const checklist = t.acceptanceCriteria.length
+    ? readVerdicts(t.acceptanceCriteria, t.stateNote)
+        .map((r) => `  - [${r.verdict ?? "not reported"}] ${r.criterion}`)
+        .join("\n") + "\n  If one fails, request changes and say which."
+    : "";
   for (const [agentId, mine] of Object.entries(byAgent)) {
     const asks = mine.map((r) => `  Your ${r.kind} review, round ${r.round}: look at ${KIND_FOCUS[r.kind as ReviewSlot]}.`).join("\n");
     const how = `  Read the changes with the review tool (action diff), then give your verdict with action submit${mine.length > 1 ? " and the kind of each review" : ""}.`;
-    await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}` });
+    await notify(agentId, { reason: REVIEW_REASON, priority: 3, causedByRunId, note: `- ${t.id} "${t.title}": ${t.stateNote ?? "(no note)"}\n${asks}\n${how}${checklist ? `\nAcceptance criteria:\n${checklist}` : ""}` });
   }
 }
 

@@ -291,6 +291,8 @@ export const tickets = pgTable(
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
     customFields: jsonb("custom_fields").notNull().default({}),
+    /** The ticket's acceptance criteria (1 to 10 non-empty strings), checked against at review; empty means none. */
+    acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */

@@ -132,14 +132,14 @@ export function QuickAdd({ label, button, onAdd }: { label: string; button: stri
   );
 }
 
-type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null };
+type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null; acceptanceCriteria?: string[] };
 type NewFeatureInput = { title: string; description: string | null; planWithCeo: boolean };
 /** What the add form was opened for: a feature, or a task (optionally inside one feature). */
 type Adding = { mode: "feature" | "task"; featureId: string };
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
 function AddForm({ initial, agents, features, tiers, hasCeo, onAddTask, onAddFeature, onClose }: { initial: Adding; agents: Company["agents"]; features: Feature[]; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onClose: () => void }) {
-  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo };
+  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, criteria: "" };
   const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
@@ -162,6 +162,7 @@ function AddForm({ initial, agents, features, tiers, hasCeo, onAddTask, onAddFea
           assigneeAgentId: form.assignee && form.assignee !== "owner" ? form.assignee : null,
           assignedToOwner: form.assignee === "owner",
           featureId: form.feature || null,
+          acceptanceCriteria: form.criteria.split("\n").map((l) => l.trim()).filter(Boolean),
         });
       onClose();
     } catch (err) {
@@ -205,6 +206,21 @@ function AddForm({ initial, agents, features, tiers, hasCeo, onAddTask, onAddFea
           style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
         />
       </div>
+      {!isFeature && (
+        <div className="field">
+          <label htmlFor="nt-criteria">Done when (one acceptance criterion per line)</label>
+          <textarea
+            id="nt-criteria"
+            rows={3}
+            maxLength={2_000}
+            placeholder={"Health check returns 200\nNo criteria is fine"}
+            value={form.criteria}
+            onChange={(e) => setForm({ ...form, criteria: e.target.value })}
+            style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
+          />
+          <small className="muted">Optional, up to 10. The agent reports pass or fail against each when it asks for review.</small>
+        </div>
+      )}
       {isFeature ? (
         <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <input type="checkbox" checked={form.plan && hasCeo} disabled={!hasCeo} onChange={(e) => setForm({ ...form, plan: e.target.checked })} />

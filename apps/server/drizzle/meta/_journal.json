@@ -351,6 +351,13 @@
       "when": 1792701545161,
       "tag": "0049_feature_objective",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1792773432555,
+      "tag": "0050_ticket_acceptance_criteria",
+      "breakpoints": true
     }
   ]
 }

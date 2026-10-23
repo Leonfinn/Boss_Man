@@ -24,6 +24,7 @@ import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
+import { acceptanceCriteriaSchema, missingVerdicts, readVerdicts } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
 import { findSection, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
@@ -189,9 +190,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         parent: z.string().uuid().optional(),
         assignee: z.string().optional(),
         waitsOn: z.string().uuid().optional(),
+        acceptanceCriteria: acceptanceCriteriaSchema.optional(),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, ...rest }) => {
+    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, ...rest }) => {
       const out = await outsideTree(parent);
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
       const to = assignee ? await delegateTarget(assignee) : null;
@@ -248,7 +250,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}) })
         .returning({ id: tickets.id });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id);
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn });
@@ -262,7 +264,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
     },
     async ({ ticketId, state, outcome, expected_version, summary }) => {
@@ -276,6 +278,18 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         if (t?.repoUrl && outcome !== "cancelled") return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
       }
       if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
+      // With criteria on the ticket, moving to review is only allowed once the state note reports
+      // pass or fail for each of them; the refusal names the ones it can't find.
+      const [withCriteria] = await db
+        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote })
+        .from(tickets)
+        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!withCriteria) return fail("No ticket with that ID in your company.");
+      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
+      if (missing.length)
+        return fail(
+          `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again.`,
+        );
       // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
       const [col] = await db
         .select({ id: workflowColumns.id })
@@ -762,7 +776,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). If the ticket lists acceptance criteria, check the work against each one, and when you request changes, name the criterion that fails. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
       inputSchema: {
         action: z.enum(["diff", "submit", "sequence", "overrule"]),
         ticketId: z.string().uuid(),
@@ -799,7 +813,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
           const patch = d.diff.length > 60_000 ? `${d.diff.slice(0, 60_000)}\n[diff truncated]` : d.diff;
-          return text(`Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
+          const checklist = rt.acceptanceCriteria.length
+            ? `Acceptance criteria:\n${readVerdicts(rt.acceptanceCriteria, rt.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`).join("\n")}\nIf one fails, request changes and name it.\n\n`
+            : "";
+          return text(`${checklist}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
         const r = await review.submit(input.ticketId, {
@@ -905,6 +922,13 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
           "",
           "## Description",
           t.body ? cut(t.body, CAP, (m) => `continue with tickets read ticketId=${t.id} offset=${m}`, offset) : "(none)",
+          ...(t.acceptanceCriteria?.length
+            ? [
+                "",
+                "## Acceptance criteria",
+                ...readVerdicts(t.acceptanceCriteria, t.stateNote).map((r) => `- [${r.verdict ?? "not reported"}] ${r.criterion}`),
+              ]
+            : []),
           ...(t.plan && t.planApprovedAt ? ["", "## Approved plan", cut(t.plan, CAP, () => "the rest isn't shown here")] : []), // shortcut: plans over 40000 chars aren't paged; add an offset if one ever is
           "",
           "## What it produced",
@@ -1238,6 +1262,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
         assignee: z.string().optional(),
         waitsOn: z.array(z.string().uuid()).max(20).optional(),
         featureId: z.string().uuid().optional(),
+        acceptanceCriteria: acceptanceCriteriaSchema.optional(),
       },
     },
     async (input) => {
@@ -1252,7 +1277,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
       try {
-        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId });
+        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id });
         return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
       } catch (err) {
