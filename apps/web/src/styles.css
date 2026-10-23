@@ -631,3 +631,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .checklist li.done { color: var(--muted); }
 .checklist li.done > span[aria-hidden] { color: var(--green-ink); }
 .setup-nav { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; border-top: 1px solid var(--line); padding-top: 16px; }
+
+/* Label/value rows, e.g. Settings > Server and Runner. */
+.facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 0; font-size: 14px; align-items: baseline; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }

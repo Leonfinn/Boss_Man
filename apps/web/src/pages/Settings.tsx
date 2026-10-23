@@ -59,6 +59,12 @@ function useAction() {
   return { busy, run, view };
 }
 
+/** The runner's last hello: while connected that is when this connection began. */
+function Since({ connected, at }: { connected: boolean; at: string | null }) {
+  if (!at) return null;
+  return <span className="muted">{connected ? `since ${when(at)}` : `last connected ${when(at)}`}</span>;
+}
+
 export function Runner({ company, onChanged }: { company: Company; onChanged?: () => void }) {
   const status = usePoll((signal) => api<RunnerStatus>(`/api/companies/${company.id}/runner`, { signal }), 10_000, company.id);
   const [token, setToken] = useState<string | null>(null);
@@ -89,20 +95,34 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
         <p className="muted" style={{ fontSize: 14 }}>
           Boss Man's launcher runs this company's runner as the container <code className="mono">boss-man-runner-{launched.slug}</code>, locked down, with its files under <code className="mono">companies/{launched.slug}</code> in your data folder.
         </p>
-        <p style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", alignItems: "center" }} role="status">
-          {connected ? (
-            <span className="tag green">Connected</span>
-          ) : c?.state === "running" ? (
-            <span className="tag amber">Starting…</span>
-          ) : c ? (
-            <span className="tag amber">{c.state[0]!.toUpperCase() + c.state.slice(1)}</span>
-          ) : (
-            <span className="tag">Not started</span>
+        <dl className="facts" role="status">
+          <dt>Connection</dt>
+          <dd>
+            {connected ? (
+              <span className="tag green">Connected</span>
+            ) : c?.state === "running" ? (
+              <span className="tag amber">Starting…</span>
+            ) : c ? (
+              <span className="tag amber">{c.state[0]!.toUpperCase() + c.state.slice(1)}</span>
+            ) : (
+              <span className="tag">Not started</span>
+            )}{" "}
+            {s?.registered && <Since connected={!!connected} at={s.lastSeenAt} />}
+          </dd>
+          {/* Docker's own words, e.g. "Up 14 hours (healthy)": how long the container has run, not the connection. */}
+          {c && (
+            <>
+              <dt>Container</dt>
+              <dd>{c.status}</dd>
+            </>
           )}
-          {c && <span className="muted">{c.status}</span>}
-          {s?.registered && s.lastSeenAt && <span className="muted">Last seen {when(s.lastSeenAt)}</span>}
-          {s?.registered && s.imageVersion && <span className="mono muted">Image {s.imageVersion}</span>}
-        </p>
+          {s?.registered && s.imageVersion && (
+            <>
+              <dt>Image</dt>
+              <dd className="mono">{s.imageVersion}</dd>
+            </>
+          )}
+        </dl>
         {launched.error && (
           <p className="error" role="alert">
             {launched.error}
@@ -136,12 +156,24 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
     <Section id="runner-h" title="Runner">
       {s && !s.registered && <p>This company has no runner yet. A runner is the container its agents work in; it connects out to this server, so it needs no open ports.</p>}
       {s?.registered && (
-        <p style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", alignItems: "center" }}>
-          {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>}
-          {s.lastSeenAt && <span className="muted">Last seen {when(s.lastSeenAt)}</span>}
-          {s.imageVersion && <span className="mono muted">Image {s.imageVersion}</span>}
-          {s.diskUsedBytes != null && <span className="muted">Workspaces use {(s.diskUsedBytes / 1024 ** 3).toFixed(1)} GB</span>}
-        </p>
+        <dl className="facts" role="status">
+          <dt>Connection</dt>
+          <dd>
+            {s.connected ? <span className="tag green">Connected</span> : <span className="tag amber">Offline</span>} <Since connected={s.connected} at={s.lastSeenAt} />
+          </dd>
+          {s.imageVersion && (
+            <>
+              <dt>Image</dt>
+              <dd className="mono">{s.imageVersion}</dd>
+            </>
+          )}
+          {s.diskUsedBytes != null && (
+            <>
+              <dt>Workspaces</dt>
+              <dd>{(s.diskUsedBytes / 1024 ** 3).toFixed(1)} GB</dd>
+            </>
+          )}
+        </dl>
       )}
       {token ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1075,16 +1107,66 @@ function RunnerUpdate() {
   );
 }
 
-/** Which copy of the server this is: "leader" runs the work, "standby" only serves reads, "single" has no leader lock (docs/09-self-deploy.md). */
-function ServerRole() {
-  const h = usePoll((signal) => api<{ role: "leader" | "standby" | "single"; version: string; commit: string }>("/api/health", { signal }), 10_000, "server-role");
+type Health = { role: "leader" | "standby" | "single"; version: string; commit: string; colour: "blue" | "green" | null; startedAt: string };
+type Colour = { colour: "blue" | "green"; up: boolean; role: string | null; commit: string | null; startedAt: string | null };
+type BlueGreen = { enabled: false } | { enabled: true; self: "blue" | "green"; colours: Colour[] };
+const ROLE_NOTE = { leader: "", standby: " (another copy is in charge; changes here are refused)", single: " (no leader lock)" };
+
+/** This copy of the server ("leader" runs the work, "standby" only serves reads; docs/09-self-deploy.md) and, when blue/green is on, both colours. */
+function ServerPanel() {
+  const h = usePoll((signal) => api<Health>("/api/health", { signal }), 10_000, "server-role");
+  const bg = usePoll((signal) => api<BlueGreen>("/api/bluegreen", { signal }), 10_000, "bluegreen");
   if (!h.data) return null;
-  const { role, version, commit } = h.data;
+  const { role, version, commit, startedAt } = h.data;
+  const b = bg.data;
   return (
-    <p className="muted" style={{ fontSize: 14 }} data-testid="server-role">
-      Server role: <strong>{role}</strong>
-      {role === "standby" ? " (another copy is in charge; changes here are refused)" : role === "single" ? " (no leader lock)" : ""} · version {version} · {commit.slice(0, 7)}
-    </p>
+    <Section id="server-h" title="Server">
+      <dl className="facts" data-testid="server-role">
+        <dt>Role</dt>
+        <dd>
+          <strong>{role}</strong>
+          {ROLE_NOTE[role]}
+        </dd>
+        <dt>Version</dt>
+        <dd>
+          {version} · <span className="mono">{commit.slice(0, 7)}</span>
+        </dd>
+        <dt>Running since</dt>
+        <dd>{when(startedAt)}</dd>
+        {b?.enabled && (
+          <>
+            <dt>Blue/green</dt>
+            <dd>
+              On. This page comes from <span className={`tag ${b.self}`}>{b.self}</span>
+            </dd>
+            {b.colours.map((c) => (
+              <ColourRow key={c.colour} c={c} />
+            ))}
+          </>
+        )}
+      </dl>
+    </Section>
+  );
+}
+
+function ColourRow({ c }: { c: Colour }) {
+  const state = !c.up ? "Not running" : c.role === "leader" ? "Live" : c.role === "standby" ? "Standby" : (c.role ?? "Up");
+  return (
+    <>
+      <dt>
+        <span className={`tag ${c.colour}`}>{c.colour}</span>
+      </dt>
+      <dd>
+        <span className={c.up ? undefined : "muted"}>{state}</span>
+        {c.up && c.commit && (
+          <span className="muted">
+            {" "}
+            · <span className="mono">{c.commit.slice(0, 7)}</span>
+            {c.startedAt ? ` · running since ${when(c.startedAt)}` : ""}
+          </span>
+        )}
+      </dd>
+    </>
   );
 }
 
@@ -1101,41 +1183,43 @@ export function Settings({ companies, companyId, go, onChanged }: { companies: C
           Run the setup wizard
         </button>
       </header>
-      <ServerRole />
-      {!company ? (
-        <p>
-          Create a company on the Kanban first, or{" "}
-          <button type="button" className="linkish" onClick={() => go("setup")}>
-            run the setup wizard
-          </button>
-          .
-        </p>
-      ) : (
-        <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          <Runner company={company} />
-          <SelfDeploy go={go} />
-          <RunnerUpdate />
-          <section className="card">
-            <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
-            <p className="muted" style={{ fontSize: 14 }}>
-              Credentials are added, granted and rotated on the{" "}
-              <button type="button" className="linkish" onClick={() => go("secrets")}>
-                Secrets
-              </button>{" "}
-              page.
-            </p>
-          </section>
-          <ToolServers company={company} />
-          <Funding company={company} onChanged={onChanged} />
-          <Chapters company={company} />
-          <Section id="reviews-h" title="Reviews">
-            <p className="muted" style={{ fontSize: 14 }}>
-              For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this on the Projects page.
-            </p>
-            <CompanyReviews companyId={company.id} agents={company.agents} />
-          </Section>
-        </div>
-      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <ServerPanel />
+        <SelfDeploy go={go} />
+        {!company ? (
+          <p>
+            Create a company on the Kanban first, or{" "}
+            <button type="button" className="linkish" onClick={() => go("setup")}>
+              run the setup wizard
+            </button>
+            .
+          </p>
+        ) : (
+          <div key={company.id} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            <Runner company={company} />
+            <RunnerUpdate />
+            <section className="card">
+              <h2 style={{ fontSize: 17, fontWeight: 600 }}>Credentials</h2>
+              <p className="muted" style={{ fontSize: 14 }}>
+                Credentials are added, granted and rotated on the{" "}
+                <button type="button" className="linkish" onClick={() => go("secrets")}>
+                  Secrets
+                </button>{" "}
+                page.
+              </p>
+            </section>
+            <ToolServers company={company} />
+            <Funding company={company} onChanged={onChanged} />
+            <Chapters company={company} />
+            <Section id="reviews-h" title="Reviews">
+              <p className="muted" style={{ fontSize: 14 }}>
+                For each risk level, choose who approves a task's plan, who reviews its code, and whether you sign off before it merges. A project can override this on the Projects page.
+              </p>
+              <CompanyReviews companyId={company.id} agents={company.agents} />
+            </Section>
+          </div>
+        )}
+      </div>
     </>
   );
 }
