@@ -10,6 +10,7 @@ Character art supplied by the owner on 16 Oct 2026. The originals are in `source
 | `boss-busy.webp` | At his desk with paperwork flying | Agents at work: the dashboard while runs are active, and the empty "nothing queued" state while agents are busy. |
 | `boss-stuck.webp` | Scratching his head at a warning screen | Problems: runner offline, a stalled run, lost connection to the server, and error pages. |
 | `boss-done.webp` | Thumbs up beside a "completion" chart | The decision queue when it's empty ("Nothing needs you"), and celebrating an engagement sign-off or a key result that reaches its target. |
+| `agents/*.svg` | Boss Man's team: one head-and-shoulders portrait per role template (`engineer.svg`, `qa.svg`, …) and `wiki.svg` for the Wiki Maintainer | Each agent's avatar (Kanban cards, Chat, Dashboard, Agents), unless the owner uploads a picture for that agent. The CEO uses `boss-mark-64.png`. Drawn by `agents/generate.mjs` (run it with node after editing); agents without a template show their initials. |
 
 ## Rules
 - Each illustration appears in only one place per screen, as an empty or status state, and never as decoration beside real data.

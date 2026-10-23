@@ -365,6 +365,13 @@
       "when": 1792775145848,
       "tag": "0051_ticket_acceptance_criteria",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1792776361894,
+      "tag": "0052_agent_avatar",
+      "breakpoints": true
     }
   ]
 }
