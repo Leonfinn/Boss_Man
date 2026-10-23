@@ -481,7 +481,10 @@ export class SessionManager {
       return verdict;
     };
 
+    // session/load replays the old conversation as updates; that history isn't this run's work.
+    let replaying = false;
     const onUpdate = (n: SessionNotification) => {
+      if (replaying) return;
       const u = n.update as Record<string, unknown> & { sessionUpdate: string };
       switch (u.sessionUpdate) {
         case "tool_call":
@@ -604,7 +607,8 @@ export class SessionManager {
       const openSession = async (): Promise<{ sessionId: string; configOptions?: unknown[] | null; resumed: boolean }> => {
         if (cmd.resumeSessionId && (init.agentCapabilities as { loadSession?: boolean } | undefined)?.loadSession) {
           try {
-            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta });
+            replaying = true;
+            const loaded = await agent.request(methods.agent.session.load, { sessionId: cmd.resumeSessionId, cwd: cmd.cwd, mcpServers, ...extraDirs, ...sessionMeta }).finally(() => (replaying = false));
             emit({ type: "run.update", runId: cmd.runId, update: { kind: "resumed", mode: "load" } });
             return { sessionId: cmd.resumeSessionId, configOptions: (loaded as { configOptions?: unknown[] | null } | null)?.configOptions ?? null, resumed: true };
           } catch (err) {
