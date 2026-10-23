@@ -1,0 +1,1 @@
+ALTER TABLE "tickets" ADD COLUMN "no_code" boolean DEFAULT false NOT NULL;

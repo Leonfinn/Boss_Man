@@ -983,6 +983,7 @@ export async function buildApp(opts: AppOptions) {
       dueDate: DateStr.nullable(),
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
+      noCode: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
       planFirst: z.boolean(),
       featureId: Uuid.nullable(),
@@ -1150,7 +1151,7 @@ export async function buildApp(opts: AppOptions) {
       if (open) return open;
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, b.p.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo) throw new WorkError(400, "This company has no CEO to write the brief. Add one first.");
-      const ticket = await work.createTicket(b.p.id, { title: b.exists ? BRIEF_TITLES[1]! : BRIEF_TITLES[0]!, body: briefTicketBody(b.p, b.exists), assigneeAgentId: ceo.id });
+      const ticket = await work.createTicket(b.p.id, { title: b.exists ? BRIEF_TITLES[1]! : BRIEF_TITLES[0]!, body: briefTicketBody(b.p, b.exists), assigneeAgentId: ceo.id, noCode: true });
       return reply.code(201).send(ticket);
     });
 

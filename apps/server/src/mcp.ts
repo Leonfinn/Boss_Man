@@ -19,7 +19,7 @@ import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
-import { ReviewError, type reviewService } from "./services/review.js";
+import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
 import { WorkError, type workService } from "./services/work.js";
@@ -177,7 +177,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass waitsOn (a task's id) to make this task wait until that one is done, such as a QA task waiting on its build task: it starts, and its assignee is woken, when that task is done. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass waitsOn (a task's id) to make this task wait until that one is done, such as a QA task waiting on its build task: it starts, and its assignee is woken, when that task is done. Set noCode to true for research, wiki, docs or deploy-only work that changes nothing in the repository; a ticket without it can't go to review until the repository has changed. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
@@ -191,9 +191,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         assignee: z.string().optional(),
         waitsOn: z.string().uuid().optional(),
         acceptanceCriteria: acceptanceCriteriaSchema.optional(),
+        noCode: z.boolean().optional().describe("true for research, wiki, docs or deploy-only work that changes nothing in the repository; such a ticket can reach review and be closed with an empty diff. Leave it off for anything that changes code."),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, ...rest }) => {
+    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, noCode, ...rest }) => {
       const out = await outsideTree(parent);
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
       const to = assignee ? await delegateTarget(assignee) : null;
@@ -250,7 +251,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}) })
         .returning({ id: tickets.id });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id);
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn });
@@ -290,6 +291,9 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         return fail(
           `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again.`,
         );
+      // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
+      // tickets are marked "no code" and are not held to this.
+      if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
       // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
       const [col] = await db
         .select({ id: workflowColumns.id })
@@ -1265,6 +1269,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
         waitsOn: z.array(z.string().uuid()).max(20).optional(),
         featureId: z.string().uuid().optional(),
         acceptanceCriteria: acceptanceCriteriaSchema.optional(),
+        noCode: z.boolean().optional(),
       },
     },
     async (input) => {
@@ -1279,7 +1284,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
       try {
-        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria });
+        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id });
         return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
       } catch (err) {

@@ -41,6 +41,9 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
 }
 
 /** The plain-words outcome of landing, for a non-developer. */
+/** What the author hears when a ticket that needs code changes has none. */
+export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or mark the ticket as not needing code and say why.";
+
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
   const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string };
   const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
@@ -51,6 +54,8 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       return `Approved; the ticket is done.${d.note ? ` ${d.note}` : ""}`;
     case "pull_request":
       return `${d.url ? `Pull request opened: ${d.url}.` : "Approved."}${d.note ? ` It hasn't merged yet: ${d.note}` : ""}`;
+    case "empty":
+      return `Approved, but not closed: nothing in the repository changed. ${back} to make the change, or to mark the ticket as not needing code.`;
     case "verify_failed":
       return `Approved, but not merged: the check ${d.timedOut ? `timed out after ${Math.max(1, Math.round((d.ms ?? 0) / 60_000))} minutes` : `failed (exit code ${d.exitCode})`}. ${back} to fix; the check's output is in the conversation below.`;
     case "check_stuck":
@@ -165,6 +170,18 @@ export function reviewService(
       } catch (err) {
         throw new ReviewError(409, (err as Error).message);
       }
+    },
+
+    /**
+     * True when a ticket that needs code changes has none yet: its project has a repo, it isn't
+     * marked "no code", and the runner reports no commits and no changed files. If the runner
+     * can't answer, this is false, so an offline runner never blocks a move to review.
+     */
+    async needsChanges(ticketId: string, companyId?: string): Promise<boolean> {
+      const { t, repoUrl } = await ticketWithRepo(ticketId, companyId);
+      if (!repoUrl || t.noCode) return false;
+      const d = await this.diff(ticketId, companyId).catch(() => null);
+      return !!d && !d.commits.length && !d.files.length;
     },
 
     /** One file of a ticket's work, from the runner that holds its repo (R77). */
@@ -344,7 +361,7 @@ export function reviewService(
      * default branch, and the merge closes the ticket. A failed check, a conflict or
      * uncommitted work sends the ticket back to the agent with what to do.
      */
-    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
@@ -368,6 +385,11 @@ export function reviewService(
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
       const changed = await ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000).catch(() => null);
       if (changed && !changed.commits.length && !changed.files.length) {
+        // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
+        if (!t.noCode) {
+          const delivered = await sendBack(`The review was approved, but the ticket can't be closed: ${NOTHING_CHANGED} Then move the ticket back to review.`, "nothing changed");
+          return { outcome: "empty", delivered };
+        }
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null, detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } };
       }

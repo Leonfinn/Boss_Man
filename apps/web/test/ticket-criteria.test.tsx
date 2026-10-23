@@ -57,3 +57,19 @@ describe("acceptance criteria on the ticket page", () => {
     expect(screen.getByLabelText("Acceptance criteria, one per line")).toBeTruthy();
   });
 });
+describe("the no-code flag on the ticket page", () => {
+  it("saves the owner's tick through the ticket patch", async () => {
+    const patches: unknown[] = [];
+    vi.stubGlobal("fetch", stub({ repoUrl: "https://github.com/x/y.git", noCode: false }, patches));
+    render(<Ticket id="t1" companies={[company]} />);
+    fireEvent.click(await screen.findByLabelText(/Doesn't need code changes/));
+    await waitFor(() => expect(patches).toContainEqual({ noCode: true }));
+  });
+
+  it("is hidden when the project has no repo", async () => {
+    vi.stubGlobal("fetch", stub({ repoUrl: null, noCode: false }));
+    render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByText("Done when");
+    expect(screen.queryByLabelText(/Doesn't need code changes/)).toBeNull();
+  });
+});
