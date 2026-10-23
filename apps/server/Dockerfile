@@ -9,11 +9,13 @@ RUN npm install -g --no-audit --no-fund pnpm@10.28.0
 WORKDIR /app
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY apps/web/package.json apps/web/
+COPY packages/shared/package.json packages/shared/
 RUN --mount=type=secret,id=extra_ca,required=false \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi \
  && pnpm install --frozen-lockfile --package-import-method=hardlink --filter "@boss-man/web..."
 COPY tsconfig.base.json ./
 COPY apps/web apps/web
+COPY packages/shared packages/shared
 COPY assets/brand assets/brand
 RUN pnpm --filter @boss-man/web build
 
