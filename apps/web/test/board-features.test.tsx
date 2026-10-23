@@ -32,6 +32,7 @@ function stub() {
           columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Build the toggle", featureId: "f1", featureTitle: "Dark mode" }), card({ id: "t3", title: "Need infra", parentTitle: "Build the toggle" })] }],
         });
       if (url.endsWith("/features")) return json(scored);
+      if (url.endsWith("/objectives")) return json([{ id: "o1", title: "Complete alpha build", milestones: [{ id: "m1", title: "Beta", targetDate: null }] }]);
       if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
       return json([]);
     }),
@@ -183,6 +184,19 @@ describe("add feature or task", () => {
     expect(posts[0]).toMatchObject({ url: "/api/companies/c1/features", body: { title: "Export", description: "Accountants need CSV", status: "planned" } });
     expect(posts[1]).toMatchObject({ url: "/api/features/f9/tickets", body: { projectId: "p1", title: "Plan: Export", assigneeAgentId: "a1" } });
     expect(posts[1]!.body.risk ?? null).toBeNull();
+  });
+
+  it("links a new feature to an objective or one of its milestones", async () => {
+    const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
+    fireEvent.click(screen.getByRole("radio", { name: "New feature" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Export" } });
+    fireEvent.click(screen.getByLabelText("Ask the CEO to plan it"));
+    await screen.findByRole("option", { name: "Complete alpha build (the whole objective)" });
+    fireEvent.change(screen.getByLabelText("Objective or milestone"), { target: { value: "o:o1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add feature" }));
+    await screen.findByText("Feature added.");
+    expect(posts[0]!.body).toMatchObject({ title: "Export", objectiveId: "o1", milestoneId: null });
   });
 
   it("creates only the feature when the CEO is not asked", async () => {
