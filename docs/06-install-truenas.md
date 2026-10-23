@@ -707,6 +707,10 @@ BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN
 ```sh
 docker compose up -d --no-deps --force-recreate server-blue
 ```
+   **If the live colour is green**, also tell it to take charge. Green starts as a standby (`BOSSMAN_ROLE: standby`) and only contests the leader lock after SIGUSR2, which the deployer normally sends; without it no server is in charge, writes answer "standby" and the runner can't connect:
+```sh
+docker compose kill -s SIGUSR2 server-green
+```
 4. Check. Blue's start command should be `node --import tsx src/main.ts`, and `/api/ready` should show `"role":"leader"` with the new commit:
 ```sh
 docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl -s http://192.168.68.67:3101/api/ready; echo
