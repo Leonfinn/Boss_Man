@@ -124,6 +124,13 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     return row;
   }
 
+  /** A notification about a decision is read once the decision is settled, whoever answered it and however. */
+  const readAnswered = () =>
+    db
+      .update(notifications)
+      .set({ readAt: now() })
+      .where(and(isNull(notifications.readAt), sql`${notifications.decisionId} in (select ${decisions.id} from ${decisions} where ${decisions.status} <> 'open')`));
+
   return {
     getSettings,
     async setSettings(next: NotifySettings) {
@@ -157,6 +164,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     },
 
     async list(opts: { before?: Date; limit?: number } = {}) {
+      await readAnswered();
       return db
         .select({ n: notifications, company: companies.name })
         .from(notifications)
@@ -168,6 +176,7 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
     },
 
     async unread() {
+      await readAnswered();
       const [row] = await db.select({ n: count() }).from(notifications).where(isNull(notifications.readAt));
       return Number(row?.n ?? 0);
     },
