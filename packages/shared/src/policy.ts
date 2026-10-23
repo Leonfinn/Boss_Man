@@ -69,7 +69,9 @@ function safeRegex(pattern: string): RegExp | null {
 }
 
 export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
-  if (rule.kinds && !(info.kind && rule.kinds.includes(info.kind))) return false;
+  // OpenCode asks about some shell commands (e.g. outside its folder) with kind "other"; a command is still a command.
+  const kind = (!info.kind || info.kind === "other") && commandOf(info.rawInput) ? "execute" : info.kind;
+  if (rule.kinds && !(kind && rule.kinds.includes(kind))) return false;
   if (rule.commandPattern) {
     const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);
     const re = safeRegex(rule.commandPattern);
