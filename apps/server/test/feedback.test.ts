@@ -90,6 +90,16 @@ describe("prioritisation", () => {
     expect((await c.req("PATCH", `/api/features/${a.id}`, { driverScores: { [mission.id]: 3 } })).statusCode).toBe(422);
   });
 
+  it("links a feature to a whole objective, in its own company only", async () => {
+    const c = await setup();
+    const o = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Complete alpha build", priority: 1 })).json();
+    const theirs = (await c.req("POST", `/api/companies/${c.other.id}/objectives`, { title: "Theirs", priority: 1 })).json();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Empty columns", objectiveId: o.id })).json();
+    expect(f.objectiveId).toBe(o.id);
+    expect((await c.req("PATCH", `/api/features/${f.id}`, { objectiveId: theirs.id })).statusCode).toBe(404);
+    expect((await c.req("PATCH", `/api/features/${f.id}`, { objectiveId: null })).json().objectiveId).toBeNull();
+  });
+
   it("keeps the hierarchy to one level and rolls subfeature demand up", async () => {
     const c = await setup();
     const area = (await c.req("POST", `/api/companies/${c.company.id}/feature-areas`, { name: "Reporting" })).json();

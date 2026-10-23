@@ -567,21 +567,28 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             </div>
           )}
           <div className="field">
-            <label htmlFor="f-milestone">Roadmap milestone</label>
-            <select id="f-milestone" value={f.milestoneId ?? ""} onChange={(e) => patch({ milestoneId: e.target.value || null })}>
+            <label htmlFor="f-milestone">Objective or milestone</label>
+            {/* One link: a whole objective (o:) or one of its milestones (m:). */}
+            <select
+              id="f-milestone"
+              value={f.milestoneId ? `m:${f.milestoneId}` : f.objectiveId ? `o:${f.objectiveId}` : ""}
+              onChange={(e) => {
+                const [kind, id] = e.target.value.split(":");
+                patch({ milestoneId: kind === "m" ? id! : null, objectiveId: kind === "o" ? id! : null });
+              }}
+            >
               <option value="">None</option>
-              {(tree.data ?? [])
-                .filter((o) => o.milestones.length)
-                .map((o) => (
-                  <optgroup key={o.id} label={o.title}>
-                    {o.milestones.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.title}
-                        {m.targetDate ? ` (${m.targetDate})` : ""}
-                      </option>
-                    ))}
-                  </optgroup>
-                ))}
+              {(tree.data ?? []).map((o) => (
+                <optgroup key={o.id} label={o.title}>
+                  <option value={`o:${o.id}`}>{o.title} (the whole objective)</option>
+                  {o.milestones.map((m) => (
+                    <option key={m.id} value={`m:${m.id}`}>
+                      {m.title}
+                      {m.targetDate ? ` (${m.targetDate})` : ""}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
             </select>
           </div>
         </div>

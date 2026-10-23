@@ -904,6 +904,8 @@ export const features = pgTable(
     /** Driver id to score, 0 to 5. */
     driverScores: jsonb("driver_scores").notNull().default({}),
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
+    /** Linked to a whole objective instead of one of its milestones. */
+    objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdAt: createdAt(),
