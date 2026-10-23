@@ -935,6 +935,39 @@ type Chapter = {
 const ENDED: Record<string, string> = { context: "when its context was 70% full", age: "after 7 days", owner: "when you asked", closed: "early" };
 
 /** CEO continuity: the CEO's current chapter, and the handoffs between chapters. */
+function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [days, setDays] = useState(String(company.goalCheckDays ?? 14));
+  const act = useAction();
+  const n = Number(days);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 365;
+  return (
+    <Section id="goal-check-h" title="Did it move the goal?">
+      <p className="muted" style={{ fontSize: 14 }}>
+        After a feature linked to a key result is released, Boss Man asks you once whether it moved that goal: keep it, change it or drop it.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="goal-days">Ask after (days)</label>
+        <input id="goal-days" type="number" min={1} max={365} value={days} onChange={(e) => setDays(e.target.value)} style={{ width: 80 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { goalCheckDays: n } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 function Chapters({ company }: { company: Company }) {
   const list = usePoll((signal) => api<Chapter[]>(`/api/companies/${company.id}/chapters`, { signal }), 30_000, `ch-${company.id}`);
   const act = useAction();
@@ -1244,6 +1277,7 @@ export function Settings({ companies, companyId, tab, go, onChanged }: { compani
               </p>
               <CompanyReviews companyId={company.id} agents={company.agents} />
             </Section>
+            <GoalCheck company={company} onChanged={onChanged} />
             <Chapters company={company} />
           </div>
         )}

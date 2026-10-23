@@ -10,6 +10,7 @@ import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, REASSIGN, type DecisionContext } from "./decisions.js";
+import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, latestRows } from "./review-kinds.js";
 import { MISSED_REASON, REVIEW_REASON, type WakeInput } from "./scheduler.js";
@@ -368,6 +369,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     /** One pass of every sweep. Safe to call often. */
     async run() {
       const t = now();
+      const goalChecks = await raiseDueGoalChecks(db, t);
       await opts.endUnconfirmedCancels(t);
       const lost = await lostRuns(t);
       const staleB = await staleBlockers(t);
@@ -376,7 +378,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const held = await getHold(db);
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
-      return { staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost };
+      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost };
     },
   };
 }

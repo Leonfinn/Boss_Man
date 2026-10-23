@@ -32,6 +32,7 @@ function stub() {
           columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Build the toggle", featureId: "f1", featureTitle: "Dark mode" }), card({ id: "t3", title: "Need infra", parentTitle: "Build the toggle" })] }],
         });
       if (url.endsWith("/features")) return json(scored);
+      if (url.endsWith("/objectives")) return json([{ id: "o1", title: "Complete alpha build", milestones: [{ id: "m1", title: "Beta", targetDate: null }] }]);
       if (url.includes("/feedback-settings")) return json({ demandWeight: 1, ceoTriage: false, portalEnabled: false, portalToken: null, portalTitle: null, portalIntro: null, hasLogo: false, drivers: [], areas: [] });
       return json([]);
     }),
@@ -47,13 +48,16 @@ describe("board", () => {
     expect(screen.getByText("Sub-task of Build the toggle")).toBeTruthy();
     expect(within(task).getByText("Task")).toBeTruthy();
     expect(within(screen.getByText("Need infra", { selector: "a" }).closest("article")!).getByText("Sub-task")).toBeTruthy();
-    expect(within(await screen.findByRole("article", { name: "Feature Dark mode" })).getByText("Feature")).toBeTruthy();
-    expect(await screen.findByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
-    expect(screen.getByText("1 of 2 tasks done")).toBeTruthy();
+    // The chip names the feature in one line; its full title is the tooltip.
+    expect(within(task).getByTitle("Dark mode")).toBeTruthy();
+    // All shows the columns only: the feature cards would grow above them.
+    expect(screen.queryByRole("progressbar")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Features" }));
     expect(screen.queryByText("Need infra")).toBeNull();
+    expect(within(await screen.findByRole("article", { name: "Feature Dark mode" })).getByText("Feature")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
+    expect(screen.getByText("1 of 2 tasks done")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
     expect(screen.getByText("Need infra")).toBeTruthy();
@@ -61,7 +65,7 @@ describe("board", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.getByText("Need infra")).toBeTruthy();
-    expect(screen.getByRole("progressbar", { name: "Dark mode progress" })).toBeTruthy();
+    expect(screen.queryByRole("progressbar")).toBeNull();
   });
 });
 
@@ -185,6 +189,19 @@ describe("add feature or task", () => {
     expect(posts[1]!.body.risk ?? null).toBeNull();
   });
 
+  it("links a new feature to an objective or one of its milestones", async () => {
+    const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
+    fireEvent.click(screen.getByRole("radio", { name: "New feature" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Export" } });
+    fireEvent.click(screen.getByLabelText("Ask the CEO to plan it"));
+    await screen.findByRole("option", { name: "Complete alpha build (the whole objective)" });
+    fireEvent.change(screen.getByLabelText("Objective or milestone"), { target: { value: "o:o1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add feature" }));
+    await screen.findByText("Feature added.");
+    expect(posts[0]!.body).toMatchObject({ title: "Export", objectiveId: "o1", milestoneId: null });
+  });
+
   it("creates only the feature when the CEO is not asked", async () => {
     const posts = record();
     fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
@@ -199,6 +216,7 @@ describe("add feature or task", () => {
 
   it("opens New task with the feature preselected from a feature card", async () => {
     const posts = record();
+    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
     fireEvent.click(await screen.findByRole("button", { name: "Add task to Dark mode" }));
     expect(screen.getByRole("radio", { name: "New task" }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByLabelText("Part of feature") as HTMLSelectElement).value).toBe("f1");

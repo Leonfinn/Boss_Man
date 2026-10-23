@@ -22,6 +22,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { recordGoalAnswer } from "./goal-check.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages } from "../db/schema.js";
@@ -36,6 +37,8 @@ export type DecisionContext =
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
+  /** The follow-up after a feature ships: did it move its key result? */
+  | { type: "goal_check"; featureId: string }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those at the NAS). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
@@ -693,6 +696,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
         if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));
         if (p && answer === HARD_STOP) await db.update(budgetPolicies).set({ onLimit: "pause" }).where(eq(budgetPolicies.id, p.id));
+      } else if (ctx.type === "goal_check") {
+        await recordGoalAnswer(db, ctx.featureId, answer, now());
       } else if (ctx.type === "stale_blocker") {
         await answerStaleBlocker(ctx, answer, extra);
       } else if (ctx.type === "stalled_run" && answer === CANCEL_RUN) {

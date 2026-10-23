@@ -422,7 +422,35 @@ function CreateTicket({ featureId, companyId, title, go }: { featureId: string; 
   );
 }
 
-type Tree = Array<{ id: string; title: string; milestones: Array<{ id: string; title: string; targetDate: string | null }> }>;
+export type Tree = Array<{ id: string; title: string; milestones: Array<{ id: string; title: string; targetDate: string | null }> }>;
+export type GoalLink = { objectiveId: string | null; milestoneId: string | null };
+
+/** A feature's one roadmap link: a whole objective (o:) or one of its milestones (m:). */
+export function GoalSelect({ id, tree, value, onChange }: { id: string; tree: Tree; value: GoalLink; onChange: (v: GoalLink) => void }) {
+  return (
+    <select
+      id={id}
+      value={value.milestoneId ? `m:${value.milestoneId}` : value.objectiveId ? `o:${value.objectiveId}` : ""}
+      onChange={(e) => {
+        const [kind, ref] = e.target.value.split(":");
+        onChange({ milestoneId: kind === "m" ? ref! : null, objectiveId: kind === "o" ? ref! : null });
+      }}
+    >
+      <option value="">None</option>
+      {tree.map((o) => (
+        <optgroup key={o.id} label={o.title}>
+          <option value={`o:${o.id}`}>{o.title} (the whole objective)</option>
+          {o.milestones.map((m) => (
+            <option key={m.id} value={`m:${m.id}`}>
+              {m.title}
+              {m.targetDate ? ` (${m.targetDate})` : ""}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
 
 function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go: (to: string) => void }) {
   const data = usePoll((signal) => api<FeatureDetail>(`/api/features/${id}`, { signal }), 30_000, `feature-${id}`);
@@ -469,6 +497,21 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           </p>
         </div>
       </header>
+
+      {f.goalCheckAnswer ? (
+        <section className="card" aria-label="Did it move the goal?">
+          <p>
+            <b>Did it move the goal?</b> You answered <span className="tag">{f.goalCheckAnswer}</span>
+            {f.goalCheckAnsweredAt && <> {when(f.goalCheckAnsweredAt)}</>}.
+          </p>
+        </section>
+      ) : f.goalCheckDueAt ? (
+        <section className="card" aria-label="Did it move the goal?">
+          <p className="muted">
+            <b>Did it move the goal?</b> You will be asked {when(f.goalCheckDueAt)}.
+          </p>
+        </section>
+      ) : null}
 
       <section className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Description">
         {editing ? (
@@ -568,28 +611,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           )}
           <div className="field">
             <label htmlFor="f-milestone">Objective or milestone</label>
-            {/* One link: a whole objective (o:) or one of its milestones (m:). */}
-            <select
-              id="f-milestone"
-              value={f.milestoneId ? `m:${f.milestoneId}` : f.objectiveId ? `o:${f.objectiveId}` : ""}
-              onChange={(e) => {
-                const [kind, id] = e.target.value.split(":");
-                patch({ milestoneId: kind === "m" ? id! : null, objectiveId: kind === "o" ? id! : null });
-              }}
-            >
-              <option value="">None</option>
-              {(tree.data ?? []).map((o) => (
-                <optgroup key={o.id} label={o.title}>
-                  <option value={`o:${o.id}`}>{o.title} (the whole objective)</option>
-                  {o.milestones.map((m) => (
-                    <option key={m.id} value={`m:${m.id}`}>
-                      {m.title}
-                      {m.targetDate ? ` (${m.targetDate})` : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
+            <GoalSelect id="f-milestone" tree={tree.data ?? []} value={f} onChange={patch} />
           </div>
         </div>
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>

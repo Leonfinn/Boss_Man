@@ -4,7 +4,7 @@ import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
-import { STATUS_TONE } from "./Features";
+import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
 import { ProjectBrief, ProjectRow } from "./Settings";
@@ -133,13 +133,13 @@ export function QuickAdd({ label, button, onAdd }: { label: string; button: stri
 }
 
 type NewTicketInput = { title: string; body: string | null; risk: Risk | null; planFirst: boolean; assigneeAgentId: string | null; assignedToOwner: boolean; featureId: string | null; acceptanceCriteria?: string[] };
-type NewFeatureInput = { title: string; description: string | null; planWithCeo: boolean };
+type NewFeatureInput = { title: string; description: string | null; planWithCeo: boolean } & GoalLink;
 /** What the add form was opened for: a feature, or a task (optionally inside one feature). */
 type Adding = { mode: "feature" | "task"; featureId: string };
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
-function AddForm({ initial, agents, features, tiers, hasCeo, onAddTask, onAddFeature, onClose }: { initial: Adding; agents: Company["agents"]; features: Feature[]; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onClose: () => void }) {
-  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, criteria: "" };
+function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onClose }: { initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onClose: () => void }) {
+  const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "" };
   const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
   const [error, setError] = useState<string | null>(null);
@@ -152,7 +152,7 @@ function AddForm({ initial, agents, features, tiers, hasCeo, onAddTask, onAddFea
     if (!form.title.trim() || busy) return;
     setBusy(true);
     try {
-      if (isFeature) await onAddFeature({ title: form.title.trim(), description: form.body.trim() || null, planWithCeo: form.plan && hasCeo });
+      if (isFeature) await onAddFeature({ title: form.title.trim(), description: form.body.trim() || null, planWithCeo: form.plan && hasCeo, ...form.goal });
       else
         await onAddTask({
           title: form.title.trim(),
@@ -222,10 +222,16 @@ function AddForm({ initial, agents, features, tiers, hasCeo, onAddTask, onAddFea
         </div>
       )}
       {isFeature ? (
-        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input type="checkbox" checked={form.plan && hasCeo} disabled={!hasCeo} onChange={(e) => setForm({ ...form, plan: e.target.checked })} />
-          Ask the CEO to plan it
-        </label>
+        <>
+          <div className="field">
+            <label htmlFor="nt-goal">Objective or milestone</label>
+            <GoalSelect id="nt-goal" tree={goals} value={form.goal} onChange={(goal) => setForm({ ...form, goal })} />
+          </div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="checkbox" checked={form.plan && hasCeo} disabled={!hasCeo} onChange={(e) => setForm({ ...form, plan: e.target.checked })} />
+            Ask the CEO to plan it
+          </label>
+        </>
       ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-start" }}>
           <div className="field">
@@ -326,6 +332,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const current = projects.data?.find((p) => p.id === projectId) ?? projects.data?.[0];
   const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
   const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
+  const goals = usePoll((signal) => (current ? api<Tree>(`/api/companies/${current.companyId}/objectives`, { signal }) : Promise.resolve(null)), 120_000, `board-goals-${current?.companyId ?? "none"}`);
   const [view, setView] = useState<"all" | "features" | "tasks">("all");
   const [adding, setAdding] = useState<(Adding & { n: number }) | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -442,6 +449,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           initial={adding}
           agents={company?.agents ?? []}
           features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")}
+          goals={goals.data ?? []}
           tiers={tiers}
           hasCeo={!!ceo}
           onClose={() => setAdding(null)}
@@ -451,7 +459,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             board.reload();
           }}
           onAddFeature={async (f) => {
-            const created = await api<Feature>(`/api/companies/${current.companyId}/features`, { method: "POST", body: { title: f.title, description: f.description, status: f.planWithCeo ? "planned" : "idea" } });
+            const created = await api<Feature>(`/api/companies/${current.companyId}/features`, { method: "POST", body: { title: f.title, description: f.description, status: f.planWithCeo ? "planned" : "idea", objectiveId: f.objectiveId, milestoneId: f.milestoneId } });
             if (view === "tasks") setView("features");
             feats.reload();
             if (f.planWithCeo) {
@@ -523,7 +531,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           </p>
         )}
       </div>
-      {view !== "tasks" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
+      {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
+      {view === "features" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
@@ -611,9 +620,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}
                       {t.parentTitle && <span className="note">Sub-task of {t.parentTitle}</span>}
                       {t.featureTitle && (
-                        <span className="fchip">
+                        <span className="fchip" title={t.featureTitle}>
                           <b>Feature</b>
-                          {t.featureTitle}
+                          <span>{t.featureTitle}</span>
                         </span>
                       )}
                       {t.blockedBy.length > 0 && <span className="tag amber" style={{ alignSelf: "flex-start" }}>Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
