@@ -424,6 +424,8 @@ chown 1000:1000 $D/inbox && chmod 750 $D/inbox
 ls -ld $D $D/inbox $D/outbox $D/state
 ```
 
+`ls` may show `inbox` as owned by another name, such as `n8n`: TrueNAS shows uid 1000 by the name of whichever app user has it. What matters is the number 1000 (`ls -ldn $D/inbox` shows it).
+
 **3. Install the script as a copy.** Read it first (`less /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh`). Copy it; do not make a link into the checkout, because a link would let a merged PR change what root runs.
 
 ```sh
@@ -431,7 +433,11 @@ cp /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh $D/host-
 chown root:root $D/host-deployer.sh && chmod 750 $D/host-deployer.sh
 ```
 
-When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it (scripts are infra). Read the diff, hand-deploy with `scripts/deploy.sh`, and copy it over again. To see whether your copy is current:
+When a later change touches `scripts/host-deployer.sh`, the deployer refuses to deploy it (scripts are infra). Read the diff, hand-deploy with `scripts/deploy.sh`, and copy it over again.
+
+Merge a PR that touches infra files on its own, after the app PRs before it are deployed. The deployer offers only the tip of `main`, so while an unapplied infra change is anywhere in that range, every later app PR is stuck behind it too, until you apply it by hand.
+
+To see whether your copy is current:
 
 ```sh
 diff $D/host-deployer.sh /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh && echo same
@@ -458,7 +464,7 @@ Test the webhook alone, with the same URL, before anything else:
 . $D/host.conf && curl -fsS -X POST -H 'Content-Type: application/json' -d '{"result":"failed","message":"Test from the NAS","from_commit":"aaaaaaaa","to_commit":"bbbbbbbb","at":"2026-10-20T12:00:00Z"}' "$WEBHOOK_URL" && echo sent
 ```
 
-Your phone should buzz. A `404` from curl means Home Assistant does not know that webhook ID.
+Your phone should buzz. `sent` only means Home Assistant accepted the request: it answers `200` even when no automation listens on that ID (seen on a real install, where the cause turned out to be a mistake in the automation's YAML). If you get `sent` and no buzz, check that the automation saved without errors and that its `webhook_id` matches the end of `WEBHOOK_URL` exactly.
 
 **5. Test the script.** First with no request: it reads `main` and writes what is waiting.
 
@@ -494,7 +500,7 @@ docker compose exec server ls /run/deployer
 - **Description:** `Boss Man host deployer`
 - **Command:** `/mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh`
 - **Run As User:** `root`
-- **Schedule:** custom, `* * * * *` (every minute)
+- **Schedule:** choose **Custom** and put `*` in every field (Minutes, Hours, Days of month, Months, Days of week), which means every minute. The **Hourly** preset is not enough: it runs once an hour, so a deploy you approve could wait up to an hour.
 - **Hide Standard Output:** ticked (the script keeps its own log). Leave **Hide Standard Error** unticked.
 - **Enabled:** ticked.
 
@@ -505,8 +511,10 @@ Save it. A few minutes later `$D/outbox/available.json` should have a newer `che
 What you may see instead of a deploy:
 - "Rejected: this change touches deployment files": run `scripts/deploy.sh` yourself in the `src` folder.
 - "Rejected: only one server deploy every 10 minutes": wait, then press **Deploy latest**.
-- "is not the tip of main": main moved after you approved; approve the new one.
-- Runner code changed: after the server is deployed, a second decision "Update the runners?" appears. Approving it builds the new image, then drains: runs in progress finish and each runner is swapped when its company is idle, so there is no need to wait for quiet. Approving frees the host script within minutes; the result of the swap arrives as a Boss Man notification.
+- "is not the tip of main": main moved after you approved; approve the new one. The host looks at `main` at most every 5 minutes, and not while a request is waiting, so after two merges close together Boss Man can briefly offer the older one. The host refuses it, drops its note, and offers the real tip within a minute or two. To refresh the note at once: `rm -f $D/outbox/available.json` (the next cron minute writes a new one).
+- An alert saying the change touches deployment files when you have already applied it by hand: the note was written before you did. Press **Got it**; it refreshes within about 6 minutes.
+- Runner code changed: after the server is deployed, a second decision "Update the runners?" appears. Anything under `packages/shared/` counts as runner code, even text the runner never reads (such as the agents' role text); when the change is only that, **Not now** is fine.
+- Approving the runner update builds the new image, then drains: runs in progress finish and each runner is swapped when its company is idle, so there is no need to wait for quiet. Approving frees the host script within minutes; the result of the swap arrives as a Boss Man notification.
 
 **Turn it off:** disable the cron job, or remove `:deploy/truenas-deployer.yml` from `COMPOSE_FILE` and run `docker compose up -d server`.
 
@@ -540,7 +548,7 @@ mode: queued
 
 ## 9b. Upgrading to v1.2
 
-v1.2 adds the launcher, the setup wizard, merge check presets, Gitea and pull requests, the Agents page, the model picker and ticket watchers. The server applies any database changes when it starts. Run these from the repo folder:
+v1.2 adds the launcher, the setup wizard, merge check presets, Gitea and pull requests, the Agents page, the model picker and ticket watchers. The server applies any database changes when it starts. Run these in a root shell (no `sudo`), from the repo folder:
 
 ```sh
 cd /mnt/NVME_Apps/Container_files/boss-man/src
@@ -549,19 +557,19 @@ cd /mnt/NVME_Apps/Container_files/boss-man/src
 1. **Back up the database** first:
 
    ```sh
-   sudo docker compose exec -T db pg_dump -U bossman bossman | gzip | sudo tee /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz > /dev/null
+   docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz
    ```
 
 2. **Update the code and the server:**
 
    ```sh
-   sudo git pull && sudo docker compose build server && sudo docker compose up -d db server
+   git pull && docker compose build server && docker compose up -d db server
    ```
 
 3. **Rebuild the runner.** The v1.2 server asks runners for things v1.1 runners don't know (detecting checks, pushing branches for pull requests, listing models), so the runner image has to match:
 
    ```sh
-   sudo scripts/update-runner.sh
+   scripts/update-runner.sh
    ```
 
 4. **Move to the launcher** (recommended): step 7b. If you stay on the compose runner, step 3 is enough.
@@ -579,7 +587,7 @@ The `db` image changed from `postgres:17-alpine` to `pgvector/pgvector:0.8.7-pg1
 
 ## 9d. Switch to blue/green (optional)
 
-With this, a server update has no "Boss Man is down for a minute" gap: the new version starts next to the old one, is checked, and takes over; the old one stays up for 15 minutes so the deployer can switch back by itself if checks fail. How it works, what it checks and what it cannot: `docs/09-self-deploy.md`, "Phase 3, part 2". It needs the host deployer (9a) already working. **Nothing here has been run on a real NAS yet; the steps are written from the repo's tests.** Do them with the stack quiet (no important agent runs), because step 6 is one planned stop of 1 to 2 minutes.
+With this, a server update has no "Boss Man is down for a minute" gap: the new version starts next to the old one, is checked, and takes over; the old one stays up for 15 minutes so the deployer can switch back by itself if checks fail. How it works, what it checks and what it cannot: `docs/09-self-deploy.md`, "Phase 3, part 2". It needs the host deployer (9a) already working. These steps were first run on a real TrueNAS SCALE NAS on 22 and 23 Oct 2026. Two bugs found then are fixed in the repo (see "If something goes wrong" below), so use a checkout at commit `5d983a16` or later. Do them with the stack quiet (no important agent runs), because step 6 is one planned stop of 1 to 2 minutes.
 
 Root shell, no `sudo`. Set the variables once:
 
@@ -663,9 +671,9 @@ grep 'Live colour' $D/proxy/active.caddy
 docker compose logs server-blue | grep 'LEADER: \*\*\*'
 ```
 
-The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Runner** should show each company's runner `Connected` within a minute. If it does not: step "Go back" below.
+The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Runner** should show each company's runner `Connected` within a minute: runners retry every 30 seconds, and reconnect through the proxy by themselves. **Settings > Server** shows "Blue/green: On" with blue Live and green Not running. If any of this is wrong: "If something goes wrong" below, or "Go back".
 
-**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in 9a step 5) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`. The status in **Settings > Updates** says which colour is live. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
+**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in 9a step 5) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`; a good swap ends with a line like `deployed: Deployed 5d983a16 to 46822c2b: green is live; blue stays up as a standby for 15 minutes`. The UI stays up throughout. **Settings > Server** then shows green Live and blue Standby, and **Settings > Runner** shows "Connected since" the time of the swap. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
 
 **Which colour is live?**
 
@@ -676,9 +684,38 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 ```
 
 **What the deployer will not do for you**
-- A change to `deploy/caddy/Caddyfile`, the compose files or `scripts/` is refused by the deployer (infra) and `scripts/deploy.sh` refuses to run on this install. By hand: `git merge --ff-only origin/main`, then for the Caddyfile `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`; for compose changes, the next swap recreates the idle colour with them, and the proxy with `docker compose up -d --no-deps proxy` (a few seconds without the UI). UNVERIFIED.
-- Copy a changed `host-deployer.sh` over `$D/host-deployer.sh` as in 9a.
+- It refuses any change to infra files: `deploy/` (including the Caddyfile), the compose files, `scripts/`, CI files and any `Dockerfile`. `scripts/deploy.sh` refuses to run on this install too. Apply such a change by hand, after merging it on its own (see 9a step 3):
+  - **Everything starts the same way:** bring the checkout up to `main` with `git fetch origin main && git merge --ff-only origin/main`.
+  - **A `Dockerfile` or other server-image change:** rebuild the live colour in place, as in "Rebuild the live colour in place" below.
+  - **The Caddyfile:** `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
+  - **The proxy's compose settings:** `docker compose up -d --no-deps proxy`, which leaves the UI down for a few seconds.
+  - **`scripts/host-deployer.sh`:** copy it to `$D` as in 9a step 3.
+- After a hand-applied change, the deployer may still show the alert about deployment files for a few minutes: press **Got it**.
 - Runner updates are unchanged (the drain); they never touch the proxy.
+
+**Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. The UI is down for about 20 to 30 seconds. Use the live colour's name; the examples say blue.
+
+1. Back up the database:
+```sh
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/before-rebuild.sql.gz && ls -l /mnt/NVME_Apps/Container_files/boss-man/before-rebuild.sql.gz
+```
+2. Build blue at the checkout's commit, then migrate:
+```sh
+BOSSMAN_COMMIT=$(git rev-parse HEAD) docker compose build server-blue && BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+```
+3. Restart blue on the new image (this is the 20 to 30 second gap):
+```sh
+docker compose up -d --no-deps --force-recreate server-blue
+```
+4. Check. Blue's start command should be `node --import tsx src/main.ts`, and `/api/ready` should show `"role":"leader"` with the new commit:
+```sh
+docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl -s http://192.168.68.67:3101/api/ready; echo
+```
+
+**If something goes wrong**
+- **The proxy keeps restarting** (`Restarting (255)`, and `docker logs boss-man-proxy-1` says `exec /usr/bin/caddy: operation not permitted`). The `caddy` program in the official image carries a file capability (bind to low ports). With every capability dropped and none added back, Linux refuses to run it at all. The compose file now gives back that one capability (`cap_add: [NET_BIND_SERVICE]`); a checkout from before 23 Oct 2026 lacks it. Bring the checkout up to `main`, then `docker compose up -d --no-deps proxy`.
+- **"Update failed: … blue did not step down. Switched back to blue automatically."** The live colour was built from an image that starts the server through the `tsx` command. That command runs the server as a child process and passes on only SIGINT and SIGTERM, so the hand-over signal (SIGUSR1) never arrives. Images from `5d983a16` on start `node --import tsx` directly. Rebuild the live colour in place (above) once; swaps work after that. The automatic switch-back left the live colour untouched. Any migration the attempt ran was expand-only, so the old code keeps working with it.
+- **Runner shows Offline after the cutover.** Its log (`docker logs -t --since 1h boss-man-runner-<company> 2>&1 | tail`) shows `getaddrinfo ENOTFOUND server` while the proxy is down. It reconnects by itself within 30 seconds of the proxy coming up.
 
 **Go back to a single server** (any time, also if step 6 misbehaves):
 
@@ -693,7 +730,17 @@ docker compose ps server
 
 If you edited `.env` after the backup, copy those changes back by hand instead of the whole file. Keep `$D/proxy` or delete it; nothing reads it without the opt-in. The images `boss-man-server:blue` and `:green` can be removed with `docker image rm`.
 
-**Things that stay UNVERIFIED until you have done it on the NAS:** the commands in step 6 and the swap on a real Docker (the repo tests use a pretend Docker); `wget` and `caddy reload` inside the Caddy container; whether runners reconnect without being recreated after a swap (they should: their journal replays); the 15-minute and timeout defaults.
+**Checked on the real NAS (22 and 23 Oct 2026):**
+- the bring-up and cutover commands (Docker Compose v2.32.3);
+- `caddy validate` and `caddy reload`, and busybox `wget` inside the `caddy:2.11.7` container;
+- runners reconnecting through the proxy without being recreated;
+- the automatic switch-back during a failed swap;
+- a full automatic swap from blue to green.
+
+**Still UNVERIFIED:**
+- the old colour being stopped by itself when the 15-minute soak ends;
+- an automatic switch-back during the soak (only the one during the swap has been seen);
+- whether the timeout defaults suit slower hardware.
 
 ## 10. Phone notifications (optional)
 

@@ -1,6 +1,6 @@
 # Self-deploy: the host deployer (phase 1) and the runner drain (phase 2)
 
-Status: built (phases 1 and 2). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2's runner drain is described in its own section below. The leader lock and the separate migrate step (phase 3, part 1) are built; the proxy and blue/green compose layout (parts 2 and 3) are not. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
+Status: built (phases 1 and 2). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2's runner drain is described in its own section below. The leader lock and the separate migrate step (phase 3, part 1) are built, and so is the opt-in blue/green swap (phase 3, part 2). Blue/green was first run on a real TrueNAS NAS on 22 and 23 Oct 2026; what that run found is in "Lessons from the first real run" below. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
 
 ## What it does
 
@@ -118,7 +118,7 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 ## Decisions in Boss Man
 
 - A decision of kind `approval` with context type `self_deploy` (no migration: no new enum value), tier `owner`, so only the owner's session can answer it; the CEO tool only answers `ceo`-tier decisions. Decisions belong to a company, so it is raised under the oldest one.
-- **Server:** raised by the poller when `available.json` shows `tip` differs from `deployed`, one per tip (`dedupeKey`); an older open one is withdrawn when main moves again, or when the owner hand-deploys. Options `Deploy` / `Not now`. The text shows the commit range, subjects, file count, migrations, and whether runner code changed. If the range touches infra files it is only an alert (`Got it`) saying to run `scripts/deploy.sh` at the NAS. Settings > Updates > **Deploy latest** raises it again for the current tip even if it was put off.
+- **Server:** raised by the poller when `available.json` shows `tip` differs from `deployed`, one per tip (`dedupeKey`); an older open one is withdrawn when main moves again, or when the owner hand-deploys. `available.json` lags `main`: the host rewrites it at most every 5 minutes and only in a minute with no request waiting. So the poller does not offer a commit the latest `status.json` already settled (refused, deployed or nothing new) until `checkedAt` is later than that status. After a not-the-tip refusal the host also deletes `available.json`, so the next minute writes a fresh one. Without both, two merges a few minutes apart made a loop: the stale offer was approved, refused and raised again. The migrations count in the question counts `apps/server/drizzle/*.sql` only, not Drizzle's `meta/` files. Options `Deploy` / `Not now`. The text shows the commit range, subjects, file count, migrations, and whether runner code changed. If the range touches infra files it is only an alert (`Got it`) saying to run `scripts/deploy.sh` at the NAS. Settings > Updates > **Deploy latest** raises it again for the current tip even if it was put off.
 - **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, whose text explains the drain (phase 2).
 - Approving checks that no deploy is running and no request is waiting, then writes the request. If the write fails the decision stays open.
 - **Notifications** (from the poller, once per result; the ladder): deployed = note, refused = flag, failed / partial / rolled back = page (phone through ntfy if configured). They link to Settings. The result is also stored on the decision and in the activity feed. `notifications.decision_id` is unique and already used by the "ask" notification, so the result notification is not linked to the decision row.
@@ -231,7 +231,7 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 
 PGlite (no `DATABASE_URL`) has no cross-process locks, so it is always the leader, with the same result as the kill switch.
 
-**How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings shows it at the top. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
+**How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings > Server shows it, with both colours when blue/green is on. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
 
 **If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; the leader connection sets `idle_session_timeout = 30s`, so Postgres ends a dead holder within about 30 s) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
 
@@ -283,11 +283,34 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
 - CI renders `docker-compose.yml + truenas.yml + truenas-bluegreen.yml`, checks the proxy has the alias `server`, the base `server` is parked, only the launcher has `docker.sock`, the default render is unchanged, and validates the Caddyfile and a generated include with `caddy:2.11.7`.
 - Locally with a real Caddy binary: the Caddyfile and the generated include validate in both colours; reload switches upstream; health URIs and upstream names come out as intended.
 
-**Not verified (no Docker daemon was available)**: anything that needs a running Docker on the NAS: `docker compose kill -s`, `exec`, `run --rm migrate` against a real stack; busybox `wget` and `caddy reload` inside the `caddy:2.11.7` container (used by the healthcheck and the probes); the `!override` / `!reset` compose tags on your Docker Compose version (needs 2.24 or newer; the CI runner renders them); two real servers handing over the lock through the real signals; runners reconnecting through the proxy (the swap does not check this; the design asked for a per-company "Connected" check, which needs a login-free endpoint that does not exist yet); the timing defaults (30 s hand-over wait, 120 s ready wait, 15 minutes).
+**Lessons from the first real run (TrueNAS SCALE, Docker Compose v2.32.3, 22 and 23 Oct 2026)**
+
+- **The proxy would not start.** `caddy:2.11.7`'s binary carries the `cap_net_bind_service` file capability. With `cap_drop: [ALL]` that capability is not in the bounding set, so `execve` fails (`exec /usr/bin/caddy: operation not permitted`, exit 255, restart loop). Fix: `cap_add: [NET_BIND_SERVICE]` on the proxy only; `no-new-privileges` and the rest stay. CI's render and the local Caddy binary could not show this; only the real image under the real security options did.
+- **The live colour never stepped down.** The server image ran `tsx src/main.ts` through the tsx CLI. The CLI runs the program as a child and relays only SIGINT and SIGTERM (checked in tsx 4.23.15's `dist/cli.mjs`). So SIGUSR1 reached the wrapper, where Node's default opened a debugger on 127.0.0.1:9229 inside the container, and never reached `leader.ts`. The swap then failed safely at step 8 and switched back. Fix: `CMD ["node", "--import", "tsx", "src/main.ts"]`, so node is PID 1. `test/dockerfile.test.ts` pins it. The deployer's tests use a fake Docker, so they could not catch this. A colour built from an older image has to be rebuilt in place once (docs/06, 9d).
+- **The order of merges matters.** The deployer offers only the tip of `main`, so one unapplied infra change blocks every app change merged after it. Merge infra PRs on their own and apply them by hand before merging more app PRs.
+
+**Verified on the NAS**
+- The cutover commands and the `!override` / `!reset` tags on Docker Compose v2.32.3.
+- `caddy validate` and `caddy reload`, and busybox `wget` inside the proxy (the deploy log shows "Valid configuration", and the checks through the proxy pass).
+- Two real servers handing over the lock with the real signals.
+- The automatic switch-back after a failed hand-over.
+- A full swap blue to green with the UI up throughout.
+- Runners reconnecting through the proxy by themselves: they retry every 30 s with `ENOTFOUND server` while the proxy is down, then connect.
+- **Settings > Server** shows both colours' states, read from each colour's `/api/health` over the compose network (`GET /api/bluegreen`, owner only, shown only when `BOSSMAN_COLOUR` is set).
+
+**Still not verified**
+- The old colour being stopped when the soak ends.
+- An automatic switch-back during the soak.
+- The timing defaults (30 s hand-over wait, 120 s ready wait, 15 minutes) on slower hardware.
+- Whether the swap should also check each company's runner reconnected: it doesn't yet. A person can see it in Settings > Runner, "Connected since".
 
 ## Open items
 
 1. Is the infra list complete? Anything the stack reads at start-up that lives in the repo and is not in step 6 belongs on it.
-2. **To verify on the NAS:** the cron job survives a TrueNAS upgrade (stored in the TrueNAS configuration database, which carries across updates; UNVERIFIED for 25.10); the bind mount ownership with the TrueNAS override; that `python3` and `flock` are on the host's PATH for root's cron (both ship with TrueNAS SCALE, UNVERIFIED); `git ls-remote` over the deploy key works from cron.
+2. **To verify on the NAS:** the cron job survives a TrueNAS upgrade (stored in the TrueNAS configuration database, which carries across updates; UNVERIFIED for 25.10). Verified on the NAS in Oct 2026:
+   - the bind mount ownership with the TrueNAS override;
+   - `python3` and `flock` on root's cron PATH;
+   - `git ls-remote` over the deploy key from cron;
+   - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
 3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.
