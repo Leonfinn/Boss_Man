@@ -167,3 +167,48 @@ describe("lessons learned from sent-back reviews", () => {
     expect(fresh.created).toBe(true);
   });
 });
+describe("lessons learned: QA edge cases", () => {
+  it("a resubmitted identical lesson after the owner already answered raises no new decision (dedupeKey persists)", async () => {
+    const c = (ctx = await setup());
+    await c.sendBack("Run the migration check locally before approving.");
+    const d = await sendBackDecision();
+    await c.answer(d!.id, "Drop");
+    await c.db.execute(`update tickets set system_state = 'review'`);
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
+    await c.sendBack("Run the migration check locally before approving.");
+    // The answered decision keeps its dedupeKey, so the resubmit can't raise a second one.
+    expect((await c.open()).filter((x) => (x.context as { type: string }).type === "lesson")).toHaveLength(0);
+    expect(await c.brief()).toBeUndefined();
+  });
+
+  it("a different lesson on the same ticket after a first lesson was answered still raises its decision", async () => {
+    const c = (ctx = await setup());
+    await c.sendBack("Read the config from a file.");
+    await c.answer((await sendBackDecision())!.id, "Drop");
+    await c.db.execute(`update tickets set system_state = 'review'`);
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
+    await c.sendBack("Read the config from the environment, not from a file.");
+    expect((await c.open()).filter((x) => (x.context as { type: string }).type === "lesson")).toHaveLength(1);
+  });
+
+  it("a whitespace-only lesson on a send-back is refused and raises no decision", async () => {
+    const c = (ctx = await setup());
+    // A whitespace-only lesson is treated as no lesson: the send-back passes without one.
+    const r = await c.sendBack("   \n\t  ");
+    expect(r.statusCode).toBe(200);
+    expect((await c.open()).filter((x) => (x.context as { type: string }).type === "lesson")).toHaveLength(0);
+  });
+
+  it("a lessons-cap replace answer must use the exact prefixed line or Don't add it", async () => {
+    const c = (ctx = await setup());
+    const lines = Array.from({ length: 20 }, (_, i) => `- Lesson ${i + 1}`).join("\n");
+    await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Lessons\n\n${lines}\n`);
+    await c.sendBack("Lesson 21");
+    const d = await sendBackDecision();
+    await c.answer(d!.id, "Add");
+    const [replace] = (await c.open()).filter((x) => (x.context as { type: string }).type === "lesson_replace");
+    const bare = await c.answer(replace!.id, "Lesson 3");
+    expect(bare.statusCode).toBe(422);
+    expect(lessonsFrom((await c.brief())!.body)).toHaveLength(20);
+  });
+});
