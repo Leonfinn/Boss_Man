@@ -58,6 +58,8 @@ export const companies = pgTable("companies", {
   diskCapBytes: bigint("disk_cap_bytes", { mode: "number" }),
   /** Who approves plans, who reviews code and whether the owner signs off, per risk tier. */
   reviewPolicy: jsonb("review_policy").$type<ReviewPolicy>().notNull().default(DEFAULT_REVIEW_POLICY),
+  /** Days after a feature is released before the owner is asked whether it moved its goal. */
+  goalCheckDays: integer("goal_check_days").notNull().default(14),
   createdAt: createdAt(),
 });
 
@@ -911,6 +913,13 @@ export const features = pgTable(
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     releasedAt: timestamp("released_at", { withTimezone: true }),
+    /** When to ask whether the released feature moved its goal. Set once, on the first release, and never again. */
+    goalCheckDueAt: timestamp("goal_check_due_at", { withTimezone: true }),
+    /** Set when that question has been put to the owner. */
+    goalCheckRaisedAt: timestamp("goal_check_raised_at", { withTimezone: true }),
+    /** The owner's answer: Keep, Change or Drop. */
+    goalCheckAnswer: text("goal_check_answer"),
+    goalCheckAnsweredAt: timestamp("goal_check_answered_at", { withTimezone: true }),
   },
   (t) => [index("features_company").on(t.companyId, t.status)],
 );

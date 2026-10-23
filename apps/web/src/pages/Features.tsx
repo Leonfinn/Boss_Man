@@ -470,6 +470,21 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
         </div>
       </header>
 
+      {f.goalCheckAnswer ? (
+        <section className="card" aria-label="Did it move the goal?">
+          <p>
+            <b>Did it move the goal?</b> You answered <span className="tag">{f.goalCheckAnswer}</span>
+            {f.goalCheckAnsweredAt && <> {when(f.goalCheckAnsweredAt)}</>}.
+          </p>
+        </section>
+      ) : f.goalCheckDueAt ? (
+        <section className="card" aria-label="Did it move the goal?">
+          <p className="muted">
+            <b>Did it move the goal?</b> You will be asked {when(f.goalCheckDueAt)}.
+          </p>
+        </section>
+      ) : null}
+
       <section className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }} aria-label="Description">
         {editing ? (
           <>
