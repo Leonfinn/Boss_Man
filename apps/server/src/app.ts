@@ -65,6 +65,9 @@ import { NotifySettings, notificationsService } from "./services/notifications.j
 /** The owner's timezone for times and days shown: the server's TZ when it's a zone name, else UK time. */
 const OWNER_TZ = timeZoneOr(process.env.TZ);
 
+/** Set on the blue/green colours only (deploy/truenas-bluegreen.yml); null on a single server. */
+const colour = () => (process.env.BOSSMAN_COLOUR === "blue" || process.env.BOSSMAN_COLOUR === "green" ? process.env.BOSSMAN_COLOUR : null);
+const STARTED_AT = new Date().toISOString();
 const SERVER_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export type AppOptions = {
@@ -441,7 +444,7 @@ export async function buildApp(opts: AppOptions) {
   // ---------- Public ----------
 
   // Public and cheap: no DB. Build facts only, nothing secret. The image HEALTHCHECK and the deploy script read `ok`.
-  const build = () => ({ version: SERVER_VERSION, commit: process.env.BOSSMAN_COMMIT || "dev", role: leader.role() });
+  const build = () => ({ version: SERVER_VERSION, commit: process.env.BOSSMAN_COMMIT || "dev", role: leader.role(), colour: colour(), startedAt: STARTED_AT });
   app.get("/api/health", async () => ({ ok: true, ...build() }));
   // Readiness: also proves the database answers.
   app.get("/api/ready", async (_req, reply) => {
@@ -500,6 +503,22 @@ export async function buildApp(opts: AppOptions) {
 
   await app.register(async (owner) => {
     owner.addHook("preHandler", requireOwner);
+    /** Blue/green at a glance: each colour's own /api/health over the compose network, or down when it doesn't answer. */
+    owner.get("/api/bluegreen", async () => {
+      const self = colour();
+      if (!self) return { enabled: false };
+      const peek = async (c: string) => {
+        if (c === self) return { ...build(), colour: c, up: true };
+        try {
+          const r = await fetch(`http://server-${c}:3100/api/health`, { signal: AbortSignal.timeout(2000) });
+          const h = (await r.json()) as { role?: string; commit?: string; startedAt?: string };
+          return { colour: c, up: r.ok, role: h.role ?? null, commit: h.commit ?? null, startedAt: h.startedAt ?? null };
+        } catch {
+          return { colour: c, up: false, role: null, commit: null, startedAt: null };
+        }
+      };
+      return { enabled: true, self, colours: await Promise.all(["blue", "green"].map(peek)) };
+    });
 
     owner.get("/api/me", async () => {
       const [o] = await db.select({ username: owners.username }).from(owners);
