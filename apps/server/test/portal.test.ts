@@ -204,3 +204,31 @@ describe("portal logo", () => {
     expect((await visitor(t!.app, portalToken)("GET", "/api/portal/logo")).statusCode).toBe(404);
   });
 });
+
+describe("agent picture", () => {
+  const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32, 2)]);
+
+  it("stores a picture apart from the agent row, serves it, and removes it", async () => {
+    const c = await setup();
+    const agentOf = async () => (await c.req("GET", "/api/companies")).json().find((x: { id: string }) => x.id === c.company.id).agents.find((a: { role: string }) => a.role === "ceo");
+    const ceo = await agentOf();
+    expect(ceo.avatarAt).toBeNull();
+    const url = `/api/agents/${ceo.id}/avatar`;
+    expect((await c.req("PUT" as never, url, { data: Buffer.from("<svg/>").toString("base64") })).statusCode).toBe(415);
+
+    const put = await c.req("PUT" as never, url, { data: PNG.toString("base64") });
+    expect(put.statusCode).toBe(200);
+    const after = await agentOf();
+    expect(after.avatarAt).toBeTruthy();
+    // The bytes never ride along in agent lists.
+    expect(Object.keys(after)).not.toContain("avatar");
+    const img = await c.req("GET", url);
+    expect(img.headers["content-type"]).toBe("image/png");
+    expect(img.headers["x-content-type-options"]).toBe("nosniff");
+    expect(img.rawPayload.equals(PNG)).toBe(true);
+
+    await c.req("DELETE", url);
+    expect((await agentOf()).avatarAt).toBeNull();
+    expect((await c.req("GET", url)).statusCode).toBe(404);
+  });
+});

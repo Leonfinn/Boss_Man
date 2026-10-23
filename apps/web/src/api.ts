@@ -34,7 +34,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 
 // ---------- Shapes the screens use ----------
 
-export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; reviewKind?: ReviewKindName | null };
+export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; reviewKind?: ReviewKindName | null; template?: string | null; avatarAt?: string | null };
 export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;

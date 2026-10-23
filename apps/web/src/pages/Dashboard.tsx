@@ -2,6 +2,7 @@
 // 14 days at a glance, and what happened recently.
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
+import { Avatar } from "../components/Avatar";
 
 type Result = "running" | "succeeded" | "failed" | "other";
 type AgentCard = {
@@ -32,14 +33,6 @@ export function ago(iso: string, now = Date.now()) {
 }
 
 const compact = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-const initials = (name: string) =>
-  name
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-
 const RESULT: Record<Result, { icon: string; label: string; tone: string }> = {
   running: { icon: "●", label: "Running", tone: "blue" },
   succeeded: { icon: "✓", label: "Finished", tone: "green" },
@@ -141,9 +134,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
             return (
               <li key={a.id} className={`card dash-agent${r?.result === "running" ? " live" : ""}`}>
                 <p className="who">
-                  <span className={`avatar ${a.role}`} aria-hidden="true">
-                    {initials(a.name)}
-                  </span>
+                  <Avatar agent={company.agents.find((x) => x.id === a.id) ?? a} className={a.role} />
                   <a href={`#/chat/${company.id}/${a.id}`}>{a.name}</a>
                 </p>
                 <p className="what">

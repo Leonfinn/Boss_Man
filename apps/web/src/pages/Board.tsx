@@ -8,6 +8,7 @@ import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
 import { ProjectBrief, ProjectRow } from "./Settings";
+import { Avatar } from "../components/Avatar";
 
 const DONE_SHOWN = 8;
 const PROJECT_TABS = [
@@ -16,15 +17,6 @@ const PROJECT_TABS = [
   { id: "config", label: "Config" },
 ] as const;
 const projectTab = (s: string | undefined) => PROJECT_TABS.find((t) => t.id === s)?.id ?? "kanban";
-
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((w) => w[0] ?? "")
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
 
 /** What a column is called until the owner renames it (the server's DEFAULT_COLUMNS). */
 const DEFAULT_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "Review", done: "Done" };
@@ -643,9 +635,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <div className="row">
                         <span className="who">
                           {who && (
-                            <span className="avatar" title={`${who.name} (${who.agentKind})`} style={who.role === "ceo" ? { background: "var(--side)" } : undefined}>
-                              {initials(who.name)}
-                            </span>
+                            <Avatar agent={who} title={`${who.name} (${who.agentKind})`} />
                           )}
                           {named(t)}
                         </span>

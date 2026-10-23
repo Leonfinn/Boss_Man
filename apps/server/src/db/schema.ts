@@ -63,6 +63,8 @@ export const companies = pgTable("companies", {
   createdAt: createdAt(),
 });
 
+const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
+
 export const agentRole = pgEnum("agent_role", ["ceo", "manager", "worker"]);
 
 export const agents = pgTable(
@@ -90,6 +92,8 @@ export const agents = pgTable(
     title: text("title"),
     template: text("template"),
     instructions: text("instructions"),
+    /** When the owner last uploaded a picture for the agent (agent_avatars); null shows the template's portrait. */
+    avatarAt: timestamp("avatar_at", { withTimezone: true }),
     /** A retired agent no longer works; its history and runs stay. */
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     /** How far this agent's brief has been delivered (R83): advances when a run is launched, not when the brief is built. */
@@ -854,7 +858,6 @@ export const ticketMessages = pgTable(
 
 // ---------- Feature requests ----------
 
-const bytea = customType<{ data: Buffer }>({ dataType: () => "bytea" });
 export const featureStatus = pgEnum("feature_status", ["idea", "considering", "planned", "in_progress", "released", "declined"]);
 export const importance = pgEnum("importance", ["nice_to_have", "important", "critical"]);
 export const noteSource = pgEnum("note_source", ["owner", "chat", "agent", "portal", "email", "import"]);
@@ -1151,3 +1154,10 @@ export const mcpServers = pgTable(
   },
   (t) => [uniqueIndex("mcp_servers_company_name").on(t.companyId, t.name)],
 );
+
+/** The picture the owner uploaded for an agent: png, jpeg or webp bytes, checked on upload. Kept apart so agent rows stay small. */
+export const agentAvatars = pgTable("agent_avatars", {
+  agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
+  bytes: bytea("bytes").notNull(),
+  type: text("type").notNull(),
+});

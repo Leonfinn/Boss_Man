@@ -6,6 +6,7 @@ import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
+import { Avatar } from "../components/Avatar";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
@@ -28,14 +29,6 @@ const ROLE: Record<Thread["role"], string> = { ceo: "CEO", manager: "Manager", w
 const roleOf = (t: Thread) => (t.duty === "assistant" ? "PA" : ROLE[t.role]);
 // The PA's posted answers end with this; it becomes a button that puts the question to the CEO (R87).
 const ASK_CEO = "[Ask the CEO]";
-const initials = (name: string) =>
-  name
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-
 // When the owner last looked at each conversation, so new replies show a dot. Only this browser
 // needs it, so it lives in local storage, and the page works without it.
 const SEEN = "bm-chat-seen";
@@ -129,9 +122,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
               {team.map((t) => (
                 <li key={t.id}>
                   <a href={`#/chat/${company.id}/${t.id}`} aria-current={t.id === current?.id ? "page" : undefined}>
-                    <span className={`avatar ${t.role}`} aria-hidden="true">
-                      {initials(t.name)}
-                    </span>
+                    <Avatar agent={company.agents.find((x) => x.id === t.id) ?? t} className={t.role} />
                     <span className="who">
                       <span className="name">
                         {t.name} <small>{roleOf(t)}</small>
@@ -151,9 +142,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                 <a className="back" href={`#/chat/${company.id}`} aria-label="Back to the team">
                   ←
                 </a>
-                <span className={`avatar ${current.role}`} aria-hidden="true">
-                  {initials(current.name)}
-                </span>
+                <Avatar agent={company.agents.find((x) => x.id === current.id) ?? current} className={current.role} />
                 <div>
                   <h2>{current.name}</h2>
                   <small className="muted">{state !== "idle" ? busyText(state, current.name) : roleOf(current)}</small>
