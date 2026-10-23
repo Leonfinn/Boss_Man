@@ -610,6 +610,19 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </span>
                       )}
                       {t.blockedBy.length > 0 && <span className="tag amber" style={{ alignSelf: "flex-start" }}>Blocked by {t.blockedBy.length === 1 ? (t.blockedBy[0]!.decisionId ? "a decision" : t.blockedBy[0]!.engagementId ? "an engagement" : "a task") : `${t.blockedBy.length} things`}</span>}
+                      {t.blockedBy.some((b) => b.ticketId) && (
+                        <span className="note">
+                          Waits on{" "}
+                          {t.blockedBy
+                            .filter((b) => b.ticketId)
+                            .map((b, i) => (
+                              <span key={b.ticketId}>
+                                {i > 0 && ", "}
+                                <a href={`#/tickets/${b.ticketId}`}>{b.ticketTitle ?? "a task"}</a>
+                              </span>
+                            ))}
+                        </span>
+                      )}
                       {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
                       <div className="row">
                         <span className="who">
