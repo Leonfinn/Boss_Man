@@ -390,9 +390,12 @@ export class SessionManager {
       }
       try {
         const spec = cmd.workspace;
-        const ws = await this.opts.workspaces.ensure(spec, secrets);
-        cmd = { ...cmd, cwd: ws.path };
-        emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
+        if (spec.review) cmd = { ...cmd, cwd: (await this.opts.workspaces.ensureReview(spec, secrets)).path };
+        else {
+          const ws = await this.opts.workspaces.ensure(spec, secrets);
+          cmd = { ...cmd, cwd: ws.path };
+          emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
+        }
       } catch (err) {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't prepare the git workspace: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
         return;
@@ -648,7 +651,8 @@ export class SessionManager {
       const first = !session.resumed && cmd.resumeSessionId && cmd.freshPrompt ? cmd.freshPrompt : cmd.prompt;
       // Turn checkpoints (R39): the worktree before the run, then after each turn.
       const checkpoint = async (label: string) => {
-        if (!cmd.workspace || !this.opts.workspaces) return;
+        // A reviewer's run checkpoints nothing: its copy isn't the ticket's worktree.
+        if (!cmd.workspace || cmd.workspace.review || !this.opts.workspaces) return;
         try {
           const c = await this.opts.workspaces.checkpoint(cmd.workspace, `${label} (run ${cmd.runId})`);
           if (c && label !== "before the run") emit({ type: "run.update", runId: cmd.runId, update: { kind: "checkpoint", turn: c.turn, files: c.files } });

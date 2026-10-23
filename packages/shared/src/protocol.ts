@@ -95,7 +95,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     /** Start in plan mode (R40): the agent plans and asks for approval before changing anything. */
     mode: z.enum(["plan"]).optional(),
     /** Git workspace (R38): the run works in the ticket's worktree instead of cwd. */
-    workspace: z.object({ projectId: Uuid, ticketId: Uuid, repoUrl: z.string(), baseRef: z.string() }).optional(),
+    workspace: z.object({ projectId: Uuid, ticketId: Uuid, repoUrl: z.string(), baseRef: z.string(), review: z.boolean().optional() }).optional(),
     /** The company's extra MCP servers. Only the name of the secret travels, never its value; an older runner ignores this. */
     mcpServers: z
       .array(z.object({ name: z.string(), url: z.string(), transport: z.enum(["http", "sse"]), headerName: z.string(), headerValue: z.string(), secretEnv: z.string().nullable() }))
@@ -143,6 +143,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
+    features: z.array(z.string().max(40)).max(50).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
   }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
@@ -152,6 +154,9 @@ export const RunnerMessage = z.discriminatedUnion("type", [
   z.object({ type: z.literal("reply"), requestId: z.string(), ok: z.boolean(), data: z.unknown().optional(), error: z.string().optional() }),
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
+
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. */
+export const RUNNER_FEATURES = ["review-copy"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [

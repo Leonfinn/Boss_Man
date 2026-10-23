@@ -3,6 +3,7 @@
 // Layout under the workspaces volume:
 //   repos/<projectId>.git     a bare clone per project, shared by its tickets
 //   tickets/<ticketId>        the ticket's worktree, on branch bossman/<ticket>
+//   reviews/<ticketId>        a reviewer's own detached copy of that work
 //   patches/<ticketId>.patch  uncommitted work saved when a worktree is released
 //
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
@@ -17,7 +18,7 @@ import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type Mer
 
 const run = promisify(execFile);
 
-export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string };
+export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
 
 /**
@@ -65,6 +66,7 @@ export class Workspaces {
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
   ticketDir = (ticketId: string) => path.join(this.root, "tickets", ticketId);
+  reviewDir = (ticketId: string) => path.join(this.root, "reviews", ticketId);
   patchFile = (ticketId: string) => path.join(this.root, "patches", `${ticketId}.patch`);
 
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
@@ -112,12 +114,7 @@ export class Workspaces {
       const branch = branchFor(spec.ticketId);
       const baseKey = `bossman.ticket-${spec.ticketId}.base`;
 
-      if (!existsSync(path.join(repo, "HEAD"))) {
-        mkdirSync(path.dirname(repo), { recursive: true });
-        await this.git(["clone", "--bare", "--quiet", spec.repoUrl, repo], { env: auth });
-        // Remote branches go under refs/remotes, so fetching never touches the bossman/* branches.
-        await this.git(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
-      }
+      await this.cloneIfMissing(spec, auth);
 
       if (existsSync(path.join(dir, ".git"))) {
         const baseCommit = await this.git(["config", "--get", baseKey], { cwd: repo }).catch(() => "");
@@ -152,6 +149,67 @@ export class Workspaces {
     });
   }
 
+  private async cloneIfMissing(spec: Pick<WorkspaceSpec, "projectId" | "repoUrl">, auth: Record<string, string>) {
+    const repo = this.repoDir(spec.projectId);
+    if (existsSync(path.join(repo, "HEAD"))) return;
+    mkdirSync(path.dirname(repo), { recursive: true });
+    await this.git(["clone", "--bare", "--quiet", spec.repoUrl, repo], { env: auth });
+    // Remote branches go under refs/remotes, so fetching never touches the bossman/* branches.
+    await this.git(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], { cwd: repo });
+  }
+
+  /**
+   * A reviewer's own copy of a ticket's latest work: the developer's worktree as it is now,
+   * uncommitted and untracked files included, or the ticket's branch when the worktree isn't
+   * here. Detached and in its own folder, so whatever the reviewer does there never reaches the
+   * ticket. Each review run resets it to the latest work; ignored files (installed packages) stay.
+   */
+  async ensureReview(spec: WorkspaceSpec, secrets: Record<string, string | undefined> = {}): Promise<{ path: string; commit: string }> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      await this.cloneIfMissing(spec, auth);
+      const repo = this.repoDir(spec.projectId);
+      const dev = this.ticketDir(spec.ticketId);
+      const dir = this.reviewDir(spec.ticketId);
+      let commit: string;
+      if (existsSync(path.join(dev, ".git"))) commit = await this.snapshot(dev);
+      else {
+        await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+        const branch = branchFor(spec.ticketId);
+        commit = await this.git(["rev-parse", "--verify", `refs/heads/${branch}^{commit}`], { cwd: repo }).catch(() =>
+          this.git(["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`], { cwd: repo }).catch(() => {
+            throw new Error("That ticket has no work on this runner to review.");
+          }),
+        );
+      }
+      if (existsSync(path.join(dir, ".git"))) {
+        await this.git(["checkout", "--quiet", "--force", "--detach", commit], { cwd: dir });
+        await this.git(["clean", "-fdq"], { cwd: dir });
+      } else {
+        await this.git(["worktree", "prune"], { cwd: repo });
+        mkdirSync(path.dirname(dir), { recursive: true });
+        await this.git(["worktree", "add", "--quiet", "--detach", dir, commit], { cwd: repo });
+      }
+      return { path: dir, commit };
+    });
+  }
+
+  /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
+  private async snapshot(dir: string): Promise<string> {
+    const index = path.join(this.root, "tmp", `${path.basename(dir)}.review.index`);
+    mkdirSync(path.dirname(index), { recursive: true });
+    const env = { GIT_INDEX_FILE: index };
+    try {
+      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
+      await this.git(["add", "-A"], { cwd: dir, env });
+      const tree = await this.git(["write-tree"], { cwd: dir, env });
+      const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
+      return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who });
+    } finally {
+      rmSync(index, { force: true });
+    }
+  }
+
   /**
    * Frees the worktree. Uncommitted work, tracked or not, is saved as a patch first and put
    * back the next time the ticket's workspace is made. The branch and its commits stay.
@@ -160,6 +218,8 @@ export class Workspaces {
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
       const dir = this.ticketDir(spec.ticketId);
+      // The reviewer's copy goes with the ticket; nothing in it is kept.
+      if (existsSync(path.join(this.reviewDir(spec.ticketId), ".git"))) await this.git(["worktree", "remove", "--force", this.reviewDir(spec.ticketId)], { cwd: repo });
       if (!existsSync(path.join(dir, ".git"))) return { savedPatch: false };
       await this.git(["add", "-A"], { cwd: dir });
       const diff = await this.git(["diff", "--cached", "--binary", "HEAD"], { cwd: dir });
@@ -479,6 +539,16 @@ export class Workspaces {
         continue;
       }
       if (UUID.test(ticketId) && UUID.test(projectId)) tickets.push({ ticketId, projectId, bytes: await diskUsage(dir) });
+    }
+
+    // A review copy git no longer knows about (its repo pruned it) is only clutter.
+    for (const ticketId of list(path.join(this.root, "reviews"))) {
+      const dir = path.join(this.root, "reviews", ticketId);
+      const pointer = existsSync(path.join(dir, ".git")) ? readFileSync(path.join(dir, ".git"), "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim() : undefined;
+      if ((!pointer || !existsSync(pointer)) && now - (statSync(dir, { throwIfNoEntry: false })?.mtimeMs ?? now) > 10 * 60_000) {
+        rmSync(dir, { recursive: true, force: true });
+        removed.push(ticketId);
+      }
     }
 
     const tmp = path.join(this.root, "tmp");

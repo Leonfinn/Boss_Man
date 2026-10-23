@@ -118,6 +118,45 @@ describe("git workspaces (R38)", () => {
   });
 });
 
+describe("a reviewer's own copy", () => {
+  it("copies the ticket's latest work, uncommitted included, keeps the reviewer's changes out of the ticket, and goes when the ticket is released", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const dev = await ws.ensure(spec);
+    writeFileSync(path.join(dev.path, "README.md"), "uncommitted\n");
+    writeFileSync(path.join(dev.path, "new.txt"), "untracked\n");
+
+    const copy = await ws.ensureReview({ ...spec, review: true });
+    expect(copy.path).not.toBe(dev.path);
+    expect(readFileSync(path.join(copy.path, "README.md"), "utf8")).toBe("uncommitted\n");
+    expect(readFileSync(path.join(copy.path, "new.txt"), "utf8")).toBe("untracked\n");
+    // The developer's branch, index and files are as they were.
+    expect(git(dev.path, "status", "--porcelain")).toContain("new.txt");
+    expect(git(dev.path, "rev-parse", "HEAD")).toBe(dev.baseCommit);
+
+    // The reviewer's edits stay in its copy, and the next review starts from the latest work again.
+    writeFileSync(path.join(copy.path, "README.md"), "reviewer was here\n");
+    writeFileSync(path.join(copy.path, "scratch.txt"), "x\n");
+    expect(readFileSync(path.join(dev.path, "README.md"), "utf8")).toBe("uncommitted\n");
+    writeFileSync(path.join(dev.path, "README.md"), "second round\n");
+    const again = await ws.ensureReview({ ...spec, review: true });
+    expect(readFileSync(path.join(again.path, "README.md"), "utf8")).toBe("second round\n");
+    expect(existsSync(path.join(again.path, "scratch.txt"))).toBe(false);
+
+    await ws.release(spec);
+    expect(existsSync(copy.path)).toBe(false);
+    // With the worktree gone, a review copy comes from the ticket's branch.
+    expect(readFileSync(path.join((await ws.ensureReview({ ...spec, review: true })).path, "README.md"), "utf8")).toBe("v1\n");
+  });
+
+  it("refuses a ticket with no work here", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    await expect(ws.ensureReview({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main", review: true })).rejects.toThrow(/no work on this runner/);
+  });
+});
+
 describe("reading another ticket's files (R77)", () => {
   it("reads from the worktree while it's there, from the branch once it's released, and refuses paths outside the repo", async () => {
     const r = remote();

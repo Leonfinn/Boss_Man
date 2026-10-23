@@ -414,7 +414,11 @@ export function schedulerService(
     }
     if (agent.duty === "wiki" && !w.ticketId) lines.push("", ...(await wikiDuty(agent)));
     if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
-    if (w.reason === REVIEW_REASON) lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
+    if (w.reason === REVIEW_REASON) {
+      lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
+      const copy = await reviewCopy(w);
+      if (copy) lines.push(`Your working folder is your own copy of "${copy.title}" as its author left it, uncommitted work included. Read the code around the change and run its checks there before you give your verdict; nothing you change there reaches the ticket. For any other ticket listed, use the review tool's diff and tickets read.`);
+    }
     if (w.note) lines.push("", w.note);
     lines.push(
       "",
@@ -424,6 +428,22 @@ export function schedulerService(
       UNTRUSTED_NOTE,
     );
     return lines.join("\n");
+  }
+
+  /** A review wake's first ticket, when its project has a repo: the reviewer gets its own copy of that ticket's work. */
+  async function reviewCopy(w: typeof wakes.$inferSelect) {
+    if (w.reason !== REVIEW_REASON || w.ticketId) return null;
+    // An older runner would ignore the review flag and put the reviewer in the author's own worktree.
+    const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, w.companyId));
+    if (!runner || !deps.runners.can(runner.id, "review-copy")) return null;
+    const id = w.note?.match(/^- ([0-9a-f-]{36}) /m)?.[1];
+    if (!id) return null;
+    const [t] = await db
+      .select({ ticketId: tickets.id, title: tickets.title, projectId: tickets.projectId, repoUrl: projects.repoUrl, baseRef: projects.defaultBranch })
+      .from(tickets)
+      .innerJoin(projects, eq(projects.id, tickets.projectId))
+      .where(and(eq(tickets.id, id), eq(tickets.companyId, w.companyId)));
+    return t?.repoUrl ? { ...t, repoUrl: t.repoUrl } : null;
   }
 
   async function launch(w: typeof wakes.$inferSelect): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
@@ -453,6 +473,7 @@ export function schedulerService(
       : [];
     // The owner chat runs with board tools only, in its own folder, outside the CEO's chapters.
     const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
+    const copy = await reviewCopy(w);
     const briefAt = now();
     const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt);
     // A CEO's run belongs to its current chapter (CEO continuity).
@@ -480,6 +501,7 @@ export function schedulerService(
       // A plan-first ticket starts in plan mode until its plan is approved (R40).
       ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && w.ticketId ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
+      ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
       prompt: chapter?.prompt ?? wakePrompt,
       mcpToken,
       ...(chapter?.resumeSessionId ? { resumeSessionId: chapter.resumeSessionId } : !chapter && previous?.acpSessionId ? { resumeSessionId: previous.acpSessionId } : {}),
