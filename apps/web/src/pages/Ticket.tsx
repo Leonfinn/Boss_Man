@@ -153,6 +153,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
+  const [lesson, setLesson] = useState("");
   const [sendingBack, setSendingBack] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -241,8 +242,9 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const review = async (verdict: "approved" | "changes_requested") => {
     setBusy(true);
     try {
-      const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(verdict === "changes_requested" ? { summary: summary.trim() } : {}) } });
+      const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(verdict === "changes_requested" ? { summary: summary.trim(), ...(lesson.trim() ? { lesson: lesson.trim() } : {}) } : {}) } });
       setSummary("");
+      setLesson("");
       setSendingBack(false);
       if (r.landing) {
         setNow(Date.now());
@@ -294,6 +296,11 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   <div className="field">
                     <label htmlFor="review-summary">What should the agent change?</label>
                     <textarea id="review-summary" rows={3} autoFocus value={summary} onChange={(e) => setSummary(e.target.value)} placeholder={t.acceptanceCriteria?.length ? "Name the failing criterion, e.g. \"Acceptance criteria: Migration is expand-only fails.\"" : undefined} />
+                  </div>
+                  <div className="field">
+                    {/* A lesson learned goes to a decision, so it only reaches the brief if the owner approves it. */}
+                    <label htmlFor="review-lesson">Lesson learned (optional) — you'll be asked whether to add it to the project brief</label>
+                    <input id="review-lesson" value={lesson} onChange={(e) => setLesson(e.target.value)} maxLength={240} placeholder={'One line, e.g. "Check the migration is expand-only before approving."'} />
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button type="button" className="btn primary" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>

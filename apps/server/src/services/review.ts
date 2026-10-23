@@ -12,6 +12,7 @@ import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hos
 import { effectivePolicy } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP } from "./decisions.js";
+import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
 
@@ -91,6 +92,7 @@ export function reviewService(
       .select({
         t: tickets,
         repoUrl: projects.repoUrl,
+        projectName: projects.name,
         defaultBranch: projects.defaultBranch,
         verifyCommand: projects.verifyCommand,
         deepVerifyCommand: projects.deepVerifyCommand,
@@ -187,14 +189,34 @@ export function reviewService(
      */
     async submit(
       ticketId: string,
-      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
+      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; /** Optional one-line lesson learned, when sending it back (R-review-lessons); the owner decides. */ lesson?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
     ) {
-      const { t } = await ticketWithRepo(ticketId, input.companyId);
+      const { t, projectName } = await ticketWithRepo(ticketId, input.companyId);
       // The coder doesn't review its own work (R49).
       if (input.reviewerAgentId && t.assigneeAgentId === input.reviewerAgentId) throw new ReviewError(403, "You can't review a ticket assigned to you.");
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
+      if (input.lesson?.trim() && input.verdict !== "changes_requested") throw new ReviewError(422, "A lesson goes with changes requested, not with an approval.");
+      if ((input.lesson?.trim().length ?? 0) > LESSON_MAX) throw new ReviewError(422, "A lesson is one line, up to 240 characters.");
+      const lesson = normalizeLesson(input.lesson ?? "");
+      if (input.lesson?.trim() && !lesson) throw new ReviewError(422, "A lesson is one line, up to 240 characters.");
       const rows = input.reviewerAgentId ? await latestRows(db, ticketId) : [];
       if (input.verdict === "changes_requested" && !input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
+      // Each lesson becomes exactly one owner decision: nothing reaches the brief without them (R-review-lessons).
+      if (lesson)
+        await db
+          .insert(decisions)
+          .values({
+            companyId: t.companyId,
+            kind: "question",
+            question: `Add this lesson to ${projectName}'s brief? "${lesson}"`,
+            options: [LESSON_ADD, LESSON_EDIT, LESSON_DROP],
+            recommendedOption: LESSON_ADD,
+            tier: "owner",
+            raisedByAgentId: input.reviewerAgentId ?? null,
+            dedupeKey: `lesson:${ticketId}:${lesson}`,
+            context: { type: "lesson", ticketId, projectId: t.projectId, projectName, lesson },
+          })
+          .onConflictDoNothing();
       let diffText = "";
       if (input.verdict === "changes_requested" && input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
       if (!rows.length) {

@@ -1766,7 +1766,7 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/tickets/:id/review", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z
-        .object({ verdict: z.enum(["approved", "changes_requested"]), comments: z.array(ReviewComment).max(100).optional(), summary: z.string().max(5000).optional() })
+        .object({ verdict: z.enum(["approved", "changes_requested"]), comments: z.array(ReviewComment).max(100).optional(), summary: z.string().max(5000).optional(), lesson: z.string().max(240).optional() })
         .parse(req.body);
       // Approval lands in the background (the check can outlast a proxy or browser timeout); the page polls /landing.
       const r = await review.submit(id, { ...b, reviewer: "the owner", background: true }).catch(reviewErrors(reply));

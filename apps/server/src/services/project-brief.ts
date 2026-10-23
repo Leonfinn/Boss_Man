@@ -3,12 +3,49 @@
 import { and, eq, isNull, ne, inArray } from "drizzle-orm";
 import { parseRepoUrl } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, projects, settings, tickets, wikiPages } from "../db/schema.js";
+import { agents, projects, settings, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import type { gitHostService } from "./git-hosts.js";
 import type { workService } from "./work.js";
-import { splitSections } from "./wiki.js";
+import { LESSONS_HEADING, addLesson, lessonLine, removeLessonLine, splitSections } from "./wiki.js";
 
+// The lessons helpers and their decision answers live in wiki.ts beside the section parsing
+// (the brief-write guard needs them there); re-exported so callers find them at the brief.
+export { LESSONS_HEADING, LESSONS_CAP, LESSON_ADD, LESSON_EDIT, LESSON_DROP, LESSON_DONT_ADD, LESSON_REPLACE_PREFIX, LESSON_MAX, lessonLine, lessonsSection, lessonsFrom, addLesson, removeLessonLine, normalizeLesson } from "./wiki.js";
+
+// A stub brief keeps its parse-off first line ("unknown" is no hex commit), so the upkeep loop
+// doesn't open refresh tickets for a page nobody has mapped yet.
+const STUB_FIRST_LINE = "Describes commit unknown on unknown.";
 export const BRIEF_HEADINGS = ["Objectives", "Architecture", "Code map", "Conventions", "Build and test", "Gotchas", "Glossary"];
+
+/** The project's brief page row, or null when nobody has written it. */
+export async function lessonsPageRow(db: Db, companyId: string, projectId: string) {
+  const [p] = await db.select().from(wikiPages).where(and(eq(wikiPages.companyId, companyId), eq(wikiPages.slug, briefSlug(projectId))));
+  return p ?? null;
+}
+
+/**
+ * Puts an owner-approved lesson in the project's brief: writes the page when there isn't one,
+ * swaps out the line the owner chose to replace, and keeps the old text as a revision. The
+ * Lessons section is capped by the caller; this only writes.
+ */
+export async function writeLesson(db: Db, ctx: { companyId: string; projectId: string; projectName: string }, lesson: string, replaced?: string) {
+  const bodyOf = (body: string) => addLesson(replaced ? removeLessonLine(body, replaced) : body, lesson);
+  const page = await lessonsPageRow(db, ctx.companyId, ctx.projectId);
+  if (!page) {
+    const body = `${STUB_FIRST_LINE}\n\n## ${LESSONS_HEADING}\n\n${lessonLine(lesson)}\n`;
+    const [p] = await db
+      .insert(wikiPages)
+      .values({ companyId: ctx.companyId, slug: briefSlug(ctx.projectId), folder: briefFolder(ctx.projectName), title: briefTitle(ctx.projectName), body })
+      .returning();
+    await db.insert(wikiRevisions).values({ pageId: p!.id, title: p!.title, body });
+    return;
+  }
+  const body = bodyOf(page.body);
+  if (body !== page.body) {
+    await db.update(wikiPages).set({ body, updatedAt: new Date() }).where(eq(wikiPages.id, page.id));
+    await db.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
+  }
+}
 
 /** Stable across renames: the page is found by project id, never by name. */
 export const briefSlug = (projectId: string) => `brief-${projectId}`;
@@ -63,6 +100,7 @@ export function briefTicketBody(p: { id: string; name: string; defaultBranch: st
     `Then these sections, in this order, each as a level-2 heading: ${BRIEF_HEADINGS.map((h) => `## ${h}`).join(", ")}.`,
     "",
     "Keep each section short and factual, because agents read one section at a time. Say what you could not find out rather than guessing.",
+    "If the page has a \"Lessons\" section, leave it exactly as it is: it holds owner-approved lessons from reviews, and the write is refused when it changes.",
     "",
     "This is a documentation task: the wiki page is its only output. Don't change, commit or push anything in the repository, tests included; read-only commands are fine. If something looks broken, such as failing tests, note it under Gotchas and tell the owner with notify_owner instead of fixing it here.",
     ...(extra ? ["", extra] : []),
