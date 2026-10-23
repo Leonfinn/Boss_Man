@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { feedbackNotes, notifications, tickets, wakes } from "../src/db/schema.js";
+import { feedbackNotes, features, notifications, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -109,7 +109,11 @@ describe("agents and feedback", () => {
     const ceo = await c.mcp(c.ceo.id);
     expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "link", noteId, featureId: f.id, importance: "critical", highlight: "CSV export" } }))).toBe("Linked.");
     expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "create_feature", title: "csv export" } }))).toContain("already exists");
-    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "create_feature", title: "Scheduled reports" } }))).toMatch(/^Created feature /);
+    const goal = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Win finance teams" })).json();
+    const made = textOf(await ceo.callTool({ name: "feedback", arguments: { action: "create_feature", title: "Scheduled reports", objectiveId: goal.id } }));
+    expect(made).toMatch(/^Created feature /);
+    expect((await c.db.select().from(features).where(eq(features.id, made.match(/feature (\S+)\./)![1]!)))[0]!.objectiveId).toBe(goal.id);
+    expect((await ceo.callTool({ name: "feedback", arguments: { action: "create_feature", title: "Elsewhere", objectiveId: randomUUID() } })).isError).toBe(true);
     expect((await ceo.callTool({ name: "feedback", arguments: { action: "link", noteId, featureId: f.id, highlight: "not in the note" } })).isError).toBe(true);
     await ceo.callTool({ name: "feedback", arguments: { action: "mark", noteId, state: "processed" } });
     await ceo.close();

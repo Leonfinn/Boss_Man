@@ -64,7 +64,7 @@ describe("agents per key", () => {
       }),
     );
     render(<Secrets companies={[co]} companyId="c1" />);
-    fireEvent.click(await screen.findByText("All agents"));
+    fireEvent.click(await screen.findByText("Every agent"));
     fireEvent.click(screen.getByRole("checkbox", { name: "Bo" }));
     fireEvent.click(screen.getByRole("button", { name: "Save agents for GIT_TOKEN" }));
     await vi.waitFor(() => expect(calls).toContain('PUT /api/grants/g1/agents {"agentIds":["a2"]}'));

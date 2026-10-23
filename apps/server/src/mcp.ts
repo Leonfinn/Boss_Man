@@ -612,11 +612,13 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description), mark (noteId, state processed|archived).",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived).",
       inputSchema: {
         action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark"]),
         noteId: z.string().uuid().optional(),
         featureId: z.string().uuid().optional(),
+        objectiveId: z.string().uuid().optional(),
+        milestoneId: z.string().uuid().optional(),
         importance: z.enum(IMPORTANCE).optional(),
         highlight: z.string().max(2000).optional(),
         title: z.string().min(1).max(200).optional(),
@@ -680,7 +682,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           if (!input.title) return fail("Give the feature a title.");
           const existing = (await feedback.scored(scope.companyId)).features.find((f) => f.title.toLowerCase() === input.title!.toLowerCase());
           if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; link to it.`);
-          const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, createdByAgentId: scope.agentId });
+          const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, createdByAgentId: scope.agentId });
           return text(`Created feature ${f.id}.`);
         }
         if (!input.noteId || !input.state) return fail("Give noteId and state.");
