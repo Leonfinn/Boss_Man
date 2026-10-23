@@ -25,6 +25,13 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission({ title: "Edit src/a.ts", kind: "edit", rawInput: {} }, []).outcome).toBe("allow");
   });
 
+  it("treats a shell command asked about as kind other like any shell command", () => {
+    const other = (command: string) => ({ title: command, kind: "other", rawInput: { command } });
+    expect(evaluatePermission(other("cd /tmp/opencode/bm && git grep -n brief"), [])).toEqual({ outcome: "allow", rule: "Other shell commands" });
+    expect(evaluatePermission(other("git push origin main"), []).outcome).toBe("owner");
+    expect(evaluatePermission({ title: "mcp__scrapling__get", kind: "other", rawInput: { url: "https://example.com" } }, []).outcome).toBe("owner");
+  });
+
   it("falls through to the owner for unknown kinds", () => {
     expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toEqual({ outcome: "owner", rule: "No rule matched" });
   });

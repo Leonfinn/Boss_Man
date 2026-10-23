@@ -45,6 +45,7 @@ describe("git workspaces on the server (R38)", () => {
     await c.scheduler.tick();
     const start = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
     expect(start.workspace).toEqual({ projectId: c.project.id, ticketId: t.id, repoUrl: "https://github.com/Leonfinn/customer-app.git", baseRef: "main" });
+    expect(start.prompt).toContain("never git push");
 
     await c.runners.ingest(c.runnerRow, { seq: 1, at: new Date().toISOString(), event: { type: "run.workspace", runId: start.runId, ticketId: t.id, branch: `bossman/${t.id}`, baseCommit: "abc123", created: true, restoredPatch: false } });
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]).toMatchObject({ branch: `bossman/${t.id}`, baseCommit: "abc123" });
@@ -81,5 +82,6 @@ describe("git workspaces on the server (R38)", () => {
     const start = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
     expect(start.workspace).toBeUndefined();
     expect(start.cwd).toMatch(/^\/ws\//);
+    expect(start.prompt).not.toContain("git push");
   });
 });

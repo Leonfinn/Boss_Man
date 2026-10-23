@@ -389,7 +389,7 @@ export function schedulerService(
       );
     if (agent.role === "ceo") lines.push("", "Reviews and plan approvals follow the company's review settings, so they may go to someone other than you; you review or approve when the chosen person is unavailable, and you can always overrule.");
     if (w.ticketId) {
-      const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
+      const [t] = await db.select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {
         lines.push("", `Ticket ${t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
@@ -407,6 +407,7 @@ export function schedulerService(
           lines.push("", `The project has a brief in the wiki, a map of its code: wiki read slug="${brief.slug}" section="Code map" (sections: ${brief.headings.join(", ")}).${brief.commit ? ` It describes commit ${brief.commit} on ${brief.branch}.` : ""} It is a map, not the source of truth: check the code before you change it, and if the brief is wrong, say so in your ticket.`);
         lines.push("", planningGuidance(t.t.risk));
         lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
+        if (t.repoUrl) lines.push("", "Commit your work on the ticket's branch but never git push: Boss Man merges or pushes it once it passes review.");
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
           const team = await db
             .select({ name: agents.name, role: agents.role, title: agents.title })
