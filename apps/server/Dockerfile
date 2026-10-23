@@ -55,4 +55,6 @@ ENV NODE_ENV=production PORT=3100 BOSSMAN_WEB_DIR=/app/web BOSSMAN_COMMIT=$BOSSM
 EXPOSE 3100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD node -e "fetch('http://127.0.0.1:3100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node_modules/.bin/tsx", "src/main.ts"]
+# node itself is PID 1, with tsx only as a loader: the tsx CLI runs the server as a child and forwards only
+# SIGINT/SIGTERM, so the blue/green handover signals (SIGUSR1/SIGUSR2, leader.ts) would never arrive.
+CMD ["node", "--import", "tsx", "src/main.ts"]

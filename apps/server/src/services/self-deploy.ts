@@ -80,7 +80,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
     const subjects = changes.slice(0, 5).map((c) => `- ${c}`).join("\n");
     const n = a?.paths.length ?? 0;
-    const migrations = (a?.paths ?? []).filter((p) => p.startsWith("apps/server/drizzle/")).length;
+    const migrations = (a?.paths ?? []).filter((p) => /^apps\/server\/drizzle\/[^/]+\.sql$/.test(p)).length;
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     const question =
       target === "runner"

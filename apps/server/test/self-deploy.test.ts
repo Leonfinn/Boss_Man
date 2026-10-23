@@ -53,10 +53,11 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
 
   it("raises one owner decision when main moves, and approving it writes the request file", async () => {
     const c = (ctx = await setup());
-    await c.available({ commits: [{ sha: B, subject: "Add rate limiting" }] });
+    await c.available({ commits: [{ sha: B, subject: "Add rate limiting" }], paths: ["apps/server/src/x.ts", "apps/server/drizzle/0049_x.sql", "apps/server/drizzle/meta/_journal.json", "apps/server/drizzle/meta/0049_snapshot.json"] });
     await c.selfDeploy.sync();
     await c.selfDeploy.sync();
     const [d] = await c.open();
+    expect(d!.question).toContain("4 files changed, 1 database migration.");
     expect(await c.open()).toHaveLength(1);
     expect(d).toMatchObject({ tier: "owner", options: ["Deploy", "Not now"], recommendedOption: "Deploy", context: { type: "self_deploy", target: "server", commit: B, fromCommit: A } });
     expect(d!.question).toContain("Add rate limiting");
