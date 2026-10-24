@@ -19,6 +19,8 @@ describe("page guard", () => {
       </PageGuard>,
     );
     expect(screen.getByRole("alert").textContent).toContain("TypeError: x is undefined");
+    // The component stack names where it broke, so a screenshot is enough to find it.
+    expect(screen.getByRole("alert").textContent).toMatch(/In:\s*at Page/);
     broken = false;
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(screen.getByText("Chat works")).toBeTruthy();

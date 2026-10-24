@@ -1,4 +1,4 @@
-import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
@@ -254,10 +254,14 @@ export function App() {
 }
 
 /** A page that throws shows what went wrong instead of blanking the whole app; moving to another page resets it. */
-export class PageGuard extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state = { error: null as Error | null };
+export class PageGuard extends Component<{ children: ReactNode }, { error: Error | null; where: string }> {
+  state = { error: null as Error | null, where: "" };
   static getDerivedStateFromError(error: Error) {
     return { error };
+  }
+  // Which components it was in: the error's own stack is React's internals, which says nothing about the page.
+  componentDidCatch(_error: Error, info: ErrorInfo) {
+    this.setState({ where: (info.componentStack ?? "").trim().split("\n").slice(0, 8).join("\n") });
   }
   render() {
     if (!this.state.error) return this.props.children;
@@ -265,9 +269,9 @@ export class PageGuard extends Component<{ children: ReactNode }, { error: Error
       <section className="card" role="alert" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <h2 style={{ fontSize: 17 }}>This page hit an error</h2>
         <p className="muted">The rest of Boss Man still works. If it happens again, send a screenshot of this message.</p>
-        <pre className="mono" style={{ margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }}>{`${this.state.error.name}: ${this.state.error.message}\n${(this.state.error.stack ?? "").split("\n").slice(0, 4).join("\n")}`}</pre>
+        <pre className="mono" style={{ margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }}>{`${this.state.error.name}: ${this.state.error.message}\n${(this.state.error.stack ?? "").split("\n").slice(0, 4).join("\n")}${this.state.where ? `\nIn:\n${this.state.where}` : ""}`}</pre>
         <div>
-          <button type="button" className="btn" onClick={() => this.setState({ error: null })}>
+          <button type="button" className="btn" onClick={() => this.setState({ error: null, where: "" })}>
             Try again
           </button>
         </div>
