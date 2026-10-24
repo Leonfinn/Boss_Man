@@ -67,6 +67,8 @@ describe("owner chat", () => {
     expect(start).toMatchObject({ agentId: c.ceo.id, boardToolsOnly: true, cwd: `/ws/chat/${c.company.id}/${c.ceo.id}` });
     expect(start.resumeSessionId).toBeUndefined();
     expect(start.prompt).toContain("Owner: Add rate limiting to the login API before the beta.\nOwner: And make it wait on the auth refactor.");
+    // A substantial answer is filed in the wiki, so it outlives the chat.
+    expect(start.prompt).toContain("also save it as a wiki page (Product/Analysis");
     expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ purpose: "chat", chapterId: null });
     // Only the CEO's own run made a chapter.
     expect((await c.db.select().from(ceoChapters)).length).toBe(1);

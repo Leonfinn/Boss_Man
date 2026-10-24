@@ -150,7 +150,10 @@ describe("wiki and ticket outputs (R69)", () => {
     expect(start.prompt).toContain("You are the company's wiki maintainer.");
     expect(start.prompt).toContain("Product/Features");
     expect(start.prompt).toContain(`- ${t.id} "Research the landscape" (completed): produced wiki page research/landscape`);
-    expect(start.prompt).toContain(`- ${t2.id} "Pick a licence" (completed): nothing attached`);
+    expect(start.prompt).toContain(`- ${t2.id} "Pick a licence" (completed): nothing attached; status page: status-${c.project.id}`);
+    // A corrected fact is marked, never silently overwritten; each project keeps a today-status page.
+    expect(start.prompt).toContain("> Changed <date>: <what it said before> → <what it says now>");
+    expect(start.prompt).toContain("Status page (slug status-<project id>");
 
     // Any agent can be paused; its work waits.
     await c.req("PATCH", `/api/agents/${c.worker.id}`, { paused: true });

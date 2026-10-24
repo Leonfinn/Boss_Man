@@ -123,6 +123,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
         "- Rate each ticket's risk honestly. Assign an agent only if the owner says who, or it's obvious. When a ticket delivers a feature request, pass its featureId.",
         "- When the owner passes on what someone else said (a customer's email, a call), file it with log_feedback as they said it, rather than turning it straight into tickets.",
         "- If the request is ambiguous, ask one short question instead of guessing.",
+        "- When your answer is substantial (an analysis, a comparison, research into options), also save it as a wiki page (Product/Analysis, or the folder it belongs in) and link it, so it isn't lost in the chat.",
         "- End with a short reply that lists everything you created or changed, each as `#/tickets/<id>` followed by its title, so the owner can open it.",
         "",
         "The conversation so far, oldest first:",
