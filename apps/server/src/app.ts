@@ -14,7 +14,7 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/s
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, costEvents, engagements, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agents, companies, costEvents, engagements, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { modelsService } from "./services/models.js";
@@ -1463,6 +1463,30 @@ export async function buildApp(opts: AppOptions) {
       const logo = await feedback.portalLogo(IdParam.parse(req.params).id);
       return logo ? sendLogo(reply, logo) : reply.code(404).send({ error: "not_found", message: "No logo." });
     });
+    // An agent's own picture, in place of its template's portrait.
+    owner.put("/api/agents/:id/avatar", { bodyLimit: 400 * 1024 }, async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { data } = z.object({ data: z.string() }).parse(req.body);
+      const bytes = Buffer.from(data, "base64");
+      if (!bytes.length || bytes.length > 256 * 1024) return reply.code(413).send({ error: "too_large", message: "The picture must be 256 KB or smaller." });
+      const type = logoType(bytes);
+      if (!type) return reply.code(415).send({ error: "bad_type", message: "The picture must be a PNG, JPEG or WebP image." });
+      const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, id));
+      if (!a) return reply.code(404).send({ error: "not_found", message: "No such agent." });
+      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type } });
+      const [row] = await db.update(agents).set({ avatarAt: new Date() }).where(eq(agents.id, id)).returning({ avatarAt: agents.avatarAt });
+      return row;
+    });
+    owner.delete("/api/agents/:id/avatar", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      await db.delete(agentAvatars).where(eq(agentAvatars.agentId, id));
+      await db.update(agents).set({ avatarAt: null }).where(eq(agents.id, id));
+      return { avatarAt: null };
+    });
+    owner.get("/api/agents/:id/avatar", async (req, reply) => {
+      const [pic] = await db.select({ bytes: agentAvatars.bytes, type: agentAvatars.type }).from(agentAvatars).where(eq(agentAvatars.agentId, IdParam.parse(req.params).id));
+      return pic ? sendLogo(reply, pic) : reply.code(404).send({ error: "not_found", message: "No picture." });
+    });
     owner.post("/api/companies/:id/portal/rotate", async (req) => feedback.rotatePortal(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/features", async (req) => feedback.scored(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/features", async (req, reply) => {
@@ -1767,7 +1791,7 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/tickets/:id/review", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z
-        .object({ verdict: z.enum(["approved", "changes_requested"]), comments: z.array(ReviewComment).max(100).optional(), summary: z.string().max(5000).optional() })
+        .object({ verdict: z.enum(["approved", "changes_requested"]), comments: z.array(ReviewComment).max(100).optional(), summary: z.string().max(5000).optional(), lesson: z.string().max(240).optional() })
         .parse(req.body);
       // Approval lands in the background (the check can outlast a proxy or browser timeout); the page polls /landing.
       const r = await review.submit(id, { ...b, reviewer: "the owner", background: true }).catch(reviewErrors(reply));

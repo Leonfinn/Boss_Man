@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { api, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type Project, type Risk, type ScoredFeatures } from "../api";
+import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -8,6 +8,7 @@ import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
 import { ProjectBrief, ProjectRow } from "./Settings";
+import { Avatar } from "../components/Avatar";
 
 const DONE_SHOWN = 8;
 const PROJECT_TABS = [
@@ -16,15 +17,6 @@ const PROJECT_TABS = [
   { id: "config", label: "Config" },
 ] as const;
 const projectTab = (s: string | undefined) => PROJECT_TABS.find((t) => t.id === s)?.id ?? "kanban";
-
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((w) => w[0] ?? "")
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
 
 /** What a column is called until the owner renames it (the server's DEFAULT_COLUMNS). */
 const DEFAULT_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "Review", done: "Done" };
@@ -296,6 +288,18 @@ function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, o
   );
 }
 
+const STATES_KEY = "board-feature-states";
+/** Every state but Declined, as before the toggles; the choice is kept for the browser session. */
+function readShownStates(): FeatureStatus[] {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(STATES_KEY) ?? "null") as unknown;
+    if (Array.isArray(saved)) return FEATURE_STATUSES.filter((st) => saved.includes(st));
+  } catch {
+    /* unreadable: use the default */
+  }
+  return FEATURE_STATUSES.filter((st) => st !== "declined");
+}
+
 /** One card per feature: its status and how many of its tasks are done. */
 function FeatureCards({ features, onAddTask }: { features: Feature[]; onAddTask: (featureId: string) => void }) {
   if (!features.length) return null;
@@ -339,6 +343,19 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [renaming, setRenaming] = useState<string | null>(null);
   const [assignee, setAssignee] = useState("anyone");
   const [allDone, setAllDone] = useState(false);
+  const [shownStates, setShownStates] = useState(readShownStates);
+  const toggleState = (st: FeatureStatus) =>
+    setShownStates((cur) => {
+      const next = cur.includes(st) ? cur.filter((x) => x !== st) : [...cur, st];
+      try {
+        sessionStorage.setItem(STATES_KEY, JSON.stringify(next));
+      } catch {
+        /* storage blocked: the choice lasts until the page reloads */
+      }
+      return next;
+    });
+  const featureList = feats.data?.features ?? [];
+  const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
   // The review column is two lanes: agent review, and the tickets whose next step is the owner's sign-off.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
   const lanes = (board.data?.columns ?? []).flatMap((col) =>
@@ -532,7 +549,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         )}
       </div>
       {/* The cards with progress only on the Features view: on All the list would grow above the columns; each task's chip names its feature. */}
-      {view === "features" && <FeatureCards features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
+      {view === "features" && (
+        <div className="segmented state-filter" role="group" aria-label="Show features that are">
+          {FEATURE_STATUSES.map((st) => (
+            <button key={st} type="button" className="chip" aria-pressed={shownStates.includes(st)} onClick={() => toggleState(st)}>
+              {FEATURE_STATUS_LABEL[st]} ({featureList.filter((f) => f.status === st).length})
+            </button>
+          ))}
+        </div>
+      )}
+      {view === "features" && featureList.length > 0 && !visibleFeatures.length && <p className="muted">No features in the states you have switched on. Switch more states on above.</p>}
+      {view === "features" && <FeatureCards features={visibleFeatures} onAddTask={(featureId) => { setNote(null); openForm({ mode: "task", featureId }); }} />}
       {view !== "features" && (
       <div className="board-scroll">
         <div className="board">
@@ -599,7 +626,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                   shown.map((t) => {
                   const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
                   return (
-                    <article className={`ticket${mine ? " mine" : ""}`} key={t.id}>
+                    <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}`} key={t.id}>
                       <div className="top">
                         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
                         {(t.risk === "high" || t.risk === "critical") && (
@@ -640,16 +667,20 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </span>
                       )}
                       {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
+                      {!!t.working?.length && (
+                        <span className="working" role="status">
+                          <span className="pulse-dot" aria-hidden="true" />
+                          {t.working.join(" and ")} working now
+                        </span>
+                      )}
                       <div className="row">
                         <span className="who">
                           {who && (
-                            <span className="avatar" title={`${who.name} (${who.agentKind})`} style={who.role === "ceo" ? { background: "var(--side)" } : undefined}>
-                              {initials(who.name)}
-                            </span>
+                            <Avatar agent={who} title={`${who.name} (${who.agentKind})`} />
                           )}
                           {named(t)}
                         </span>
-                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : age(t.lastActivityAt)}</span>
+                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? "now" : age(t.lastActivityAt)}</span>
                       </div>
                     </article>
                   );

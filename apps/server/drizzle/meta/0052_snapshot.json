@@ -1,5 +1,5 @@
 {
-  "id": "372b0f42-fa62-433f-9843-a0fa32cae48c",
+  "id": "6b8637da-3981-46a8-b049-d7403aa697f0",
   "prevId": "8fd1d1e7-4b3e-4760-b4f2-733f4cc84c97",
   "version": "7",
   "dialect": "postgresql",
@@ -109,6 +109,51 @@
           "tableTo": "tickets",
           "columnsFrom": [
             "ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.agent_avatars": {
+      "name": "agent_avatars",
+      "schema": "",
+      "columns": {
+        "agent_id": {
+          "name": "agent_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "bytes": {
+          "name": "bytes",
+          "type": "bytea",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "type": {
+          "name": "type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "agent_avatars_agent_id_agents_id_fk": {
+          "name": "agent_avatars_agent_id_agents_id_fk",
+          "tableFrom": "agent_avatars",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "agent_id"
           ],
           "columnsTo": [
             "id"
@@ -435,6 +480,12 @@
         "instructions": {
           "name": "instructions",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "avatar_at": {
+          "name": "avatar_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -6042,13 +6093,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'[]'::jsonb"
-        },
-        "no_code": {
-          "name": "no_code",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "version": {
           "name": "version",

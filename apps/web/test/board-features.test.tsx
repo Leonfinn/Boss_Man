@@ -7,6 +7,7 @@ import { Features } from "../src/pages/Features";
 
 afterEach(() => {
   cleanup();
+  sessionStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -29,7 +30,7 @@ function stub() {
       if (url.endsWith("/board"))
         return json({
           project: { id: "p1", companyId: "c1", name: "App" },
-          columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Build the toggle", featureId: "f1", featureTitle: "Dark mode" }), card({ id: "t3", title: "Need infra", parentTitle: "Build the toggle", blockedBy: [{ ticketId: "t1", ticketTitle: "Build the toggle", engagementId: null, decisionId: null }] })] }],
+          columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Build the toggle", featureId: "f1", featureTitle: "Dark mode", working: ["Developer"] }), card({ id: "t3", title: "Need infra", parentTitle: "Build the toggle", blockedBy: [{ ticketId: "t1", ticketTitle: "Build the toggle", engagementId: null, decisionId: null }] })] }],
         });
       if (url.endsWith("/features")) return json(scored);
       if (url.endsWith("/objectives")) return json([{ id: "o1", title: "Complete alpha build", milestones: [{ id: "m1", title: "Beta", targetDate: null }] }]);
@@ -48,6 +49,9 @@ describe("board", () => {
     expect(screen.getByText("Sub-task of Build the toggle")).toBeTruthy();
     expect(within(task).getByText("Task")).toBeTruthy();
     expect(within(screen.getByText("Need infra", { selector: "a" }).closest("article")!).getByText("Sub-task")).toBeTruthy();
+    // A card an agent is running on says so.
+    expect(within(task).getByRole("status").textContent).toBe("Developer working now");
+    expect(task.className).toContain("live");
     // A blocked card links to the task it waits on.
     expect(within(screen.getByText("Need infra", { selector: "a" }).closest("article")!).getByRole("link", { name: "Build the toggle" }).getAttribute("href")).toBe("#/tickets/t1");
     // The chip names the feature in one line; its full title is the tooltip.
@@ -68,6 +72,38 @@ describe("board", () => {
     fireEvent.click(screen.getByRole("button", { name: "All" }));
     expect(screen.getByText("Need infra")).toBeTruthy();
     expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+});
+
+describe("feature state toggles", () => {
+  it("shows every state but Declined at first, toggles each state, and keeps the choice", async () => {
+    sessionStorage.clear();
+    stub();
+    const base = globalThis.fetch;
+    const list = [feature(), feature({ id: "f2", title: "Export", status: "released" }), feature({ id: "f3", title: "Old idea", status: "declined" })];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => (url.endsWith("/features") ? json({ ...scored, features: list }) : base(url, init))));
+    const { unmount } = render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
+    await screen.findByRole("article", { name: "Feature Dark mode" });
+    expect(screen.getByRole("article", { name: "Feature Export" })).toBeTruthy();
+    expect(screen.queryByRole("article", { name: "Feature Old idea" })).toBeNull();
+    const released = screen.getByRole("button", { name: "Released (1)" });
+    expect(released.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Declined (1)" }).getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "In progress (1)" }));
+    expect(screen.queryByRole("article", { name: "Feature Dark mode" })).toBeNull();
+    expect(screen.getByRole("article", { name: "Feature Export" })).toBeTruthy();
+    fireEvent.click(released);
+    expect(screen.getByText(/No features in the states you have switched on/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Declined (1)" }));
+    expect(screen.getByRole("article", { name: "Feature Old idea" })).toBeTruthy();
+
+    unmount();
+    render(<Board companies={[company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Features" }));
+    expect(await screen.findByRole("article", { name: "Feature Old idea" })).toBeTruthy();
+    expect(screen.queryByRole("article", { name: "Feature Export" })).toBeNull();
   });
 });
 

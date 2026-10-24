@@ -90,6 +90,73 @@ export function findSection(sections: Section[], wanted: string) {
 /** [[slug]] and [[slug#Section heading]] in a page body: the slugs it links to. */
 export const linkedSlugs = (body: string) => [...new Set([...body.matchAll(/\[\[([^\]#|]+?)(?:#[^\]]*)?\]\]/g)].map((m) => m[1]!.trim()))];
 
+// Lessons learned from sent-back reviews (R-review-lessons): a "Lessons" section on a project
+// brief that only a lesson decision may change, so a rewrite passes over it untouched.
+export const LESSONS_HEADING = "Lessons";
+export const LESSONS_CAP = 20;
+/** The lesson decision's answers: add it as it is, edit it (the owner's note is the new text), or drop it. */
+export const LESSON_ADD = "Add";
+export const LESSON_EDIT = "Edit";
+export const LESSON_DROP = "Drop";
+export const LESSON_DONT_ADD = "Don't add it";
+export const LESSON_REPLACE_PREFIX = "Replace: ";
+/** A lesson is one line the owner approves; lines are bullets in the brief's Lessons section. */
+export const lessonLine = (lesson: string) => `- ${lesson}`;
+
+export const LESSON_MAX = 240;
+
+/** One-line, bounded text for the decision and the brief. */
+export function normalizeLesson(text: string) {
+  return text
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, LESSON_MAX)
+    .trim();
+}
+
+const findLessons = (body: string) => splitSections(body).find((x) => x.level === 2 && x.heading.toLowerCase() === LESSONS_HEADING.toLowerCase());
+
+/** The Lessons section's own text of a page body, or null when it has none. */
+export function lessonsSection(body: string) {
+  const sec = findLessons(body);
+  return sec ? body.slice(sec.start, sec.ownEnd) : null;
+}
+
+/** The approved lessons in a brief's Lessons section, in order. */
+export function lessonsFrom(body: string): string[] {
+  const s = lessonsSection(body);
+  if (!s) return [];
+  return s
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /^- /.test(l))
+    .map((l) => l.slice(2));
+}
+
+/** A body with the lesson appended: the Lessons section is created at the end when missing. */
+export function addLesson(body: string, lesson: string): string {
+  const line = lessonLine(lesson);
+  const sec = findLessons(body);
+  const sectionText = sec ? body.slice(sec.start, sec.ownEnd) : null;
+  if (!sectionText) return `${body.trimEnd()}\n\n## ${LESSONS_HEADING}\n\n${line}\n`;
+  const inner = sectionText.slice(sectionText.indexOf("\n") + 1).replace(/\n?\n*$/, "");
+  return `${body.slice(0, sec!.start)}## ${LESSONS_HEADING}\n${inner}\n${line}\n${body.slice(sec!.ownEnd)}`;
+}
+
+/** A lesson's remove, when the owner swaps a full section's line for a new one: first match only. */
+export function removeLessonLine(body: string, lesson: string) {
+  const line = lessonLine(lesson);
+  let removed = false;
+  return body
+    .split("\n")
+    .filter((l) => {
+      if (removed || l.trim() !== line) return true;
+      removed = true;
+      return false;
+    })
+    .join("\n");
+}
+
 export type SectionHit = { slug: string; title: string; path: string; snippet: string; score: number };
 
 type Author = { agentId: string | null; runId: string | null };
@@ -260,6 +327,10 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         existing = await bySlug(slug);
       }
       const changed = !existing || existing.title !== title || existing.body !== input.body;
+      // (R-review-lessons) A project brief's Lessons section holds owner-approved lessons; it can
+      // only change through a lesson decision, so any other rewrite of the brief passes over it.
+      if (existing && /^brief-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(existing.slug) && lessonsSection(existing.body) && lessonsSection(input.body) !== lessonsSection(existing.body))
+        throw new WikiError(409, "The Lessons section of a project brief is owner-approved and can't be edited here; leave it exactly as it is.");
       let p = existing;
       if (!p) {
         [p] = await db.insert(wikiPages).values({ companyId, slug, folder, title, body: input.body, ticketId: input.ticketId ?? null, updatedByAgentId: input.agentId }).returning();

@@ -782,13 +782,14 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "review",
     {
       description:
-        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). If the ticket lists acceptance criteria, check the work against each one, and when you request changes, name the criterion that fails. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
+        "For the CEO and the reviewers your company's review settings name for a ticket: review a ticket in your company that's ready for review. A ticket may need several reviews (code, security, infra, adversarial); they're requested together unless the CEO orders them. action: diff (ticketId; shows the changes against the ticket's base), submit (ticketId, verdict approved or changes_requested, optional comments as {path, line, body} and a summary; kind if you hold more than one review on the ticket). When requesting changes you may add lesson: a one-line lesson learned for the project's brief — the owner decides whether it's added. If the ticket lists acceptance criteria, check the work against each one, and when you request changes, name the criterion that fails. CEO only: sequence (ticketId, order: kinds listed in the order they should run, e.g. [\"infra\",\"security\"]; empty runs them all at once) and overrule (ticketId, kind, reason: overrules a review that asked for changes; it does not replace the owner's sign-off). You can't review a ticket assigned to you.",
       inputSchema: {
         action: z.enum(["diff", "submit", "sequence", "overrule"]),
         ticketId: z.string().uuid(),
         verdict: z.enum(["approved", "changes_requested"]).optional(),
         comments: z.array(z.object({ path: z.string(), line: z.number().int().positive(), body: z.string().min(1) })).max(50).optional(),
         summary: z.string().max(5000).optional(),
+        lesson: z.string().max(1000).optional(),
         kind: z.enum(["code", ...REVIEW_KINDS]).optional(),
         order: z.array(z.enum(["code", ...REVIEW_KINDS])).max(4).optional(),
         reason: z.string().max(2000).optional(),
@@ -829,6 +830,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           verdict: input.verdict,
           comments: input.comments,
           summary: input.summary,
+          lesson: input.lesson,
           kind: input.kind,
           reviewer: `${me.name} (${me.role === "ceo" ? "CEO" : me.title ?? me.role})`,
           reviewerAgentId: scope.agentId,

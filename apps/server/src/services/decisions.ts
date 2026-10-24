@@ -25,6 +25,7 @@ import { record } from "./activity.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
+import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, LESSON_REPLACE_PREFIX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -50,6 +51,10 @@ export type DecisionContext =
   | { type: "risk_review"; ticketId: string; reviewer: string }
   /** The merge check was killed or timed out: the owner's call, not the agent's. */
   | { type: "check_stuck"; ticketId: string; command: string; output: string }
+  /** A lesson learned from a sent-back review (R-review-lessons), awaiting the owner's call. */
+  | { type: "lesson"; ticketId: string; projectId: string; projectName: string; lesson: string }
+  /** The lesson is approved but the project's Lessons section is full: pick which line it replaces. */
+  | { type: "lesson_replace"; projectId: string; projectName: string; lesson: string }
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
   | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string }; byAgentId: string }
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
@@ -72,6 +77,27 @@ export const SEND_IT_BACK = "Send it back";
 export const CHECK_AGAIN = "Run the check again";
 export const CHECK_SEND_BACK = "Send it back to the agent";
 export const CHECK_SKIP = "Merge without the check";
+
+/**
+ * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
+ * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
+ */
+export async function raiseMergeStuck(db: Db, t: { id: string; title: string; companyId: string }, why: string) {
+  return db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: `"${t.title}" was approved, but its merge didn't finish (${why}). This isn't a problem with the agent's work.`,
+      options: [CHECK_AGAIN, CHECK_SEND_BACK],
+      recommendedOption: CHECK_AGAIN,
+      tier: "owner",
+      dedupeKey: `merge-stuck:${t.id}`,
+      context: { type: "check_stuck", ticketId: t.id, command: "", output: why },
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id });
+}
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
 export const NOT_NOW = "Not now";
@@ -215,6 +241,46 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
       if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
     }
+    if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
+    if (ctx.type === "lesson_replace" && answer !== LESSON_DONT_ADD && !answer.startsWith(LESSON_REPLACE_PREFIX)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
+  }
+
+  /** Adds the approved lesson to the project's brief, unless the section is full and a line must go first (R-review-lessons). */
+  async function answerLessons(d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson" }>, answer: string, extra: AnswerExtra) {
+    if (answer === LESSON_DROP) return;
+    const text = normalizeLesson(answer === LESSON_EDIT ? (extra.note ?? "") : ctx.lesson);
+    if (text.length > LESSON_MAX) throw new AnswerError(`A lesson is one line, up to ${LESSON_MAX} characters.`);
+    // An edit with no usable note adds nothing: nothing reaches the brief without words behind it.
+    if (!text) return;
+    const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
+    const existing = page ? lessonsFrom(page.body) : [];
+    if (existing.includes(text)) return;
+    if (existing.length >= LESSONS_CAP) {
+      // The section is full: the owner picks which line the new lesson replaces, or leaves it out.
+      const unique = [...new Set(existing)];
+      await db
+        .insert(decisions)
+        .values({
+          companyId: d.companyId,
+          kind: "question",
+          question: `The Lessons section of ${ctx.projectName}'s brief is full (${LESSONS_CAP}). Approving the new lesson drops one: which?`,
+          options: [...unique.map((l) => `${LESSON_REPLACE_PREFIX}${l}`), LESSON_DONT_ADD],
+          recommendedOption: `${LESSON_REPLACE_PREFIX}${unique[0]}`,
+          tier: "owner",
+          dedupeKey: `lesson-replace:${ctx.projectId}:${text}`,
+          context: { type: "lesson_replace", projectId: ctx.projectId, projectName: ctx.projectName, lesson: text } satisfies DecisionContext,
+        })
+        .onConflictDoNothing();
+      return;
+    }
+    await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, text);
+  }
+
+  /** Finishes a replace: the chosen line goes, the new lesson takes its place. */
+  async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string) {
+    if (answer === LESSON_DONT_ADD || !answer.startsWith(LESSON_REPLACE_PREFIX)) return;
+    const dropped = answer.slice(LESSON_REPLACE_PREFIX.length);
+    await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, ctx.lesson, dropped);
   }
 
   async function answerStaleBlocker(ctx: Extract<DecisionContext, { type: "stale_blocker" }>, answer: string, extra: AnswerExtra) {
@@ -690,8 +756,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
-        if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but the check \`${ctx.command}\` couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");
+        if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but ${ctx.command ? `the check \`${ctx.command}\`` : "the merge"} couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");
         else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
+      } else if (ctx.type === "lesson") {
+        await answerLessons(d, ctx, answer, extra);
+      } else if (ctx.type === "lesson_replace") {
+        await answerLessonReplace(db, d, ctx, answer);
       } else if (ctx.type === "budget_limit") {
         const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
         if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));

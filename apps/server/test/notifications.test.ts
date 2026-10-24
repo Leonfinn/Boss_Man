@@ -117,6 +117,18 @@ describe("notification ladder (R44)", () => {
     expect(t.json().message).toContain("403");
   });
 
+  it("marks a decision's notification read once the decision is answered", async () => {
+    const c = await setup();
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Ship the beta?", options: ["Yes", "No"], recommendedOption: "Yes", context: { type: "question" } }).returning();
+    await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: "Rename the app?", options: ["Yes", "No"], recommendedOption: "No", context: { type: "question" } });
+    await c.notes.syncDecisions();
+    expect((await c.req("GET", "/api/notifications")).json().unread).toBe(2);
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Yes" })).statusCode).toBe(200);
+    const feed = (await c.req("GET", "/api/notifications")).json();
+    expect(feed.unread).toBe(1);
+    expect(feed.items.find((n: { body: string }) => n.body === "Ship the beta?").readAt).not.toBeNull();
+  });
+
   it("lowers levels in quiet hours and past an agent's hourly cap", async () => {
     const c = await setup();
     await c.req("PUT", "/api/notification-settings", { ...SETTINGS, quietHours: { start: "22:00", end: "07:00", timeZone: "Europe/London" }, agentHourlyCap: 2 });

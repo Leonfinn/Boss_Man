@@ -11,7 +11,8 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, raiseMergeStuck } from "./decisions.js";
+import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
 
@@ -96,6 +97,7 @@ export function reviewService(
       .select({
         t: tickets,
         repoUrl: projects.repoUrl,
+        projectName: projects.name,
         defaultBranch: projects.defaultBranch,
         verifyCommand: projects.verifyCommand,
         deepVerifyCommand: projects.deepVerifyCommand,
@@ -204,14 +206,34 @@ export function reviewService(
      */
     async submit(
       ticketId: string,
-      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
+      input: { verdict: "approved" | "changes_requested"; comments?: ReviewComment[]; summary?: string; /** Optional one-line lesson learned, when sending it back (R-review-lessons); the owner decides. */ lesson?: string; reviewer: string; reviewerAgentId?: string | null; /** Which of the agent's reviews, when it holds several. */ kind?: string; companyId?: string; causedByRunId?: string | null; /** Land in the background and return at once (the owner's page polls `landing`). */ background?: boolean },
     ) {
-      const { t } = await ticketWithRepo(ticketId, input.companyId);
+      const { t, projectName } = await ticketWithRepo(ticketId, input.companyId);
       // The coder doesn't review its own work (R49).
       if (input.reviewerAgentId && t.assigneeAgentId === input.reviewerAgentId) throw new ReviewError(403, "You can't review a ticket assigned to you.");
       if (t.systemState === "done") throw new ReviewError(409, "That ticket is already done.");
+      if (input.lesson?.trim() && input.verdict !== "changes_requested") throw new ReviewError(422, "A lesson goes with changes requested, not with an approval.");
+      if ((input.lesson?.trim().length ?? 0) > LESSON_MAX) throw new ReviewError(422, "A lesson is one line, up to 240 characters.");
+      const lesson = normalizeLesson(input.lesson ?? "");
+      if (input.lesson?.trim() && !lesson) throw new ReviewError(422, "A lesson is one line, up to 240 characters.");
       const rows = input.reviewerAgentId ? await latestRows(db, ticketId) : [];
       if (input.verdict === "changes_requested" && !input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
+      // Each lesson becomes exactly one owner decision: nothing reaches the brief without them (R-review-lessons).
+      if (lesson)
+        await db
+          .insert(decisions)
+          .values({
+            companyId: t.companyId,
+            kind: "question",
+            question: `Add this lesson to ${projectName}'s brief? "${lesson}"`,
+            options: [LESSON_ADD, LESSON_EDIT, LESSON_DROP],
+            recommendedOption: LESSON_ADD,
+            tier: "owner",
+            raisedByAgentId: input.reviewerAgentId ?? null,
+            dedupeKey: `lesson:${ticketId}:${lesson}`,
+            context: { type: "lesson", ticketId, projectId: t.projectId, projectName, lesson },
+          })
+          .onConflictDoNothing();
       let diffText = "";
       if (input.verdict === "changes_requested" && input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
       if (!rows.length) {
@@ -362,6 +384,21 @@ export function reviewService(
      * uncommitted work sends the ticket back to the agent with what to do.
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+      try {
+        return await this.landOnce(ticketId, reviewer, causedByRunId, opts);
+      } catch (err) {
+        if (!(err instanceof ReviewError)) throw err;
+        // The approval is already recorded, so nothing else would move the ticket: say so on it and ask the owner as well.
+        const [t] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+        if (!t) throw err;
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't run: ${err.message}` });
+        await raiseMergeStuck(db, t, err.message);
+        // Whoever approved still hears why, as before.
+        throw err;
+      }
+    },
+
+    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });

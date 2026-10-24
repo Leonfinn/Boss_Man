@@ -35,6 +35,8 @@ export type Limits = {
   selfWakesPer10Min: number;
   /** Wakes with no ticket an agent may get in an hour, not counting the owner's own (R68). */
   ticketlessPerHour: number;
+  /** How long the wiki maintainer's upkeep wake waits for more finished tickets, so a busy hour starts a few runs, not one per ticket and over ticketlessPerHour. */
+  wikiBatchMs: number;
   /** Subscription utilisation at which low-priority work waits for the reset. */
   quotaHoldAt: number;
   /** Wakes at or above this priority ignore the quota hold. */
@@ -71,7 +73,7 @@ const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
   agentId: string;
@@ -164,9 +166,10 @@ export function schedulerService(
       "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
       "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
+      "- Product pages go one level down: Product/Features (one page per feature: what it does and the decisions behind it), Product/Analysis (proposals, reviews, research into options) or Product/Strategy (direction, objectives, roadmap thinking). Move any page sitting straight in Product into the right one.",
       "- When finished work produced a document, make sure it's in the wiki, linked to its ticket, and linked from related pages. Read the ticket with tickets read, and a document that's only in the repo with tickets file (it reads the ticket's branch even if it was never merged). Copy it into the wiki with the ticket's id. Write a short summary page if a ticket produced something useful but no page.",
       "- Don't change what a page says is true unless another page or a ticket shows it's out of date; then update it and say what changed at the bottom.",
-      ...(briefs.size ? ["- Some projects have a brief page (listed below with their tickets). When merged work changed a project's objectives, architecture, code structure, conventions or build steps, update the affected sections of that brief by its slug, and update its first line (\"Describes commit <sha> on <branch>.\") to the new commit. Leave it alone if nothing relevant changed."] : []),
+      ...(briefs.size ? ["- Some projects have a brief page (listed below with their tickets). When merged work changed a project's objectives, architecture, code structure, conventions or build steps, update the affected sections of that brief by its slug, and update its first line (\"Describes commit <sha> on <branch>.\") to the new commit. Leave it alone if nothing relevant changed. Never change the brief's \"Lessons\" section; it holds owner-approved lessons and only a lesson decision may touch it."] : []),
       "- Don't create tickets or change code; when something needs doing, tell the owner with notify_owner and a link.",
       "",
       finished.length ? "Tickets finished since your last run, newest first:" : "No tickets have finished since your last run; tidy the wiki and the Index page.",
@@ -389,7 +392,7 @@ export function schedulerService(
       );
     if (agent.role === "ceo") lines.push("", "Reviews and plan approvals follow the company's review settings, so they may go to someone other than you; you review or approve when the chosen person is unavailable, and you can always overrule.");
     if (w.ticketId) {
-      const [t] = await db.select({ t: tickets, project: projects.name }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
+      const [t] = await db.select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
       if (t) {
         lines.push("", `Ticket ${t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
@@ -407,6 +410,7 @@ export function schedulerService(
           lines.push("", `The project has a brief in the wiki, a map of its code: wiki read slug="${brief.slug}" section="Code map" (sections: ${brief.headings.join(", ")}).${brief.commit ? ` It describes commit ${brief.commit} on ${brief.branch}.` : ""} It is a map, not the source of truth: check the code before you change it, and if the brief is wrong, say so in your ticket.`);
         lines.push("", planningGuidance(t.t.risk));
         lines.push("", "Keep working notes in the ticket's state note or the wiki, never as loose files in the repo.");
+        if (t.repoUrl) lines.push("", "Commit your work on the ticket's branch but never git push: Boss Man merges or pushes it once it passes review.");
         if ((agent.role === "ceo" || agent.role === "manager") && t.t.assigneeAgentId === agent.id) {
           const team = await db
             .select({ name: agents.name, role: agents.role, title: agents.title })
@@ -691,7 +695,7 @@ export function schedulerService(
         if (live) return this.wake({ ...input, agentId, steerRunId: live.id });
       }
       // How long a reason waits for more of itself; 0 still joins a wake that is already waiting.
-      const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.answerBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs } as Record<string, number>)[input.reason] ?? 0;
+      const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.answerBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs, [WIKI_REASON]: limits.wikiBatchMs } as Record<string, number>)[input.reason] ?? 0;
       const [waiting] = await db
         .select()
         .from(wakes)

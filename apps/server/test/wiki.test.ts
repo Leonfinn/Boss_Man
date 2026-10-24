@@ -17,9 +17,9 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-async function setup() {
+async function setup(wikiBatchMs = 0) {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0, wikiBatchMs }, workspaceRoot: "/ws" });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -112,6 +112,19 @@ describe("wiki and ticket outputs (R69)", () => {
     expect((await c.req("POST", base, { title: "Deep", body: "", folder: "a/b/c/d/e/f/g" })).statusCode).toBe(400);
     expect((await c.req("GET", base)).json().map((p: { folder: string }) => p.folder).sort()).toEqual(["Ideas", "Research/Done"]);
   });
+  it("holds the wiki maintainer's upkeep wake so a busy spell of finished tickets starts one run", async () => {
+    const c = (ctx = await setup(15 * 60_000));
+    const [keeper] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.duty, "wiki")));
+    for (const title of ["One", "Two", "Three"]) {
+      const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title })).json() as { id: string };
+      await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
+    }
+    const upkeep = await c.db.select().from(wakes).where(and(eqq(wakes.agentId, keeper!.id), eqq(wakes.reason, "wiki upkeep")));
+    expect(upkeep).toHaveLength(1);
+    expect(upkeep[0]).toMatchObject({ status: "deferred" });
+    expect(upkeep[0]!.notBefore!.getTime() - Date.now()).toBeGreaterThan(14 * 60_000);
+  });
+
   it("has a wiki maintainer that starts paused, needs a model, and files finished work (R73)", async () => {
     const c = (ctx = await setup());
     const [keeper] = await c.db.select().from(agents).where(and(eqq(agents.companyId, c.company.id), eqq(agents.duty, "wiki")));
@@ -135,6 +148,7 @@ describe("wiki and ticket outputs (R69)", () => {
     await c.scheduler.tick();
     const start = c.starts().find((s) => s.agentId === keeper!.id)!;
     expect(start.prompt).toContain("You are the company's wiki maintainer.");
+    expect(start.prompt).toContain("Product/Features");
     expect(start.prompt).toContain(`- ${t.id} "Research the landscape" (completed): produced wiki page research/landscape`);
     expect(start.prompt).toContain(`- ${t2.id} "Pick a licence" (completed): nothing attached`);
 

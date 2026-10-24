@@ -314,8 +314,8 @@ function TreeList({ folder, companyId, current, currentFolder, open, onPick }: {
       ))}
       {folder.pages.map((p) => (
         <li key={p.id}>
-          <a href={`#/wiki/${companyId}/${p.slug}`} aria-current={p.slug === current ? "page" : undefined} onClick={onPick}>
-            {p.title}
+          <a href={`#/wiki/${companyId}/${p.slug}`} aria-current={p.slug === current ? "page" : undefined} onClick={onPick} title={p.title}>
+            <span className="t">{p.title}</span>
             <small>
               {when(p.updatedAt)} · {p.updatedBy ?? "you"}
             </small>

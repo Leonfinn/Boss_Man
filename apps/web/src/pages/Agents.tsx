@@ -3,6 +3,7 @@
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
 import { api, usd, type Company, type FundingSource } from "../api";
+import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
@@ -24,6 +25,7 @@ type AgentRow = {
   starred: boolean;
   duty: string | null;
   reviewKind?: string | null;
+  avatarAt?: string | null;
   retiredAt: string | null;
   status: "working" | "idle" | "paused" | "retired";
   current: { ticketId: string; title: string | null } | null;
@@ -252,6 +254,33 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
   );
 }
 
+/** The agent's picture: the template's portrait until the owner uploads one. */
+function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, done: string) => Promise<boolean> }) {
+  const url = `/api/agents/${a.id}/avatar`;
+  const pick = (file: File | undefined) => {
+    if (!file) return;
+    if (file.size > 256 * 1024) return void run(() => Promise.reject(new Error("The picture must be 256 KB or smaller.")), "");
+    const r = new FileReader();
+    r.onload = () => void run(() => api(url, { method: "PUT", body: { data: String(r.result).split(",")[1] ?? "" } }), "Picture saved.");
+    r.readAsDataURL(file);
+  };
+  return (
+    <div className="field" style={{ flexDirection: "row", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <Avatar agent={a} className={`huge ${a.role}`} />
+      <label className="btn small" style={{ cursor: "pointer" }}>
+        Upload a picture
+        <input type="file" accept="image/png,image/jpeg,image/webp" className="sr-only" aria-label={`Picture for ${a.name}`} onChange={(e) => pick(e.target.files?.[0])} />
+      </label>
+      {a.avatarAt && (
+        <button type="button" className="btn small" onClick={() => void run(() => api(url, { method: "DELETE" }), "Back to the default picture.")}>
+          Use the default
+        </button>
+      )}
+      <small className="muted">PNG, JPEG or WebP, up to 256 KB. Square works best.</small>
+    </div>
+  );
+}
+
 function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void }) {
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
@@ -337,6 +366,7 @@ function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: F
           <SaveButton {...sv} busy={busy} style={{ alignSelf: "flex-start" }} />
         </form>
       )}
+      {!retired && <Picture a={a} run={run} />}
       {note && (
         <p role={note.ok ? "status" : "alert"} className={note.ok ? "muted" : "error"}>
           {note.text}
@@ -461,7 +491,8 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
     return (
       <li key={a.id} className="card agent-card">
         <div className="agent-line">
-          <div style={{ minWidth: 0 }}>
+          <Avatar agent={a} className={`big ${a.role}`} />
+          <div style={{ minWidth: 0, flex: 1 }}>
             <strong>{a.name}</strong>
             {jobOf(a) !== a.name && <span className="muted"> · {jobOf(a)}</span>}
             <div className="muted" style={{ fontSize: 13 }}>
