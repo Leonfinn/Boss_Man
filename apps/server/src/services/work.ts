@@ -1,9 +1,9 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, ne } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
+import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export class WorkError extends Error {
   constructor(
@@ -159,6 +159,16 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           .filter((d) => (d.context as { type?: string }).type === "risk_review")
           .map((d) => [d.id, (d.context as { reviewer?: string }).reviewer ?? null] as const),
       );
+      // Who is running on each ticket right now, so a card can show live work (chat runs don't count).
+      const ids = rows.map((r) => r.t.id);
+      const live = ids.length
+        ? await db
+            .select({ ticketId: runs.ticketId, agent: agents.name })
+            .from(runs)
+            .innerJoin(agents, eq(agents.id, runs.agentId))
+            .where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+        : [];
+      const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
         return {
@@ -171,7 +181,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
-        blockedBy: deps.filter((d) => d.blockedTicketId === t.id).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        working: live.filter((l) => l.ticketId === t.id).map((l) => l.agent),
+        // A blocker task already done no longer holds the card up.
+        blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         };
       });
       return {

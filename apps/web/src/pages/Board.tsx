@@ -591,7 +591,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                   shown.map((t) => {
                   const who = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
                   return (
-                    <article className={`ticket${mine ? " mine" : ""}`} key={t.id}>
+                    <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}`} key={t.id}>
                       <div className="top">
                         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
                         {(t.risk === "high" || t.risk === "critical") && (
@@ -632,6 +632,12 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </span>
                       )}
                       {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
+                      {!!t.working?.length && (
+                        <span className="working" role="status">
+                          <span className="pulse-dot" aria-hidden="true" />
+                          {t.working.join(" and ")} working now
+                        </span>
+                      )}
                       <div className="row">
                         <span className="who">
                           {who && (
@@ -639,7 +645,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                           )}
                           {named(t)}
                         </span>
-                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : age(t.lastActivityAt)}</span>
+                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? "now" : age(t.lastActivityAt)}</span>
                       </div>
                     </article>
                   );
