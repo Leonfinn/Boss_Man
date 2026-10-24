@@ -13,7 +13,7 @@ import { PROTOCOL_VERSION as ACP_PROTOCOL_VERSION, client as acpClient, methods,
 import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, SessionNotification } from "@agentclientprotocol/sdk";
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
-import { checkAddons } from "./addons.js";
+import { addonList, checkAddons } from "./addons.js";
 import { gitAuthEnv, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
@@ -319,7 +319,7 @@ export class SessionManager {
       }
       case "addons.check": {
         const reply = this.opts.reply ?? (() => {});
-        checkAddons(this.opts.baseEnv?.BOSSMAN_ADDONS ?? process.env.BOSSMAN_ADDONS).then((data) => reply(command.requestId, { ok: true, data }));
+        checkAddons(addonList(this.opts.baseEnv ?? process.env)).then((data) => reply(command.requestId, { ok: true, data }));
         return;
       }
       case "models.probe": {

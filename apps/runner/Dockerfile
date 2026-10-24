@@ -24,6 +24,27 @@ RUN apt-get update \
 
 RUN npm install -g --no-audit --no-fund pnpm@10.28.0
 
+# Optional add-ons (docs/12), off unless asked for: --build-arg RUNNER_ADDONS=agent-browser.
+# Boss Man works the same without them; a skill that needs one is only given to runs once the
+# runner reports it healthy. The image lists what it holds in /etc/bossman-addons.
+# agent-browser drives Debian's chromium (security updates via apt) instead of downloading one;
+# the pin must match packages/shared/src/addons.ts (checked by a test).
+ARG RUNNER_ADDONS=""
+ARG AGENT_BROWSER_VERSION=0.39.0
+RUN --mount=type=secret,id=extra_ca,required=false \
+    set -e; : > /etc/bossman-addons; \
+    if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi; \
+    case ",$RUNNER_ADDONS," in *,agent-browser,*) \
+      apt-get update && apt-get install -y --no-install-recommends chromium fonts-liberation && rm -rf /var/lib/apt/lists/*; \
+      npm install -g --no-audit --no-fund "agent-browser@${AGENT_BROWSER_VERSION}"; \
+      agent-browser --version; \
+      echo "agent-browser@${AGENT_BROWSER_VERSION}" >> /etc/bossman-addons;; \
+    esac
+# The container is the sandbox (agents already run shell commands in it); Chromium's own sandbox
+# needs privileges the runner doesn't have. Both are ignored when the add-on isn't installed.
+ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
+    AGENT_BROWSER_ARGS=--no-sandbox
+
 ARG CLAUDE_CODE_VERSION=latest
 ARG OPENCODE_VERSION=1.19.3
 USER node
