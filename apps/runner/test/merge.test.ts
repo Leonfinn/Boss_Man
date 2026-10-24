@@ -128,4 +128,15 @@ describe("verify before done (R47)", () => {
     expect(bad.output).toContain("2 tests failed");
     expect(await ws.verify(spec, "sleep 5", 200)).toMatchObject({ ok: false, timedOut: true });
   });
+
+  it("puts a released ticket's worktree back from its branch, with the work saved at release", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    writeFileSync(path.join(ws.ticketDir(spec.ticketId), "notes.txt"), "uncommitted\n");
+    await ws.release(spec);
+    expect((await ws.diff(spec)).files.map((f) => f.path).sort()).toEqual(["feature.txt", "notes.txt"]);
+    expect(await ws.verify(spec, "test -f feature.txt && test -f notes.txt")).toMatchObject({ ok: true });
+    // No branch at all: nothing to check.
+    await expect(ws.verify({ ...spec, ticketId: "00000000-0000-4000-8000-000000000000" }, "true")).rejects.toThrow("no workspace or branch");
+  });
 });

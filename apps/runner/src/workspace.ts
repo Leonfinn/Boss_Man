@@ -149,6 +149,31 @@ export class Workspaces {
     });
   }
 
+  /**
+   * A ticket's worktree for its check or diff. One released or cleaned up since (the branch is
+   * kept) is put back from the branch, with any work saved at release; with no branch either,
+   * there is nothing to check.
+   */
+  private async reopen(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">): Promise<string> {
+    const dir = this.ticketDir(spec.ticketId);
+    if (existsSync(path.join(dir, ".git"))) return dir;
+    return this.withRepoLock(spec.projectId, async () => {
+      if (existsSync(path.join(dir, ".git"))) return dir;
+      const repo = this.repoDir(spec.projectId);
+      const branch = branchFor(spec.ticketId);
+      const has = existsSync(repo) && (await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo }).then(() => true, () => false));
+      if (!has) throw new Error("That ticket has no workspace or branch on this runner.");
+      await this.git(["worktree", "prune"], { cwd: repo });
+      await this.git(["worktree", "add", "--quiet", dir, branch], { cwd: repo });
+      const patch = this.patchFile(spec.ticketId);
+      if (existsSync(patch)) {
+        await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir });
+        rmSync(patch);
+      }
+      return dir;
+    });
+  }
+
   private async cloneIfMissing(spec: Pick<WorkspaceSpec, "projectId" | "repoUrl">, auth: Record<string, string>) {
     const repo = this.repoDir(spec.projectId);
     if (existsSync(path.join(repo, "HEAD"))) return;
@@ -272,8 +297,7 @@ export class Workspaces {
 
   async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
     const repo = this.repoDir(spec.projectId);
-    const dir = this.ticketDir(spec.ticketId);
-    if (!existsSync(path.join(dir, ".git"))) throw new Error("That ticket has no workspace on this runner.");
+    const dir = await this.reopen(spec);
     const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
     const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
     const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..HEAD`], { cwd: dir });
@@ -384,9 +408,8 @@ export class Workspaces {
    * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
-  async verify(spec: Pick<WorkspaceSpec, "ticketId">, command: string, timeoutMs = 10 * 60_000): Promise<VerifyResult> {
-    const dir = this.ticketDir(spec.ticketId);
-    if (!existsSync(path.join(dir, ".git"))) throw new Error("That ticket has no workspace on this runner.");
+  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = 10 * 60_000): Promise<VerifyResult> {
+    const dir = await this.reopen(spec);
     const started = Date.now();
     try {
       const { stdout, stderr } = await run("sh", ["-c", command], {
