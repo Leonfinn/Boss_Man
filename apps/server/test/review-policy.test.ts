@@ -177,6 +177,15 @@ describe("an approval whose merge fails", () => {
     expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
     release();
     await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+
+    // An older ask answered after the merge runs nothing again: no check, no second merge.
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${t.id}/landing`)).json().landing.state).toBe("finished"));
+    const [late] = await c.db.insert(decisions).values({ companyId: (await c.row(t.id)).companyId, kind: "question", question: "stale", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", tier: "owner", context: { type: "check_stuck", ticketId: t.id, command: "pnpm test" } }).returning();
+    const before = c.sent.length;
+    await c.req("POST", `/api/decisions/${late!.id}/answer`, { answer: "Run the check again" });
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${t.id}/landing`)).json().landing).toMatchObject({ state: "finished", outcome: "done" }));
+    expect(c.sent.slice(before).filter((x) => x.type.startsWith("workspace."))).toEqual([]);
+    expect((await c.row(t.id)).systemState).toBe("done");
   });
 });
 
