@@ -81,7 +81,8 @@ describe("CEO chapters", () => {
     expect(second.start.prompt).toContain("A decision is waiting for you.");
     // If the session can't be reopened, the fresh one gets the frozen opening.
     expect(second.start.freshPrompt).toContain("This is chapter 1 of your work.");
-    expect(second.start.freshPrompt).not.toContain("Cut churn");
+    // The frozen objectives list doesn't gain it (the owner's new objective is only mentioned as news, docs/13).
+    expect(second.start.freshPrompt).not.toContain("P2 Cut churn");
     expect((await c.chapters())[0]).toMatchObject({ contextUsed: 150_000, contextSize: 200_000 });
 
     // 75% full: the next run closes the chapter, in the same session.

@@ -14,7 +14,7 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/s
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agents, companies, costEvents, engagements, fundingSources, mcpServers, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
 import { modelsService } from "./services/models.js";
@@ -996,10 +996,21 @@ export async function buildApp(opts: AppOptions) {
       return db.select().from(projects).where(eq(projects.companyId, id)).orderBy(projects.name);
     });
 
+    // New scope from the owner: noted for the CEO's next run, which checks the team covers it (docs/13).
+    // shortcut: read-modify-write of one settings row; two owner adds in the same instant could drop one line.
+    const teamCheck = async (companyId: string, what: string) => {
+      const key = `team-scope:${companyId}`;
+      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, key));
+      const value = [...((row?.value as string[] | undefined) ?? []), what].slice(-10);
+      await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+    };
+
     owner.post("/api/companies/:id/projects", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const body = z.object({ name: z.string().trim().min(1).max(80), columns: z.array(Column).optional() }).parse(req.body);
-      return reply.code(201).send(await work.createProject(id, body.name, body.columns));
+      const p = await work.createProject(id, body.name, body.columns);
+      await teamCheck(id, `created a project, "${p.name}" (${p.id})`);
+      return reply.code(201).send(p);
     });
 
     owner.patch("/api/projects/:id", async (req, reply) => {
@@ -1382,7 +1393,9 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/objectives", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const body = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5).optional(), projectId: Uuid.optional() }).parse(req.body);
-      return reply.code(201).send(await work.createObjective(id, body));
+      const o = await work.createObjective(id, body);
+      await teamCheck(id, `added an objective, "${o.title}"${body.projectId ? ` for project ${body.projectId}` : ""}`);
+      return reply.code(201).send(o);
     });
 
     owner.post("/api/objectives/:id/key-results", async (req, reply) => {
@@ -1394,7 +1407,10 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/objectives/:id/milestones", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const body = z.object({ title: z.string().trim().min(1).max(200), targetDate: DateStr.optional(), horizon: z.enum(HORIZONS).optional() }).parse(req.body);
-      return reply.code(201).send(await work.addMilestone(id, body));
+      const m = await work.addMilestone(id, body);
+      const [o] = await db.select({ companyId: objectives.companyId, title: objectives.title }).from(objectives).where(eq(objectives.id, id));
+      if (o) await teamCheck(o.companyId, `added a milestone, "${body.title}", under the objective "${o.title}"`);
+      return reply.code(201).send(m);
     });
 
     owner.get("/api/companies/:id/objectives", async (req) => work.objectivesTree(IdParam.parse(req.params).id));

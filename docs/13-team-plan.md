@@ -12,11 +12,8 @@ Status: design, not built (asked 24 Oct 2026).
 ## Change
 
 1. **When it runs:**
-   - a project is created;
-   - an objective or milestone is added to a project that has a team;
+   - a project is created, or an objective or milestone is added: each is noted, and the CEO's **next run** is told "since your last run the owner added …; check the team covers it". That needs no extra run of its own. A separate wake was tried and dropped: it competed with the CEO's real work and its other wakes (an engagement message, missed work), and the setup wizard would have woken the CEO once for each project it created;
    - the owner asks in chat ("recommend a team for X").
-
-   The first two wake the CEO with reason `team plan`. Repeated triggers within a day merge into one wake.
 2. **What the CEO does:**
    - reads the project (repo, brief if any, objectives, milestones, open tickets) and the current team;
    - drafts a plan with one tool call, `propose_team`. The plan holds who already covers what, plus each proposed hire: template, name, model, skills to give from the library, the reason, and which objectives the hire serves.
@@ -30,4 +27,4 @@ Status: design, not built (asked 24 Oct 2026).
 ## Build order
 
 1. `propose_team` tool, the team-plan decision with per-hire choices, and CEO template guidance. Triggered from chat only.
-2. Wake on project creation and on scope growth, with coalescing.
+2. Note project creation and scope growth for the CEO's next run.

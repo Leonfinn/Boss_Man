@@ -218,6 +218,24 @@ describe("skills library (R71)", () => {
     expect(names).not.toContain("Rae");
   });
 
+  it("tells the CEO, on its next run only, about projects, objectives and milestones the owner added (docs/13)", async () => {
+    const c = (ctx = await setup());
+    const docs = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Docs" })).json() as { id: string };
+    const goal = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Launch the beta", projectId: docs.id })).json() as { id: string };
+    await c.req("POST", `/api/objectives/${goal.id}/milestones`, { title: "Private beta" });
+    const ceoRun = async (title: string) => {
+      await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.ceo.id });
+      await c.scheduler.tick();
+      return c.starts().filter((x) => x.agentId === c.ceo.id).at(-1)!;
+    };
+    const first = await ceoRun("Plan the docs");
+    expect(first.prompt).toContain("Since your last run the owner created a project, \"Site\"");
+    expect(first.prompt).toContain(`created a project, "Docs" (${docs.id}); added an objective, "Launch the beta" for project ${docs.id}; added a milestone, "Private beta", under the objective "Launch the beta".`);
+    expect(first.prompt).toContain("propose_team");
+    await c.emit({ type: "run.ended", runId: first.runId, stopReason: "end_turn", error: null });
+    expect((await ceoRun("Something else")).prompt).not.toContain("Since your last run the owner");
+  });
+
   it("says where a repository's skills are, and takes Claude Code's copy from a repo with one per tool", async () => {
     const c = (ctx = await setup());
     const base = `/api/companies/${c.company.id}/skills`;
