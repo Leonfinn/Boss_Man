@@ -35,6 +35,8 @@ export type Limits = {
   selfWakesPer10Min: number;
   /** Wakes with no ticket an agent may get in an hour, not counting the owner's own (R68). */
   ticketlessPerHour: number;
+  /** How long the wiki maintainer's upkeep wake waits for more finished tickets, so a busy hour starts a few runs, not one per ticket and over ticketlessPerHour. */
+  wikiBatchMs: number;
   /** Subscription utilisation at which low-priority work waits for the reset. */
   quotaHoldAt: number;
   /** Wakes at or above this priority ignore the quota hold. */
@@ -71,7 +73,7 @@ const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
   agentId: string;
@@ -692,7 +694,7 @@ export function schedulerService(
         if (live) return this.wake({ ...input, agentId, steerRunId: live.id });
       }
       // How long a reason waits for more of itself; 0 still joins a wake that is already waiting.
-      const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.answerBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs } as Record<string, number>)[input.reason] ?? 0;
+      const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.answerBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs, [WIKI_REASON]: limits.wikiBatchMs } as Record<string, number>)[input.reason] ?? 0;
       const [waiting] = await db
         .select()
         .from(wakes)
