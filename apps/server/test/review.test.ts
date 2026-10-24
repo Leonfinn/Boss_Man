@@ -173,6 +173,7 @@ describe("landing an approved ticket (R46, R47)", () => {
   it("closes a ticket that changed nothing in the repository, without running the check or merging", async () => {
     const c = (ctx = await setup({ answers: { diff: { ...DIFF, commits: [], files: [], diff: "" }, verify: { ok: false, exitCode: 1, timedOut: true, output: "", ms: 660_000 } } }));
     await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { noCode: true });
     expect((await approve(c)).json()).toMatchObject({ verdict: "approved", outcome: "done" });
     expect(c.sent.map((x) => x.type)).not.toContain("workspace.verify");
     expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");

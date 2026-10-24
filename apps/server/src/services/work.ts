@@ -40,6 +40,8 @@ type TicketPatch = {
   planFirst?: boolean;
   /** Acceptance criteria (R?): 1 to 10 non-empty strings; empty means none. */
   acceptanceCriteria?: string[];
+  /** Research, wiki, docs or deploy-only work: an empty diff is fine. */
+  noCode?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
 };
@@ -226,6 +228,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           dueDate: input.dueDate ?? null,
           customFields: input.customFields ?? {},
           acceptanceCriteria: input.acceptanceCriteria ?? [],
+          noCode: input.noCode ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
           // Graded planning: high and critical work is planned first unless the creator says otherwise.

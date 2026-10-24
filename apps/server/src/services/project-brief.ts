@@ -135,7 +135,7 @@ export async function refreshBriefs(
       const assignee = (await findWikiKeeper(db, p.companyId)) ?? (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, p.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt))))[0];
       if (!assignee) throw new Error("the company has no wiki maintainer or CEO");
       const extra = `${p.defaultBranch} moved from ${brief.commit} to ${head}. Run \`git log --oneline ${brief.commit}..${head}\` and \`git diff --stat ${brief.commit}..${head}\` in your workspace, and update only the sections those changes affect. Then set the first line to the new commit. If nothing relevant changed, only update the first line.`;
-      await deps.work.createTicket(p.id, { title: BRIEF_TITLES[1]!, body: briefTicketBody(p, true, extra), assigneeAgentId: assignee.id });
+      await deps.work.createTicket(p.id, { title: BRIEF_TITLES[1]!, body: briefTicketBody(p, true, extra), assigneeAgentId: assignee.id, noCode: true });
       const value = now().toISOString();
       await db.insert(settings).values({ key, value }).onConflictDoUpdate({ target: settings.key, set: { value } });
     } catch (err) {

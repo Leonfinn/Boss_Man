@@ -388,6 +388,15 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             )}
           </section>
 
+          {t.repoUrl && (
+            <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+              <input type="checkbox" checked={!!t.noCode} disabled={busy} onChange={(e) => patch({ noCode: e.target.checked })} />
+              <span>
+                Doesn't need code changes <span className="muted">(research, wiki, docs or deploy only: it can close with nothing changed in the repository)</span>
+              </span>
+            </label>
+          )}
+
           <DoneWhen t={t} patch={patch} busy={busy} />
 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "code on its branch" : "nothing yet"}>

@@ -15,7 +15,7 @@ afterEach(async () => {
   ctx = undefined;
 });
 
-const DIFF = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [], files: [], diff: "diff --git a/x b/x", truncated: false };
+const DIFF = { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "x", added: 1, removed: 0 }], diff: "diff --git a/x b/x", truncated: false };
 const PLAN = "1. Read the limiter.";
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 
