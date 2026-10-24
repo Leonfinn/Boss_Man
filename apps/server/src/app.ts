@@ -802,7 +802,7 @@ export async function buildApp(opts: AppOptions) {
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
       if (!r) return { registered: false, launcher };
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, launcher };
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, launcher };
     });
 
     // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.
