@@ -223,7 +223,7 @@ describe("add feature or task", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add feature" }));
     expect(await screen.findByText("Feature added. The CEO will plan it and break it into tasks.")).toBeTruthy();
     expect(posts[0]).toMatchObject({ url: "/api/companies/c1/features", body: { title: "Export", description: "Accountants need CSV", status: "planned" } });
-    expect(posts[1]).toMatchObject({ url: "/api/features/f9/tickets", body: { projectId: "p1", title: "Plan: Export", assigneeAgentId: "a1" } });
+    expect(posts[1]).toMatchObject({ url: "/api/features/f9/tickets", body: { projectId: "p1", title: "Plan: Export", assigneeAgentId: "a1", noCode: true } });
     expect(posts[1]!.body.risk ?? null).toBeNull();
   });
 

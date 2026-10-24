@@ -69,6 +69,12 @@ describe("a ticket that changed nothing", () => {
     expect((await row(t.id)).systemState).toBe("in_progress");
   });
 
+  it("a code ticket that never got a branch cannot reach review, even if the runner has no workspace for it", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { branch: null });
+    expect(await toReview(t.id)).toBe(NOTHING_CHANGED);
+    expect((await row(t.id)).systemState).toBe("in_progress");
+  });
+
   it("a ticket marked no code reaches review and, approved with an empty diff, goes to done", async () => {
     const t = await ctx.ticket(ctx.withRepo.id, { noCode: true });
     expect(await toReview(t.id)).toContain("is now review");

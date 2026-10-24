@@ -259,7 +259,7 @@ describe("Boss Man MCP server", () => {
 
   it("won't let an agent mark a repo ticket done; it goes through review and merge (R46)", async () => {
     const [p] = await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app", repoUrl: "https://github.com/Leonfinn/customer-app.git" }).returning();
-    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.appCo.company.id, projectId: p!.id, title: "Add rate limiting", systemState: "in_progress" }).returning();
+    const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.appCo.company.id, projectId: p!.id, title: "Add rate limiting", systemState: "in_progress", branch: "bossman/x" }).returning();
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "done" } }))).toMatch(/move the ticket to "review" instead/);
     expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t!.id, state: "review", summary: "Ready." } }))).toMatch(/now review/);

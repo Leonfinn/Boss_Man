@@ -41,10 +41,10 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
   return null;
 }
 
-/** The plain-words outcome of landing, for a non-developer. */
 /** What the author hears when a ticket that needs code changes has none. */
 export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or mark the ticket as not needing code and say why.";
 
+/** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
   const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string };
   const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
@@ -177,11 +177,13 @@ export function reviewService(
     /**
      * True when a ticket that needs code changes has none yet: its project has a repo, it isn't
      * marked "no code", and the runner reports no commits and no changed files. If the runner
-     * can't answer, this is false, so an offline runner never blocks a move to review.
+     * can't answer, this is false, so an offline runner never blocks a move to review. A ticket
+     * with no branch was never worked on, so it has nothing, whatever the runner says.
      */
     async needsChanges(ticketId: string, companyId?: string): Promise<boolean> {
       const { t, repoUrl } = await ticketWithRepo(ticketId, companyId);
       if (!repoUrl || t.noCode) return false;
+      if (!t.branch) return true;
       const d = await this.diff(ticketId, companyId).catch(() => null);
       return !!d && !d.commits.length && !d.files.length;
     },
@@ -423,7 +425,7 @@ export function reviewService(
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
       const changed = await ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000).catch(() => null);
-      if (changed && !changed.commits.length && !changed.files.length) {
+      if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
         if (!t.noCode) {
           const delivered = await sendBack(`The review was approved, but the ticket can't be closed: ${NOTHING_CHANGED} Then move the ticket back to review.`, "nothing changed");
