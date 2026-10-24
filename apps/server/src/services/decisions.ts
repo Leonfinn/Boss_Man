@@ -77,6 +77,27 @@ export const SEND_IT_BACK = "Send it back";
 export const CHECK_AGAIN = "Run the check again";
 export const CHECK_SEND_BACK = "Send it back to the agent";
 export const CHECK_SKIP = "Merge without the check";
+
+/**
+ * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
+ * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
+ */
+export async function raiseMergeStuck(db: Db, t: { id: string; title: string; companyId: string }, why: string) {
+  return db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: `"${t.title}" was approved, but its merge didn't finish (${why}). This isn't a problem with the agent's work.`,
+      options: [CHECK_AGAIN, CHECK_SEND_BACK],
+      recommendedOption: CHECK_AGAIN,
+      tier: "owner",
+      dedupeKey: `merge-stuck:${t.id}`,
+      context: { type: "check_stuck", ticketId: t.id, command: "", output: why },
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id });
+}
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
 export const NOT_NOW = "Not now";
@@ -735,7 +756,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
-        if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but the check \`${ctx.command}\` couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");
+        if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but ${ctx.command ? `the check \`${ctx.command}\`` : "the merge"} couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");
         else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);

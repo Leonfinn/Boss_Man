@@ -9,10 +9,10 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql 
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
-import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, REASSIGN, type DecisionContext } from "./decisions.js";
+import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
-import { activeRows, latestRows } from "./review-kinds.js";
+import { activeRows, evaluate, latestRows } from "./review-kinds.js";
 import { MISSED_REASON, REVIEW_REASON, type WakeInput } from "./scheduler.js";
 
 export type SweepLimits = {
@@ -272,6 +272,32 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return result;
   }
 
+  /**
+   * Tickets whose reviews all passed but that still sit in review: the merge never finished (the server
+   * stopped mid-way, say). Nothing else would move them, so the owner is asked to merge again or send back.
+   * One waiting on the owner's sign-off is left alone.
+   */
+  async function unmergedApprovals(t: Date) {
+    const stuck = await db
+      .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs))));
+    let raised = 0;
+    for (const ticket of stuck) {
+      const rows = await latestRows(db, ticket.id);
+      if (!rows.length || evaluate(rows) !== "passed") continue;
+      const [signoff] = await db
+        .select({ id: decisions.id })
+        .from(ticketDependencies)
+        .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+        .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
+      if (signoff) continue;
+      raised += (await raiseMergeStuck(db, ticket, "it was approved, then nothing merged it; the server may have restarted part-way")).length;
+    }
+    return raised;
+  }
+
   async function missedWork(t: Date) {
     const msObjective = alias(objectives, "ms_objective");
     const rows = await db
@@ -378,7 +404,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const held = await getHold(db);
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
-      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost };
+      const unmerged = held ? 0 : await unmergedApprovals(t);
+      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged };
     },
   };
 }
