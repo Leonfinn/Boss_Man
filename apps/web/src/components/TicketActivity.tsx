@@ -128,7 +128,10 @@ export function TicketActivity({ ticketId, assignee, assigneeId = null, agents =
     ...(runs.data ?? []).map((r) => ({ at: r.startedAt, key: `r${r.id}`, m: null as Message | null, r, mark: null })),
     ...reviewMarks(reviews ?? []).map((mark) => ({ at: mark.at, key: mark.key, m: null as Message | null, r: null as RunRow | null, mark })),
   ].sort((a, b) => a.at.localeCompare(b.at));
-  useEffect(() => end.current?.scrollIntoView({ block: "nearest" }), [feed.length]);
+  // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "nearest" });
+  }, [feed.length]);
 
   const send = async (interrupt = false) => {
     if (!text.trim()) return;
