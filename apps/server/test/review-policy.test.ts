@@ -134,6 +134,15 @@ describe("review wake", () => {
     expect(await wakeTarget()).toEqual([c.ceo.id]);
     expect((await c.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary)).toContain("Designer is unavailable, so the CEO reviews it");
   });
+
+  it("never sends the CEO's own work back to the CEO: the senior developer reviews it", async () => {
+    const c = await setup();
+    const t = await c.ticket({ risk: "low" });
+    await c.db.update(tickets).set({ assigneeAgentId: c.ceo.id }).where(eq(tickets.id, t.id));
+    expect(await resolveReviewer(c.db, await c.row(t.id))).toEqual({ agent: { id: c.senior.id, name: "Sam" }, note: "The CEO did this work, so Sam reviews it" });
+    await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.senior.id));
+    expect(await resolveReviewer(c.db, await c.row(t.id))).toEqual({ agent: null, note: "The CEO did this work and no other agent can review it, so it waits for the owner" });
+  });
 });
 
 describe("the review tool", () => {

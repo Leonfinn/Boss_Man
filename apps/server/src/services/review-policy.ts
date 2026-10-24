@@ -21,6 +21,19 @@ export async function effectivePolicy(db: Db, t: { companyId: string; projectId:
  * `author` is who did the work: nobody reviews their own. An unavailable pick falls back to the CEO.
  */
 export async function resolveActor(db: Db, companyId: string, ref: string, author: string | null): Promise<Resolved> {
+  const r = await pick(db, companyId, ref, author);
+  if (!author || r.agent?.id !== author) return r;
+  // The CEO did the work, and every route ended back at the CEO: a senior developer reviews it, else nobody can and the owner does.
+  const [senior] = await db
+    .select({ id: agents.id, name: agents.name })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), eq(agents.template, SENIOR_DEV_TEMPLATE), eq(agents.paused, false), isNull(agents.retiredAt)))
+    .orderBy(asc(agents.createdAt))
+    .limit(1);
+  return senior ? { agent: senior, note: `The CEO did this work, so ${senior.name} reviews it` } : { agent: null, note: "The CEO did this work and no other agent can review it, so it waits for the owner" };
+}
+
+async function pick(db: Db, companyId: string, ref: string, author: string | null): Promise<Resolved> {
   const [ceo] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
   const fallback = (name: string | null): Resolved => ({ agent: ceo ?? null, note: name ? `${name} is unavailable, so the CEO reviews it` : null });
   if (ref === "ceo") return { agent: ceo ?? null, note: null };
