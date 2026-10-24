@@ -108,6 +108,8 @@ export type Ticket = {
   assignedToOwner: boolean;
   dueDate: string | null;
   blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
+  /** Agents running on the ticket right now. */
+  working?: string[];
   branch: string | null;
   risk: Risk | null;
   planFirst: boolean;

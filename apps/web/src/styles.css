@@ -516,6 +516,11 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .rstate.blue { color: var(--link); animation: pulse 1.6s ease-in-out infinite; } .rstate.green { color: var(--green-ink); } .rstate.red { color: var(--red-ink); }
 @keyframes pulse { 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .rstate.blue { animation: none; } }
+/* A board card an agent is running on right now. */
+.ticket.live { border-color: var(--green-ink); box-shadow: 0 0 0 1px var(--green-soft); }
+.ticket .working { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--green-ink); font-weight: 600; }
+.pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green-ink); animation: pulse 1.6s ease-in-out infinite; flex: none; }
+@media (prefers-reduced-motion: reduce) { .pulse-dot { animation: none; } }
 .dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
 .stat { display: flex; flex-direction: column; gap: 2px; padding: 16px 18px; color: var(--ink); text-decoration: none; }
 .stat:hover { border-color: var(--line-strong); }

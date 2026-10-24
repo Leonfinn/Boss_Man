@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { decisions, reviewRequests, ticketDependencies } from "../src/db/schema.js";
+import { decisions, reviewRequests, runs, ticketDependencies } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp;
@@ -152,5 +152,15 @@ describe("dependencies (R25)", () => {
     const board = (await req("GET", `/api/projects/${p.id}/board`)).json();
     const ship = board.columns.flatMap((x: { tickets: Array<{ title: string }> }) => x.tickets).find((x: { title: string }) => x.title === "Ship");
     expect(ship.blockedBy).toEqual([{ ticketId: t2.id, ticketTitle: "Domain", engagementId: null, decisionId: null }]);
+    expect(ship.working).toEqual([]);
+
+    // A blocker that's done no longer shows; an agent running on the ticket does, but not a chat run.
+    await req("PATCH", `/api/tickets/${t2.id}`, { state: "done" });
+    const [agent] = (await req("GET", "/api/companies")).json().find((x: { id: string }) => x.id === c.id).agents;
+    await t.db.insert(runs).values({ companyId: c.id, agentId: agent.id, ticketId: t1.id });
+    await t.db.insert(runs).values({ companyId: c.id, agentId: agent.id, ticketId: t1.id, purpose: "chat" });
+    const after = (await req("GET", `/api/projects/${p.id}/board`)).json().columns.flatMap((x: { tickets: Array<{ title: string }> }) => x.tickets).find((x: { title: string }) => x.title === "Ship");
+    expect(after.blockedBy).toEqual([]);
+    expect(after.working).toEqual([agent.name]);
   });
 });
