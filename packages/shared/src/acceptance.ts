@@ -43,7 +43,7 @@ export function readVerdicts(criteria: readonly string[], note: string | null | 
         const hit = want.filter((w) => bag[i]!.has(w)).length;
         if (hit >= need && hit > (best < 0 ? 0 : want.filter((w) => bag[best]!.has(w)).length)) best = i;
       }
-      if (best >= 0) verdict = PASS.test(raw[best]!) ? "pass" : FAIL.test(raw[best]!) ? "fail" : null;
+      if (best >= 0) verdict = FAIL.test(raw[best]!) ? "fail" : PASS.test(raw[best]!) ? "pass" : null;
     }
     return { criterion, verdict };
   });
