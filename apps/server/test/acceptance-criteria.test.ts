@@ -55,6 +55,11 @@ describe("acceptance criteria", () => {
     expect(missingVerdicts(CRITERIA, null)).toEqual(CRITERIA);
   });
 
+  it("a sentence with a fail word reads as fail even when it also says \"nothing green\"", () => {
+    const rows = readVerdicts(["Migration is expand-only"], "Migration is expand-only fail, tests fail, nothing green.");
+    expect(rows).toEqual([{ criterion: "Migration is expand-only", verdict: "fail" }]);
+  });
+
   it("create_ticket accepts 1 to 10 criteria and refuses 11; the tickets tool shows them", async () => {
     const c = await agent(ctx.dev.id);
     const ten = Array.from({ length: 10 }, (_, i) => `criterion ${i + 1}`);
