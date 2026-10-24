@@ -80,7 +80,9 @@ describe("a ticket that changed nothing", () => {
   it("an approved code ticket with no branch is sent back when the runner has no workspace for it", async () => {
     ctx.diff.failing = true;
     const t = await ctx.ticket(ctx.withRepo.id, { systemState: "review", branch: null });
-    expect((await approveAndWait(ctx.req, t.id)).json()).toMatchObject({ verdict: "approved", outcome: "empty" });
+    const verdict = (await approveAndWait(ctx.req, t.id)).json() as { verdict: string; outcome: string; message: string };
+    expect(verdict).toMatchObject({ verdict: "approved", outcome: "empty" });
+    expect(verdict.message).toContain("nothing in the repository changed");
     expect((await row(t.id)).systemState).toBe("in_progress");
   });
 
