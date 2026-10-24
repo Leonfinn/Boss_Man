@@ -100,6 +100,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [notes, setNotes] = useState<Record<string, string>>({});
   // The owner's own answer to an agent's question, being written; absent while not.
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
+  // A team plan's ticked hires, by position; all of them until the owner unticks one.
+  const [picks, setPicks] = useState<Record<string, number[]>>({});
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
@@ -107,7 +109,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     setBusy(d.id);
     try {
       const note = notes[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(custom ? { custom: true } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(custom ? { custom: true } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
@@ -256,6 +258,25 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : (
                       <>
+                        {d.context?.hires && (
+                          <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+                            <legend style={{ fontWeight: 600, marginBottom: 4 }}>Who to hire</legend>
+                            {d.context.hires.map((h, i) => {
+                              const chosen = picks[d.id] ?? d.context!.hires!.map((_, j) => j);
+                              return (
+                                <label key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 14 }}>
+                                  <input type="checkbox" checked={chosen.includes(i)} onChange={(e) => setPicks((p) => ({ ...p, [d.id]: e.target.checked ? [...chosen, i].sort((a, b) => a - b) : chosen.filter((x) => x !== i) }))} />
+                                  <span>
+                                    <strong>{h.name}</strong>
+                                    {h.title ? `, ${h.title}` : ""}
+                                    {h.template ? <span className="muted"> ({h.template})</span> : null}: {h.reason}
+                                    {h.skills?.length ? <span className="muted"> Skills: {h.skills.join(", ")}.</span> : null}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </fieldset>
+                        )}
                         {d.recommendedOption && (
                           <p className="rec">
                             <strong>RECOMMENDED</strong>

@@ -58,6 +58,7 @@ export type DecisionContext =
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
   | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string }; byAgentId: string }
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
+  | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
   | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
 
@@ -107,7 +108,14 @@ export const CANCEL_UPDATE = "Cancel the update";
 
 export class AnswerError extends Error {}
 
+/** One proposed hire in a team plan (docs/13). */
+export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string; serves?: string | null };
+export const TEAM_HIRE = "Hire the ticked ones";
+export const TEAM_NOT_NOW = "Not now";
+
 export type AnswerExtra = {
+  /** A team plan: which proposed hires (by position) the owner ticked; all of them when absent. */
+  picks?: number[];
   assigneeAgentId?: string;
   /** What to tell the agent, e.g. why a plan or a review went back. */
   note?: string;
@@ -135,6 +143,7 @@ export type LoopHooks = {
 export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
+type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
 
 /**
@@ -173,6 +182,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
+  let onTeamPlan: TeamPlanHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
   let maintenance: MaintenanceHook | null = null;
@@ -538,6 +548,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onAgentDecision = hook;
     },
 
+    setTeamPlanHook(hook: TeamPlanHook) {
+      onTeamPlan = hook;
+    },
+
     setLoopHooks(hooks: LoopHooks) {
       loopHooks = hooks;
     },
@@ -670,6 +684,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (options.length > 0 && !ownWords && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
       const ctx = d.context as DecisionContext;
+      if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
       if (always) {
@@ -734,6 +749,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       } else if (ctx.type === "maintenance") {
         await maintenance?.answered(answer);
+      } else if (ctx.type === "team_plan") {
+        if (answer === TEAM_HIRE) {
+          await onTeamPlan?.(ctx, d.companyId, [...new Set(extra.picks ?? ctx.hires.map((_, i) => i))]);
+        }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
         await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
       } else if (ctx.type === "review_loop" || ctx.type === "ticket_cap") {

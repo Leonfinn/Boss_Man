@@ -1018,6 +1018,40 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     },
   );
   server.registerTool(
+    "propose_team",
+    {
+      description: `Propose a team for a project, or for the company, as ONE decision the owner ticks through (CEO only). Use it when the owner asks for a team, or a project is new or its scope grew. Read the project and the current team first (board), reuse existing agents, and propose the smallest team that covers the scope. For each hire: a name, a template (${AGENT_TEMPLATES.map((t) => t.id).join(", ")}), optionally a title and model, the skills or packs from the library to give it, and the reason. Say in "covered" who already covers what.`,
+      inputSchema: {
+        projectId: z.string().uuid().optional(),
+        covered: z.string().trim().min(1).max(2000),
+        hires: z
+          .array(
+            z.object({
+              name: z.string().trim().min(1).max(80),
+              template: z.string().max(40).optional(),
+              title: z.string().trim().max(80).optional(),
+              model: z.string().max(200).optional(),
+              skills: z.array(z.string().max(200)).max(30).optional(),
+              reason: z.string().trim().min(1).max(600),
+            }),
+          )
+          .min(1)
+          .max(8),
+      },
+    },
+    async (input) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can propose a team.");
+      try {
+        const r = await team.proposeTeam(scope.companyId, ceo, input);
+        return text(`The team plan is waiting for the owner (decision ${r.decisionId}). They tick the hires they want; each is hired with its skills.`);
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+  server.registerTool(
     "propose_rule",
     {
       description:
