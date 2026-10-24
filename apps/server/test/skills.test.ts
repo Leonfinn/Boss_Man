@@ -1,12 +1,12 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, notifications, runners } from "../src/db/schema.js";
+import { agents, decisions, notifications, runners, settings } from "../src/db/schema.js";
 import { cleanPath, normalise, parseGitHub, parseSkillMd, skillName } from "../src/services/skills.js";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -157,6 +157,60 @@ describe("skills library (R71)", () => {
     const start = c.starts().find((s) => s.agentId === c.worker.id)!;
     expect(start.skills).toEqual([{ name: "house-style", files: [{ path: "SKILL.md", content: expect.any(String) }] }]);
     expect(Buffer.from(start.skills![0]!.files[0]!.content, "base64").toString()).toContain("description: \"How we write: short sentences, UK spelling.\"");
+  });
+
+  it("holds back a skill whose runner add-on isn't working, and tells the owner once (docs/12)", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const [qa] = (await c.req("POST", base, { from: "written", name: "dogfood", description: "Explore the site in a browser.", body: "Use agent-browser." })).json();
+    const [style] = (await c.req("POST", base, { from: "written", name: "house-style", description: "UK spelling.", body: "Use UK spelling." })).json();
+    expect((await c.req("PUT", `${base}/${qa.id}/addons`, { requires: ["warp-drive"] })).statusCode).toBe(400);
+    expect((await c.req("PUT", `${base}/${qa.id}/addons`, { requires: ["agent-browser"] })).statusCode).toBe(200);
+    expect((await c.req("GET", base)).json().find((s: { name: string }) => s.name === "dogfood").requiresAddons).toEqual(["agent-browser"]);
+    await c.req("PUT", `${base}/${qa.id}/agents`, { agentIds: [c.worker.id] });
+    await c.req("PUT", `${base}/${style.id}/agents`, { agentIds: [c.worker.id] });
+    const run = async (title: string) => {
+      await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id });
+      await c.scheduler.tick();
+      return c.starts().filter((s) => s.agentId === c.worker.id).at(-1)!;
+    };
+    const asks = async () => (await c.db.select().from(decisions)).filter((d) => d.question.includes('"dogfood" is left out'));
+    // The runner hasn't reported the add-on: the skill stays home, the rest go.
+    expect((await run("Check the homepage")).skills?.map((s) => s.name)).toEqual(["house-style"]);
+    expect(await asks()).toHaveLength(1);
+    const end = async () => c.emit({ type: "run.ended", runId: c.starts().filter((x) => x.agentId === c.worker.id).at(-1)!.runId, stopReason: "end_turn", error: null });
+    await end();
+    await run("Check the menu");
+    expect(await asks()).toHaveLength(1);
+    // Once the runner reports it healthy, the skill goes with the run.
+    await end();
+    await c.db.update(runners).set({ addons: [{ id: "agent-browser", version: "0.39.0", ok: true }] });
+    expect((await run("Check the footer")).skills?.map((s) => s.name)).toEqual(["dogfood", "house-style"]);
+    expect(c.starts().filter((x) => x.agentId === c.worker.id)).toHaveLength(3);
+  });
+
+  it("asks a runner how its add-ons are, keeps the answer, and re-arms the notice when it changes (docs/12)", async () => {
+    const c = (ctx = await setup());
+    const [row] = await c.db.select().from(runners);
+    let report: unknown = [{ id: "agent-browser", version: "0.39.0", ok: true }];
+    const asked: string[] = [];
+    // A runner without the "addons" feature is never asked.
+    expect(await c.runners.checkAddons(row!.id)).toBeNull();
+    c.runners.connect(row!.id, (cmd) => {
+      if (cmd.type !== "addons.check") return true;
+      asked.push(cmd.type);
+      queueMicrotask(() => c.runners.resolveReply({ requestId: cmd.requestId, ok: true, data: report }));
+      return true;
+    }, ["addons"]);
+    await c.db.insert(settings).values({ key: `addon-missing:${row!.id}:dogfood:agent-browser`, value: true });
+    expect(await c.runners.checkAddons(row!.id)).toEqual([{ id: "agent-browser", version: "0.39.0", ok: true }]);
+    expect((await c.db.select().from(runners))[0]!.addons).toEqual([{ id: "agent-browser", version: "0.39.0", ok: true }]);
+    expect(await c.db.select().from(settings).where(like(settings.key, "addon-missing:%"))).toEqual([]);
+    // A malformed answer is refused, and the stored report stays.
+    report = [{ id: "agent-browser" }];
+    await expect(c.runners.checkAddons(row!.id)).rejects.toThrow();
+    expect((await c.db.select().from(runners))[0]!.addons).toEqual([{ id: "agent-browser", version: "0.39.0", ok: true }]);
+    expect(asked).toHaveLength(2);
   });
 
   it("edits a written skill, and drops front matter pasted into the instructions", async () => {

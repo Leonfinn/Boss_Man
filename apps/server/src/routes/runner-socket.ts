@@ -85,6 +85,7 @@ export async function runnerSocketRoutes(
                 return true;
               }, msg.features);
               send({ type: "welcome", lastSeq: await runners.lastSeq(runner.id) });
+              void runners.checkAddons(runner.id).catch((err) => app.log.warn({ err, runnerId: runner.id }, "add-on check failed"));
               // Verdicts that may have been lost in a dropped connection are sent again.
               if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id }, "re-sending verdicts failed"));
             });

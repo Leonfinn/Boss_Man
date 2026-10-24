@@ -19,7 +19,7 @@ const leader = createLeader({
   log: (m) => console.warn(m),
 });
 
-const { app, briefUpkeep, scheduler, sweeps, notes, feedback, review, semantic, selfDeploy, maintenance } = await buildApp({
+const { app, briefUpkeep, scheduler, sweeps, notes, feedback, review, semantic, selfDeploy, maintenance, runners } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -53,6 +53,8 @@ const bg = createBackground(
     // What the host deployer reports: raises "Deploy?" when main moves and tells the owner how a deploy went. // leader-only
     { name: "self-deploy sync", everyMs: Number(env.BOSSMAN_SELF_DEPLOY_MS ?? 5000), run: () => selfDeploy.sync() },
     // The runner update drain: starts when update-runner.sh asks, swaps each runner as its company goes idle, lifts the hold at the end. // leader-only
+    // What each runner's add-ons say about their health (docs/12).
+    { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
   ],
   (err, name) => app.log.error({ err }, `${name} failed`),

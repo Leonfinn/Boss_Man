@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Skills } from "../src/pages/Skills";
+import { Runner } from "../src/pages/Settings";
 
 afterEach(() => {
   cleanup();
@@ -34,5 +35,41 @@ describe("skills", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await vi.waitFor(() => expect(calls).toContainEqual({ method: "PUT", url: "/api/companies/c1/skills/s1", body: { name: "web-fetch", description: "Fetch pages.", body: "# Rules\n\nTwo pages at most." } }));
     expect(await screen.findByText(/Saved\. Agents get the new version/)).toBeTruthy();
+  });
+
+  it("marks a skill as needing the browser add-on (docs/12)", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (url.endsWith("/skills/s1/addons")) return json({ requires: ["agent-browser"] });
+        if (url.endsWith("/skills/s1")) return json({ ...row, requiresAddons: null, files: [{ path: "SKILL.md", size: 10, text: "x" }] });
+        if (url.endsWith("/skills")) return json([row]);
+        return json([]);
+      }),
+    );
+    render(<Skills company={company} />);
+    fireEvent.click((await screen.findByText("web-fetch", { selector: "a span" })).closest("a")!);
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Browser (agent-browser)" }));
+    await vi.waitFor(() => expect(calls).toContainEqual({ method: "PUT", url: "/api/companies/c1/skills/s1/addons", body: { requires: ["agent-browser"] } }));
+    expect(await screen.findByText(/goes with runs only while the runner reports Browser \(agent-browser\) working/)).toBeTruthy();
+  });
+
+  it("shows each runner add-on as working, not working, or not installed with how to add it", async () => {
+    let addons: unknown = null;
+    vi.stubGlobal("fetch", vi.fn(async () => json({ registered: true, runnerId: "r1", connected: true, lastSeenAt: null, imageVersion: null, diskUsedBytes: null, addons })));
+    const view = render(<Runner company={company} />);
+    expect(await screen.findByText("Not installed")).toBeTruthy();
+    expect(screen.getByText("RUNNER_ADDONS=agent-browser")).toBeTruthy();
+    view.unmount();
+    addons = [{ id: "agent-browser", version: "0.39.0", ok: false, detail: "spawn agent-browser ENOENT" }];
+    render(<Runner company={company} />);
+    expect(await screen.findByText("Not working")).toBeTruthy();
+    expect(screen.getByText("spawn agent-browser ENOENT")).toBeTruthy();
+    cleanup();
+    addons = [{ id: "agent-browser", version: "0.39.0", ok: true }];
+    render(<Runner company={company} />);
+    expect(await screen.findByText("Working, 0.39.0")).toBeTruthy();
   });
 });

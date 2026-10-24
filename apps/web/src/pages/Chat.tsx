@@ -124,7 +124,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
             <ul>
               {team.map((t) => (
                 <li key={t.id}>
-                  <a href={`#/chat/${company.id}/${t.id}`} aria-current={t.id === current?.id ? "page" : undefined}>
+                  <a href={`#/chat/${company.id}/${t.id}`} aria-current={t.id === current?.id ? "page" : undefined} title={`${t.name}, ${roleOf(t)}`} data-unread={unread(t) ? "yes" : undefined}>
                     <Avatar agent={company.agents.find((x) => x.id === t.id) ?? t} className={t.role} />
                     <span className="who">
                       <span className="name">

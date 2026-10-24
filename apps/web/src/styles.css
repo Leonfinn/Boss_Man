@@ -490,6 +490,15 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .messenger-head .back { display: none; font-size: 20px; text-decoration: none; padding: 0 6px; }
 .messenger .chat-log { flex: 1; max-height: none; min-height: 0; }
 .messenger .chat-form { padding-top: 10px; border-top: 1px solid var(--line); }
+/* Narrow screens with the sidebar showing (a tablet): faces only, so the conversation keeps the room. */
+@media (min-width: 761px) and (max-width: 1180px) {
+  .messenger { grid-template-columns: 64px minmax(0, 1fr); }
+  .messenger-list a { position: relative; justify-content: center; padding: 8px 4px; }
+  .messenger-list .who, .messenger-list .when { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .messenger-list a[data-unread]::after { content: ""; position: absolute; top: 6px; right: 8px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+}
+.messenger .chat-form { flex-wrap: wrap; }
+.messenger .chat-form textarea { flex: 1 1 220px; }
 @media (max-width: 760px) {
   .messenger { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; }
   .messenger .chat-log { max-height: 55dvh; min-height: 160px; }
