@@ -110,4 +110,15 @@ describe("a ticket that changed nothing", () => {
     expect(r.statusCode).toBe(201);
     expect((await row((r.json() as { id: string }).id)).noCode).toBe(true);
   });
+
+  it("a feature plan ticket created with noCode reaches review in a repo project", async () => {
+    const f = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/features`, { title: "Rate limits" })).json() as { id: string };
+    const r = await ctx.req("POST", `/api/features/${f.id}/tickets`, { projectId: ctx.withRepo.id, title: "Plan: Rate limits", noCode: true });
+    expect(r.statusCode).toBe(201);
+    const id = (r.json() as { id: string }).id;
+    expect((await row(id)).noCode).toBe(true);
+    await ctx.db.update(tickets).set({ systemState: "in_progress", assigneeAgentId: ctx.dev.id, branch: "bossman/x" }).where(eq(tickets.id, id));
+    expect(await toReview(id)).not.toBe(NOTHING_CHANGED);
+    expect((await row(id)).systemState).toBe("review");
+  });
 });

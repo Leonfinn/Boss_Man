@@ -482,7 +482,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             if (f.planWithCeo) {
               // The feature exists now: a failed planning task mustn't make a retry add it twice.
               try {
-                await api(`/api/features/${created.id}/tickets`, { method: "POST", body: { projectId: current.id, title: `Plan: ${f.title}`, assigneeAgentId: ceo!.id } });
+                await api(`/api/features/${created.id}/tickets`, { method: "POST", body: { projectId: current.id, title: `Plan: ${f.title}`, assigneeAgentId: ceo!.id, noCode: true } });
               } catch (err) {
                 setNote(`Feature added, but its planning task couldn't be created (${(err as Error).message}). Use "Add task" on the feature's card.`);
                 return;

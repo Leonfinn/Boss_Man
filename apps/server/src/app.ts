@@ -1499,11 +1499,11 @@ export async function buildApp(opts: AppOptions) {
     /** A ticket that delivers the feature, described from what people asked for. */
     owner.post("/api/features/:id/tickets", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ projectId: Uuid, title: Text(200).optional(), risk: z.enum(RISK_TIERS).optional(), assigneeAgentId: Uuid.optional(), state: z.enum(SYSTEM_STATES).optional() }).parse(req.body);
+      const b = z.object({ projectId: Uuid, title: Text(200).optional(), risk: z.enum(RISK_TIERS).optional(), assigneeAgentId: Uuid.optional(), state: z.enum(SYSTEM_STATES).optional(), noCode: z.boolean().optional() }).parse(req.body);
       const { feature: f, body } = await feedback.brief(id);
       const [p] = await db.select({ companyId: projects.companyId }).from(projects).where(eq(projects.id, b.projectId));
       if (!p || p.companyId !== f.companyId) return reply.code(422).send({ error: "rejected", message: "Pick a project of the feature's company." });
-      const t = await work.createTicket(b.projectId, { title: b.title ?? f.title, body, featureId: id, risk: b.risk, assigneeAgentId: b.assigneeAgentId, state: b.state });
+      const t = await work.createTicket(b.projectId, { title: b.title ?? f.title, body, featureId: id, risk: b.risk, assigneeAgentId: b.assigneeAgentId, state: b.state, noCode: b.noCode });
       if (f.status === "idea" || f.status === "considering") await feedback.updateFeature(id, { status: "planned" });
       return reply.code(201).send(t);
     });
