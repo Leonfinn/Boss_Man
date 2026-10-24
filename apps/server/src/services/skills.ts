@@ -4,6 +4,7 @@
 // Man, or is uploaded. The owner gives skills to agents, and so can the CEO.
 // Format: https://code.claude.com/docs/en/skills and https://agentskills.io.
 import { and, asc, eq, inArray } from "drizzle-orm";
+import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentSkills, agents, skills } from "../db/schema.js";
 
@@ -211,7 +212,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   return {
     async list(companyId: string) {
       const rows = await db
-        .select({ id: skills.id, name: skills.name, description: skills.description, source: skills.source, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef, pack: skills.pack, packUrl: skills.packUrl, sizeBytes: skills.sizeBytes, files: skills.files, updatedAt: skills.updatedAt })
+        .select({ id: skills.id, name: skills.name, description: skills.description, source: skills.source, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef, pack: skills.pack, packUrl: skills.packUrl, sizeBytes: skills.sizeBytes, files: skills.files, requiresAddons: skills.requiresAddons, updatedAt: skills.updatedAt })
         .from(skills)
         .where(eq(skills.companyId, companyId))
         .orderBy(asc(skills.name));
@@ -239,6 +240,14 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
           return { path: f.path, size: bytes.length, text };
         }),
       };
+    },
+
+    /** The runner add-ons a skill needs (docs/12); only add-ons Boss Man knows. */
+    async setRequires(companyId: string, id: string, requires: string[]) {
+      const unknown = requires.filter((r) => !addonById(r));
+      if (unknown.length) throw new SkillError(400, `Unknown add-on: ${unknown.join(", ")}.`);
+      const [s] = await db.update(skills).set({ requiresAddons: requires.length ? [...new Set(requires)] : null }).where(and(eq(skills.id, id), eq(skills.companyId, companyId))).returning({ id: skills.id });
+      if (!s) throw new SkillError(404, "No such skill.");
     },
 
     /** A skill written in Boss Man: its SKILL.md is built from the form. */
@@ -373,11 +382,20 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
 }
 
 /** The skills an agent's run loads, as folders of files. */
-export async function skillsForRun(db: Db, agentId: string) {
-  return db
-    .select({ name: skills.name, files: skills.files })
+/** An agent's skills for a run; a skill needing an add-on the runner lacks is held back (docs/12). */
+export async function skillsForRun(db: Db, agentId: string, addons: AddonReport[] | null = null) {
+  const rows = await db
+    .select({ name: skills.name, files: skills.files, requiresAddons: skills.requiresAddons })
     .from(agentSkills)
     .innerJoin(skills, eq(skills.id, agentSkills.skillId))
     .where(eq(agentSkills.agentId, agentId))
     .orderBy(asc(skills.name));
+  const give: Array<{ name: string; files: SkillFile[] }> = [];
+  const withheld: Array<{ name: string; missing: string[] }> = [];
+  for (const { requiresAddons, ...s } of rows) {
+    const missing = missingAddons(requiresAddons, addons);
+    if (missing.length) withheld.push({ name: s.name, missing });
+    else give.push(s);
+  }
+  return { give, withheld };
 }

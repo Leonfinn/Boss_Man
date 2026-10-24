@@ -1,5 +1,6 @@
 // Skills (R71): the company's library of Agent Skills, and who has each. A skill is added from
 // a GitHub link (pinned to a commit), written here, or uploaded as a folder, files or a zip.
+import { RUNNER_ADDONS } from "@boss-man/shared";
 import { useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
 import { api, type Company } from "../api";
@@ -9,7 +10,7 @@ import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
 
 type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
-type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }> };
+type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }>; requiresAddons: string[] | null };
 type Upload = { path: string; content: string };
 
 const SOURCE: Record<SkillRow["source"], string> = { link: "From a link", written: "Written here", upload: "Uploaded" };
@@ -230,6 +231,34 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         )}
         <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
           The CEO can also give and take skills; you're told when it does. Skills load for Claude agents.
+        </p>
+      </fieldset>
+
+      <fieldset style={{ border: "1px solid var(--line)", borderRadius: 8, padding: "10px 14px" }}>
+        <legend style={{ padding: "0 6px", fontWeight: 600 }}>Needs a runner add-on</legend>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
+          {RUNNER_ADDONS.map((a) => {
+            const needs = s.requiresAddons ?? [];
+            return (
+              <label key={a.id} style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  checked={needs.includes(a.id)}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    void run(async () => {
+                      await api(`/api/companies/${company.id}/skills/${id}/addons`, { method: "PUT", body: { requires: on ? [...needs, a.id] : needs.filter((x) => x !== a.id) } });
+                      return on ? `Saved. ${s.name} goes with runs only while the runner reports ${a.title} working.` : "Saved.";
+                    });
+                  }}
+                />
+                {a.title}
+              </label>
+            );
+          })}
+        </div>
+        <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
+          A skill that needs an add-on is left out of runs while the runner doesn't have it working, and you're told once. See Settings → Runner.
         </p>
       </fieldset>
 

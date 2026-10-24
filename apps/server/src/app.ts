@@ -9,7 +9,7 @@ import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, TOOL_KINDS, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
 import { timeZoneOr } from "@boss-man/shared";
-import { NO_CHECK, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
+import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
@@ -803,7 +803,7 @@ export async function buildApp(opts: AppOptions) {
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
       if (!r) return { registered: false, launcher };
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, launcher };
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, launcher };
     });
 
     // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.
@@ -1266,6 +1266,12 @@ export async function buildApp(opts: AppOptions) {
       const { pack } = z.object({ pack: PackName }).parse(req.query);
       return skillsSvc.removePack(id, pack).then(() => reply.code(204).send(), skillErrors(reply));
     });
+    owner.put("/api/companies/:id/skills/:skillId/addons", async (req, reply) => {
+      const { id, skillId } = SkillParams.parse(req.params);
+      const { requires } = z.object({ requires: z.array(z.string().max(40)).max(10) }).parse(req.body);
+      return skillsSvc.setRequires(id, skillId, requires).then(() => ({ requires }), skillErrors(reply));
+    });
+    owner.get("/api/runner-addons", async () => RUNNER_ADDONS);
     owner.put("/api/companies/:id/skills/:skillId/agents", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
       const { agentIds } = z.object({ agentIds: z.array(Uuid).max(200) }).parse(req.body);

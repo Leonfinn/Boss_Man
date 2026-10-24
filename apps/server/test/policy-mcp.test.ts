@@ -114,6 +114,7 @@ describe("permission requests through the policy engine", () => {
       runnerVersion: "test",
       heartbeatMs: 200,
       onCommand: (c) => {
+        if (c.type === "addons.check") return; // asked of every runner at connect (docs/12)
         if (c.type === "permission.decide") {
           if (!waiting.delete(c.requestId)) return;
         }
@@ -160,7 +161,7 @@ describe("permission requests through the policy engine", () => {
       journal: new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-")), "j.jsonl")),
       runnerVersion: "test",
       heartbeatMs: 200,
-      onCommand: (c) => commands.push(c),
+      onCommand: (c) => c.type !== "addons.check" && commands.push(c),
       pendingPermissions: () => [],
     });
     conn.start();

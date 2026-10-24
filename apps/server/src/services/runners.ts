@@ -1,11 +1,12 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, eq, inArray, isNotNull, isNull, max, sql } from "drizzle-orm";
-import type { JournalEntry, RUNNER_FEATURES, RunnerCommand, RunnerEvent } from "@boss-man/shared";
+import { and, eq, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
+import { z } from "zod";
+import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { costEvents, decisions, engagements, runnerEvents, runners, runs, tickets } from "../db/schema.js";
+import { costEvents, decisions, engagements, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
 
 type Runner = typeof runners.$inferSelect;
@@ -217,6 +218,25 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
           reject(new Error("The company's runner is offline."));
         }
       });
+    },
+
+    /**
+     * Asks a runner how its add-ons are (docs/12) and keeps the answer. When it changes, the
+     * "skill held back" notices for that runner are cleared, so a later breakage is told again.
+     */
+    async checkAddons(runnerId: string) {
+      if (!this.isConnected(runnerId) || !this.can(runnerId, "addons")) return null;
+      const report = z.array(AddonReport).max(50).parse(await this.request<unknown>(runnerId, (requestId) => ({ type: "addons.check", requestId }), 60_000));
+      const [before] = await db.select({ addons: runners.addons }).from(runners).where(eq(runners.id, runnerId));
+      if (JSON.stringify(before?.addons ?? null) === JSON.stringify(report)) return report;
+      await db.update(runners).set({ addons: report }).where(eq(runners.id, runnerId));
+      await db.delete(settings).where(like(settings.key, `addon-missing:${runnerId}:%`));
+      return report;
+    },
+
+    /** Every connected runner's add-ons, for the background loop. */
+    async checkAllAddons() {
+      for (const runnerId of [...connected.keys()]) await this.checkAddons(runnerId).catch(() => null);
     },
 
     /** Delivers a runner's reply to whoever asked. */

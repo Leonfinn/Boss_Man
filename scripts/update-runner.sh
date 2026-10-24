@@ -26,6 +26,8 @@ IMAGE=boss-man-runner
 profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2- || true)}"
 # The deployer folder (docs/09-self-deploy.md) is where the drain request goes; .env has it once self-deploy is set up.
 BOSSMAN_DEPLOYER="${BOSSMAN_DEPLOYER:-$(grep -s '^BOSSMAN_DEPLOYER=' .env | tail -1 | cut -d= -f2- || true)}"
+# Optional runner add-ons (docs/12), e.g. RUNNER_ADDONS=agent-browser in .env; empty builds the plain image.
+addons="${RUNNER_ADDONS:-$(grep -s '^RUNNER_ADDONS=' .env | tail -1 | cut -d= -f2- || true)}"
 compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
 launcher_id() { docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher; }
 
@@ -85,13 +87,14 @@ if ((ROLLBACK)); then
 fi
 
 stamp="$(date -u +%Y%m%d%H%M)"
-echo "Building $IMAGE:candidate with Claude Code $version..."
+echo "Building $IMAGE:candidate with Claude Code $version${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
   --build-arg CLAUDE_CODE_VERSION="$version" \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
+  --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .
 
-echo "Running the canary (no network)..."
+echo "Running the canary (no network): a Claude session, then each add-on..."
 if ! docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true \
   "$IMAGE:candidate" node_modules/.bin/tsx src/canary-main.ts; then
   echo "The canary failed: $IMAGE:current is unchanged and the runners keep running it." >&2

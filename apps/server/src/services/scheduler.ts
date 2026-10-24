@@ -527,7 +527,12 @@ export function schedulerService(
     // Claude can reopen the interrupted ACP session (spike S4); other agents start fresh.
     const [previous] = w.resumeRunId && agent.agentKind === "claude" ? await db.select({ acpSessionId: runs.acpSessionId }).from(runs).where(eq(runs.id, w.resumeRunId)) : [];
     // The agent's skills (R71) go with the run; chat runs have no built-in tools to use them.
-    const skillSet = !chat && agent.agentKind === "claude" ? await skillsForRun(db, agent.id) : [];
+    const { give: skillSet, withheld } = !chat && agent.agentKind === "claude" ? await skillsForRun(db, agent.id, runner.addons) : { give: [], withheld: [] };
+    for (const h of withheld) {
+      // Told once per skill and missing set. shortcut: never re-told after the add-on recovers and breaks again; clear the key on a healthy report (docs/12 step 2).
+      const told = await db.insert(settings).values({ key: `addon-missing:${runner.id}:${h.name}:${h.missing.join(",")}`, value: true }).onConflictDoNothing().returning();
+      if (told.length) await deps.alert(w.companyId, `${agent.name}'s skill "${h.name}" is left out of its runs: it needs the ${h.missing.join(" and ")} add-on, which this company's runner doesn't have working. See Settings → Runner.`);
+    }
     const toolServers = chat ? [] : await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId));
     const sent = deps.runners.send(runner.id, {
       type: "run.start",

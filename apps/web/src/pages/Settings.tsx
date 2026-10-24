@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { RUNNER_ADDONS, type AddonReport } from "@boss-man/shared";
 import { api, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
@@ -10,7 +11,7 @@ import { StarButton } from "./Agents";
 
 /** The runner's container when the launcher runs it (R55); null when the launcher is off. */
 type Launched = { slug: string; container: { state: string; status: string; image: string } | null; error?: string } | null;
-type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null }) & { launcher?: Launched };
+type RunnerStatus = ({ registered: false } | { registered: true; runnerId: string; connected: boolean; lastSeenAt: string | null; imageVersion: string | null; diskUsedBytes: number | null; addons: AddonReport[] | null }) & { launcher?: Launched };
 type Grant = { id: string; envName: string; secretId: string; secretName: string; hint: string | null; deployTargetId: string | null; agentIds: string[] };
 type McpServerRow = { id: string; name: string; url: string; transport: "http" | "sse"; secretEnv: string | null; secretGranted: boolean };
 type Secret = { id: string; name: string; kind: string; hint: string | null };
@@ -57,6 +58,37 @@ function useAction() {
     </p>
   );
   return { busy, run, view };
+}
+
+/** Optional add-ons baked into the runner image (docs/12), and how the runner last said they were. */
+function RunnerAddons({ report }: { report: AddonReport[] | null }) {
+  return (
+    <div>
+      <h3 style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Add-ons</h3>
+      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+        {RUNNER_ADDONS.map((a) => {
+          const r = report?.find((x) => x.id === a.id);
+          return (
+            <li key={a.id}>
+              <strong>{a.title}</strong> {r?.ok ? <span className="tag green">Working, {r.version}</span> : r ? <span className="tag red">Not working</span> : <span className="tag">Not installed</span>}
+              <p className="muted" style={{ fontSize: 14, margin: "2px 0 0" }}>
+                {a.summary}{" "}
+                <a href={a.homepage} target="_blank" rel="noopener noreferrer">
+                  About it
+                </a>
+              </p>
+              {r && !r.ok && r.detail && <p className="error" style={{ fontSize: 13, margin: "2px 0 0" }}>{r.detail}</p>}
+              {!r && (
+                <p className="muted" style={{ fontSize: 13, margin: "2px 0 0" }}>
+                  To add it, put <code className="mono">RUNNER_ADDONS={a.id}</code> in <code className="mono">.env</code> on the server, then run <code className="mono">sudo scripts/update-runner.sh</code>. Skills that need it stay out of runs until then.
+                </p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
 }
 
 /** The runner's last hello: while connected that is when this connection began. */
@@ -148,6 +180,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
             </>
           )}
         </div>
+        {s?.registered && <RunnerAddons report={s.addons} />}
         {act.view}
       </Section>
     );
@@ -196,6 +229,7 @@ export function Runner({ company, onChanged }: { company: Company; onChanged?: (
           {s?.registered ? "Issue a new runner token" : "Register a runner"}
         </button>
       )}
+      {s?.registered && <RunnerAddons report={s.addons} />}
       {act.view}
     </Section>
   );
