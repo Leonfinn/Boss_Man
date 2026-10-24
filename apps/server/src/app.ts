@@ -54,6 +54,7 @@ import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
+import { exportCompany } from "./services/company-export.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -1275,6 +1276,15 @@ export async function buildApp(opts: AppOptions) {
       const { id, skillId } = SkillParams.parse(req.params);
       const { agentIds } = z.object({ agentIds: z.array(Uuid).max(200) }).parse(req.body);
       return skillsSvc.setHolders(id, skillId, agentIds).then(() => ({ agentIds }), skillErrors(reply));
+    });
+
+    // The company as one file (docs/11): set-up always; wiki and tickets when asked. Read-only.
+    owner.get("/api/companies/:id/export", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const q = z.object({ wiki: z.enum(["0", "1"]).optional(), tickets: z.enum(["none", "open", "all"]).optional() }).parse(req.query);
+      const out = await exportCompany(db, id, { wiki: q.wiki === "1", tickets: q.tickets ?? "none" });
+      if (!out) return reply.code(404).send({ error: "not_found" });
+      return reply.header("content-type", "application/zip").header("content-disposition", `attachment; filename="${out.name}"`).send(Buffer.from(out.bytes));
     });
 
     // The home screen (R74).
