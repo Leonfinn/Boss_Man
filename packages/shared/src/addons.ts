@@ -1,9 +1,11 @@
+import { z } from "zod";
+
 /**
  * Runner add-ons (docs/12): optional third-party tools baked into the runner image at build,
  * each pinned. Boss Man works without any of them; a skill that needs one is only given to
  * runs whose runner reports it installed and healthy.
  */
-export type RunnerAddon = { id: string; title: string; summary: string; npm: string; version: string; licence: string; homepage: string };
+export type RunnerAddon = { id: string; title: string; summary: string; npm: string; version: string; licence: string; homepage: string; /** Run on the runner to prove it works; exit 0 means healthy. */ check: string[] };
 
 export const RUNNER_ADDONS: RunnerAddon[] = [
   {
@@ -14,11 +16,13 @@ export const RUNNER_ADDONS: RunnerAddon[] = [
     version: "0.39.0",
     licence: "Apache-2.0",
     homepage: "https://github.com/vercel-labs/agent-browser",
+    check: ["agent-browser", "--version"],
   },
 ];
 
 /** What a runner last said about its add-ons. */
-export type AddonReport = { id: string; version: string; ok: boolean; detail?: string };
+export const AddonReport = z.object({ id: z.string().max(40), version: z.string().max(40), ok: z.boolean(), detail: z.string().max(500).optional() });
+export type AddonReport = z.infer<typeof AddonReport>;
 
 export const addonById = (id: string) => RUNNER_ADDONS.find((a) => a.id === id);
 

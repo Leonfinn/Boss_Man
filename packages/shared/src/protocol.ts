@@ -125,6 +125,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("credential.check"), requestId: z.string() }),
   /** Ask an agent kind for its model list without sending a prompt: a throwaway ACP session, closed at once. */
   z.object({ type: z.literal("models.probe"), requestId: z.string(), agentKind: z.enum(["claude", "codex", "opencode"]) }),
+  /** Check the runner's add-ons (docs/12); answered with AddonReport[]. Sent only to runners with the "addons" feature. */
+  z.object({ type: z.literal("addons.check"), requestId: z.string() }),
   z.object({ type: z.literal("run.cancel"), runId: Uuid }),
   /** Steer a running agent (R37): the text is sent as the next prompt in the same session. With interrupt, the current turn is stopped first. */
   z.object({ type: z.literal("run.message"), runId: Uuid, text: z.string().min(1).max(20_000), interrupt: z.boolean() }),
@@ -155,8 +157,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. */
-export const RUNNER_FEATURES = ["review-copy"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). */
+export const RUNNER_FEATURES = ["review-copy", "addons"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [

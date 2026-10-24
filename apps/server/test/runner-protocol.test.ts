@@ -50,7 +50,7 @@ afterEach(async () => {
 
 function runner(commands: RunnerCommand[] = [], journalPath = path.join(mkdtempSync(path.join(tmpdir(), "bm-runner-")), "j.jsonl")) {
   const journal = new Journal(journalPath);
-  const conn = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, onCommand: (c) => commands.push(c) });
+  const conn = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, onCommand: (c) => c.type !== "addons.check" && commands.push(c) }); // add-ons are asked of every runner at connect (docs/12)
   return { conn, journal, journalPath };
 }
 
