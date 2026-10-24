@@ -5,7 +5,7 @@ import { z } from "zod";
  * each pinned. Boss Man works without any of them; a skill that needs one is only given to
  * runs whose runner reports it installed and healthy.
  */
-export type RunnerAddon = { id: string; title: string; summary: string; npm: string; version: string; licence: string; homepage: string; /** Run on the runner to prove it works; exit 0 means healthy. */ check: string[] };
+export type RunnerAddon = { id: string; title: string; summary: string; npm: string; version: string; licence: string; homepage: string; /** Run on the runner to prove it works; exit 0 means healthy. */ check: string[]; /** Run by the image canary before a build is promoted (docs/12): the add-on doing real work. */ canary: string[][] };
 
 export const RUNNER_ADDONS: RunnerAddon[] = [
   {
@@ -17,6 +17,7 @@ export const RUNNER_ADDONS: RunnerAddon[] = [
     licence: "Apache-2.0",
     homepage: "https://github.com/vercel-labs/agent-browser",
     check: ["agent-browser", "--version"],
+    canary: [["agent-browser", "open", "about:blank"], ["agent-browser", "close"]],
   },
 ];
 
