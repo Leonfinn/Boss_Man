@@ -106,7 +106,7 @@ describe("project brief", () => {
     expect(await c.db.select().from(wakes).where(eq(wakes.agentId, keeper!.id))).not.toHaveLength(0);
     await c.scheduler.tick();
     const prompt = c.commands.find((c) => c.agentId === keeper!.id)!.prompt;
-    expect(prompt).toContain(`"Move the server" (completed): nothing attached; project brief: ${briefSlug(c.project.id)}`);
+    expect(prompt).toContain(`"Move the server" (completed): nothing attached; status page: status-${c.project.id}; project brief: ${briefSlug(c.project.id)}`);
     expect(prompt).toContain("update the affected sections of that brief");
   });
 });

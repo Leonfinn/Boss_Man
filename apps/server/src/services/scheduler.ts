@@ -9,6 +9,7 @@ import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, UNTRUSTE
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
+import { linkedSlugs } from "./wiki.js";
 import { agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
@@ -160,6 +161,19 @@ export function schedulerService(
           .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
           .where(inArray(ticketArtifacts.ticketId, finished.map((t) => t.id)))
       : [];
+    // Health check: links to pages that don't exist, and pages nothing links to.
+    // shortcut: reads every page body per wake; move to a wiki_links table with the backlinks shortcut in wiki.ts.
+    const pages = await db.select({ slug: wikiPages.slug, body: wikiPages.body }).from(wikiPages).where(eq(wikiPages.companyId, agent.companyId));
+    const exists = new Set(pages.map((p) => p.slug));
+    const linkedTo = new Set<string>();
+    const broken: string[] = [];
+    for (const p of pages)
+      for (const l of linkedSlugs(p.body)) {
+        if (l === p.slug) continue;
+        linkedTo.add(l);
+        if (!exists.has(l)) broken.push(`${p.slug} → ${l}`);
+      }
+    const orphans = pages.map((p) => p.slug).filter((s) => s !== "index" && !linkedTo.has(s));
     const briefs = new Map<string, string>();
     for (const projectId of new Set(finished.map((t) => t.projectId))) if (await findBrief(db, agent.companyId, projectId)) briefs.set(projectId, briefSlug(projectId));
     return [
@@ -168,15 +182,24 @@ export function schedulerService(
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
       "- Product pages go one level down: Product/Features (one page per feature: what it does and the decisions behind it), Product/Analysis (proposals, reviews, research into options) or Product/Strategy (direction, objectives, roadmap thinking). Move any page sitting straight in Product into the right one.",
       "- When finished work produced a document, make sure it's in the wiki, linked to its ticket, and linked from related pages. Read the ticket with tickets read, and a document that's only in the repo with tickets file (it reads the ticket's branch even if it was never merged). Copy it into the wiki with the ticket's id. Write a short summary page if a ticket produced something useful but no page.",
-      "- Don't change what a page says is true unless another page or a ticket shows it's out of date; then update it and say what changed at the bottom.",
+      "- Don't change what a page says is true unless another page or a ticket shows it's out of date. Then never overwrite it silently: update it and put a line at the top of the changed section, \"> Changed <date>: <what it said before> → <what it says now>, per <link to the ticket or page>\", so a reader sees what moved and why.",
+      "- Each project with finished work has a Status page (slug status-<project id>, in the project's folder): where it stands today, what changed recently, what's blocked and on what, and the next steps, with ticket links. Rewrite it as today's picture each time rather than adding dated entries; history lives on the tickets. Link it from the project's brief if there is one.",
       ...(briefs.size ? ["- Some projects have a brief page (listed below with their tickets). When merged work changed a project's objectives, architecture, code structure, conventions or build steps, update the affected sections of that brief by its slug, and update its first line (\"Describes commit <sha> on <branch>.\") to the new commit. Leave it alone if nothing relevant changed. Never change the brief's \"Lessons\" section; it holds owner-approved lessons and only a lesson decision may touch it."] : []),
       "- Don't create tickets or change code; when something needs doing, tell the owner with notify_owner and a link.",
       "",
       finished.length ? "Tickets finished since your last run, newest first:" : "No tickets have finished since your last run; tidy the wiki and the Index page.",
       ...finished.map((t) => {
         const outs = made.filter((m) => m.ticketId === t.id).map((m) => (m.kind === "wiki_page" ? `wiki page ${m.slug}` : m.kind === "url" ? `link ${m.url}` : `repo file ${m.path}${m.ref ? ` on ${m.ref}` : ""}`));
-        return `- ${t.id} "${t.title}" (${t.outcome ?? "done"})${outs.length ? `: produced ${outs.join("; ")}` : ": nothing attached"}${briefs.has(t.projectId) ? `; project brief: ${briefs.get(t.projectId)}` : ""}`;
+        return `- ${t.id} "${t.title}" (${t.outcome ?? "done"})${outs.length ? `: produced ${outs.join("; ")}` : ": nothing attached"}; status page: status-${t.projectId}${briefs.has(t.projectId) ? `; project brief: ${briefs.get(t.projectId)}` : ""}`;
       }),
+      ...(broken.length || orphans.length
+        ? [
+            "",
+            "Wiki health check. Fix what you can: point a broken link at the right page or write the missing page, and link each orphan from the Index or a related page (or merge it away if it duplicates one).",
+            ...(broken.length ? [`Broken links (page → missing page)${broken.length > 15 ? `, first 15 of ${broken.length}` : ""}:`, ...broken.slice(0, 15).map((b) => `- ${b}`)] : []),
+            ...(orphans.length ? [`Pages nothing links to${orphans.length > 15 ? `, first 15 of ${orphans.length}` : ""}:`, ...orphans.slice(0, 15).map((o) => `- ${o}`)] : []),
+          ]
+        : []),
     ];
   }
 

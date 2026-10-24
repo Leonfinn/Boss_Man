@@ -74,7 +74,10 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
   const items = chat.data?.items ?? [];
   const latest = items.at(-1)?.createdAt;
   useEffect(() => setBusy(state !== "idle"), [state]);
-  useEffect(() => end.current?.scrollIntoView({ block: "end" }), [items.length, current?.id]);
+  // Braces: scrollIntoView returns a Promise in Chromium 150+, and React would call it as the clean-up.
+  useEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [items.length, current?.id]);
   useEffect(() => {
     if (!current || !latest) return;
     markSeen(current.id, latest);
@@ -121,7 +124,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
             <ul>
               {team.map((t) => (
                 <li key={t.id}>
-                  <a href={`#/chat/${company.id}/${t.id}`} aria-current={t.id === current?.id ? "page" : undefined}>
+                  <a href={`#/chat/${company.id}/${t.id}`} aria-current={t.id === current?.id ? "page" : undefined} title={`${t.name}, ${roleOf(t)}`} data-unread={unread(t) ? "yes" : undefined}>
                     <Avatar agent={company.agents.find((x) => x.id === t.id) ?? t} className={t.role} />
                     <span className="who">
                       <span className="name">
