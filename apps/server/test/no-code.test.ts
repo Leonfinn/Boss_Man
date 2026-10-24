@@ -31,9 +31,10 @@ async function setup() {
   await req("PATCH", `/api/projects/${withRepo.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
   const noRepo = (await req("POST", `/api/companies/${co.company.id}/projects`, { name: "Notes" })).json() as { id: string };
   const reg = (await req("POST", `/api/companies/${co.company.id}/runner`)).json() as { runnerId: string };
-  const diff = { current: EMPTY };
+  const diff = { current: EMPTY, failing: false };
   built.runners.connect(reg.runnerId, (c) => {
-    if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: diff.current }));
+    if (c.type === "workspace.diff")
+      queueMicrotask(() => built.runners.resolveReply(diff.failing ? { requestId: c.requestId, ok: false, error: "no workspace or branch" } : { requestId: c.requestId, ok: true, data: diff.current }));
     if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "merged", commit: "c".repeat(40) } }));
     return true;
   });
@@ -70,8 +71,16 @@ describe("a ticket that changed nothing", () => {
   });
 
   it("a code ticket that never got a branch cannot reach review, even if the runner has no workspace for it", async () => {
+    ctx.diff.failing = true;
     const t = await ctx.ticket(ctx.withRepo.id, { branch: null });
     expect(await toReview(t.id)).toBe(NOTHING_CHANGED);
+    expect((await row(t.id)).systemState).toBe("in_progress");
+  });
+
+  it("an approved code ticket with no branch is sent back when the runner has no workspace for it", async () => {
+    ctx.diff.failing = true;
+    const t = await ctx.ticket(ctx.withRepo.id, { systemState: "review", branch: null });
+    expect((await approveAndWait(ctx.req, t.id)).json()).toMatchObject({ verdict: "approved", outcome: "empty" });
     expect((await row(t.id)).systemState).toBe("in_progress");
   });
 
