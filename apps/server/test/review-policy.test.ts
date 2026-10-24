@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -39,12 +39,15 @@ async function setup() {
   const reg = (await req("POST", `/api/companies/${company.id}/runner`)).json();
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
+  /** Set to make the runner's merge fail, as when it drops off mid-way. */
+  const faults = { merge: false };
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
-    if (c.type === "workspace.diff") ok(DIFF);
+    if (c.type === "workspace.diff") ok(faults.merge ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
     if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
-    if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
+    if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
+    else if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
     return true;
   });
   let seq = 0;
@@ -74,7 +77,7 @@ async function setup() {
     await emit({ type: "run.permission_request", runId, requestId, title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once"], detail: PLAN });
     return (await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`)))[0]!;
   };
-  return { ...built, db, req, company, ceo, worker, other, senior: senior!, project, ticket, row, mcp, setPolicy, plan, sent };
+  return { ...built, db, req, company, ceo, worker, other, senior: senior!, project, ticket, row, mcp, setPolicy, plan, sent, faults };
 }
 
 describe("who the policy names", () => {
@@ -142,6 +145,29 @@ describe("review wake", () => {
     expect(await resolveReviewer(c.db, await c.row(t.id))).toEqual({ agent: { id: c.senior.id, name: "Sam" }, note: "The CEO did this work, so Sam reviews it" });
     await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.senior.id));
     expect(await resolveReviewer(c.db, await c.row(t.id))).toEqual({ agent: null, note: "The CEO did this work and no other agent can review it, so it waits for the owner" });
+  });
+});
+
+describe("an approval whose merge fails", () => {
+  it("says so on the ticket and asks the owner, instead of leaving it in review with nothing pending", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.scheduler.onTicketReview(t.id, c.worker.id);
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    c.faults.merge = true;
+    const senior = await c.mcp(c.senior.id);
+    const out = textOf(await senior.callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } }));
+    // The reviewer is told the merge failed.
+    expect(out).toContain("The runner went away");
+    expect((await c.row(t.id)).systemState).toBe("review");
+    expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_failed"))))[0]?.summary).toBe("Approved, but the merge couldn't run: The runner went away");
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`));
+    expect(d).toMatchObject({ status: "open", tier: "owner", options: ["Run the check again", "Send it back to the agent"] });
+
+    // Trying again once the runner is back merges it.
+    c.faults.merge = false;
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Run the check again" });
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
   });
 });
 

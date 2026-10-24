@@ -17,7 +17,7 @@ async function setup() {
   const { db, close } = await openPglite();
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", now: clock });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -202,5 +202,29 @@ describe("stalled review sweep", () => {
     await ctx.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.id, r!.id));
     ctx.advance(30 * HOUR);
     expect(await ctx.sweeps.run()).toMatchObject({ stalledReviews: { woken: 0, gaveUp: 0 } });
+  });
+});
+
+describe("unmerged approvals sweep", () => {
+  it("asks the owner once about a ticket approved but never merged, and leaves one waiting on sign-off", async () => {
+    ctx = await setup();
+    const id = await ctx.forgotten("Ship it", { systemState: "review" });
+    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved" });
+    // Still pending somewhere: not this sweep's business.
+    const waiting = await ctx.forgotten("Still reviewing", { systemState: "review" });
+    await ctx.db.insert(reviewRequests).values({ ticketId: waiting, kind: "code", reviewerAgentId: ctx.worker.id, round: 1 });
+    // Approved but waiting on the owner's sign-off.
+    const signoff = await ctx.forgotten("Needs sign-off", { systemState: "review" });
+    await ctx.db.insert(reviewRequests).values({ ticketId: signoff, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved" });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", question: "Merge?", options: ["Approve and merge"], recommendedOption: "Approve and merge", context: { type: "risk_review", ticketId: signoff, reviewer: "x" } }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: signoff, blockerDecisionId: d!.id });
+
+    expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    const asked = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ dedupeKey: `merge-stuck:${id}`, options: ["Run the check again", "Send it back to the agent"] });
+    expect(asked[0]!.question).toContain('"Ship it" was approved, but its merge didn\'t finish');
+    // Asked once, not every pass.
+    expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
   });
 });

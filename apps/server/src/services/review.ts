@@ -11,7 +11,7 @@ import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
 import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hosts.js";
 import { effectivePolicy } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
-import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP } from "./decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, raiseMergeStuck } from "./decisions.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
@@ -367,6 +367,21 @@ export function reviewService(
      * uncommitted work sends the ticket back to the agent with what to do.
      */
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+      try {
+        return await this.landOnce(ticketId, reviewer, causedByRunId, opts);
+      } catch (err) {
+        if (!(err instanceof ReviewError)) throw err;
+        // The approval is already recorded, so nothing else would move the ticket: say so on it and ask the owner as well.
+        const [t] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+        if (!t) throw err;
+        await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't run: ${err.message}` });
+        await raiseMergeStuck(db, t, err.message);
+        // Whoever approved still hears why, as before.
+        throw err;
+      }
+    },
+
+    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
