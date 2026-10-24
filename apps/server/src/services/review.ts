@@ -399,6 +399,8 @@ export function reviewService(
     },
 
     async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+      // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
+      await db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });

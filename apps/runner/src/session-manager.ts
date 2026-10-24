@@ -286,7 +286,7 @@ export class SessionManager {
         }
         const work =
           command.type === "workspace.verify"
-            ? ws.verify({ ticketId: command.ticketId }, command.command)
+            ? ws.verify({ projectId: command.projectId, ticketId: command.ticketId }, command.command)
             : (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({})).then((secrets): Promise<unknown> =>
                 command.type === "workspace.detect"
                   ? ws.detect({ projectId: command.projectId, repoUrl: command.repoUrl, baseRef: command.baseRef }, secrets)

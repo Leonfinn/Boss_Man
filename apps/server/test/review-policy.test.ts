@@ -40,14 +40,14 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   /** Set to make the runner's merge fail, as when it drops off mid-way. */
-  const faults = { merge: false };
+  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null } = { merge: false, changed: false, holdMerge: null };
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
-    if (c.type === "workspace.diff") ok(faults.merge ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
+    if (c.type === "workspace.diff") ok(faults.changed ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
     if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
     if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
-    else if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
+    else if (c.type === "workspace.merge") void (faults.holdMerge ?? Promise.resolve()).then(() => ok({ status: "merged", commit: "c".repeat(40) }));
     return true;
   });
   let seq = 0;
@@ -155,6 +155,7 @@ describe("an approval whose merge fails", () => {
     await c.scheduler.onTicketReview(t.id, c.worker.id);
     await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
     c.faults.merge = true;
+    c.faults.changed = true;
     const senior = await c.mcp(c.senior.id);
     const out = textOf(await senior.callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } }));
     // The reviewer is told the merge failed.
@@ -164,9 +165,17 @@ describe("an approval whose merge fails", () => {
     const [d] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`));
     expect(d).toMatchObject({ status: "open", tier: "owner", options: ["Run the check again", "Send it back to the agent"] });
 
-    // Trying again once the runner is back merges it.
+    // Trying again once the runner is back merges it. While that merge runs (held here, as a long
+    // check would), the ticket counts as active, so the sweep doesn't ask about it again.
     c.faults.merge = false;
+    let release!: () => void;
+    c.faults.holdMerge = new Promise<void>((r) => (release = r));
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 2 * 3_600_000) }).where(eq(tickets.id, t.id));
+    const merges = c.sent.filter((x) => x.type === "workspace.merge").length;
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Run the check again" });
+    await vi.waitFor(() => expect(c.sent.filter((x) => x.type === "workspace.merge").length).toBeGreaterThan(merges));
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+    release();
     await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
   });
 });
