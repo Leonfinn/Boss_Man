@@ -9,6 +9,7 @@ import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, UNTRUSTE
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
+import { linkedSlugs } from "./wiki.js";
 import { agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
@@ -160,6 +161,19 @@ export function schedulerService(
           .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
           .where(inArray(ticketArtifacts.ticketId, finished.map((t) => t.id)))
       : [];
+    // Health check: links to pages that don't exist, and pages nothing links to.
+    // shortcut: reads every page body per wake; move to a wiki_links table with the backlinks shortcut in wiki.ts.
+    const pages = await db.select({ slug: wikiPages.slug, body: wikiPages.body }).from(wikiPages).where(eq(wikiPages.companyId, agent.companyId));
+    const exists = new Set(pages.map((p) => p.slug));
+    const linkedTo = new Set<string>();
+    const broken: string[] = [];
+    for (const p of pages)
+      for (const l of linkedSlugs(p.body)) {
+        if (l === p.slug) continue;
+        linkedTo.add(l);
+        if (!exists.has(l)) broken.push(`${p.slug} → ${l}`);
+      }
+    const orphans = pages.map((p) => p.slug).filter((s) => s !== "index" && !linkedTo.has(s));
     const briefs = new Map<string, string>();
     for (const projectId of new Set(finished.map((t) => t.projectId))) if (await findBrief(db, agent.companyId, projectId)) briefs.set(projectId, briefSlug(projectId));
     return [
@@ -178,6 +192,14 @@ export function schedulerService(
         const outs = made.filter((m) => m.ticketId === t.id).map((m) => (m.kind === "wiki_page" ? `wiki page ${m.slug}` : m.kind === "url" ? `link ${m.url}` : `repo file ${m.path}${m.ref ? ` on ${m.ref}` : ""}`));
         return `- ${t.id} "${t.title}" (${t.outcome ?? "done"})${outs.length ? `: produced ${outs.join("; ")}` : ": nothing attached"}; status page: status-${t.projectId}${briefs.has(t.projectId) ? `; project brief: ${briefs.get(t.projectId)}` : ""}`;
       }),
+      ...(broken.length || orphans.length
+        ? [
+            "",
+            "Wiki health check. Fix what you can: point a broken link at the right page or write the missing page, and link each orphan from the Index or a related page (or merge it away if it duplicates one).",
+            ...(broken.length ? [`Broken links (page → missing page)${broken.length > 15 ? `, first 15 of ${broken.length}` : ""}:`, ...broken.slice(0, 15).map((b) => `- ${b}`)] : []),
+            ...(orphans.length ? [`Pages nothing links to${orphans.length > 15 ? `, first 15 of ${orphans.length}` : ""}:`, ...orphans.slice(0, 15).map((o) => `- ${o}`)] : []),
+          ]
+        : []),
     ];
   }
 
