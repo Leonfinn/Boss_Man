@@ -148,6 +148,7 @@ describe("wiki and ticket outputs (R69)", () => {
     await c.scheduler.tick();
     const start = c.starts().find((s) => s.agentId === keeper!.id)!;
     expect(start.prompt).toContain("You are the company's wiki maintainer.");
+    expect(start.prompt).toContain("Product/Features");
     expect(start.prompt).toContain(`- ${t.id} "Research the landscape" (completed): produced wiki page research/landscape`);
     expect(start.prompt).toContain(`- ${t2.id} "Pick a licence" (completed): nothing attached`);
 
