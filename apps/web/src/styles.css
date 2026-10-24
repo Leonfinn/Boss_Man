@@ -440,14 +440,21 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .md th { background: var(--ground); font-weight: 600; }
 
 .wiki { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 20px; align-items: start; }
-.wiki-list { display: flex; flex-direction: column; gap: 10px; }
+/* The page list stays narrow and one line per page while you read; pointing at it or tabbing into it widens it over the reading pane, with full titles and who changed them. */
+.wiki-list { display: flex; flex-direction: column; gap: 10px; position: sticky; top: 12px; z-index: 5; width: 260px; max-height: calc(100vh - 24px); overflow-y: auto; transition: width 0.15s ease, box-shadow 0.15s ease; }
+.wiki-list:hover, .wiki-list:focus-within { width: 440px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); }
+.wiki-list li a .t { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wiki-list:is(:hover, :focus-within) li a .t { white-space: normal; }
+.wiki-list li small { display: none; }
+.wiki-list:is(:hover, :focus-within) li small { display: block; }
 .wiki-list ul { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: 0; padding: 0; }
 .wiki-list li a { display: block; padding: 7px 10px; border-radius: 6px; color: var(--ink); text-decoration: none; }
 .wiki-list li a[aria-current="page"] { background: var(--ground); font-weight: 600; }
-.wiki-list li small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+.wiki-list li small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .wiki-editor textarea { width: 100%; min-height: 420px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 14px; background: var(--field); color: var(--ink); }
 @media (max-width: 760px) {
   .wiki { grid-template-columns: minmax(0, 1fr); }
+  .wiki-list, .wiki-list:hover, .wiki-list:focus-within { position: static; width: auto; max-height: none; box-shadow: none; }
 }
 button.link { background: none; border: 0; padding: 0; color: var(--link); text-decoration: underline; font: inherit; cursor: pointer; }
 .wiki-list details > summary { cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
