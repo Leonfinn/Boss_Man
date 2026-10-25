@@ -45,6 +45,7 @@ import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
+import { ticketImagesService } from "./services/ticket-images.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
@@ -272,6 +273,7 @@ export async function buildApp(opts: AppOptions) {
   const semantic = wikiSemanticService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, log: (m) => app.log.warn(m), debounceMs: opts.semanticDebounceMs });
   app.addHook("onClose", async () => semantic.stop());
   const wiki = wikiService(db, semantic);
+  const images = ticketImagesService(db, { runners });
   const dashboard = dashboardService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
@@ -399,7 +401,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -1196,6 +1198,13 @@ export async function buildApp(opts: AppOptions) {
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
       return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee };
+    });
+
+    // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
+    owner.get("/api/tickets/:id/images", async (req) => images.list(IdParam.parse(req.params).id));
+    owner.get("/api/ticket-images/:id", async (req, reply) => {
+      const img = await images.get(IdParam.parse(req.params).id);
+      return img ? sendLogo(reply, img) : reply.code(404).send({ error: "not_found" });
     });
 
     // The reviews a ticket needs, every round, newest first (review kinds).

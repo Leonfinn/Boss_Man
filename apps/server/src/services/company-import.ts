@@ -117,7 +117,7 @@ export type Package = {
 };
 
 /** The picture's type from its first bytes, as the upload route checks it: PNG, JPEG or WebP only, never what the name claims. */
-const pictureType = (b: Uint8Array) => {
+export const pictureType = (b: Uint8Array) => {
   const head = Buffer.from(b.subarray(0, 12));
   return head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ? "image/png"
     : head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff ? "image/jpeg"

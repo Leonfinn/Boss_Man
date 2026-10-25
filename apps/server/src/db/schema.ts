@@ -1171,6 +1171,25 @@ export const mcpServers = pgTable(
 );
 
 /** The picture the owner uploaded for an agent: png, jpeg or webp bytes, checked on upload. Kept apart so agent rows stay small. */
+/** Images attached to a ticket, such as a tester's screenshots (PNG, JPEG or WebP, checked by their bytes). */
+export const ticketImages = pgTable(
+  "ticket_images",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** The file name it was saved under, e.g. issue-003-step-2.png. */
+    name: text("name").notNull(),
+    caption: text("caption"),
+    type: text("type").notNull(),
+    size: integer("size").notNull(),
+    bytes: bytea("bytes").notNull(),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("ticket_images_ticket").on(t.ticketId)],
+);
+
 export const agentAvatars = pgTable("agent_avatars", {
   agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   bytes: bytea("bytes").notNull(),

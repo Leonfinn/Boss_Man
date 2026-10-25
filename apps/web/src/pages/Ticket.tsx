@@ -8,6 +8,8 @@ import { TicketLinks } from "../components/TicketLinks";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { readVerdicts } from "@boss-man/shared";
 import { usePoll } from "../hooks";
+
+type TicketImage = { id: string; name: string; caption: string | null; size: number; createdAt: string };
 import { when } from "./Runs";
 
 /** The mark for one verdict on a "Done when" checklist row. */
@@ -162,6 +164,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const [descOpen, setDescOpen] = useState(false);
   const tiers = useRiskTiers(ticket.data?.companyId);
   const outputs = usePoll((signal) => api<Artifact[]>(`/api/tickets/${id}/artifacts`, { signal }), 20_000, id);
+  const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
@@ -402,6 +405,23 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "code on its branch" : "nothing yet"}>
             <TicketOutputs items={made} companyId={t.companyId} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch ? { branch: t.branch } : null} />
           </Fold>
+
+          {(images.data?.length ?? 0) > 0 && (
+            <Fold title="Images" hint={`${images.data!.length} attached`}>
+              <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+                {images.data!.map((img) => (
+                  <figure key={img.id} style={{ margin: 0 }}>
+                    <a href={`/api/ticket-images/${img.id}`} target="_blank" rel="noreferrer">
+                      <img src={`/api/ticket-images/${img.id}`} alt={img.caption ?? img.name} loading="lazy" style={{ width: "100%", borderRadius: 6, border: "1px solid var(--line)" }} />
+                    </a>
+                    <figcaption className="muted" style={{ fontSize: 13 }}>
+                      {img.caption ?? img.name} · {when(img.createdAt)}
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
+            </Fold>
+          )}
 
           {t.plan && (
             <Fold title="Plan" hint={t.planApprovedAt ? `approved ${when(t.planApprovedAt)}` : "waiting for your approval"}>

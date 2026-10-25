@@ -295,6 +295,27 @@ export class Workspaces {
     return { text: data.subarray(0, maxBytes).toString("utf8"), truncated, from };
   }
 
+  /**
+   * An image the agent saved while working a ticket (a screenshot), for attaching to it: from the ticket's
+   * worktree, its review copy, or the plain working folder of a ticket without a repo. A relative path is
+   * taken from the first of those that has it; an absolute one must be inside one of them.
+   */
+  readImage(ticketId: string, file: string, maxBytes = 5 * 1024 * 1024): { base64: string; size: number } {
+    if (!file || file.includes("\0")) throw new Error("Give the image's path.");
+    const dirs = [this.ticketDir(ticketId), this.reviewDir(ticketId), path.join(this.root, ticketId)].filter((d) => existsSync(d)).map((d) => realpathSync(d));
+    const candidates = path.isAbsolute(file) ? [path.resolve(file)] : dirs.map((d) => path.resolve(d, file));
+    for (const c of candidates) {
+      if (!existsSync(c)) continue;
+      // A symlink mustn't lead out of the ticket's folders.
+      const real = realpathSync(c);
+      if (!dirs.some((d) => real.startsWith(d + path.sep))) continue;
+      const size = statSync(real).size;
+      if (size > maxBytes) throw new Error(`${file} is ${Math.ceil(size / 1024)} KB; images are limited to ${maxBytes / 1024 / 1024} MB.`);
+      return { base64: readFileSync(real).toString("base64"), size };
+    }
+    throw new Error(`There's no ${file} in this ticket's working folder. Save the image there (a path relative to where you work) and try again.`);
+  }
+
   async diff(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, maxBytes = 512 * 1024): Promise<WorkspaceDiff> {
     const repo = this.repoDir(spec.projectId);
     const dir = await this.reopen(spec);
