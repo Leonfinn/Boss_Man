@@ -72,4 +72,25 @@ describe("skills", () => {
     render(<Runner company={company} />);
     expect(await screen.findByText("Working, 0.39.0")).toBeTruthy();
   });
+
+  it("adds a skill from another company and shows the result", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    const other = { id: "s9", name: "kit", description: "Builds kits.", companyName: "Other Co", requiresAddons: null, fileCount: 2, hasScripts: true };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+        if (url.includes("/skills/elsewhere")) return json([other]);
+        if (url.endsWith("/skills/copy")) return json({ id: "s10", name: "kit" });
+        return json([]);
+      }),
+    );
+    render(<Skills company={company} />);
+    expect(await screen.findByText("Builds kits.")).toBeTruthy();
+    expect(screen.getByText(/Other Co · 2 files · has scripts/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add to Boss Man Co" }));
+    expect(await screen.findByText("Added to Boss Man Co. Choose who has it.")).toBeTruthy();
+    expect(calls).toContainEqual({ method: "POST", url: "/api/companies/c1/skills/copy", body: { skillId: "s9" } });
+    expect((screen.getByRole("button", { name: "Added" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
