@@ -52,6 +52,30 @@ function Daily({ s }: { s: FundingStatus }) {
 
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "");
 
+/** Who used this source in the last 7 days: money for paid sources, tokens for a subscription. */
+function ByCompany({ s }: { s: FundingStatus }) {
+  const rows = s.byCompany ?? [];
+  if (!rows.length) return null;
+  const sub = s.source.kind === "subscription";
+  return (
+    <div>
+      <span className="muted" style={{ fontSize: 13 }}>
+        Last 7 days, by company
+      </span>
+      <ul style={{ listStyle: "none", margin: "4px 0 0", padding: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 13 }}>
+        {rows.map((r) => (
+          <li key={r.companyId} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+            <span>{r.name}</span>
+            <span className="mono">
+              {sub ? `${compact(r.tokens)} tokens` : usd(r.costMicros)} · {r.runs} run{r.runs === 1 ? "" : "s"}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function SourceCard({ s }: { s: FundingStatus }) {
   const kind = s.source.kind === "api_credit" ? "API credit" : s.source.kind === "subscription" ? "Subscription" : s.source.kind === "api_payg" ? "API, pay as you go" : s.source.kind;
   return (
@@ -106,6 +130,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
         </span>
       )}
       <Daily s={s} />
+      <ByCompany s={s} />
       {s.coverage === "boss_man_runs_only" && s.source.kind !== "subscription" && (
         <span className="muted" style={{ fontSize: 12 }}>
           Counted from Boss Man's own runs. Spend outside Boss Man isn't included: see the{" "}

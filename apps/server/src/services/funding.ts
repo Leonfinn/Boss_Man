@@ -10,7 +10,7 @@ import {
   type QuotaSample,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, costEvents, fundingSources, quotaSamples, runs } from "../db/schema.js";
+import { agents, budgetPolicies, companies, costEvents, fundingSources, quotaSamples, runs } from "../db/schema.js";
 
 type FundingRow = typeof fundingSources.$inferSelect;
 type PolicyRow = typeof budgetPolicies.$inferSelect;
@@ -90,6 +90,7 @@ export function fundingService(db: Db) {
         quota,
         forecasts,
         daily: await this.daily(id, now, timeZone),
+        byCompany: await this.byCompany(id, now),
         totalSpentMicros: events.reduce((s, e) => s + e.costMicros, 0),
         // Boss Man only sees its own runs (spike S3: no Admin API on individual accounts).
         coverage: "boss_man_runs_only" as const,
@@ -123,6 +124,39 @@ export function fundingService(db: Db) {
           costMicros: money.filter((m) => day(m.occurredAt) === d).reduce((n, m) => n + m.costMicros, 0),
         };
       });
+    },
+
+    /**
+     * This source's use over the last 7 days, per company: runs and tokens (a subscription's measure)
+     * and money from its cost events. The company is the one whose agent did the work.
+     */
+    async byCompany(id: string, now = new Date(), days = 7) {
+      const since = new Date(now.getTime() - days * 86_400_000);
+      const used = await db
+        .select({ companyId: runs.companyId, runs: count(), input: sql<number>`coalesce(sum(${runs.inputTokens}), 0)`, output: sql<number>`coalesce(sum(${runs.outputTokens}), 0)` })
+        .from(runs)
+        .leftJoin(agents, eq(agents.id, runs.agentId))
+        .where(and(gte(runs.startedAt, since), sql`(${runs.id} in (select ${costEvents.runId} from ${costEvents} where ${costEvents.fundingSourceId} = ${id} and ${costEvents.runId} is not null) or ${agents.fundingSourceId} = ${id})`))
+        .groupBy(runs.companyId);
+      const money = await db
+        .select({ companyId: costEvents.companyId, micros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)` })
+        .from(costEvents)
+        .where(and(eq(costEvents.fundingSourceId, id), gte(costEvents.occurredAt, since)))
+        .groupBy(costEvents.companyId);
+      const ids = [...new Set([...used.map((u) => u.companyId), ...money.map((m) => m.companyId)])];
+      const names = ids.length ? await db.select({ id: companies.id, name: companies.name }).from(companies) : [];
+      return ids
+        .map((companyId) => {
+          const u = used.find((x) => x.companyId === companyId);
+          return {
+            companyId,
+            name: names.find((n) => n.id === companyId)?.name ?? "Deleted company",
+            runs: Number(u?.runs ?? 0),
+            tokens: Number(u?.input ?? 0) + Number(u?.output ?? 0),
+            costMicros: Number(money.find((m) => m.companyId === companyId)?.micros ?? 0),
+          };
+        })
+        .sort((a, b) => b.costMicros - a.costMicros || b.tokens - a.tokens);
     },
 
     async recordCost(input: typeof costEvents.$inferInsert) {
