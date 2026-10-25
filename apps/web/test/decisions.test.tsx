@@ -155,6 +155,13 @@ describe("decision queue", () => {
 });
 
 describe("permission cards", () => {
+  it("say first when everything happens in a temporary folder", () => {
+    const explain = { title: "Saruman wants to run a command", summary: "Deletes files (/tmp/mut).", effect: "deletes" as const, command: "rm -rf /tmp/mut", scratch: { note: "Works only in a temporary folder (/tmp): every file it changes or deletes is there.", unchecked: [] } };
+    render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Allow once", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("Temporary folder only")).toBeTruthy();
+    expect(screen.getByText(/Works only in a temporary folder/)).toBeTruthy();
+  });
+
   it("lead with plain words and keep the command behind a fold", () => {
     const explain = { title: "Wiki Maintainer wants to run a command", summary: "Only reads information (the machine's memory); it doesn't change anything.", effect: "reads" as const, command: "grep MemTotal /proc/meminfo", reason: "Check how much memory is available" };
     render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Allow once", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
