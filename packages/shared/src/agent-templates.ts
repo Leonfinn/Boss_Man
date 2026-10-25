@@ -296,10 +296,12 @@ export const CEO_TEMPLATE: Omit<AgentTemplate, "role"> = {
 };
 
 /** How an agent introduces itself in a prompt, and its standing instructions after it (R62). */
-export function agentIdentity(agent: { name: string; role: string; title: string | null; instructions: string | null }, company: string): { who: string; instructions: string[] } {
+export function agentIdentity(agent: { name: string; role: string; title: string | null; instructions: string | null; model?: string | null; thinking?: string | null }, company: string): { who: string; instructions: string[] } {
   const job = agent.role === "ceo" ? "CEO" : (agent.title ?? agent.role);
+  // The model is a setting, so instructions that name one (often copied from elsewhere) can go stale; the setting wins.
+  const setup = `Your model is set in Boss Man: ${agent.model ?? "your agent's default"}${agent.thinking ? `, with ${agent.thinking} thinking` : ""}. If anything in your instructions names a different model, this setting is the right one.`;
   return {
     who: `${agent.name}, the ${job} of ${company}`,
-    instructions: agent.instructions?.trim() ? ["", "Your instructions from the owner:", agent.instructions.trim()] : [],
+    instructions: agent.instructions?.trim() ? ["", "Your instructions from the owner:", agent.instructions.trim(), "", setup] : [],
   };
 }

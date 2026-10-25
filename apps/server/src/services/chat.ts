@@ -50,7 +50,8 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       .from(wakes)
       .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, CHAT_REASON), inArray(wakes.status, ["queued", "deferred"])));
     const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.companyId, companyId), eq(runs.agentId, agentId), eq(runs.purpose, "chat"), isNull(runs.endedAt)));
-    return running ? "answering" : queued ? (queued.status === "deferred" ? `waiting: ${queued.reason ?? "deferred"}` : "queued") : "idle";
+    // A queued wake with a reason is held (agent or company paused, a limit, a runner update), not just waiting for the runner.
+    return running ? "answering" : queued ? (queued.status === "deferred" || queued.reason ? `waiting: ${queued.reason ?? "deferred"}` : "queued") : "idle";
   }
 
   return {
