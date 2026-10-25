@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, notifications, runners, wakes } from "../src/db/schema.js";
+import { agents, notifications, runners, tickets, wakes } from "../src/db/schema.js";
 import { and, eq as eqq } from "drizzle-orm";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -77,6 +77,13 @@ describe("wiki and ticket outputs (R69)", () => {
     expect(made).toEqual([
       expect.objectContaining({ kind: "wiki_page", slug: "research/2026-agent-landscape", agent: "Engineer" }),
       expect.objectContaining({ kind: "repo_file", path: "docs/04-research.md", ref: "c996308" }),
+    ]);
+    // A sub-task shows its parent's pages too, naming where they came from, so the owner needn't look for them.
+    const kid = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Part 2" })).json() as { id: string };
+    await c.db.update(tickets).set({ parentTicketId: t.id }).where(eq(tickets.id, kid.id));
+    expect((await c.req("GET", `/api/tickets/${kid.id}/artifacts`)).json()).toEqual([
+      expect.objectContaining({ kind: "wiki_page", slug: "research/2026-agent-landscape", ticketId: t.id }),
+      expect.objectContaining({ kind: "repo_file", ticketId: t.id }),
     ]);
   });
 

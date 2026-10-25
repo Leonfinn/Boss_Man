@@ -13,12 +13,14 @@ type Chat = { agentId: string; items: Message[]; state: string };
 type Thread = { id: string; name: string; role: "ceo" | "manager" | "worker"; duty: string | null; state: string; last: { role: Message["role"]; text: string; createdAt: string } | null };
 
 /** Plain text with in-app links (#/tickets/<id> and the like, or [title](#/tickets/<id>)) made clickable. */
-export function linked(text: string): ReactNode {
+export function linked(text: string, wikiCompanyId?: string): ReactNode {
   const out: ReactNode[] = [];
   let at = 0;
-  for (const m of text.matchAll(/\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?/g)) {
-    const href = (m[2] ?? m[3])!;
-    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[1] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2))}</a>);
+  // [[slug]] and [[slug#Section]] link to the company's wiki page when the company is known.
+  for (const m of text.matchAll(/\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
+    if (m[4] && !wikiCompanyId) continue;
+    const href = m[4] ? `#/wiki/${wikiCompanyId}/${m[4].trim()}` : (m[2] ?? m[3])!;
+    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[4] ? `${m[4].trim()}${m[5] ?? ""}` : (m[1] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2)))}</a>);
     at = m.index + m[0].length;
   }
   out.push(<Fragment key="end">{text.slice(at)}</Fragment>);

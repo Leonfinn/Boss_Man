@@ -402,8 +402,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
 
           <DoneWhen t={t} patch={patch} busy={busy} />
 
-          <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch ? "code on its branch" : "nothing yet"}>
-            <TicketOutputs items={made} companyId={t.companyId} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch ? { branch: t.branch } : null} />
+          <Fold title="What it produced" hint={made.length ? `${made.length} item${made.length === 1 ? "" : "s"}` : t.mergeCommit ? `code merged as ${t.mergeCommit.slice(0, 7)}` : t.branch && !t.noCode ? "code on its branch" : "nothing yet"}>
+            <TicketOutputs items={made} companyId={t.companyId} ticketId={t.id} prefix={t.ref?.replace(/-\d+$/, "") ?? null} onChanged={outputs.reload} code={t.mergeCommit ? { merged: t.mergeCommit } : t.branch && !t.noCode ? { branch: t.branch } : null} />
           </Fold>
 
           {(images.data?.length ?? 0) > 0 && (
@@ -531,7 +531,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </p>
           )}
 
-          <TicketActivity ticketId={t.id} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
+          <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
