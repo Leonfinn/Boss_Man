@@ -86,8 +86,11 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
   const holders = new Map<string, string[]>(); // skill → agent folders. lost on restart, harmless: one import call.
   const secrets = new Map<string, string[]>(); // env name → agent folders. lost on restart, harmless: one import call.
   const agentDirs = [...new Set([...files.keys()].filter((p) => /^agents\/[^/]+\/AGENTS\.md$/.test(p)).map((p) => p.split("/")[1]!))].sort();
+  const paperclipy: string[] = [];
   for (const slug of agentDirs) {
     const md = frontmatter(text(`agents/${slug}/AGENTS.md`)!);
+    // Instructions are kept word for word, so ones written for Paperclip's way of working are pointed out rather than changed.
+    if (/\bpaperclip\b|\bheartbeats?\b/i.test(md.body)) paperclipy.push(str(md.meta.name) ?? slug);
     const cfg = obj(agentCfg[slug]);
     const adapter = obj(cfg.adapter);
     const role = str(cfg.role) ?? "";
@@ -119,6 +122,10 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
     if (missing.length) notes.push(`${str(md.meta.name) ?? slug} had skills that aren't in the export: ${missing.join(", ")}.`);
     for (const [env, v] of Object.entries(obj(obj(cfg.inputs).env))) if (obj(v).kind === "secret" && /^[A-Z][A-Z0-9_]{0,63}$/.test(env)) secrets.set(env, [...(secrets.get(env) ?? []), slug]);
   }
+  if (paperclipy.length)
+    notes.push(
+      `${paperclipy.length === 1 ? "1 agent's instructions describe" : `${paperclipy.length} agents' instructions describe`} working in Paperclip (the paperclip skill, heartbeats, its API or /paperclip paths), which Boss Man doesn't have: ${paperclipy.join(", ")}. After importing, ask your CEO to revise them (it can read and update every agent's instructions), or edit them under Agents.`,
+    );
   json(
     "skills.json",
     kept.map((d) => {
