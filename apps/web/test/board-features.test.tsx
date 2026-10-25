@@ -196,18 +196,18 @@ describe("new task form", () => {
 
 describe("add feature or task", () => {
   const ceoCompany: Company = { ...company, agents: [{ id: "a1", companyId: "c1", name: "Ada", role: "ceo", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null }] };
-  function record() {
+  function record(go: (to: string) => void = () => {}) {
     const posts: { url: string; body: Record<string, unknown> }[] = [];
     stub();
     const base = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
       if (init?.method === "POST") {
         posts.push({ url, body: JSON.parse(String(init.body)) });
-        return json({ id: "f9" });
+        return json({ id: "f9", agentId: "a1" });
       }
       return base(url, init);
     }));
-    render(<Board companies={[ceoCompany]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    render(<Board companies={[ceoCompany]} projectId="p1" go={go} onCompaniesChanged={() => {}} />);
     return posts;
   }
 
@@ -250,6 +250,17 @@ describe("add feature or task", () => {
     expect(await screen.findByText("Feature added.")).toBeTruthy();
     expect(posts).toHaveLength(1);
     expect(posts[0]!.body.status).toBe("idea");
+  });
+
+  it("sends the draft to the CEO's chat instead of creating it, and opens the chat", async () => {
+    const go = vi.fn();
+    const posts = record(go);
+    fireEvent.click(await screen.findByRole("button", { name: "Add task" }));
+    fireEvent.change(screen.getByLabelText("Title"), { target: { value: "Add SSO" } });
+    fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Acme needs it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Let the CEO question me first" }));
+    await waitFor(() => expect(go).toHaveBeenCalledWith("chat/c1/a1"));
+    expect(posts).toEqual([{ url: "/api/companies/c1/chat/grill", body: { kind: "task", title: "Add SSO", description: "Acme needs it", projectId: "p1" } }]);
   });
 
   it("opens New task with the feature preselected from a feature card", async () => {

@@ -131,7 +131,7 @@ type NewFeatureInput = { title: string; description: string | null; planWithCeo:
 type Adding = { mode: "feature" | "task"; featureId: string };
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
-function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onClose }: { initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onClose: () => void }) {
+function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
   const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "" };
   const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
@@ -161,6 +161,17 @@ function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, o
     } catch (err) {
       setError((err as Error).message);
     } finally {
+      setBusy(false);
+    }
+  };
+  // Hands the draft to the CEO, who questions the owner in chat and then creates it.
+  const grill = async () => {
+    if (!form.title.trim() || busy) return;
+    setBusy(true);
+    try {
+      await onGrill({ kind: mode, title: form.title.trim(), description: form.body.trim() || null });
+    } catch (err) {
+      setError((err as Error).message);
       setBusy(false);
     }
   };
@@ -273,6 +284,11 @@ function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, o
         <button className="btn primary" type="submit" disabled={busy || !form.title.trim()}>
           {isFeature ? "Add feature" : agentChosen ? "Add and start" : "Add to backlog"}
         </button>
+        {hasCeo && (
+          <button className="btn" type="button" disabled={busy || !form.title.trim()} onClick={() => void grill()}>
+            Let the CEO question me first
+          </button>
+        )}
         <button className="btn" type="button" onClick={onClose}>
           Cancel
         </button>
@@ -473,6 +489,10 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           tiers={tiers}
           hasCeo={!!ceo}
           onClose={() => setAdding(null)}
+          onGrill={async (d) => {
+            const r = await api<{ agentId: string }>(`/api/companies/${current.companyId}/chat/grill`, { method: "POST", body: { ...d, projectId: current.id } });
+            go(`chat/${current.companyId}/${r.agentId}`);
+          }}
           onAddTask={async (t) => {
             await api(`/api/projects/${current.id}/tickets`, { method: "POST", body: t });
             setNote(null);
