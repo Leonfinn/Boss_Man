@@ -317,7 +317,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               ) : (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
-                    {!t.repoUrl ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
+                    {!t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
                   </button>
                   <button type="button" className="btn" disabled={busy || running} onClick={() => setSendingBack(true)}>
                     Request changes

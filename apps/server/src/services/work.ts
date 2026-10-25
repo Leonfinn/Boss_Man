@@ -3,7 +3,7 @@ import { and, asc, eq, inArray, isNull, or, ne } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
-import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
+import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export class WorkError extends Error {
   constructor(
@@ -163,6 +163,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           .filter((d) => (d.context as { type?: string }).type === "risk_review")
           .map((d) => [d.id, (d.context as { reviewer?: string }).reviewer ?? null] as const),
       );
+      // A review no agent could take (the CEO did the work and nobody else can review it) waits on the owner too.
+      const inReview = rows.filter((r) => r.t.systemState === "review").map((r) => r.t.id);
+      const unreviewed = new Set(
+        (inReview.length ? await db.select({ ticketId: reviewRequests.ticketId }).from(reviewRequests).where(and(inArray(reviewRequests.ticketId, inReview), eq(reviewRequests.status, "pending"), isNull(reviewRequests.reviewerAgentId))) : []).map((r) => r.ticketId),
+      );
       // Who is running on each ticket right now, so a card can show live work (chat runs don't count).
       const ids = rows.map((r) => r.t.id);
       const live = ids.length
@@ -177,7 +182,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
         return {
         ...t,
-        waitingOnOwner: !!waitingDecisionId,
+        waitingOnOwner: !!waitingDecisionId || unreviewed.has(t.id),
+        noReviewer: unreviewed.has(t.id),
         waitingDecisionId,
         approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : null,
         featureTitle: t.featureId ? (featureTitle.get(t.featureId) ?? null) : null,
