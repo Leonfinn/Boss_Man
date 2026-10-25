@@ -17,7 +17,8 @@
 #   WEBHOOK_URL        POSTed on failure; empty = off
 #   WEBHOOK_ON_SUCCESS 1 = also POST on success  (0)
 #   RATE_LIMIT_SECONDS min gap between two runs of the same target (600)
-#   AVAILABLE_REFRESH_SECONDS  how often to look for a new commit on main (300)
+#   AVAILABLE_REFRESH_SECONDS  how often to look for a new commit on main (300); sooner when the server
+#                              leaves inbox/check ("Deploy latest" found nothing new; only its existence is read)
 #   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900)
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
@@ -89,8 +90,10 @@ remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs
 
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
 refresh_available() {
-  local f="$OUTBOX/available.json"
-  if [[ -e $f && -z $(find "$f" -mmin +$((AVAILABLE_REFRESH_SECONDS / 60)) 2>/dev/null) ]]; then return 0; fi
+  local f="$OUTBOX/available.json" asked=0
+  # rm -f removes a symlink itself, never what it points at.
+  if [[ -e $INBOX/check || -L $INBOX/check ]]; then asked=1; ((DRY)) || rm -f "$INBOX/check"; fi
+  if ((!asked)) && [[ -e $f && -z $(find "$f" -mmin +$((AVAILABLE_REFRESH_SECONDS / 60)) 2>/dev/null) ]]; then return 0; fi
   ((DRY)) && { log "[dry-run] would refresh $f"; return 0; }
   local head tip commits="$STATE/avail.commits" paths="$STATE/avail.paths"
   head="$(g rev-parse HEAD)"; tip="$(remote_tip)"

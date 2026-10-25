@@ -73,6 +73,15 @@ has "$D/outbox/available.json" '"runnerChanged": false'
 has "$D/outbox/available.json" '"infraPaths": []'
 has "$D/outbox/available.json" 'change apps/server/a'
 [[ ! -e $D/outbox/status.json ]] || fail "status written with no request"
+# 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
+sed -i 's/^AVAILABLE_REFRESH_SECONDS=0$/AVAILABLE_REFRESH_SECONDS=300/' "$D/host.conf"
+printf '{"tip":"stale"}\n' >"$D/outbox/available.json"
+host
+[[ $(jget "$D/outbox/available.json" tip) == stale ]] || fail "refreshed before it was due"
+: >"$D/inbox/check"; host
+[[ $(jget "$D/outbox/available.json" tip) == "$c1" ]] || fail "inbox/check did not refresh the offer"
+[[ ! -e $D/inbox/check ]] || fail "inbox/check was left behind"
+conf 0
 
 # 2. A good server request runs the fixed action, writes status and history, and stays quiet on success.
 req server "$c1" 11111111-1111-1111-1111-111111111111

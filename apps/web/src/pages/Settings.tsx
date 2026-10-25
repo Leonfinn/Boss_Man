@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { RUNNER_ADDONS, type AddonReport } from "@boss-man/shared";
-import { api, type Agent, type Company, type FundingSource, type Project } from "../api";
+import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
 import { usePoll } from "../hooks";
@@ -1223,7 +1223,13 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           disabled={act.busy || v.pending || s?.result === "running"}
           onClick={() =>
             act.run(async () => {
-              await api("/api/self-deploy/deploy-latest", { method: "POST", body: {} });
+              try {
+                await api("/api/self-deploy/deploy-latest", { method: "POST", body: {} });
+              } catch (err) {
+                // Nothing new is not a failure: the server says so, and has asked the host to look at main again.
+                if (err instanceof ApiError && err.status === 409) return err.message;
+                throw err;
+              }
               go("decisions");
             })
           }

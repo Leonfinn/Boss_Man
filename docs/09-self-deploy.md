@@ -41,6 +41,7 @@ Base: `/mnt/NVME_Apps/Container_files/boss-man/deployer` (`$D` below).
 | `$D/host.conf` | root:root 600 | owner, by hand | Webhook URL and options (below). The script refuses to start if it is not private. |
 | `$D/inbox/` | 1000:1000 750 | server (uid 1000) | The only place the server writes. Bind-mounted read-write into the server. |
 | `$D/inbox/request.json` | 1000:1000 640 | server | One pending request. The host takes it by renaming it out of the folder. |
+| `$D/inbox/check` | 1000:1000 640 | server | "Look at main now": left by **Deploy latest** when it finds nothing new. Only its existence is read; the host deletes it and refreshes `available.json` on its next tick instead of waiting for the 5-minute refresh. |
 | `$D/outbox/` | root:root 755 | host | Bind-mounted **read-only** into the server. |
 | `$D/outbox/status.json` | root:root 644 | host | What happened to the last request. |
 | `$D/outbox/available.json` | root:root 644 | host | What main has that is not deployed yet (refreshed every 5 minutes). |
@@ -143,6 +144,7 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 - Approve its own deploy: owner tier, and the request is written only after the owner's answer.
 
 **Not covered**
+- A compromised **server** can leave `inbox/check` every minute; the cost is one `git ls-remote` (and a fetch when main moved) per cron tick.
 - A compromised **server** can write `inbox/` freely, so it could replay requests for the current tip, limited by the rate limit and the one-time id check (it can invent new ids). Impact: a redeploy of already-merged code.
 - `git hooks` in the checkout would run as root during `git fetch`/`merge`; the script exports `core.hooksPath=/dev/null` for itself and for `deploy.sh`. `.gitattributes` filters and submodules (none are used) are not covered.
 - **Build steps in a Dockerfile** run agent-written commands, which is why Dockerfile changes are infra. `pnpm install` lifecycle scripts in app code do run in the build; that is the same trust as running the code. Builds must stay on the default bridge, never `--privileged`.
