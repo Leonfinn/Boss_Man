@@ -183,62 +183,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  server.registerTool(
-    "roadmap",
-    {
-      description:
-        "For CEOs and managers: the company's roadmap, as the owner sees it on the Roadmap and Plan pages. action list (objectives with their ids, priority and milestones with dates), add_objective (title, priority 1 most important to 5, optional project by name or id), add_milestone (objectiveId, title, targetDate YYYY-MM-DD, optional horizon now, next or later) and set (ticketId, milestoneId or null: put a ticket in a milestone or take it out). Give a reason up to 240 characters for any change; it is kept in the activity log. List first, and reuse an objective or milestone that already fits rather than adding a near-duplicate.",
-      inputSchema: {
-        action: z.enum(["list", "add_objective", "add_milestone", "set"]),
-        title: z.string().trim().min(1).max(200).optional(),
-        priority: z.number().int().min(1).max(5).optional(),
-        project: z.string().min(1).optional(),
-        objectiveId: z.string().uuid().optional(),
-        targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD").optional(),
-        horizon: z.enum(HORIZONS).optional(),
-        ticketId: z.string().uuid().optional(),
-        milestoneId: z.string().uuid().nullable().optional(),
-        reason: z.string().trim().min(1).max(240).optional(),
-      },
-    },
-    async ({ action, title, priority, project, objectiveId, targetDate, horizon, ticketId, milestoneId, reason }) => {
-      if (!(await isManager())) return fail("Only your company's CEO or a manager can change the roadmap.");
-      if (action === "list") {
-        const tree = await work.objectivesTree(scope.companyId);
-        return text(JSON.stringify(tree.map((o) => ({ id: o.id, title: o.title, priority: o.priority, projectId: o.projectId, milestones: o.milestones.map((m) => ({ id: m.id, title: m.title, targetDate: m.targetDate, horizon: m.horizon })) }))));
-      }
-      if (!reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
-      const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-      const log = (summary: string, ticket?: string) => record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: ticket ?? null, kind: "roadmap", summary: `${me?.name ?? "An agent"} ${summary}: ${reason}` });
-      try {
-        if (action === "add_objective") {
-          if (!title) return fail("Give the objective a title.");
-          const p = project !== undefined ? await resolveProject(project) : null;
-          if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
-          const o = await work.createObjective(scope.companyId, { title, priority, ...(p ? { projectId: p.id } : {}) });
-          await log(`added the objective "${o.title}"`);
-          return text(`Added the objective "${o.title}" (id ${o.id}, priority ${o.priority}).`);
-        }
-        if (action === "add_milestone") {
-          if (!objectiveId || !title) return fail("Give objectiveId and a title (and a targetDate if it has one).");
-          const [o] = await db.select({ title: objectives.title }).from(objectives).where(and(eq(objectives.id, objectiveId), eq(objectives.companyId, scope.companyId)));
-          if (!o) return fail("No objective with that id in your company. Call roadmap list for the ids.");
-          const m = await work.addMilestone(objectiveId, { title, targetDate, horizon });
-          await log(`added the milestone "${m.title}"${targetDate ? ` (${targetDate})` : ""} under "${o.title}"`);
-          return text(`Added the milestone "${m.title}" (id ${m.id}) under "${o.title}".`);
-        }
-        if (!ticketId || milestoneId === undefined) return fail("Give ticketId and milestoneId (or null to take it out).");
-        const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-        if (!t) return fail("No ticket with that ID in your company.");
-        await work.updateTicket(ticketId, { milestoneId });
-        await log(milestoneId ? "put it in a milestone" : "took it out of its milestone", ticketId);
-        return text(milestoneId ? `Ticket ${ticketId} is in the milestone now.` : `Ticket ${ticketId} has no milestone now.`);
-      } catch (err) {
-        if (err instanceof WorkError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
+  registerRoadmap(server, db, work, scope);
 
   server.registerTool(
     "update_ticket",
@@ -1339,6 +1284,72 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
 
 }
 
+/** CEOs and managers: whether the run's agent is one. */
+async function managerIn(db: Db, scope: Scope) {
+  const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+  return me?.role === "ceo" || me?.role === "manager";
+}
+
+/** The roadmap tool, in ticket runs and the owner chat alike. */
+function registerRoadmap(server: McpServer, db: Db, work: Services["work"], scope: Scope) {
+  server.registerTool(
+    "roadmap",
+    {
+      description:
+        "For CEOs and managers: the company's roadmap, as the owner sees it on the Roadmap and Plan pages. action list (objectives with their ids, priority and milestones with dates), add_objective (title, priority 1 most important to 5, optional project by name or id), add_milestone (objectiveId, title, targetDate YYYY-MM-DD, optional horizon now, next or later) and set (ticketId, milestoneId or null: put a ticket in a milestone or take it out). Give a reason up to 240 characters for any change; it is kept in the activity log. List first, and reuse an objective or milestone that already fits rather than adding a near-duplicate.",
+      inputSchema: {
+        action: z.enum(["list", "add_objective", "add_milestone", "set"]),
+        title: z.string().trim().min(1).max(200).optional(),
+        priority: z.number().int().min(1).max(5).optional(),
+        project: z.string().min(1).optional(),
+        objectiveId: z.string().uuid().optional(),
+        targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD").optional(),
+        horizon: z.enum(HORIZONS).optional(),
+        ticketId: z.string().uuid().optional(),
+        milestoneId: z.string().uuid().nullable().optional(),
+        reason: z.string().trim().min(1).max(240).optional(),
+      },
+    },
+    async ({ action, title, priority, project, objectiveId, targetDate, horizon, ticketId, milestoneId, reason }) => {
+      if (!(await managerIn(db, scope))) return fail("Only your company's CEO or a manager can change the roadmap.");
+      if (action === "list") {
+        const tree = await work.objectivesTree(scope.companyId);
+        return text(JSON.stringify(tree.map((o) => ({ id: o.id, title: o.title, priority: o.priority, projectId: o.projectId, milestones: o.milestones.map((m) => ({ id: m.id, title: m.title, targetDate: m.targetDate, horizon: m.horizon })) }))));
+      }
+      if (!reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
+      const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      const log = (summary: string, ticket?: string) => record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: ticket ?? null, kind: "roadmap", summary: `${me?.name ?? "An agent"} ${summary}: ${reason}` });
+      try {
+        if (action === "add_objective") {
+          if (!title) return fail("Give the objective a title.");
+          const p = project !== undefined ? (await db.select().from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt)))).find((x) => x.id === project || x.name.toLowerCase() === project.toLowerCase()) ?? null : null;
+          if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
+          const o = await work.createObjective(scope.companyId, { title, priority, ...(p ? { projectId: p.id } : {}) });
+          await log(`added the objective "${o.title}"`);
+          return text(`Added the objective "${o.title}" (id ${o.id}, priority ${o.priority}).`);
+        }
+        if (action === "add_milestone") {
+          if (!objectiveId || !title) return fail("Give objectiveId and a title (and a targetDate if it has one).");
+          const [o] = await db.select({ title: objectives.title }).from(objectives).where(and(eq(objectives.id, objectiveId), eq(objectives.companyId, scope.companyId)));
+          if (!o) return fail("No objective with that id in your company. Call roadmap list for the ids.");
+          const m = await work.addMilestone(objectiveId, { title, targetDate, horizon });
+          await log(`added the milestone "${m.title}"${targetDate ? ` (${targetDate})` : ""} under "${o.title}"`);
+          return text(`Added the milestone "${m.title}" (id ${m.id}) under "${o.title}".`);
+        }
+        if (!ticketId || milestoneId === undefined) return fail("Give ticketId and milestoneId (or null to take it out).");
+        const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        if (!t) return fail("No ticket with that ID in your company.");
+        await work.updateTicket(ticketId, { milestoneId });
+        await log(milestoneId ? "put it in a milestone" : "took it out of its milestone", ticketId);
+        return text(milestoneId ? `Ticket ${ticketId} is in the milestone now.` : `Ticket ${ticketId} has no milestone now.`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+}
+
 function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
   server.registerTool(
     "board",
@@ -1459,6 +1470,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
   };
 
   registerBoard(server, db, scope);
+  registerRoadmap(server, db, work, scope);
 
   // So an agent asked in chat for something it can't do here (a ticket's state, say) asks the colleague who can, instead of the owner.
   server.registerTool("nudge", { description: NUDGE_DESCRIPTION, inputSchema: NUDGE_INPUT }, async ({ agent, ticketId, why }) => {
