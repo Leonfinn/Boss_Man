@@ -358,4 +358,39 @@ describe("skills library (R71)", () => {
     const all = (await c.req("GET", `/api/companies/${c.company.id}/skills`)).json();
     expect(all.map((s: { name: string; agents: unknown[] }) => [s.name, s.agents.length])).toEqual([["release-notes", 1], ["triage", 1]]);
   });
+
+  it("finds skills in other companies and copies one in, files and add-ons but not holders", async () => {
+    const c = (ctx = await setup());
+    const mine = `/api/companies/${c.company.id}/skills`;
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json().company as { id: string };
+    const theirs = `/api/companies/${other.id}/skills`;
+    await c.req("POST", mine, { from: "written", name: "local-only", description: "Only here.", body: "" });
+    const [kit] = (await c.req("POST", theirs, { from: "upload", files: [{ path: "kit/SKILL.md", content: b64("---\nname: kit\ndescription: Builds 100% kits.\n---\nGo.") }, { path: "kit/scripts/run.sh", content: b64("echo hi") }] })).json();
+    await c.req("PUT", `${theirs}/${kit.id}/addons`, { requires: ["agent-browser"] });
+    await c.req("PUT", `${theirs}/${kit.id}/agents`, { agentIds: [(await c.db.select().from(agents).where(eq(agents.companyId, other.id)))[0]!.id] });
+    // Search skips this company's own skills; q matches name or description, with % taken literally.
+    const found = async (q = "") => (await c.req("GET", `${mine}/elsewhere?q=${encodeURIComponent(q)}`)).json();
+    expect(await found()).toEqual([{ id: kit.id, name: "kit", description: "Builds 100% kits.", companyName: "Other Co", requiresAddons: ["agent-browser"], fileCount: 2, hasScripts: true }]);
+    expect(await found("BUILDS")).toHaveLength(1);
+    expect(await found("100%")).toHaveLength(1);
+    expect(await found("%x")).toEqual([]);
+    expect(await found("nope")).toEqual([]);
+    expect(await found("local")).toEqual([]);
+    // Copying brings the files and add-ons, not who holds it.
+    const copied = await c.req("POST", `${mine}/copy`, { skillId: kit.id });
+    expect(copied.statusCode).toBe(201);
+    const one = (await c.req("GET", `${mine}/${copied.json().id}`)).json();
+    expect(one).toMatchObject({ name: "kit", source: "upload", requiresAddons: ["agent-browser"], agents: [], pack: null });
+    expect(one.files.map((f: { path: string }) => f.path)).toEqual(["SKILL.md", "scripts/run.sh"]);
+    expect((await c.req("GET", `${theirs}/${kit.id}`)).json().agents).toHaveLength(1);
+    // A name clash is refused, and so is copying a skill to its own company or an unknown one.
+    const again = await c.req("POST", `${mine}/copy`, { skillId: kit.id });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().message).toBe("There's already a skill called kit.");
+    expect((await c.req("POST", `${theirs}/copy`, { skillId: kit.id })).statusCode).toBe(400);
+    expect((await c.req("POST", `${mine}/copy`, { skillId: "00000000-0000-4000-8000-000000000000" })).statusCode).toBe(404);
+    // Owner only.
+    expect((await c.app.inject({ method: "GET", url: `${mine}/elsewhere` })).statusCode).toBe(401);
+    expect((await c.app.inject({ method: "POST", url: `${mine}/copy`, payload: { skillId: kit.id } })).statusCode).toBe(401);
+  });
 });

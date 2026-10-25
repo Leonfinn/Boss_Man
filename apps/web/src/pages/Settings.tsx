@@ -28,7 +28,7 @@ const CREDENTIALS = [
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
 ] as const;
 
-function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+export function Section({ id, title, children }: { id: string; title: string; children: ReactNode }) {
   return (
     <section className="card" aria-labelledby={id} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <h2 id={id} style={{ fontSize: 17, fontWeight: 600 }}>
@@ -39,7 +39,7 @@ function Section({ id, title, children }: { id: string; title: string; children:
   );
 }
 
-function useAction() {
+export function useAction() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const run = async (fn: () => Promise<string | void>) => {

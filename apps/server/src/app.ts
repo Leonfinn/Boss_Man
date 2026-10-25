@@ -1261,6 +1261,17 @@ export async function buildApp(opts: AppOptions) {
         return skillErrors(reply)(err);
       }
     });
+    // Other companies' skills, to copy into this one (not which agents hold them).
+    owner.get("/api/companies/:id/skills/elsewhere", async (req) => {
+      const { id } = IdParam.parse(req.params);
+      const { q } = z.object({ q: z.string().max(100).default("") }).parse(req.query);
+      return skillsSvc.searchElsewhere(id, q);
+    });
+    owner.post("/api/companies/:id/skills/copy", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { skillId } = z.object({ skillId: Uuid }).parse(req.body);
+      return skillsSvc.copyFrom(id, skillId).then((s) => reply.code(201).send(s), skillErrors(reply));
+    });
     owner.get("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
       return skillsSvc.get(id, skillId).catch(skillErrors(reply));

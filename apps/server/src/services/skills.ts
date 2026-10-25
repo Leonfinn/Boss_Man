@@ -3,10 +3,10 @@
 // skill comes from a GitHub link (pinned to the commit it was read at), is written in Boss
 // Man, or is uploaded. The owner gives skills to agents, and so can the CEO.
 // Format: https://code.claude.com/docs/en/skills and https://agentskills.io.
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentSkills, agents, skills } from "../db/schema.js";
+import { agentSkills, agents, companies, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
 // Skills may ship many example assets (e.g. cathrynlavery/diagram-design has 200+), so the caps are generous.
@@ -224,6 +224,39 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
             .where(inArray(agentSkills.skillId, rows.map((r) => r.id)))
         : [];
       return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
+    },
+
+    /** Skills of the owner's other companies, to add here instead of importing again. */
+    async searchElsewhere(companyId: string, q: string) {
+      const like = `%${q.trim().replace(/[\\%_]/g, "\\$&")}%`;
+      return db
+        .select({
+          id: skills.id,
+          name: skills.name,
+          description: skills.description,
+          companyName: companies.name,
+          requiresAddons: skills.requiresAddons,
+          fileCount: sql<number>`jsonb_array_length(${skills.files})::int`,
+          hasScripts: sql<boolean>`exists (select 1 from jsonb_array_elements(${skills.files}) f where f->>'path' ~ '(^|/)scripts/|\\.(sh|py|js|mjs|ts|rb|ps1)$')`,
+        })
+        .from(skills)
+        .innerJoin(companies, eq(companies.id, skills.companyId))
+        .where(and(ne(skills.companyId, companyId), q.trim() ? or(ilike(skills.name, like), ilike(skills.description, like)) : undefined))
+        .orderBy(asc(companies.name), asc(skills.name))
+        .limit(50);
+    },
+
+    /** Copies a skill from another company: its files and details, not which agents hold it. */
+    async copyFrom(companyId: string, skillId: string) {
+      const [src] = await db.select().from(skills).where(eq(skills.id, skillId));
+      if (!src) throw new SkillError(404, "No such skill.");
+      if (src.companyId === companyId) throw new SkillError(400, "That skill is already in this company.");
+      const [clash] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, src.name)));
+      if (clash) throw new SkillError(409, `There's already a skill called ${src.name}.`);
+      // Not the pack: the copy is one skill, so a pack's update and give-all don't reach it.
+      const { id: _id, companyId: _company, pack: _pack, packUrl: _packUrl, createdAt: _created, ...values } = src;
+      const [s] = await db.insert(skills).values({ ...values, companyId, updatedAt: new Date() }).returning({ id: skills.id, name: skills.name });
+      return s!;
     },
 
     /** One skill with its files; text files are decoded for reading. */

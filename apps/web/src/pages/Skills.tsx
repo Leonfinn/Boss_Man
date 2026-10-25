@@ -1,17 +1,19 @@
 // Skills (R71): the company's library of Agent Skills, and who has each. A skill is added from
 // a GitHub link (pinned to a commit), written here, or uploaded as a folder, files or a zip.
 import { RUNNER_ADDONS } from "@boss-man/shared";
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
 import { api, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
+import { Section, useAction } from "./Settings";
 
 type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
 type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }>; requiresAddons: string[] | null };
 type Upload = { path: string; content: string };
+type Elsewhere = { id: string; name: string; description: string; companyName: string; requiresAddons: string[] | null; fileCount: number; hasScripts: boolean };
 
 const SOURCE: Record<SkillRow["source"], string> = { link: "From a link", written: "Written here", upload: "Uploaded" };
 const kb = (n: number) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
@@ -137,6 +139,67 @@ function AddSkill({ companyId, onAdded }: { companyId: string; onAdded: (names: 
         </p>
       )}
     </form>
+  );
+}
+
+/** Skills the owner's other companies already have, copied in instead of imported again (agents are given them afterwards). */
+function FromOtherCompany({ company, onAdded }: { company: Company; onAdded: (name: string) => void }) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<Elsewhere[] | null>(null);
+  const [status, setStatus] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const search = useAction();
+  const add = useAction();
+  const find = (text: string) => void search.run(async () => void setResults(await api<Elsewhere[]>(`/api/companies/${company.id}/skills/elsewhere?q=${encodeURIComponent(text.trim())}`)));
+  useEffect(() => find(""), [company.id]);
+  const copy = (r: Elsewhere) =>
+    void add.run(async () => {
+      try {
+        const s = await api<{ id: string; name: string }>(`/api/companies/${company.id}/skills/copy`, { method: "POST", body: { skillId: r.id } });
+        setStatus((all) => ({ ...all, [r.id]: { ok: true, text: `Added to ${company.name}. Choose who has it.` } }));
+        onAdded(s.name);
+      } catch (err) {
+        setStatus((all) => ({ ...all, [r.id]: { ok: false, text: (err as Error).message } }));
+      }
+    });
+  return (
+    <Section id="from-other-h" title="Add from another company">
+      <form onSubmit={(e) => (e.preventDefault(), find(q))} style={{ display: "flex", gap: 8 }}>
+        <input type="search" aria-label="Search other companies' skills" placeholder="Search by name or description" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1 }} />
+        <button type="submit" className="btn" disabled={search.busy}>
+          Search
+        </button>
+      </form>
+      {search.view}
+      {results && results.length === 0 && <p className="muted">No skills in your other companies{q.trim() ? " match that" : ""}.</p>}
+      <ul className="link-list">
+        {results?.map((r) => (
+          <li key={r.id} style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
+            <span style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
+              <strong className="mono">{r.name}</strong>
+              <small className="muted">
+                {r.companyName} · {r.fileCount} {r.fileCount === 1 ? "file" : "files"}
+                {r.hasScripts && " · has scripts"}
+                {r.requiresAddons?.length ? ` · needs ${r.requiresAddons.join(", ")}` : ""}
+              </small>
+              <button type="button" className="btn" style={{ marginLeft: "auto" }} disabled={add.busy || status[r.id]?.ok} onClick={() => copy(r)}>
+                {status[r.id]?.ok ? "Added" : `Add to ${company.name}`}
+              </button>
+            </span>
+            <span className="muted" style={{ fontSize: 13 }}>
+              {r.description}
+            </span>
+            {status[r.id] && (
+              <span role={status[r.id]!.ok ? "status" : "alert"} className={status[r.id]!.ok ? "muted" : "error"} style={{ fontSize: 13 }}>
+                {status[r.id]!.text}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Copies the skill's files and details; agents here don't have it until you give it to them. Read any scripts first.
+      </p>
+    </Section>
   );
 }
 
@@ -497,6 +560,7 @@ export function Skills({ company }: { company: Company | undefined }) {
         </nav>
         <div>
           {adding || (!picked && !pickedPack && rows.length === 0) ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <AddSkill
               companyId={company.id}
               onAdded={(names) => {
@@ -511,6 +575,14 @@ export function Skills({ company }: { company: Company | undefined }) {
                 });
               }}
             />
+            <FromOtherCompany
+              company={company}
+              onAdded={(name) => {
+                setAdded(name);
+                list.reload();
+              }}
+            />
+            </div>
           ) : pickedPack && packs.includes(pickedPack) ? (
             <PackView key={pickedPack} company={company} pack={pickedPack} rows={rows.filter((r) => r.pack === pickedPack)} onChanged={list.reload} onPick={pick} onClose={() => setPickedPack(null)} />
           ) : picked ? (
