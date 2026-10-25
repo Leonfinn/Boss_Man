@@ -30,6 +30,23 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
 });
 
 describe("decision queue", () => {
+  it("a team plan: the owner unticks a hire and only the ticked ones are sent (docs/13)", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const plan = decision({
+      kind: "approval",
+      question: "Team plan for Site: the CEO proposes 2 hires.",
+      options: ["Hire the ticked ones", "Not now"],
+      recommendedOption: "Hire the ticked ones",
+      context: { type: "team_plan", hires: [{ name: "Quinn", template: "qa", reason: "Checks releases.", skills: ["dogfood"] }, { name: "Rae", reason: "Writes the copy." }] },
+    });
+    render(<Decisions decisions={[plan]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("Skills: dogfood.", { exact: false })).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Rae/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Hire the ticked ones" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Hire the ticked ones", picks: [0] }) })));
+  });
+
   it("shows the score, what it blocks and the recommendation, and answers with one click", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);

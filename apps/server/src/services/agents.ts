@@ -1,9 +1,10 @@
 // The Agents tab (R62): who works for each company, what they cost this month, and every change
 // to them, with what it was before so it can be undone.
-import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { AGENT_TEMPLATES, CEO_TEMPLATE } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentChanges, agents, costEvents, decisions, fundingSources, paAnswers, runs, settings, tickets } from "../db/schema.js";
+import { agentChanges, agents, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, tickets } from "../db/schema.js";
+import { TEAM_HIRE, TEAM_NOT_NOW, type TeamHire } from "./decisions.js";
 
 export class AgentError extends Error {
   constructor(
@@ -125,6 +126,56 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
       const applied = await this.update(agentId, { instructions }, ceoId);
       await notify({ companyId: a.companyId, agentId: ceoId, level: "note", title: `The CEO changed ${a.name}'s instructions`, body: `${reason ? `${reason}\n` : ""}See the change, or undo it, in Agents › ${a.name} › History.`, link: "#/agents" });
       return { applied };
+    },
+
+    /**
+     * The CEO's team plan for a project or the company (docs/13): every proposed hire in one
+     * decision, so the owner ticks the ones they want. Always asked, whatever the hire approvals.
+     */
+    async proposeTeam(companyId: string, ceoId: string, plan: { projectId?: string | null; covered: string; hires: TeamHire[] }) {
+      for (const h of plan.hires) {
+        if (h.template && !AGENT_TEMPLATES.some((x) => x.id === h.template)) throw new AgentError(422, `There's no template called ${h.template}. Templates: ${AGENT_TEMPLATES.map((x) => x.id).join(", ")}.`);
+        for (const name of h.skills ?? []) {
+          const [hit] = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), or(eq(skills.name, name), eq(skills.pack, name)))).limit(1);
+          if (!hit) throw new AgentError(422, `There's no skill or pack called ${name} in the library.`);
+        }
+      }
+      const [project] = plan.projectId ? await db.select({ id: projects.id, name: projects.name }).from(projects).where(and(eq(projects.id, plan.projectId), eq(projects.companyId, companyId))) : [];
+      if (plan.projectId && !project) throw new AgentError(422, "No project with that ID in this company.");
+      const open = await db.select({ context: decisions.context }).from(decisions).where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open")));
+      if (open.some((d) => (d.context as { type?: string; projectId?: string | null } | null)?.type === "team_plan" && ((d.context as { projectId?: string | null }).projectId ?? null) === (project?.id ?? null))) throw new AgentError(409, "A team plan for this is already waiting for the owner.");
+      const lines = plan.hires.map((h, i) => `${i + 1}. ${h.name}${h.title ? `, ${h.title}` : ""}${h.template ? ` (${h.template})` : ""}${h.model ? ` on ${h.model}` : ""}: ${h.reason}${h.skills?.length ? ` Skills: ${h.skills.join(", ")}.` : ""}`);
+      const [d] = await db
+        .insert(decisions)
+        .values({
+          companyId,
+          raisedByAgentId: ceoId,
+          kind: "approval",
+          tier: "owner",
+          question: [`Team plan for ${project ? project.name : "the company"}: the CEO proposes ${plan.hires.length === 1 ? "1 hire" : `${plan.hires.length} hires`}.`, `Already covered: ${plan.covered}`, ...lines].join("\n\n"),
+          options: [TEAM_HIRE, TEAM_NOT_NOW],
+          recommendedOption: TEAM_HIRE,
+          context: { type: "team_plan", projectId: project?.id ?? null, covered: plan.covered, hires: plan.hires, byAgentId: ceoId },
+        })
+        .returning({ id: decisions.id });
+      return { decisionId: d!.id };
+    },
+
+    /** Hires the ticked members of a team plan and gives each its skills; one that fails doesn't stop the rest. */
+    async hireTeam(companyId: string, hires: TeamHire[], ceoId: string, give: (agentId: string, skill: string) => Promise<unknown>) {
+      const hired: string[] = [];
+      const failed: string[] = [];
+      for (const h of hires) {
+        try {
+          const a = await this.hire(companyId, { name: h.name, template: h.template, title: h.title ?? undefined, model: h.model ?? null }, ceoId);
+          for (const sk of h.skills ?? []) await give(a.id, sk).catch((err: Error) => failed.push(`${h.name} didn't get ${sk}: ${err.message}`));
+          hired.push(h.name);
+        } catch (err) {
+          failed.push(`${h.name}: ${(err as Error).message}`);
+        }
+      }
+      await notify({ companyId, agentId: ceoId, level: failed.length ? "flag" : "note", title: hired.length ? `Hired from the team plan: ${hired.join(", ")}` : "Nobody was hired from the team plan", body: failed.length ? failed.join("\n") : null, link: "#/agents" });
+      return { hired, failed };
     },
 
     /** The owner's answer to a hire or instructions decision. */

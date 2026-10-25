@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, runners, settings } from "../src/db/schema.js";
+import { agents, decisions, notifications, runners, settings } from "../src/db/schema.js";
 import { cleanPath, normalise, parseGitHub, parseSkillMd, skillName } from "../src/services/skills.js";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -241,6 +241,37 @@ describe("skills library (R71)", () => {
     await asCeo.close();
     expect((await c.db.select().from(notifications)).map((n) => n.title)).toEqual(expect.arrayContaining(["The CEO gave Engineer the triage skill", "The CEO took the triage skill from Engineer"]));
   });
+  it("lets the CEO propose a team as one decision; the owner's ticked hires join with their skills (docs/13)", async () => {
+    const c = (ctx = await setup());
+    await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "triage", description: "Sorts bug reports.", body: "Steps." });
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Anything", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const runId = c.starts()[0]!.runId;
+    const propose = async (agentId: string, args: Record<string, unknown>) => {
+      const m = await c.mcp(runId, agentId);
+      const r = await m.callTool({ name: "propose_team", arguments: args });
+      await m.close();
+      return r;
+    };
+    const plan = { projectId: c.project.id, covered: "Engineer builds the site.", hires: [{ name: "Quinn", template: "qa", reason: "Checks each release in a browser.", skills: ["triage"] }, { name: "Rae", reason: "Writes the copy." }] };
+    expect(textOf(await propose(c.worker.id, plan))).toBe("Only your company's CEO can propose a team.");
+    expect(textOf(await propose(c.ceo.id, { ...plan, hires: [{ name: "X", reason: "y", skills: ["nope"] }] }))).toBe("There's no skill or pack called nope in the library.");
+    expect(textOf(await propose(c.ceo.id, plan))).toMatch(/^The team plan is waiting for the owner/);
+    expect(textOf(await propose(c.ceo.id, plan))).toBe("A team plan for this is already waiting for the owner.");
+    const [d] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "team_plan");
+    expect(d).toMatchObject({ tier: "owner", options: ["Hire the ticked ones", "Not now"] });
+    expect(d!.question).toContain("Team plan for Site: the CEO proposes 2 hires.");
+    expect(d!.question).toContain("1. Quinn (qa): Checks each release in a browser. Skills: triage.");
+    // A pick outside the plan is refused and the decision stays open; then the owner ticks only Quinn.
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [5] })).statusCode).toBe(422);
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [0] })).statusCode).toBe(200);
+    const team = (await c.req("GET", `/api/companies/${c.company.id}/skills`)).json().find((s: { name: string }) => s.name === "triage").agents.map((a: { name: string }) => a.name);
+    expect(team).toEqual(["Quinn"]);
+    const names = (await c.db.select().from(agents)).map((a) => a.name);
+    expect(names).toContain("Quinn");
+    expect(names).not.toContain("Rae");
+  });
+
   it("says where a repository's skills are, and takes Claude Code's copy from a repo with one per tool", async () => {
     const c = (ctx = await setup());
     const base = `/api/companies/${c.company.id}/skills`;
