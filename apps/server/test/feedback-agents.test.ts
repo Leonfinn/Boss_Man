@@ -100,7 +100,9 @@ describe("agents and feedback", () => {
     expect(inbox).toContain('<untrusted source="feedback via portal">');
     expect(inbox).toContain("[tag removed]please[tag removed]");
     expect(inbox).toContain('<untrusted source="feedback via agent">');
-    expect(JSON.parse(textOf(await worker.callTool({ name: "feedback", arguments: { action: "features" } })))[0]).toMatchObject({ id: f.id, title: "CSV export" });
+    expect(JSON.parse(textOf(await worker.callTool({ name: "feedback", arguments: { action: "features" } }))).features[0]).toMatchObject({ id: f.id, title: "CSV export", effort: null });
+    // Only the CEO, a manager or a product manager sizes features.
+    expect(textOf(await worker.callTool({ name: "feedback", arguments: { action: "size", featureId: f.id, effort: 2, reason: "x" } }))).toMatch(/Only the CEO, a manager or a product manager/);
     const noteId = (await c.db.select().from(feedbackNotes).where(eq(feedbackNotes.source, "agent")))[0]!.id;
     const refused = await worker.callTool({ name: "feedback", arguments: { action: "link", noteId, featureId: f.id } });
     expect(refused.isError).toBe(true);
@@ -116,7 +118,20 @@ describe("agents and feedback", () => {
     expect((await ceo.callTool({ name: "feedback", arguments: { action: "create_feature", title: "Elsewhere", objectiveId: randomUUID() } })).isError).toBe(true);
     expect((await ceo.callTool({ name: "feedback", arguments: { action: "link", noteId, featureId: f.id, highlight: "not in the note" } })).isError).toBe(true);
     await ceo.callTool({ name: "feedback", arguments: { action: "mark", noteId, state: "processed" } });
+    // The CEO sizes it: effort and a score on the company's criterion, so it can be ranked.
+    await c.req("POST", `/api/companies/${c.company.id}/feature-drivers`, { name: "Revenue", weight: 2 });
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "size", featureId: f.id, effort: 2, scores: { revenue: 4 } } }))).toMatch(/Say why/);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "size", featureId: f.id, scores: { Speed: 3 }, reason: "x" } }))).toMatch(/No criterion called Speed. Criteria: Revenue/);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "size", featureId: f.id, effort: 2, scores: { revenue: 4 }, reason: "One export endpoint and a button." } }))).toBe('Sized "CSV export".');
+    const sized = JSON.parse(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "features" } })));
+    expect(sized.criteria).toEqual([{ name: "Revenue", weight: 2 }]);
+    expect(sized.features.find((x: { id: string }) => x.id === f.id)).toMatchObject({ effort: 2, scores: { Revenue: 4 } });
+    expect(sized.features.find((x: { id: string }) => x.id === f.id).priority).toBeGreaterThan(0);
     await ceo.close();
+    const pmAgent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Faramir", template: "product-manager" })).json() as { id: string };
+    const pm = await c.mcp(pmAgent.id);
+    expect(textOf(await pm.callTool({ name: "feedback", arguments: { action: "size", featureId: f.id, effort: 3, reason: "Needs a background job too." } }))).toBe('Sized "CSV export".');
+    await pm.close();
 
     const detail = (await c.req("GET", `/api/feedback/${noteId}`)).json();
     expect(detail.note).toMatchObject({ state: "processed", source: "agent", untrusted: true });

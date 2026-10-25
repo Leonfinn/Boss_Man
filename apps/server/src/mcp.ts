@@ -755,9 +755,12 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived).",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features: size (featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null.",
       inputSchema: {
-        action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark"]),
+        action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size"]),
+        effort: z.number().int().min(1).max(5).optional(),
+        scores: z.record(z.string().min(1).max(100), z.number().int().min(0).max(5)).optional(),
+        reason: z.string().trim().min(1).max(240).optional(),
         noteId: z.string().uuid().optional(),
         featureId: z.string().uuid().optional(),
         objectiveId: z.string().uuid().optional(),
@@ -798,8 +801,24 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
             .filter((f) => f.status !== "declined")
             .sort((a, b) => b.priority - a.priority)
             .slice(0, 60)
-            .map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, demand: f.demand, people: f.customerCount, priority: f.priority, tickets: f.tickets }));
-          return text(JSON.stringify(list));
+            .map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, demand: f.demand, people: f.customerCount, effort: f.effort, scores: Object.fromEntries(all.drivers.map((d) => [d.name, f.driverScores[d.id] ?? null])), value: f.value, priority: f.priority, tickets: f.tickets }));
+          return text(JSON.stringify({ criteria: all.drivers.map((d) => ({ name: d.name, weight: d.weight })), features: list }));
+        }
+        if (input.action === "size") {
+          const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+          if (!me || (me.role !== "ceo" && me.role !== "manager" && me.template !== "product-manager")) return fail("Only the CEO, a manager or a product manager can size features.");
+          if (!input.featureId || (input.effort === undefined && !input.scores)) return fail("Give featureId and effort (1 to 5), scores, or both.");
+          if (!input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
+          const drivers = await feedback.drivers(scope.companyId);
+          const driverScores: Record<string, number> = {};
+          for (const [name, v] of Object.entries(input.scores ?? {})) {
+            const d = drivers.find((x) => x.name.toLowerCase() === name.toLowerCase() || x.id === name);
+            if (!d) return fail(`No criterion called ${name}. Criteria: ${drivers.map((x) => x.name).join(", ") || "none set up yet"}.`);
+            driverScores[d.id] = v;
+          }
+          const f = await feedback.updateFeature(input.featureId, { ...(input.effort !== undefined ? { effort: input.effort } : {}), ...(Object.keys(driverScores).length ? { driverScores } : {}) }, scope.companyId);
+          await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_sized", summary: `${me.name} sized "${f.title}"${input.effort !== undefined ? `: effort ${input.effort}` : ""}${Object.keys(input.scores ?? {}).length ? `, ${Object.entries(input.scores!).map(([k, v]) => `${k} ${v}`).join(", ")}` : ""}. ${input.reason}` });
+          return text(`Sized "${f.title}".`);
         }
         if (input.action === "log") {
           if (!input.text) return fail("Give the feedback as text.");
