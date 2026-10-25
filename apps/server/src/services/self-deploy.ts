@@ -159,7 +159,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
       if (!a || !a.tip) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
-      if (a.tip === a.deployed) return { error: `Already up to date (${short(a.deployed)}), checked ${a.checkedAt}.` } as const;
+      if (a.tip === a.deployed) {
+        // The host looks at main every few minutes; this file asks it to look on its next tick. Only its existence is read.
+        const asked = await writeFile(path.join(dir, "inbox", "check"), "", { mode: 0o640 }).then(() => true, () => false);
+        return { error: `Already up to date (${short(a.deployed)}), checked ${a.checkedAt}.${asked ? " Looking at main again now: if something has just merged, the deploy question appears in Decisions within a minute or two." : ""}` } as const;
+      }
       const open = (await openFor("server")).find((d) => (d.context as SelfDeployContext).commit === a.tip);
       const d = open ?? (await raise("server", a.tip, a.deployed, a, true));
       return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);

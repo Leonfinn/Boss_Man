@@ -155,7 +155,11 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(r.statusCode).toBe(200);
     expect(await c.open()).toHaveLength(1);
     await c.available({ deployed: B });
-    expect((await c.req("POST", "/api/self-deploy/deploy-latest")).statusCode).toBe(409);
+    const up = await c.req("POST", "/api/self-deploy/deploy-latest");
+    expect(up.statusCode).toBe(409);
+    // Nothing new yet: the host is asked to look at main on its next tick, in case something has just merged.
+    expect(up.json().message).toContain("Looking at main again now");
+    expect(await readdir(path.join(c.dir, "inbox"))).toContain("check");
   });
 
   it("is off without a deployer folder, and refuses a Deploy answer", async () => {
