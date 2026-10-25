@@ -360,6 +360,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [note, setNote] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [assignee, setAssignee] = useState("anyone");
+  const [query, setQuery] = useState("");
   const [allDone, setAllDone] = useState(false);
   const [shownStates, setShownStates] = useState(readShownStates);
   const toggleState = (st: FeatureStatus) =>
@@ -550,6 +551,9 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             ))}
           </div>
           {view !== "features" && (
+            <input type="search" aria-label="Search tasks" placeholder="Search: HOL-12, title, words…" value={query} onChange={(e) => setQuery(e.target.value)} style={{ minWidth: 220 }} />
+          )}
+          {view !== "features" && (
             <label>
               Assigned to
               <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
@@ -588,14 +592,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         <div className="board">
           {lanes.map(({ col, tickets, mine }) => {
             const full = col.wipLimit != null && col.tickets.length >= col.wipLimit;
-            const shown = tickets.filter((t) => assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee));
+            const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            // Every word must appear in the ticket's reference, title, feature or description.
+            const hit = (t: (typeof tickets)[number]) => !words.length || words.every((w) => [t.number ? ticketRef(company?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w));
+            const shown = tickets.filter((t) => (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) && hit(t));
             const named = (t: (typeof shown)[number]) => {
               const a = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
               return a ? a.name : t.assignedToOwner ? "You" : "Nobody yet";
             };
             const done = col.systemState === "done";
             const rows = done ? [...shown].sort((x, y) => (y.lastActivityAt ?? "").localeCompare(x.lastActivityAt ?? "")) : shown;
-            const visible = done && !allDone ? rows.slice(0, DONE_SHOWN) : rows;
+            const visible = done && !allDone && !words.length ? rows.slice(0, DONE_SHOWN) : rows;
             return (
               <section className={`lane${mine ? " mine" : ""}`} key={mine ? "your-review" : col.id} id={mine ? "your-review" : undefined} aria-labelledby={mine ? "lane-your-review" : `lane-${col.id}`}>
                 {mine ? (
