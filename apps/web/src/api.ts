@@ -138,6 +138,8 @@ export type FundingStatus = {
   forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
   /** The last 7 days, oldest first (UTC days). */
   daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
+  /** The last 7 days per company, biggest first. */
+  byCompany?: Array<{ companyId: string; name: string; runs: number; tokens: number; costMicros: number }>;
   totalSpentMicros: number;
   coverage: string;
 };

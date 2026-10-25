@@ -35,6 +35,20 @@ describe("API credit tracking from Boss Man's own runs (spike S3 fallback)", () 
     expect(status.credit.remainingMicros).toBe(117_600_000);
     expect(status.coverage).toBe("boss_man_runs_only");
   });
+
+  it("splits the last 7 days by company, biggest first", async () => {
+    const appCo = await company("App Co");
+    const holiday = await company("HolidayHours");
+    const payg = (await post("/api/funding-sources", { name: "Ollama", kind: "api_payg", provider: "ollama" })).json();
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: appCo, costUsd: 0.5 });
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: holiday, costUsd: 1.8 });
+    await post("/api/cost-events", { fundingSourceId: payg.id, companyId: holiday, costUsd: 9, occurredAt: new Date(Date.now() - 9 * 86_400_000).toISOString() });
+    const status = (await get(`/api/funding-sources/${payg.id}/status`)).json();
+    expect(status.byCompany).toEqual([
+      { companyId: holiday, name: "HolidayHours", runs: 0, tokens: 0, costMicros: 1_800_000 },
+      { companyId: appCo, name: "App Co", runs: 0, tokens: 0, costMicros: 500_000 },
+    ]);
+  });
 });
 
 describe("subscription quota from the Claude adapter", () => {
