@@ -1246,7 +1246,12 @@ const TABS = [
   { id: "access", label: "Access and funding", help: "Where agents get their keys, tools and model accounts." },
   { id: "workflow", label: "Reviews and CEO", help: "Who approves and reviews work at each risk level, and the CEO's chapters." },
   { id: "transfer", label: "Import and export", help: "Move a company in or out of Boss Man as one file: a backup, a copy for another Boss Man, or a template." },
+  // These three are pages of their own (#/funding, #/rules, #/secrets), shown inside Settings.
+  { id: "funding", label: "Funding", help: "Where agent work is paid from, and how much is left this cycle." },
+  { id: "rules", label: "Rules", help: "What happens when an agent asks to use a tool." },
+  { id: "secrets", label: "Secrets", help: "Every stored credential, who gets it, and when it was used." },
 ] as const;
+const OWN_PAGE = new Set<string>(["funding", "rules", "secrets"]);
 
 type ImportPreview = {
   company: { name: string; nameTaken: boolean };
@@ -1428,7 +1433,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   );
 }
 
-export function Settings({ companies, companyId, tab, go, onChanged }: { companies: Company[]; companyId: string | undefined; tab: string | undefined; go: (to: string) => void; onChanged: () => void }) {
+export function Settings({ companies, companyId, tab, go, onChanged, children }: { companies: Company[]; companyId: string | undefined; tab: string | undefined; go: (to: string) => void; onChanged: () => void; children?: ReactNode }) {
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const current = TABS.find((t) => t.id === tab) ?? TABS[0];
   return (
@@ -1444,7 +1449,7 @@ export function Settings({ companies, companyId, tab, go, onChanged }: { compani
       </header>
       <div className="tabs" role="tablist" aria-label="Settings pages">
         {TABS.map((t) => (
-          <button key={t.id} type="button" role="tab" id={`set-tab-${t.id}`} aria-selected={current.id === t.id} aria-controls="set-panel" onClick={() => go(company ? `settings/${company.id}/${t.id}` : "settings")}>
+          <button key={t.id} type="button" role="tab" id={`set-tab-${t.id}`} aria-selected={current.id === t.id} aria-controls="set-panel" onClick={() => go(OWN_PAGE.has(t.id) ? t.id : company ? `settings/${company.id}/${t.id}` : "settings")}>
             {t.label}
           </button>
         ))}
@@ -1453,6 +1458,7 @@ export function Settings({ companies, companyId, tab, go, onChanged }: { compani
         <p className="muted" style={{ fontSize: 13 }}>
           {current.help}
         </p>
+        {OWN_PAGE.has(current.id) ? <div className="embedded-page">{children}</div> : null}
         {current.id === "system" && (
           <>
             <ServerPanel />
@@ -1460,7 +1466,7 @@ export function Settings({ companies, companyId, tab, go, onChanged }: { compani
           </>
         )}
         {current.id === "transfer" && <ImportCompany go={go} onChanged={onChanged} />}
-        {!company ? (
+        {OWN_PAGE.has(current.id) ? null : !company ? (
           current.id === "transfer" ? null : (
           <p>
             Create a company on the Kanban first, or{" "}

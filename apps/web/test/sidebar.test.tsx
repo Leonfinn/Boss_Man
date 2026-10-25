@@ -44,3 +44,22 @@ describe("starred projects in the sidebar", () => {
     expect(screen.queryByRole("list", { name: "Starred projects" })).toBeNull();
   });
 });
+
+describe("settings pages", () => {
+  it("keeps Funding, Rules and Secrets out of the side menu, inside Settings", async () => {
+    show([], undefined, [], "settings");
+    for (const name of ["Funding", "Rules", "Secrets"]) expect(screen.queryByRole("link", { name })).toBeNull();
+    expect(screen.getByRole("link", { name: "Settings" }).getAttribute("aria-current")).toBe("page");
+    cleanup();
+    const { Settings } = await import("../src/pages/Settings");
+    const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [], projects: [] };
+    render(
+      <Settings companies={[company]} companyId="c1" tab="secrets" go={() => {}} onChanged={() => {}}>
+        <p>the secrets page</p>
+      </Settings>,
+    );
+    expect(screen.getByRole("tab", { name: "Secrets" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("the secrets page")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Funding" })).toBeTruthy();
+  });
+});
