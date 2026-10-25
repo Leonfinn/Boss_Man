@@ -21,7 +21,7 @@ export function TicketReviews({ reviews }: { reviews: TicketReview[] | null }) {
       <ul style={{ margin: 0, paddingLeft: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
         {reviews.map((r) => (
           <li key={r.id} style={{ opacity: r.round === latest ? 1 : 0.7 }}>
-            <strong style={{ textTransform: "capitalize" }}>{r.kind}</strong> review by {r.reviewer ?? "nobody"} · round {r.round} · <span className={`tag ${TONE[r.status] ?? ""}`}>{r.status === "pending" ? `Waiting for ${r.reviewer ?? "a reviewer"}` : (STATUS[r.status] ?? r.status)}</span>
+            <strong style={{ textTransform: "capitalize" }}>{r.kind}</strong> review by {r.reviewer ?? "you (no agent can review it)"} · round {r.round} · <span className={`tag ${TONE[r.status] ?? ""}`}>{r.status === "pending" ? `Waiting for ${r.reviewer ?? "you"}` : (STATUS[r.status] ?? r.status)}</span>
             {r.notes && <div className="muted" style={{ whiteSpace: "pre-wrap", fontSize: 14 }}>{r.notes}</div>}
             {r.overruleReason && <div style={{ fontSize: 14 }}>Overruled by the CEO: {r.overruleReason}</div>}
           </li>

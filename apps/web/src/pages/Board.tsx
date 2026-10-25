@@ -662,7 +662,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <h3>
                         <a href={`#/tickets/${t.id}`}>{t.title}</a>
                       </h3>
-                      {mine && <span className="note">{t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.</span>}
+                      {mine && <span className="note">{t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`}</span>}
                       {mine && (
                         <a className="btn primary small" href={`#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
                           Review and approve

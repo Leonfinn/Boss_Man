@@ -143,10 +143,10 @@ describe("board lanes", () => {
   });
 
   it("splits review into agent review and your review, and flags what waits on the owner", async () => {
-    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low" }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" })] });
+    columns.push({ id: "c3", name: "Review", systemState: "review", wipLimit: null, tickets: [card({ id: "t5", title: "Agent still reviewing", risk: "low" }), card({ id: "t6", title: "Needs your sign-off", risk: "high", waitingOnOwner: true, waitingDecisionId: "d1", approvedBy: "Senior Developer" }), card({ id: "t7", title: "Nobody else can review", waitingOnOwner: true, noReviewer: true })] });
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
-    const strip = await screen.findByRole("link", { name: /1 task is waiting on you/ });
+    const strip = await screen.findByRole("link", { name: /2 tasks are waiting on you/ });
     expect(strip.textContent).toContain("Needs your sign-off");
     expect(strip.getAttribute("href")).toBe("#your-review");
     const agent = screen.getByRole("region", { name: "Agent review" });
@@ -155,7 +155,8 @@ describe("board lanes", () => {
     const mine = screen.getByRole("region", { name: "Your review" });
     expect(mine.id).toBe("your-review");
     expect(within(mine).getByText("Senior Developer approved. Needs your sign-off to merge.")).toBeTruthy();
-    expect(within(mine).getByRole("link", { name: "Review and approve" }).getAttribute("href")).toBe("#/tickets/t6");
+    expect(within(mine).getAllByRole("link", { name: "Review and approve" })[0]!.getAttribute("href")).toBe("#/tickets/t6");
+    expect(within(mine).getByText("No agent can review this. Open it to approve or send it back.")).toBeTruthy();
     columns.pop();
   });
 

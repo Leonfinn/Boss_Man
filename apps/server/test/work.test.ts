@@ -90,11 +90,15 @@ describe("tickets waiting on the owner", () => {
       .returning();
     await t.db.insert(ticketDependencies).values({ blockedTicketId: signoff.id, blockerDecisionId: d!.id });
     await t.db.insert(reviewRequests).values({ ticketId: agentReview.id, kind: "code", reviewerAgentId: ceo.id, round: 1 });
+    // The CEO did this one and no other agent can review it, so it is the owner's too.
+    const noReviewer = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Nobody can review", state: "review" })).json();
+    await t.db.insert(reviewRequests).values({ ticketId: noReviewer.id, kind: "code", reviewerAgentId: null, round: 1 });
 
     const cards = () => req("GET", `/api/projects/${p.id}/board`).then((r) => r.json().columns.flatMap((x: { tickets: Array<{ title: string; waitingOnOwner: boolean; waitingDecisionId: string | null }> }) => x.tickets));
     const by = (await cards()) as Array<{ title: string; waitingOnOwner: boolean; waitingDecisionId: string | null }>;
     expect(by.find((x) => x.title === "Needs you")).toMatchObject({ waitingOnOwner: true, waitingDecisionId: d!.id });
     expect(by.find((x) => x.title === "Needs the CEO")).toMatchObject({ waitingOnOwner: false, waitingDecisionId: null });
+    expect(by.find((x) => x.title === "Nobody can review")).toMatchObject({ waitingOnOwner: true, noReviewer: true, waitingDecisionId: null });
 
     await req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Send it back" });
     expect(((await cards()) as typeof by).find((x) => x.title === "Needs you")?.waitingOnOwner).toBe(false);
