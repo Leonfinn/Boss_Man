@@ -233,7 +233,7 @@ describe("Boss Man MCP server", () => {
   it("exposes a small, described tool set", async () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const { tools } = await c.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notify_owner", "nudge", "pa_verdict", "propose_hire", "propose_rule", "propose_team", "raise_decision", "report_key_result", "request_engagement", "review", "runs", "schedule_check", "set_ticket_risk", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notify_owner", "nudge", "pa_verdict", "propose_hire", "propose_rule", "propose_team", "raise_decision", "report_key_result", "request_engagement", "review", "roadmap", "runs", "schedule_check", "set_ticket_risk", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
     expect(tools.find((t) => t.name === "ticket_reply")!.description).toContain("Details:");
     expect(tools.find((t) => t.name === "set_ticket_state")!.description).toContain("plain words");

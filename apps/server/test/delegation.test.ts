@@ -262,3 +262,35 @@ describe("CEO reorganises tickets", () => {
     await c.close();
   });
 });
+
+describe("CEO edits the roadmap", () => {
+  const roadmap = (c: Client, args: Record<string, unknown>) => c.callTool({ name: "roadmap", arguments: args });
+
+  it("adds an objective and a milestone, puts a ticket in it, and logs why", async () => {
+    const t = await ctx.ticket();
+    const c = await agent(ctx.co.ceo.id);
+    expect(textOf(await roadmap(c, { action: "add_objective", title: "Launch the calculator" }))).toMatch(/Say why/);
+    const added = textOf(await roadmap(c, { action: "add_objective", title: "Launch the calculator", priority: 1, project: "Customer app", reason: "From the backlog review." }));
+    const objectiveId = /id ([0-9a-f-]{36})/.exec(added)![1]!;
+    const ms = textOf(await roadmap(c, { action: "add_milestone", objectiveId, title: "M1", targetDate: "2026-10-29", horizon: "now", reason: "First deploy." }));
+    const milestoneId = /id ([0-9a-f-]{36})/.exec(ms)![1]!;
+    expect((await roadmap(c, { action: "set", ticketId: t.id, milestoneId, reason: "Ships in M1." })).isError).toBeFalsy();
+    expect((await row(t.id)).milestoneId).toBe(milestoneId);
+    const tree = JSON.parse(textOf(await roadmap(c, { action: "list" })));
+    expect(tree).toEqual([expect.objectContaining({ id: objectiveId, priority: 1, milestones: [expect.objectContaining({ id: milestoneId, title: "M1", targetDate: "2026-10-29" })] })]);
+    const log = (await ctx.db.select().from(activity).where(eq(activity.kind, "roadmap"))).map((a) => a.summary);
+    expect(log).toEqual(expect.arrayContaining(['CEO added the objective "Launch the calculator": From the backlog review.', 'CEO added the milestone "M1" (2026-10-29) under "Launch the calculator": First deploy.', "CEO put it in a milestone: Ships in M1."]));
+    await c.close();
+  });
+
+  it("refuses a worker and another company's objective", async () => {
+    const dev = await agent(ctx.dev.id);
+    expect(textOf(await roadmap(dev, { action: "list" }))).toMatch(/Only your company's CEO or a manager/);
+    await dev.close();
+    const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string } };
+    const theirs = (await ctx.req("POST", `/api/companies/${other.company.id}/objectives`, { title: "Theirs" })).json() as { id: string };
+    const c = await agent(ctx.co.ceo.id);
+    expect(textOf(await roadmap(c, { action: "add_milestone", objectiveId: theirs.id, title: "Sneaky", reason: "x" }))).toMatch(/No objective with that id/);
+    await c.close();
+  });
+});
