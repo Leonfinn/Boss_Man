@@ -69,8 +69,13 @@ The spec at agentcompanies.io is **not yet read**. This mapping comes from a rea
 | `inputs.env` with `kind: secret` | secret placeholder, granted to that agent |
 | `projects.*.workspaces.repo.repoUrl` and `defaultRef` | project repo and branch |
 | `heartbeat`, `permissions`, `appearance` | dropped: Boss Man wakes on events, and only the CEO hires |
-| skills that call the Paperclip API (`paperclip`, the operations skills, the LLM Wiki plugin skills) | flagged in the preview as "replaced by Boss Man". Unticked by default. |
+| skills that call the Paperclip API (`paperclip`, the operations skills, the LLM Wiki plugin skills) | left out, and listed in the preview's notes ("Boss Man has its own tools for that"). |
 | a skill with no name, or a name breaking the rule | renamed from its folder, shown in the preview |
+| two skills with the same folder name (e.g. the company's own `seo-audit` and a pack's) | the company's own keeps the name; the other gets its source in front (`claude-seo-seo-audit`), noted in the preview |
+| `PROJECT.md` description | a wiki page, `Imported/<project>` (Boss Man projects have no description field) |
+| `dogfood`, `agent-browser` skills | `requires_addons: ["agent-browser"]` (docs/12) |
+
+As built (step 4): the adapter (`apps/server/src/services/import-agent-companies.ts`) writes the files of a Boss Man package, so the importer's own checks and preview apply unchanged. A zip whose files sit under one top folder is accepted, and a Mac's `__MACOSX/` and `.DS_Store` files are ignored. YAML is read with the `yaml` package (2.9.1, ISC, no dependencies). Tested on a fixture written for the test; tried once on the owner's own export outside the repo.
 
 ### Paperclip tickets and documents
 

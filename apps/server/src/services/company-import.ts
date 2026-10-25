@@ -9,6 +9,7 @@ import { columnProblems, DEFAULT_REVIEW_POLICY, ReviewPolicySchema, repoUrlAllow
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
+import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
 import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type SkillFile } from "./skills.js";
 
@@ -108,6 +109,8 @@ export type Package = {
   secrets: Array<z.infer<typeof Secret>>;
   wiki: Array<z.infer<typeof WikiMeta> & { body: string }>;
   tickets: Array<z.infer<typeof Ticket>>;
+  /** What an adapter changed or left out on the way in. */
+  notes: string[];
 };
 
 const AVATAR_TYPES: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", webp: "image/webp" };
@@ -142,12 +145,20 @@ export function readPackage(zip: Uint8Array): Package {
     if (err instanceof ImportError) throw err;
     throw new ImportError(400, "That isn't a zip file Boss Man can read.");
   }
-  const files = new Map<string, Uint8Array>(); // lost on restart, harmless because it lives only for this one import call.
+  let files = new Map<string, Uint8Array>(); // lost on restart, harmless because it lives only for this one import call.
   for (const [name, bytes] of Object.entries(raw)) {
     const path = cleanPath(name);
     if (!path || path !== name.replace(/\\/g, "/")) throw new ImportError(400, `"${name}" isn't a safe path inside the package.`);
-    files.set(path, bytes);
+    // What a Mac adds when it zips a folder.
+    if (!path.startsWith("__MACOSX/") && !path.endsWith(".DS_Store")) files.set(path, bytes);
   }
+  // A zipped folder puts everything under one top folder.
+  const tops = new Set([...files.keys()].map((p) => p.split("/")[0]));
+  const [top] = [...tops];
+  if (tops.size === 1 && !files.has("manifest.json") && !files.has("COMPANY.md") && (files.has(`${top}/manifest.json`) || files.has(`${top}/COMPANY.md`)))
+    files = new Map([...files].map(([p, b]) => [p.slice(top!.length + 1), b]));
+  let notes: string[] = [];
+  if (isAgentCompanies(files)) ({ files, notes } = fromAgentCompanies(files));
   const text = (p: string) => (files.has(p) ? strFromU8(files.get(p)!) : null);
   const json = (p: string) => {
     const t = text(p);
@@ -185,7 +196,8 @@ export function readPackage(zip: Uint8Array): Package {
       const md = parseSkillMd(Buffer.from(n.files[0]!.content, "base64").toString("utf8"));
       const description = (md.description ?? "").slice(0, 1024);
       if (!description) throw new SkillError(400, "SKILL.md needs a description.");
-      return { name: skillName(md.name ?? folder), folder, description, files: n.files, bytes: n.bytes, meta: metas.find((m) => m.name === folder) ?? null };
+      const meta = metas.find((m) => m.name === folder) ?? null;
+      return { name: skillName(meta?.name ?? md.name ?? folder), folder, description, files: n.files, bytes: n.bytes, meta };
     } catch (err) {
       if (err instanceof SkillError) throw new ImportError(400, `skills/${folder}: ${err.message}`);
       throw err;
@@ -234,13 +246,14 @@ export function readPackage(zip: Uint8Array): Package {
     secrets: parse(z.array(Secret).max(500), json("secrets.json") ?? [], "secrets.json"),
     wiki,
     tickets: pkgTickets,
+    notes,
   };
 }
 
 /** What applying the package would create, and what the owner should look at first. */
 export async function previewPackage(db: Db, pkg: Package, name = pkg.company.name) {
   const [taken] = await db.select({ id: companies.id }).from(companies).where(eq(companies.name, name));
-  const warnings: string[] = [];
+  const warnings: string[] = [...pkg.notes];
   if (!pkg.agents.some((a) => a.role === "ceo")) warnings.push("The package has no CEO; hire one after importing.");
   return {
     company: { name, nameTaken: !!taken },
