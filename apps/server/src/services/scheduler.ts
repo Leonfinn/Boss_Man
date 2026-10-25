@@ -787,21 +787,43 @@ export function schedulerService(
       const since = new Date(now().getTime() - 10 * 60_000);
       const [sent] = await db.select({ n: sql<number>`count(*)::int` }).from(nudges).where(and(eq(nudges.fromAgentId, from.id), eq(nudges.toAgentId, to.id), eq(nudges.dropped, false), gt(nudges.createdAt, since)));
       if ((sent?.n ?? 0) >= limits.nudgesPerPairPer10Min) return { ok: false, error: `You've nudged ${to.name} ${limits.nudgesPerPairPer10Min} times in 10 minutes. Wait for them, or put it on the ticket.` };
+      const about = ticketId ? eq(nudges.ticketId, ticketId) : isNull(nudges.ticketId);
       const [back] = await db
-        .select({ id: nudges.id })
+        .select({ id: nudges.id, why: nudges.why })
         .from(nudges)
-        .where(and(eq(nudges.fromAgentId, to.id), eq(nudges.toAgentId, from.id), eq(nudges.dropped, false), gt(nudges.createdAt, since), ticketId ? eq(nudges.ticketId, ticketId) : isNull(nudges.ticketId)))
+        .where(and(eq(nudges.fromAgentId, to.id), eq(nudges.toAgentId, from.id), eq(nudges.dropped, false), gt(nudges.createdAt, since), about))
+        .orderBy(desc(nudges.createdAt))
         .limit(1);
-      const row = { companyId: from.companyId, fromAgentId: from.id, toAgentId: to.id, ticketId };
-      if (back) {
+      // Without a ticket there's nowhere else to answer, so one reply is let through; a third exchange is a loop.
+      const [said] = ticketId
+        ? [{ n: 2 }]
+        : await db
+            .select({ n: sql<number>`count(*)::int` })
+            .from(nudges)
+            .where(and(eq(nudges.dropped, false), gt(nudges.createdAt, since), about, or(and(eq(nudges.fromAgentId, from.id), eq(nudges.toAgentId, to.id)), and(eq(nudges.fromAgentId, to.id), eq(nudges.toAgentId, from.id)))));
+      const row = { companyId: from.companyId, fromAgentId: from.id, toAgentId: to.id, ticketId, why: input.why };
+      if (back && (said?.n ?? 0) >= 2) {
         const [told] = await db
           .select({ id: nudges.id })
           .from(nudges)
           .where(and(eq(nudges.dropped, true), gt(nudges.createdAt, since), or(and(eq(nudges.fromAgentId, from.id), eq(nudges.toAgentId, to.id)), and(eq(nudges.fromAgentId, to.id), eq(nudges.toAgentId, from.id)))))
           .limit(1);
         await db.insert(nudges).values({ ...row, dropped: true });
-        if (!told) await deps.alert(from.companyId, `${from.name} and ${to.name} are nudging each other back and forth about the same thing. The latest nudge was dropped. Look into it.`);
-        return { ok: false, error: `${to.name} nudged you about this a moment ago. Answer them on the ticket instead of nudging back.` };
+        if (!told) {
+          const [t] = ticketId ? await db.select({ number: tickets.number, title: tickets.title, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, ticketId)) : [];
+          const ref = t ? (ticketRef(t.prefix, t.number) ?? "a ticket") : null;
+          const quote = (x: string | null) => `"${(x ?? "(not recorded)").slice(0, 300)}"`;
+          await deps.alert(
+            from.companyId,
+            [
+              `${from.name} and ${to.name} keep nudging each other ${t ? `about ${ref} "${t.title}"` : "with no ticket to work on"}, so Boss Man stopped passing these on.`,
+              `${to.name} to ${from.name}: ${quote(back.why)}`,
+              `${from.name} to ${to.name} (not delivered): ${quote(input.why)}`,
+              t ? `Usually one of them is waiting on something only you can give. Answer on ${ref}, or tell one of them in chat what to do.` : "Usually the work has no ticket yet. Create one and assign it, or tell one of them in chat what to do.",
+            ].join("\n\n"),
+          );
+        }
+        return { ok: false, error: ticketId ? `${to.name} nudged you about this a moment ago. Answer them on the ticket instead of nudging back.` : `You and ${to.name} have already nudged each other about this. Put it on a ticket (create one if needed) instead of nudging again.` };
       }
       await db.insert(nudges).values(row);
       const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });

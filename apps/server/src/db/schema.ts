@@ -733,6 +733,8 @@ export const nudges = pgTable(
     fromAgentId: uuid("from_agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
     toAgentId: uuid("to_agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
+    /** What was said, for the owner's alert when two agents loop. */
+    why: text("why"),
     /** Dropped as a ping-pong: not delivered, and not counted again. */
     dropped: boolean("dropped").notNull().default(false),
     createdAt: createdAt(),
