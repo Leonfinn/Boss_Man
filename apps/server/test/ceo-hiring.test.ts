@@ -92,6 +92,13 @@ describe("the CEO builds the team (R62)", () => {
 
     await c.req("PUT", `/api/companies/${c.company.id}/agent-approvals`, { approvals: "hires_and_edits" });
     expect(textOf(await client.callTool({ name: "update_instructions", arguments: { agent: "Engineer", instructions: "Pair with QA.", reason: "Fewer bugs." } }))).toContain("waiting for the owner's approval");
+    // A long change: the card's question holds the start, the queue carries all of it for the owner to read.
+    const long = `Pair with QA.\n${"x".repeat(5000)}`;
+    await client.callTool({ name: "update_instructions", arguments: { agent: "Engineer", instructions: long, reason: "Longer." } });
+    const queued = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string; question: string; context: { instructions?: string } }>;
+    const longOne = queued.find((q) => q.context.instructions === long)!;
+    expect(longOne.question.length).toBeLessThan(long.length);
+    await c.db.delete(decisions).where(eq(decisions.id, longOne.id));
     const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Apply the change" });
     expect((await c.db.select().from(agents).where(eq(agents.id, c.worker.id)))[0]!.instructions).toBe("Pair with QA.");

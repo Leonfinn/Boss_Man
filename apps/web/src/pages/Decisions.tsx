@@ -40,6 +40,26 @@ const minutesAgo = (iso: string) => {
 };
 
 /** The facts behind a stalled-run alert, in plain words: who, since when, the last sign of life, the runner, the last steps. */
+const PREVIEW_LINES = 8;
+
+/** Long text shows its first lines and opens in place, so a card stays short until it's read. */
+function MoreText({ text, label }: { text: string; label?: string }) {
+  const [open, setOpen] = useState(false);
+  const lines = text.split("\n");
+  const long = lines.length > PREVIEW_LINES + 2;
+  return (
+    <div>
+      {label && <p style={{ fontWeight: 600, margin: "8px 0 4px" }}>{label}</p>}
+      <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{long && !open ? `${lines.slice(0, PREVIEW_LINES).join("\n")}\n…` : text}</p>
+      {long && (
+        <button type="button" className="linkish" onClick={() => setOpen(!open)}>
+          {open ? "Show less" : `Show all (${lines.length - PREVIEW_LINES} more lines)`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function StallEvidenceView({ e }: { e: StallEvidence }) {
   const { items } = useTranscript(e.runId, 60_000);
   const steps = items.map((i) => ({ i, d: describe(i) })).filter(({ d }) => d.tone !== "text" || d.body?.trim());
@@ -201,7 +221,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
-                    <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : rule ? d.question.split("\n\n")[0] : d.question}</h2>
+                    {d.context?.type === "instructions" && d.context.instructions ? (
+                      <>
+                        {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
+                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\nNew instructions:")[0]}</h2>
+                        <MoreText label="New instructions" text={d.context.instructions} />
+                      </>
+                    ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
+                      <>
+                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n")[0]}</h2>
+                        <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} />
+                      </>
+                    ) : (
+                      <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : rule ? d.question.split("\n\n")[0] : d.question}</h2>
+                    )}
                     {rule && (
                       <>
                         <p style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n").slice(1).join("\n\n")}</p>
