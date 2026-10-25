@@ -268,6 +268,16 @@ export class SessionManager {
         );
         return;
       }
+      case "workspace.image": {
+        const reply = this.opts.reply ?? (() => {});
+        try {
+          if (!this.opts.workspaces) throw new Error("This runner has no workspace directory configured.");
+          reply(command.requestId, { ok: true, data: this.opts.workspaces.readImage(command.ticketId, command.path) });
+        } catch (err) {
+          reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err) });
+        }
+        return;
+      }
       case "workspace.diff": {
         const reply = this.opts.reply ?? (() => {});
         if (!this.opts.workspaces) {

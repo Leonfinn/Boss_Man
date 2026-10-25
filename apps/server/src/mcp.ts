@@ -14,6 +14,7 @@ import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
+import { TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
@@ -90,9 +91,10 @@ type Services = {
   skills: ReturnType<typeof skillsService>;
   agents: ReturnType<typeof agentsService>;
   pa: ReturnType<typeof paService>;
+  images: ReturnType<typeof ticketImagesService>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa }: Services, scope: Scope, hooks: McpHooks) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
@@ -334,6 +336,27 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
       return text(`Ticket ${ticketId} is now ${state}.`);
+    },
+  );
+
+  server.registerTool(
+    "attach_image",
+    {
+      description:
+        "Attach an image you saved while working, such as a test screenshot, to a ticket so the owner sees it on the ticket. Save it where you work (e.g. agent-browser screenshot shots/step-2.png) and give that path; PNG, JPEG or WebP up to 5 MB. The ticket can be its id or its reference (e.g. HOL-12). Add a caption saying what it shows. Don't commit screenshots to the repo.",
+      inputSchema: { ticketId: z.string().max(40), path: z.string().min(1).max(500), caption: z.string().max(500).optional() },
+    },
+    async ({ ticketId: given, path, caption }) => {
+      const byRef = REF.exec(given);
+      const ticketId = byRef ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), eq(tickets.number, Number(byRef[1])))))[0]?.id : given;
+      if (!ticketId || !z.string().uuid().safeParse(ticketId).success) return fail(`No ticket ${given} in your company.`);
+      try {
+        await images.attach(scope.companyId, { ticketId, path, caption, agentId: scope.agentId });
+        return text(`Attached ${path} to the ticket.`);
+      } catch (err) {
+        if (err instanceof TicketImageError) return fail(err.message);
+        throw err;
+      }
     },
   );
 

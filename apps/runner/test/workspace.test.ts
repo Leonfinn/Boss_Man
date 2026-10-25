@@ -264,3 +264,25 @@ describe("turn checkpoints (R39)", () => {
     expect(git(ws.repoDir(ids.project), "for-each-ref", `refs/bossman/checkpoints/${ids.a}/`)).toBe("");
   });
 });
+
+describe("images for a ticket", () => {
+  it("reads a screenshot from the ticket's worktree or plain working folder, never outside them, and caps the size", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-img-"));
+    const ws = new Workspaces(root);
+    const withRepo = "11111111-1111-4111-8111-111111111111";
+    const plain = "22222222-2222-4222-8222-222222222222";
+    mkdirSync(path.join(ws.ticketDir(withRepo), "shots"), { recursive: true });
+    writeFileSync(path.join(ws.ticketDir(withRepo), "shots", "a.png"), "png bytes");
+    mkdirSync(path.join(root, plain), { recursive: true });
+    writeFileSync(path.join(root, plain, "b.png"), "more bytes");
+    writeFileSync(path.join(root, "secret.txt"), "not yours");
+    symlinkSync(path.join(root, "secret.txt"), path.join(root, plain, "link.png"));
+
+    expect(ws.readImage(withRepo, "shots/a.png")).toEqual({ base64: Buffer.from("png bytes").toString("base64"), size: 9 });
+    expect(ws.readImage(plain, path.join(root, plain, "b.png")).size).toBe(10);
+    expect(() => ws.readImage(plain, "link.png")).toThrow("There's no link.png");
+    expect(() => ws.readImage(plain, "../secret.txt")).toThrow("There's no ../secret.txt");
+    expect(() => ws.readImage(plain, path.join(root, "secret.txt"))).toThrow("There's no");
+    expect(() => ws.readImage(plain, "b.png", 4)).toThrow("images are limited to");
+  });
+});

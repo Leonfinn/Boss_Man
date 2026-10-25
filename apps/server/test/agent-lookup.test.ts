@@ -32,6 +32,11 @@ async function setup() {
   const sent: RunnerCommand[] = [];
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
+    // Stands in for the runner reading a screenshot from the ticket's working folder.
+    if (c.type === "workspace.image")
+      queueMicrotask(() =>
+        built.runners.resolveReply(c.path in IMAGES ? { requestId: c.requestId, ok: true, data: { base64: IMAGES[c.path]!.toString("base64"), size: IMAGES[c.path]!.length } } : { requestId: c.requestId, ok: false, error: `There's no ${c.path} in this ticket's working folder.` }),
+      );
     // Stands in for the runner reading a file from a ticket's branch.
     if (c.type === "workspace.file")
       queueMicrotask(() =>
@@ -51,7 +56,32 @@ async function setup() {
   return { ...built, db, close, req, company, worker, project, sent, emit, starts, mcp };
 }
 
+// A real PNG's first bytes, and a file that only claims to be an image.
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("rest of the picture")]);
+const IMAGES: Record<string, Buffer> = { "shots/step-2.png": PNG, "shots/fake.png": Buffer.from("<svg onload=alert(1)>") };
+
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
+
+describe("ticket images", () => {
+  it("attaches a screenshot from the ticket's working folder by reference, refuses a non-image, and serves it to the owner", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Test the calculator", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: "APP-1", path: "shots/step-2.png", caption: "Leap year shows 28.1 days" } }))).toBe("Attached shots/step-2.png to the ticket.");
+    expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: t.id, path: "shots/fake.png" } }))).toBe("shots/fake.png isn't a PNG, JPEG or WebP image.");
+    expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: t.id, path: "shots/missing.png" } }))).toContain("There's no shots/missing.png");
+    expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: "APP-9", path: "shots/step-2.png" } }))).toBe("No ticket APP-9 in your company.");
+    await client.close();
+
+    const list = (await c.req("GET", `/api/tickets/${t.id}/images`)).json() as Array<{ id: string; name: string; caption: string; size: number }>;
+    expect(list).toEqual([expect.objectContaining({ name: "step-2.png", caption: "Leap year shows 28.1 days", size: PNG.length })]);
+    const img = await c.req("GET", `/api/ticket-images/${list[0]!.id}`);
+    expect(img.headers["content-type"]).toBe("image/png");
+    expect(img.headers["x-content-type-options"]).toBe("nosniff");
+    expect(img.rawPayload.equals(PNG)).toBe(true);
+  });
+});
 
 describe("archived projects", () => {
   it("archives a project with no open tasks: hidden from menus and agents, no new tasks, history kept, and it can come back", async () => {
