@@ -37,6 +37,9 @@ describe("starred projects in the sidebar", () => {
     expect(link.getAttribute("href")).toBe("#/board/p1");
     expect(link.getAttribute("aria-current")).toBe("page");
     expect(list.queryByRole("link", { name: "Docs" })).toBeNull();
+    // There is no separate Kanban item: a board is one project's, reached from Projects, which stays marked.
+    expect(screen.queryByRole("link", { name: "Kanban" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Projects" }).getAttribute("aria-current")).toBe("page");
   });
 
   it("shows nothing extra when no project is starred", () => {
