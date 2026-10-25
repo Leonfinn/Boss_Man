@@ -995,6 +995,40 @@ type Chapter = {
 
 const ENDED: Record<string, string> = { context: "when its context was 70% full", age: "after 7 days", owner: "when you asked", closed: "early" };
 
+/** The prefix in ticket references (HOL-12). Changing it renames every reference; the numbers stay. */
+function TicketPrefix({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [prefix, setPrefix] = useState(company.ticketPrefix ?? "");
+  const act = useAction();
+  const value = prefix.trim().toUpperCase();
+  const valid = /^[A-Z0-9]{1,10}$/.test(value);
+  return (
+    <Section id="ticket-prefix-h" title="Ticket references">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Every ticket in {company.name} has a number, shown as {value || "PREFIX"}-{company.nextTicketNumber ?? 1} for the next one. Numbers carry on across all its projects. Changing the prefix changes how every ticket is shown; the numbers stay.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="ticket-prefix">Prefix</label>
+        <input id="ticket-prefix" className="mono" maxLength={10} value={prefix} onChange={(e) => setPrefix(e.target.value)} style={{ width: 120, textTransform: "uppercase" }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid || value === company.ticketPrefix}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { ticketPrefix: value } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** CEO continuity: the CEO's current chapter, and the handoffs between chapters. */
 function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [days, setDays] = useState(String(company.goalCheckDays ?? 14));
@@ -1530,6 +1564,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
               </p>
               <CompanyReviews companyId={company.id} agents={company.agents} />
             </Section>
+            <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <Chapters company={company} />
           </div>

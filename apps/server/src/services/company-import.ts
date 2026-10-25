@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
-import { columnProblems, DEFAULT_REVIEW_POLICY, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, type ReviewPolicy } from "@boss-man/shared";
+import { columnProblems, DEFAULT_REVIEW_POLICY, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
@@ -27,7 +27,7 @@ export const IMPORT_LIMITS = { zipBytes: 48 * 1024 * 1024, unpackedBytes: 256 * 
 const str = (max: number) => z.string().max(max);
 const opt = (max: number) => str(max).nullable().optional();
 const Uuidish = z.string().max(100);
-const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional() });
+const Company = z.object({ name: z.string().trim().min(1).max(80), mission: opt(2000), reviewPolicy: z.unknown().optional(), goalCheckDays: z.number().int().min(1).max(365).optional(), ownerApprovesEngagements: z.boolean().optional(), ticketPrefix: z.string().regex(TICKET_PREFIX).nullable().optional().catch(null) });
 const Agent = z.object({
   ref: Uuidish.optional(),
   name: z.string().trim().min(1).max(80),
@@ -83,6 +83,8 @@ const Secret = z.object({ name: z.string().trim().min(1).max(200), kind: str(64)
 const WikiMeta = z.object({ slug: z.string().min(1).max(300), title: z.string().trim().min(1).max(300), folder: str(300).default(""), ticket: opt(100) });
 const Ticket = z.object({
   ref: z.string().min(1).max(100),
+  /** Its number in the company's sequence, kept so references like HOL-12 still point at it. */
+  number: z.number().int().positive().max(999_999_999).nullable().optional().catch(null),
   project: z.string().max(120),
   title: z.string().trim().min(1).max(500),
   body: opt(100_000),
@@ -298,7 +300,13 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     const ticketId = new Map<string, string>();
     const columnsOf = new Map<string, Array<{ id: string; systemState: string }>>();
 
-    const [c] = await tx.insert(companies).values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ownerApprovesEngagements: pkg.company.ownerApprovesEngagements }).returning();
+    // Tickets keep their numbers (a repeat gets a new one); tickets without one are numbered after the highest.
+    const seen = new Set<number>();
+    const numberOf = new Map(pkg.tickets.map((t) => [t.ref, t.number && !seen.has(t.number) && seen.add(t.number) ? t.number : null]));
+    const [c] = await tx
+      .insert(companies)
+      .values({ name, mission: pkg.company.mission ?? null, goalCheckDays: pkg.company.goalCheckDays, ownerApprovesEngagements: pkg.company.ownerApprovesEngagements, ticketPrefix: pkg.company.ticketPrefix ?? defaultTicketPrefix(name), nextTicketNumber: Math.max(0, ...seen) + 1 })
+      .returning();
     const companyId = c!.id;
 
     for (const a of pkg.agents) {
@@ -367,6 +375,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
           companyId,
           projectId: project,
           title: t.title,
+          number: numberOf.get(t.ref) ?? null,
           body,
           systemState: t.state,
           outcome: t.outcome ?? null,

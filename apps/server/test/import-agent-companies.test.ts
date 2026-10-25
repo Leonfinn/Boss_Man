@@ -120,6 +120,12 @@ describe("Paperclip issues (docs/11, step 5)", () => {
     expect(by("Launch the site").conversation.map((m: { author: string; agent: string | null; text: string }) => [m.author, m.agent, m.text])).toEqual([["agent", "boss", "On it."], ["owner", null, "Thanks."], ["system", null, "Status changed."]]);
     expect(by("Write the copy")).toMatchObject({ state: "done", outcome: "Cancelled in Paperclip.", parent: by("Launch the site").ref });
     expect(by("Loose idea")).toMatchObject({ state: "ready", project: "imported-tickets" });
+    // Paperclip's numbers and prefix carry on, so ACM-2 still means the same ticket; new ones follow on.
+    expect(tickets.map((t) => [t.title, t.number])).toEqual(expect.arrayContaining([["Launch the site", 1], ["Write the copy", 2], ["Loose idea", 3]]));
+    expect(JSON.parse(strFromU8(out["company.json"]!))).toMatchObject({ ticketPrefix: "ACM" });
+    const projectId = ((await req("GET", `/api/companies/${id}/projects`)).json() as Array<{ id: string }>)[0]!.id;
+    const next = (await req("POST", `/api/projects/${projectId}/tickets`, { title: "New work" })).json() as { id: string };
+    expect((await req("GET", `/api/tickets/${next.id}`)).json()).toMatchObject({ ref: "ACM-4" });
     const pages = Object.keys(out).filter((p) => p.startsWith("wiki/imported/acm-1/")).sort();
     expect(pages).toEqual(["wiki/imported/acm-1/claims-2.md", "wiki/imported/acm-1/claims.md", "wiki/imported/acm-1/plan.md"]);
     expect(strFromU8(out["wiki/imported/acm-1/claims.md"]!).length + strFromU8(out["wiki/imported/acm-1/claims-2.md"]!).length).toBeGreaterThan(250_000);

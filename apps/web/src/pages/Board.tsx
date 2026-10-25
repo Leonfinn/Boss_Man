@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
+import { ticketRef } from "@boss-man/shared";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -611,7 +612,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                           <svg width="16" height="16" {...iconProps} strokeWidth={2.2}><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
                           <span>
                             <a href={`#/tickets/${t.id}`}>{t.title}</a>
-                            <small>{named(t)} · {when(t.lastActivityAt)}</small>
+                            <small>{t.number ? `${ticketRef(company?.ticketPrefix, t.number)} · ` : ""}{named(t)} · {when(t.lastActivityAt)}</small>
                           </span>
                         </li>
                       ))}
@@ -629,6 +630,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                     <article className={`ticket${mine ? " mine" : ""}${t.working?.length ? " live" : ""}`} key={t.id}>
                       <div className="top">
                         <span className={`type${t.parentTitle ? " sub" : ""}`}>{t.parentTitle ? "Sub-task" : "Task"}</span>
+                        {t.number && <span className="mono muted">{ticketRef(company?.ticketPrefix, t.number)}</span>}
                         {(t.risk === "high" || t.risk === "critical") && (
                           <span className={`tag ${t.risk === "critical" ? "red" : "amber"}`} title={tiers.find((x) => x.tier === t.risk)?.summary}>
                             {t.risk} risk

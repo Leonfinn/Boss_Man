@@ -45,3 +45,10 @@ export function stateNoteLine(t: { stateNote: string | null; stateNoteAt: Date |
   const age = m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
   return `State note (${age} ago): ${t.stateNote}${t.stateNoteAt < t.lastActivityAt ? " (may be out of date)" : ""}`;
 }
+
+/** A company's ticket prefix, as in HOL-12: 1 to 10 capital letters or digits. */
+export const TICKET_PREFIX = /^[A-Z0-9]{1,10}$/;
+/** The prefix a company starts with: the first three letters or digits of its name (as migration 0056 did). */
+export const defaultTicketPrefix = (name: string) => name.replace(/[^A-Za-z0-9]/g, "").slice(0, 3).toUpperCase() || "TKT";
+/** How a ticket is referred to, e.g. HOL-12; null for one without a number yet. */
+export const ticketRef = (prefix: string | null | undefined, number: number | null | undefined) => (number ? `${prefix || "T"}-${number}` : null);

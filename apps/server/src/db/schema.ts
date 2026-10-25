@@ -60,6 +60,9 @@ export const companies = pgTable("companies", {
   reviewPolicy: jsonb("review_policy").$type<ReviewPolicy>().notNull().default(DEFAULT_REVIEW_POLICY),
   /** Days after a feature is released before the owner is asked whether it moved its goal. */
   goalCheckDays: integer("goal_check_days").notNull().default(14),
+  /** Tickets are referred to as PREFIX-number (e.g. HOL-12); one sequence per company, handed out by a database trigger. */
+  ticketPrefix: text("ticket_prefix"),
+  nextTicketNumber: integer("next_ticket_number").notNull().default(1),
   createdAt: createdAt(),
 });
 
@@ -310,10 +313,12 @@ export const tickets = pgTable(
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
+    number: integer("number"),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tickets_company_state").on(t.companyId, t.systemState)],
+  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number)],
 );
 
 // ---------- Decisions and engagements ----------

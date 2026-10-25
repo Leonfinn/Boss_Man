@@ -54,6 +54,29 @@ async function setup() {
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
 
 describe("agents look tickets up (R77)", () => {
+  it("numbers tickets per company as PREFIX-n, and finds and reads one by its reference", async () => {
+    const c = (ctx = await setup());
+    const first = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First" })).json() as { id: string };
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Docs" })).json() as { id: string };
+    const second = (await c.req("POST", `/api/projects/${other.id}/tickets`, { title: "Second", assigneeAgentId: c.worker.id })).json() as { id: string };
+    // One sequence across the company's projects; the prefix comes from the company's name.
+    expect((await c.req("GET", `/api/tickets/${first.id}`)).json()).toMatchObject({ number: 1, ref: "APP-1" });
+    expect((await c.req("GET", `/api/tickets/${second.id}`)).json()).toMatchObject({ number: 2, ref: "APP-2" });
+    await c.scheduler.tick();
+    expect(c.starts()[0]!.prompt).toContain(`Ticket APP-2 (id ${second.id})`);
+
+    const client = await c.mcp(c.starts()[0]!.runId);
+    expect(JSON.parse(textOf(await client.callTool({ name: "tickets", arguments: { action: "find", q: "app-1" } })))).toEqual([expect.objectContaining({ id: first.id, ref: "APP-1" })]);
+    expect(textOf(await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: "APP-2" } }))).toContain(`Ticket APP-2 (id ${second.id})`);
+    expect(textOf(await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: "APP-9" } }))).toContain("No ticket APP-9 in your company.");
+    await client.close();
+
+    // The owner can change the prefix; the numbers stay.
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { ticketPrefix: "x y" })).statusCode).toBe(400);
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { ticketPrefix: "web" })).json()).toMatchObject({ ticketPrefix: "WEB" });
+    expect((await c.req("GET", `/api/tickets/${first.id}`)).json()).toMatchObject({ ref: "WEB-1" });
+  });
+
   it("finds and reads any ticket in the company, with its outputs and files from its branch", async () => {
     const c = (ctx = await setup());
     await c.db.update(projects).set({ repoUrl: "git@example.com:acme/app.git" });
