@@ -60,8 +60,9 @@ describe("skills", () => {
     let addons: unknown = null;
     vi.stubGlobal("fetch", vi.fn(async () => json({ registered: true, runnerId: "r1", connected: true, lastSeenAt: null, imageVersion: null, diskUsedBytes: null, addons })));
     const view = render(<Runner company={company} />);
-    expect(await screen.findByText("Not installed")).toBeTruthy();
+    expect(await screen.findAllByText("Not installed")).toHaveLength(2);
     expect(screen.getByText("RUNNER_ADDONS=agent-browser")).toBeTruthy();
+    expect(screen.getByText("RUNNER_ADDONS=webkit")).toBeTruthy();
     view.unmount();
     addons = [{ id: "agent-browser", version: "0.39.0", ok: false, detail: "spawn agent-browser ENOENT" }];
     render(<Runner company={company} />);

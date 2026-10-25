@@ -19,7 +19,7 @@ async function run(opts: { model: string | null; boardToolsOnly?: boolean; secre
   const ended = new Promise<void>((r) => (done = r));
   const manager = new SessionManager({
     mcpUrl: "http://127.0.0.1:9/mcp",
-    baseEnv: { PATH: process.env.PATH },
+    baseEnv: { PATH: process.env.PATH, AGENT_BROWSER_ARGS: "--no-sandbox", SOME_RUNNER_ONLY_SETTING: "kept back" },
     adapterBins: { opencode: fake },
     resolveEnv: async () => ({ DUMP: dump, ...opts.secrets }),
     emit: (e) => (events.push(e), e.type === "run.ended" && done()),
@@ -31,6 +31,12 @@ async function run(opts: { model: string | null; boardToolsOnly?: boolean; secre
 }
 
 describe("opencode agent kind", () => {
+  it("passes the add-ons' settings through to the agent, and nothing else from the runner", async () => {
+    const { dump } = await run({ model: null });
+    expect(dump.browserArgs).toBe("--no-sandbox");
+    expect(dump.runnerOnly).toBeNull();
+  });
+
   it("sets the thinking level through the effort option, and leaves one the model doesn't offer at its default", async () => {
     const high = await run({ model: "b/two", thinking: "high" });
     expect(high.dump.effort).toBe("high");

@@ -24,13 +24,16 @@ RUN apt-get update \
 
 RUN npm install -g --no-audit --no-fund pnpm@10.28.0
 
-# Optional add-ons (docs/12), off unless asked for: --build-arg RUNNER_ADDONS=agent-browser.
+# Optional add-ons (docs/12), off unless asked for: --build-arg RUNNER_ADDONS=agent-browser,webkit.
 # Boss Man works the same without them; a skill that needs one is only given to runs once the
 # runner reports it healthy. The image lists what it holds in /etc/bossman-addons.
 # agent-browser drives Debian's chromium (security updates via apt) instead of downloading one;
 # the pin must match packages/shared/src/addons.ts (checked by a test).
 ARG RUNNER_ADDONS=""
 ARG AGENT_BROWSER_VERSION=0.39.0
+# webkit: Playwright's WebKit build (Safari's engine) and the libraries it needs, in a shared folder the
+# node user can read. It is Playwright's own download; Debian has no WebKit package Playwright can drive.
+ARG PLAYWRIGHT_VERSION=1.64.1
 RUN --mount=type=secret,id=extra_ca,required=false \
     set -e; : > /etc/bossman-addons; \
     if [ -s /run/secrets/extra_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/extra_ca npm_config_cafile=/run/secrets/extra_ca; fi; \
@@ -39,11 +42,20 @@ RUN --mount=type=secret,id=extra_ca,required=false \
       npm install -g --no-audit --no-fund "agent-browser@${AGENT_BROWSER_VERSION}"; \
       agent-browser --version; \
       echo "agent-browser@${AGENT_BROWSER_VERSION}" >> /etc/bossman-addons;; \
+    esac; \
+    case ",$RUNNER_ADDONS," in *,webkit,*) \
+      npm install -g --no-audit --no-fund "playwright@${PLAYWRIGHT_VERSION}"; \
+      PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install --with-deps webkit; \
+      chmod -R a+rX /ms-playwright; \
+      playwright --version; \
+      echo "webkit@${PLAYWRIGHT_VERSION}" >> /etc/bossman-addons;; \
     esac
 # The container is the sandbox (agents already run shell commands in it); Chromium's own sandbox
 # needs privileges the runner doesn't have. Both are ignored when the add-on isn't installed.
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium \
-    AGENT_BROWSER_ARGS=--no-sandbox
+    AGENT_BROWSER_ARGS=--no-sandbox \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    NODE_PATH=/usr/local/lib/node_modules
 
 ARG CLAUDE_CODE_VERSION=latest
 ARG OPENCODE_VERSION=1.19.3
