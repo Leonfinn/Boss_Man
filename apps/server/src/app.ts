@@ -55,6 +55,7 @@ import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
+import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
 import { SecretRejected, secretsService, type LiveValidator } from "./services/secrets.js";
 import { runnerSocketRoutes } from "./routes/runner-socket.js";
@@ -1297,6 +1298,37 @@ export async function buildApp(opts: AppOptions) {
       const out = await exportCompany(db, id, { wiki: q.wiki === "1", tickets: q.tickets ?? "none" });
       if (!out) return reply.code(404).send({ error: "not_found" });
       return reply.header("content-type", "application/zip").header("content-disposition", `attachment; filename="${out.name}"`).send(Buffer.from(out.bytes));
+    });
+
+    // Import (docs/11, step 2): a package becomes a new company. Preview writes nothing.
+    const ImportBody = z.object({ zip: z.string().min(1), name: z.string().trim().min(1).max(80).optional(), fundingSourceId: Uuid.nullable().optional() });
+    const importErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof ImportError) return reply.code(err.status).send({ error: "import", message: err.message });
+      throw err;
+    };
+    owner.post("/api/companies/import/preview", { bodyLimit: 66 * 1024 * 1024 }, async (req, reply) => {
+      const b = ImportBody.parse(req.body);
+      try {
+        return await previewPackage(db, readPackage(new Uint8Array(Buffer.from(b.zip, "base64"))), b.name);
+      } catch (err) {
+        return importErrors(reply)(err);
+      }
+    });
+    owner.post("/api/companies/import", { bodyLimit: 66 * 1024 * 1024 }, async (req, reply) => {
+      const b = ImportBody.parse(req.body);
+      let done;
+      try {
+        done = await applyPackage(db, readPackage(new Uint8Array(Buffer.from(b.zip, "base64"))), { name: b.name, fundingSourceId: b.fundingSourceId });
+      } catch (err) {
+        return importErrors(reply)(err);
+      }
+      for (const pageId of done.wikiPageIds) semantic.enqueue(done.companyId, pageId);
+      await decisionsSvc.raise({ companyId: done.companyId, agentId: null, question: `${done.name} was imported. Left to do:\n${done.checklist.map((x) => `- ${x}`).join("\n")}`, options: ["Done"], recommended: "Done" });
+      if (launch.enabled)
+        void launch.start(done.companyId).catch((err) =>
+          notes.notify({ companyId: done.companyId, agentId: null, level: "flag", title: `${done.name}'s runner didn't start`, body: (err as Error).message, link: "#/settings" }).catch(() => {}),
+        );
+      return reply.code(201).send({ companyId: done.companyId, name: done.name, checklist: done.checklist });
     });
 
     // The home screen (R74).

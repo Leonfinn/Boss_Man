@@ -1,6 +1,6 @@
 # 11 — Company import and export
 
-Status: design, not built. Owner asked for a general tool, not a one-off migration (24 Oct 2026).
+Status: steps 1 (export) and 2 (import of Boss Man packages, API only) built. Owner asked for a general tool, not a one-off migration (24 Oct 2026).
 
 ## Goal
 
@@ -44,8 +44,12 @@ Never exported: secret values, owner login and sessions, runs and transcripts, c
 4. **Apply** in one transaction. IDs are new. Ticket IDs from the source are kept in each ticket's body as `Imported from <ID>`, so references like "HOL-228" still resolve by search.
 5. **Afterwards:**
    - every imported agent starts **paused**;
-   - each secret is an empty placeholder already granted to the right agents;
-   - a checklist decision lists what's left: secret values, unpausing, skills flagged in the preview.
+   - no secret is created or granted: the secret store has no empty values, and the package must not be able to point an agent at an existing secret. The checklist names each secret, its variable and the agents to grant it to;
+   - a checklist decision lists what's left: secrets, funding, unpausing, skills that ship scripts.
+
+As built (step 2): an import always creates a **new** company, so the only clash is the company name (the preview flags it and the owner picks another). Merging into an existing company is not supported. One funding source can be given to every agent at import; models are checked after import, once the new company's runner has started. Review policies that name an agent are pointed at the imported copy of that agent; an agent the package doesn't hold becomes the CEO.
+
+API: `POST /api/companies/import/preview` and `POST /api/companies/import`, body `{ zip: <base64>, name?, fundingSourceId? }`.
 
 The importer treats a package as untrusted. Instructions and skills are shown before anything is applied. Nothing in the package can grant itself a secret value or start work.
 
