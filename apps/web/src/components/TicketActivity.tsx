@@ -109,7 +109,7 @@ function reviewMarks(reviews: TicketReview[]) {
   return marks;
 }
 
-export function TicketActivity({ ticketId, assignee, assigneeId = null, agents = [], reviews = null }: { ticketId: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null }) {
+export function TicketActivity({ ticketId, companyId, assignee, assigneeId = null, agents = [], reviews = null }: { ticketId: string; companyId?: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null }) {
   const [busy, setBusy] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
@@ -179,11 +179,11 @@ export function TicketActivity({ ticketId, assignee, assigneeId = null, agents =
                 const { summary, details } = m!.author === "agent" ? splitDetails(m!.text) : { summary: m!.text, details: null };
                 return (
                   <>
-                    <p>{linked(summary)}</p>
+                    <p>{linked(summary, companyId)}</p>
                     {details && (
                       <details>
                         <summary>Details</summary>
-                        <p>{linked(details)}</p>
+                        <p>{linked(details, companyId)}</p>
                       </details>
                     )}
                   </>

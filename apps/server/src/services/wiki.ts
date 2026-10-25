@@ -378,9 +378,19 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
     },
 
     /** What a ticket produced, oldest first. */
-    async artifacts(ticketId: string) {
+    /** A ticket's outputs; with family, also its parent's and sub-tasks', each naming the ticket it came from. */
+    async artifacts(ticketId: string, opts: { family?: boolean } = {}) {
+      let ids = [ticketId];
+      if (opts.family) {
+        const [t] = await db.select({ parent: tickets.parentTicketId }).from(tickets).where(eq(tickets.id, ticketId));
+        const kids = await db.select({ id: tickets.id }).from(tickets).where(eq(tickets.parentTicketId, ticketId));
+        ids = [ticketId, ...(t?.parent ? [t.parent] : []), ...kids.map((k) => k.id)];
+      }
       return db
         .select({
+          ticketId: ticketArtifacts.ticketId,
+          fromTitle: tickets.title,
+          fromNumber: tickets.number,
           id: ticketArtifacts.id,
           kind: ticketArtifacts.kind,
           title: ticketArtifacts.title,
@@ -395,7 +405,8 @@ export function wikiService(db: Db, semantic?: Pick<WikiSemantic, "enqueue" | "s
         .from(ticketArtifacts)
         .leftJoin(wikiPages, eq(wikiPages.id, ticketArtifacts.wikiPageId))
         .leftJoin(agents, eq(agents.id, ticketArtifacts.agentId))
-        .where(eq(ticketArtifacts.ticketId, ticketId))
+        .innerJoin(tickets, eq(tickets.id, ticketArtifacts.ticketId))
+        .where(inArray(ticketArtifacts.ticketId, ids))
         .orderBy(asc(ticketArtifacts.createdAt));
     },
 

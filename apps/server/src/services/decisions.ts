@@ -637,6 +637,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           }
           case "stale_blocker":
             return [c.blockedTicketId];
+          // An approved ticket that can't merge holds that ticket up, and whatever waits on it.
+          case "check_stuck":
+            return [c.ticketId];
           case "deploy": {
             const id = deployTickets.get(c.deployId);
             return id ? [id] : [];

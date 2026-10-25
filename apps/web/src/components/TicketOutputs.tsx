@@ -1,10 +1,11 @@
 // What a ticket produced (R69): wiki pages, repo files and links its agents attached.
+import { ticketRef } from "@boss-man/shared";
 import { api } from "../api";
 import { when } from "../pages/Runs";
 
-export type Artifact = { id: string; kind: "wiki_page" | "repo_file" | "url"; title: string; slug: string | null; path: string | null; ref: string | null; url: string | null; agent: string | null; runId: string | null; createdAt: string };
+export type Artifact = { ticketId?: string; fromTitle?: string; fromNumber?: number | null; id: string; kind: "wiki_page" | "repo_file" | "url"; title: string; slug: string | null; path: string | null; ref: string | null; url: string | null; agent: string | null; runId: string | null; createdAt: string };
 
-export function TicketOutputs({ items, companyId, onChanged, code }: { items: Artifact[]; companyId: string; onChanged: () => void; code?: { merged: string } | { branch: string } | null }) {
+export function TicketOutputs({ items, companyId, onChanged, code, ticketId, prefix }: { items: Artifact[]; companyId: string; onChanged: () => void; code?: { merged: string } | { branch: string } | null; ticketId?: string; prefix?: string | null }) {
   const remove = async (a: Artifact) => {
     if (!window.confirm(`Take "${a.title}" off this task? ${a.kind === "wiki_page" ? "The wiki page itself stays." : ""}`)) return;
     await api(`/api/artifacts/${a.id}`, { method: "DELETE" });
@@ -45,6 +46,12 @@ export function TicketOutputs({ items, companyId, onChanged, code }: { items: Ar
               {a.ref && <span className="muted"> on {a.ref}</span>}
             </span>
           )}
+          {/* Written on the parent task or a sub-task, shown here too so the owner needn't go looking. */}
+          {ticketId && a.ticketId && a.ticketId !== ticketId && (
+            <a className="muted" href={`#/tickets/${a.ticketId}`} style={{ fontSize: 13 }}>
+              from {a.fromNumber ? ticketRef(prefix, a.fromNumber) : `"${a.fromTitle}"`}
+            </a>
+          )}
           <small className="muted">
             {a.agent ?? "You"} · {when(a.createdAt)}
             {a.runId && (
@@ -54,9 +61,11 @@ export function TicketOutputs({ items, companyId, onChanged, code }: { items: Ar
               </>
             )}
           </small>
-          <button type="button" className="link" onClick={() => void remove(a)} aria-label={`Take ${a.title} off this task`}>
-            Remove
-          </button>
+          {(!ticketId || !a.ticketId || a.ticketId === ticketId) && (
+            <button type="button" className="link" onClick={() => void remove(a)} aria-label={`Take ${a.title} off this task`}>
+              Remove
+            </button>
+          )}
         </li>
       ))}
     </ul>
