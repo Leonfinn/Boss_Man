@@ -142,5 +142,83 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
     const about = md.body.trim() || str(md.meta.description);
     if (about) out.set(`wiki/imported/${slug}.md`, strToU8(`---\n${JSON.stringify({ slug: `imported/${slug}`, title: `${name} (imported)`, folder: "Imported" })}\n---\n${about}\n`));
   }
+  issues(files, out, notes, Object.fromEntries(projectDirs.map((slug) => [str(frontmatter(text(`projects/${slug}/PROJECT.md`)!).meta.name) ?? slug, slug])), agentDirs.map((slug) => [str(frontmatter(text(`agents/${slug}/AGENTS.md`)!).meta.name) ?? slug, slug]));
   return { files: out, notes };
+}
+
+/** Paperclip issue states → Boss Man ticket states; "cancelled" has none, so it lands as done with an outcome. */
+const STATE: Record<string, string> = { backlog: "backlog", todo: "ready", in_progress: "in_progress", in_review: "review", blocked: "blocked", done: "done", cancelled: "done" };
+const PAGE = 190_000;
+
+/**
+ * paperclip-issues.json, made by the read-only query in docs/14-paperclip-migration.md, beside COMPANY.md:
+ * issues become tickets, comments their conversation, and each issue document a wiki page linked to its
+ * ticket. The repeated continuation summaries are working notes, so they are skipped.
+ */
+function issues(files: Files, out: Files, notes: string[], projectSlug: Record<string, string>, agentNames: Array<[string, string]>) {
+  const raw = files.get("paperclip-issues.json");
+  if (!raw) return;
+  let list: unknown;
+  try {
+    list = JSON.parse(strFromU8(raw));
+  } catch {
+    notes.push("paperclip-issues.json isn't valid JSON, so no tickets were imported.");
+    return;
+  }
+  if (!Array.isArray(list)) return void notes.push("paperclip-issues.json isn't a list of issues, so no tickets were imported.");
+  const agentSlug = new Map(agentNames); // lost on restart, harmless: one import call.
+  let homeless = 0;
+  let skipped = 0;
+  const lines: string[] = [];
+  for (const it of list.map(obj)) {
+    const ref = str(it.identifier);
+    if (!ref) continue;
+    const projectName = str(it.project);
+    const project = projectName ? projectSlug[projectName] : undefined;
+    if (!project) homeless++;
+    const status = str(it.status) ?? "backlog";
+    const conversation = (Array.isArray(it.comments) ? it.comments : []).map(obj).flatMap((c) => {
+      const body = str(c.body);
+      if (!body) return [];
+      const by = str(c.by) ?? "";
+      const agent = agentSlug.get(by);
+      // A comment with no agent is the owner's, unless Paperclip wrote it itself.
+      const author = agent ? "agent" : by === "system" || by === "Summarizer" ? "system" : "owner";
+      return [{ author, agent: agent ?? null, text: body, at: str(c.at) ?? undefined }];
+    });
+    lines.push(
+      JSON.stringify({
+        ref,
+        project: project ?? "imported-tickets",
+        title: str(it.title) ?? ref,
+        body: str(it.description),
+        state: STATE[status] ?? "backlog",
+        outcome: status === "cancelled" ? "Cancelled in Paperclip." : null,
+        parent: str(it.parent),
+        createdAt: str(it.created_at) ?? undefined,
+        conversation,
+      }),
+    );
+    for (const d of (Array.isArray(it.documents) ? it.documents : []).map(obj)) {
+      const key = str(d.key);
+      const body = str(d.body);
+      if (!key || !body) continue;
+      if (key === "continuation-summary") {
+        skipped++;
+        continue;
+      }
+      // A page holds at most 200,000 characters, so a longer document is split rather than cut.
+      for (let i = 0; i * PAGE < body.length; i++) {
+        const part = i ? `-${i + 1}` : "";
+        const meta = { slug: `imported/${ref.toLowerCase()}/${key}${part}`, title: `${ref} ${str(d.title) ?? key}${i ? ` (part ${i + 1})` : ""}`, folder: `Imported/${ref}`, ticket: ref };
+        out.set(`wiki/imported/${ref.toLowerCase()}/${key}${part}.md`, strToU8(`---\n${JSON.stringify(meta)}\n---\n${body.slice(i * PAGE, (i + 1) * PAGE)}`));
+      }
+    }
+  }
+  out.set("tickets.jsonl", strToU8(lines.join("\n") + (lines.length ? "\n" : "")));
+  if (homeless) {
+    out.set("projects/imported-tickets/project.json", strToU8(JSON.stringify({ name: "Imported tickets", columns: DEFAULT_COLUMNS })));
+    notes.push(`${homeless} tickets had no project in Paperclip; they're in a new project, "Imported tickets".`);
+  }
+  if (skipped) notes.push(`Skipped ${skipped} "continuation-summary" documents: they were Paperclip's working notes between runs.`);
 }
