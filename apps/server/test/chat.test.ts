@@ -26,7 +26,7 @@ async function setup() {
   ctx = { close: async () => (await built.app.close(), await close()) };
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json();
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json();
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "App" })).json();
@@ -49,6 +49,14 @@ async function setup() {
 }
 
 describe("owner chat", () => {
+  it("says why a message is held, such as the agent being paused", async () => {
+    const c = await setup();
+    await c.req("PATCH", `/api/agents/${c.ceo.id}`, { paused: true });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Are you there?" });
+    await c.scheduler.tick();
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().state).toBe("waiting: agent paused");
+  });
+
   it("answers with a board-only run beside the CEO's own work, and the reply lands in the chat", async () => {
     const c = await setup();
     await c.db.delete(wakes);
