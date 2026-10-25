@@ -104,6 +104,11 @@ export function fromAgentCompanies(files: Files): { files: Files; notes: string[
       reportsTo: str(md.meta.reportsTo),
     });
     if (md.body.trim()) out.set(`agents/${slug}/INSTRUCTIONS.md`, strToU8(md.body.trim()));
+    // A picture saved beside AGENTS.md comes across as the agent's avatar.
+    for (const [p, bytes] of files) {
+      const pic = p.startsWith(`agents/${slug}/`) ? /^avatar\.(png|jpe?g|webp)$/i.exec(p.slice(`agents/${slug}/`.length)) : null;
+      if (pic) out.set(`agents/${slug}/avatar.${pic[1]!.toLowerCase()}`, bytes);
+    }
     const missing: string[] = [];
     for (const ref of Array.isArray(md.meta.skills) ? md.meta.skills.filter((s): s is string => typeof s === "string") : []) {
       if (REPLACED.some((r) => r.test(`${ref}/`))) continue;

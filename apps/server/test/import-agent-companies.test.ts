@@ -126,3 +126,20 @@ describe("Paperclip issues (docs/11, step 5)", () => {
     expect(strFromU8(out["wiki/imported/acm-1/plan.md"]!)).toContain('"ticket":"' + by("Launch the site").ref + '"');
   });
 });
+
+describe("agent pictures in an Agent Companies export", () => {
+  it("takes a real PNG beside AGENTS.md as the avatar, and ignores a file that only claims to be one", async () => {
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwAEhgGAcwq9lwAAAABJRU5ErkJggg==", "base64");
+    const entries: Record<string, Uint8Array> = Object.fromEntries(Object.entries(FILES).map(([p, t]) => [`acme/${p}`, strToU8(t)]));
+    entries["acme/agents/builder/avatar.PNG"] = new Uint8Array(png);
+    entries["acme/agents/boss/avatar.png"] = strToU8("<svg onload=alert(1)>not a png</svg>");
+    const req = await setup();
+    const id = (await req("POST", "/api/companies/import", { zip: Buffer.from(zipSync(entries)).toString("base64") })).json().companyId as string;
+    const team = ((await req("GET", "/api/companies")).json() as Array<{ id: string; agents: Array<{ id: string; name: string }> }>).find((c) => c.id === id)!.agents;
+    const pic = await req("GET", `/api/agents/${team.find((a) => a.name === "Builder")!.id}/avatar`);
+    expect(pic.statusCode).toBe(200);
+    expect(pic.headers["content-type"]).toBe("image/png");
+    expect(Buffer.from(pic.rawPayload).equals(png)).toBe(true);
+    expect((await req("GET", `/api/agents/${team.find((a) => a.name === "Boss")!.id}/avatar`)).statusCode).toBe(404);
+  });
+});

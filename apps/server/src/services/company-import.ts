@@ -22,7 +22,7 @@ export class ImportError extends Error {
   }
 }
 
-export const IMPORT_LIMITS = { zipBytes: 48 * 1024 * 1024, unpackedBytes: 256 * 1024 * 1024, files: 20_000, avatarBytes: 400 * 1024 };
+export const IMPORT_LIMITS = { zipBytes: 48 * 1024 * 1024, unpackedBytes: 256 * 1024 * 1024, files: 20_000, avatarBytes: 256 * 1024 };
 
 const str = (max: number) => z.string().max(max);
 const opt = (max: number) => str(max).nullable().optional();
@@ -113,7 +113,14 @@ export type Package = {
   notes: string[];
 };
 
-const AVATAR_TYPES: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", webp: "image/webp" };
+/** The picture's type from its first bytes, as the upload route checks it: PNG, JPEG or WebP only, never what the name claims. */
+const pictureType = (b: Uint8Array) => {
+  const head = Buffer.from(b.subarray(0, 12));
+  return head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) ? "image/png"
+    : head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff ? "image/jpeg"
+    : head.subarray(0, 4).toString("latin1") === "RIFF" && head.subarray(8, 12).toString("latin1") === "WEBP" ? "image/webp"
+    : null;
+};
 const SCRIPT = /(^|\/)scripts?\/|\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|php|ps1|bat|cmd|exe|bin)$/i;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -180,8 +187,8 @@ export function readPackage(zip: Uint8Array): Package {
   const pkgAgents = folders("agents").map((slug) => {
     const a = parse(Agent, { ...(json(`agents/${slug}/agent.json`) as object), instructions: text(`agents/${slug}/INSTRUCTIONS.md`) }, `agents/${slug}`);
     const pic = under(`agents/${slug}`).find((p) => /\/avatar\.[a-z]+$/.test(p));
-    const type = pic ? AVATAR_TYPES[pic.split(".").at(-1)!] : undefined;
     const bytes = pic ? files.get(pic)! : null;
+    const type = bytes ? pictureType(bytes) : null;
     return { ...a, slug, avatar: type && bytes && bytes.length <= IMPORT_LIMITS.avatarBytes ? { bytes, type } : null };
   });
   if (pkgAgents.filter((a) => a.role === "ceo").length > 1) throw new ImportError(400, "The package has more than one CEO.");
