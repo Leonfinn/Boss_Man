@@ -111,7 +111,7 @@ function why(d: { score: number; parts: { blocking: number; liveRun: number; urg
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -148,8 +148,21 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
           <h1>Decisions</h1>
           <p className="sub">
             {open.length === 1 ? "1 decision waiting" : `${open.length} decisions waiting`}
-            {filter ? "" : " across all companies"}, ranked by what they unblock.
+            {filter ? "" : companies.length === 1 ? ` in ${companies[0]!.name}` : " across all companies"}, ranked by what they unblock.
           </p>
+          {elsewhere.length > 0 && (
+            <p className="sub">
+              Also waiting:{" "}
+              {elsewhere.map((c, i) => (
+                <span key={c.id}>
+                  {i > 0 && ", "}
+                  <button type="button" className="linkish" onClick={() => onPickCompany?.(c.id)}>
+                    {c.count} in {c.name}
+                  </button>
+                </span>
+              ))}
+            </p>
+          )}
         </div>
         {companies.length > 1 && (
           <div role="group" aria-label="Filter by company" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>

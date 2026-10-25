@@ -75,7 +75,7 @@ describe("decision queue", () => {
     expect(screen.getByText('Blocks "Checkout error states"')).toBeTruthy();
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
     expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
-    expect(screen.getByText("1 decision waiting across all companies, ranked by what they unblock.", { exact: false })).toBeTruthy();
+    expect(screen.getByText(`1 decision waiting in ${company.name}, ranked by what they unblock.`, { exact: false })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Raise to $80" }));
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());
@@ -96,6 +96,12 @@ describe("decision queue", () => {
   });
 
   it("is empty with the right illustration: done when idle, busy while agents work", () => {
+    // Another company's decisions are named, one click from switching to it.
+    const onPick = vi.fn();
+    const other = render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} elsewhere={[{ id: "c2", name: "HolidayHours", count: 9 }]} onPickCompany={onPick} />);
+    fireEvent.click(screen.getByRole("button", { name: "9 in HolidayHours" }));
+    expect(onPick).toHaveBeenCalledWith("c2");
+    other.unmount();
     const { rerender } = render(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByRole("img", { name: "Nothing needs you" })).toBeTruthy();
     rerender(<Decisions decisions={[]} companies={[company]} loaded agentsWorking={2} onAnswered={() => {}} />);
