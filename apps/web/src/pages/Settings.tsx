@@ -331,10 +331,13 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
         warnings = created.warnings;
       }
       await api(`/api/secrets/${secretId}/grants`, { method: "POST", body: { companyId: company.id, envName: env } });
+      // Each new credential starts from a blank form, so nothing carries over from the last one.
       setValue("");
       setName("");
       setExisting("");
-      sv.markSaved({ choice, name: "", value: "", env, existing: "" });
+      setChoice(-1);
+      setEnv("");
+      sv.markSaved({ choice: -1, name: "", value: "", env: "", existing: "" });
       grants.reload();
       secrets.reload();
       onChanged?.();
@@ -434,7 +437,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
           <>
             <div className="field">
               <label htmlFor="cred-name">Name</label>
-              <input id="cred-name" aria-describedby="cred-name-hint" placeholder={defaultName} value={name} onChange={(e) => setName(e.target.value)} />
+              <input id="cred-name" autoComplete="off" aria-describedby="cred-name-hint" placeholder={defaultName} value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div className="field">
               <label htmlFor="cred-value">Value</label>
@@ -444,7 +447,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
         )}
         <div className="field">
           <label htmlFor="cred-env">Variable name</label>
-          <input id="cred-env" className="mono" required pattern="[A-Z_][A-Z0-9_]*" value={env} onChange={(e) => setEnv(e.target.value.toUpperCase())} />
+          <input id="cred-env" className="mono" autoComplete="off" required pattern="[A-Z_][A-Z0-9_]*" value={env} onChange={(e) => setEnv(e.target.value.toUpperCase())} />
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {!existing && (

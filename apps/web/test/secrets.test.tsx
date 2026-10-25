@@ -99,5 +99,8 @@ describe("adding a credential", () => {
     expect((screen.getByLabelText("Name") as HTMLInputElement).placeholder).toBe("GSC_SERVICE_ACCOUNT_JSON");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await vi.waitFor(() => expect(posts.find((p) => p.url === "/api/secrets")?.body.name).toBe("GSC_SERVICE_ACCOUNT_JSON"));
+    // The next one starts blank: no kind, no variable name carried over.
+    await vi.waitFor(() => expect((screen.getByLabelText("Variable name") as HTMLInputElement).value).toBe(""));
+    expect(kind.value).toBe("");
   });
 });
