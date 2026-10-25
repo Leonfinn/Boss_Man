@@ -97,3 +97,32 @@ describe("Agent Companies import (docs/11, step 4)", () => {
     expect(strFromU8(out["wiki/imported/site.md"]!)).toContain("Deploy on Thursdays.");
   });
 });
+
+describe("Paperclip issues (docs/11, step 5)", () => {
+  it("brings issues, comments and documents in as tickets, conversation and wiki pages", async () => {
+    const issues = [
+      { identifier: "ACM-1", title: "Launch the site", status: "in_progress", priority: "high", parent: null, project: "Site", description: "Ship it.", created_at: "2026-10-01T09:00:00Z", comments: [{ at: "2026-10-01T10:00:00Z", by: "Boss", body: "On it." }, { at: "2026-10-01T11:00:00Z", by: "user-abc123", body: "Thanks." }, { at: "2026-10-01T12:00:00Z", by: "system", body: "Status changed." }], documents: [{ key: "plan", title: "Launch plan", body: "Step one." }, { key: "continuation-summary", title: null, body: "notes between runs" }, { key: "claims", title: "Claims", body: "x".repeat(250_000) }] },
+      { identifier: "ACM-2", title: "Write the copy", status: "cancelled", priority: "low", parent: "ACM-1", project: "Site", description: null, created_at: "2026-10-02T09:00:00Z", comments: null, documents: null },
+      { identifier: "ACM-3", title: "Loose idea", status: "todo", priority: "medium", parent: null, project: null, description: null, created_at: "2026-10-03T09:00:00Z", comments: [], documents: [] },
+    ];
+    const withIssues = Buffer.from(zipSync(Object.fromEntries([...Object.entries(FILES), ["paperclip-issues.json", JSON.stringify(issues)]].map(([p, t]) => [`acme/${p}`, strToU8(t)])))).toString("base64");
+    const req = await setup();
+    const pre = (await req("POST", "/api/companies/import/preview", { zip: withIssues })).json();
+    expect(pre.counts).toMatchObject({ tickets: 3, projects: 2, wikiPages: 4 });
+    expect(pre.warnings).toEqual(expect.arrayContaining(['1 tickets had no project in Paperclip; they\'re in a new project, "Imported tickets".', 'Skipped 1 "continuation-summary" documents: they were Paperclip\'s working notes between runs.']));
+    const id = (await req("POST", "/api/companies/import", { zip: withIssues })).json().companyId as string;
+
+    const { unzipSync, strFromU8 } = await import("fflate");
+    const out = unzipSync(new Uint8Array((await req("GET", `/api/companies/${id}/export?wiki=1&tickets=all`)).rawPayload));
+    const tickets = strFromU8(out["tickets.jsonl"]!).trim().split("\n").map((l) => JSON.parse(l));
+    const by = (t: string) => tickets.find((x) => x.title === t);
+    expect(by("Launch the site")).toMatchObject({ state: "in_progress", project: "site", body: "Ship it.\n\nImported from ACM-1" });
+    expect(by("Launch the site").conversation.map((m: { author: string; agent: string | null; text: string }) => [m.author, m.agent, m.text])).toEqual([["agent", "boss", "On it."], ["owner", null, "Thanks."], ["system", null, "Status changed."]]);
+    expect(by("Write the copy")).toMatchObject({ state: "done", outcome: "Cancelled in Paperclip.", parent: by("Launch the site").ref });
+    expect(by("Loose idea")).toMatchObject({ state: "ready", project: "imported-tickets" });
+    const pages = Object.keys(out).filter((p) => p.startsWith("wiki/imported/acm-1/")).sort();
+    expect(pages).toEqual(["wiki/imported/acm-1/claims-2.md", "wiki/imported/acm-1/claims.md", "wiki/imported/acm-1/plan.md"]);
+    expect(strFromU8(out["wiki/imported/acm-1/claims.md"]!).length + strFromU8(out["wiki/imported/acm-1/claims-2.md"]!).length).toBeGreaterThan(250_000);
+    expect(strFromU8(out["wiki/imported/acm-1/plan.md"]!)).toContain('"ticket":"' + by("Launch the site").ref + '"');
+  });
+});

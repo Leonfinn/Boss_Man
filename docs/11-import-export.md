@@ -85,6 +85,8 @@ Paperclip's company export carries no issues. Its issues, comments and issue doc
 - comment → ticket message, author kept as text;
 - issue document → wiki page under `Imported/<identifier>/<key>`, linked from the ticket, keeping the latest body only. The repeated `continuation-summary` documents are skipped.
 
+As built (step 5): `paperclip-issues.json` goes next to `COMPANY.md` in the Agent Companies export, and the adapter turns it into `tickets.jsonl` and wiki pages. `cancelled` arrives as done with an outcome, issues with no project go to an "Imported tickets" project, and a document over the page limit is split into parts. The query and the steps are in docs/14-paperclip-migration.md.
+
 ## Export
 
 - In the UI: Settings → company → **Export**, with tick boxes for wiki and tickets (none, open or all).
