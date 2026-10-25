@@ -328,7 +328,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       <header className="page-head">
         <div>
           <p className="label">
-            <a href={`#/board/${t.projectId}`}>{t.project}</a> · task
+            <a href={`#/board/${t.projectId}`}>{t.project}</a> · task{t.ref && <span className="mono"> · {t.ref}</span>}
           </p>
           <h1>{t.title}</h1>
         </div>

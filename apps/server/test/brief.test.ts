@@ -133,7 +133,7 @@ describe("the brief cursor (R83)", () => {
     expect(p).toMatch(/^You are Dev[^\n]*working through Boss Man\./);
     const at = p.indexOf("Company brief as of ");
     expect(at).toBeGreaterThan(0);
-    expect(at).toBeLessThan(p.indexOf(`Ticket ${t.id}`));
+    expect(at).toBeLessThan(p.indexOf(`(id ${t.id})`));
     expect(p).toMatch(/Company brief as of \d{4}-\d\d-\d\d \d\d:\d\d UTC\. This supersedes any earlier brief in this conversation\./);
     expect(p).toContain('<untrusted source="brief');
   });

@@ -194,6 +194,7 @@ function issues(files: Files, out: Files, notes: string[], projectSlug: Record<s
     lines.push(
       JSON.stringify({
         ref,
+        number: Number(/-(\d{1,9})$/.exec(ref)?.[1]) || null,
         project: project ?? "imported-tickets",
         title: str(it.title) ?? ref,
         body: str(it.description),
@@ -221,6 +222,10 @@ function issues(files: Files, out: Files, notes: string[], projectSlug: Record<s
     }
   }
   out.set("tickets.jsonl", strToU8(lines.join("\n") + (lines.length ? "\n" : "")));
+  // Paperclip's prefix (HOL in HOL-12) carries on, so its references keep pointing at the same tickets.
+  const prefixes = list.map((it) => /^([A-Z][A-Z0-9]{0,9})-\d+$/.exec(str(obj(it).identifier) ?? "")?.[1]).filter((p): p is string => !!p);
+  const prefix = [...new Set(prefixes)].sort((a, b) => prefixes.filter((p) => p === b).length - prefixes.filter((p) => p === a).length)[0];
+  if (prefix) out.set("company.json", strToU8(`${JSON.stringify({ ...JSON.parse(strFromU8(out.get("company.json")!)), ticketPrefix: prefix }, null, 2)}\n`));
   if (homeless) {
     out.set("projects/imported-tickets/project.json", strToU8(JSON.stringify({ name: "Imported tickets", columns: DEFAULT_COLUMNS })));
     notes.push(`${homeless} tickets had no project in Paperclip; they're in a new project, "Imported tickets".`);

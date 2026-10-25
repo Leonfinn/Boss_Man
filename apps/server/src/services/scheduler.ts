@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
-import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -432,9 +432,10 @@ export function schedulerService(
     }
     if (agent.role === "ceo") lines.push("", "Reviews and plan approvals follow the company's review settings, so they may go to someone other than you; you review or approve when the chosen person is unavailable, and you can always overrule.");
     if (w.ticketId) {
-      const [t] = await db.select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).where(eq(tickets.id, w.ticketId));
+      const [t] = await db.select({ t: tickets, project: projects.name, repoUrl: projects.repoUrl, prefix: companies.ticketPrefix }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).innerJoin(companies, eq(companies.id, tickets.companyId)).where(eq(tickets.id, w.ticketId));
       if (t) {
-        lines.push("", `Ticket ${t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
+        const ref = ticketRef(t.prefix, t.t.number);
+        lines.push("", `Ticket ${ref ? `${ref} (id ${t.t.id})` : t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
         const note = stateNoteLine(t.t, now());
         if (note) lines.push("", note);

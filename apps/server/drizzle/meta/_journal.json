@@ -393,6 +393,13 @@
       "when": 1792938985859,
       "tag": "0055_agent_thinking",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1792940136329,
+      "tag": "0056_ticket_refs",
+      "breakpoints": true
     }
   ]
 }

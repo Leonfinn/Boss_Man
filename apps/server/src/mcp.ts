@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, stateNoteLine, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -62,6 +62,14 @@ export type McpHooks = {
 };
 
 /** The ticket row for an agent, with its state note shown with its age (R85). */
+/** Shows a company's ticket numbers as references (HOL-12). */
+async function refsOf(db: Db, companyId: string) {
+  const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+  return <T extends { number: number | null }>({ number, ...r }: T) => ({ ref: ticketRef(c?.prefix, number), ...r });
+}
+/** A reference like HOL-12 (any prefix: an old one still finds the number). */
+const REF = /^[A-Za-z0-9]{1,10}-(\d{1,9})$/;
+
 const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date }>({ stateNote, stateNoteAt, ...r }: T) => {
   const note = stateNoteLine({ stateNote, stateNoteAt, lastActivityAt: r.lastActivityAt }, new Date());
   return note ? { ...r, stateNote: note } : r;
@@ -884,10 +892,16 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     "tickets",
     {
       description:
-        "Look up your company's tickets. find (optional q to search titles and descriptions, optional state) lists matches with their ids; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters.",
-      inputSchema: { action: z.enum(["find", "read", "file"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().uuid().optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional() },
+        "Look up your company's tickets. Each has a reference like HOL-12, which you can use anywhere this tool takes a ticketId. find (optional q to search titles and descriptions, or a reference, optional state) lists matches with their ids and references; read (ticketId) gives one ticket: description (long ones are cut; pass offset to continue), state, assignee, its branch, what it produced (wiki pages, repo files, links) and its recent conversation; file (ticketId, path, optional offset) reads a file from that ticket's work in the repo, such as a document it wrote, even if it was never merged; long files come in parts of 40000 characters.",
+      inputSchema: { action: z.enum(["find", "read", "file"]), q: z.string().max(200).optional(), state: z.enum(STATES).optional(), ticketId: z.string().max(40).optional(), path: z.string().max(500).optional(), offset: z.number().int().min(0).optional() },
     },
-    async ({ action, q, state, ticketId, path, offset }) => {
+    async ({ action, q, state, ticketId: given, path, offset }) => {
+      const asRef = given ? REF.exec(given) : null;
+      const ticketId = asRef
+        ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), eq(tickets.number, Number(asRef[1])))))[0]?.id
+        : given && z.string().uuid().safeParse(given).success ? given : undefined;
+      if (given && !ticketId) return fail(`No ticket ${given} in your company.`);
+      const ref = await refsOf(db, scope.companyId);
       if (action === "file") {
         if (!ticketId || !path) return fail("Give the ticketId and the file's path in the repo.");
         try {
@@ -899,15 +913,16 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
         }
       }
       if (action === "find") {
-        const like = q?.trim() ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
+        const byRef = q ? REF.exec(q.trim()) : null;
+        const like = q?.trim() && !byRef ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
         const rows = await db
-          .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt })
+          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-          .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like)) : undefined))
+          .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like)) : undefined))
           .orderBy(desc(tickets.lastActivityAt))
           .limit(40);
-        return text(JSON.stringify(rows.map(withNote)));
+        return text(JSON.stringify(rows.map((r) => withNote(ref(r)))));
       }
       if (!ticketId) return fail("Give the ticketId to read.");
       const [row] = await db
@@ -924,7 +939,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
       return text(
         [
           `# ${t.title}`,
-          `Ticket ${t.id} in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
+          `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
           ...(note ? [note] : []),
           t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
           "",
@@ -1184,12 +1199,13 @@ function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: S
       const ms = os.length ? await db.select({ id: milestones.id, objectiveId: milestones.objectiveId, title: milestones.title, targetDate: milestones.targetDate }).from(milestones).where(inArray(milestones.objectiveId, os.map((o) => o.id))) : [];
       const as = await db.select({ id: agents.id, name: agents.name, role: agents.role }).from(agents).where(eq(agents.companyId, scope.companyId));
       const ts = await db
-        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, projectId: tickets.projectId, milestoneId: tickets.milestoneId, assigneeAgentId: tickets.assigneeAgentId, risk: tickets.risk })
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, projectId: tickets.projectId, milestoneId: tickets.milestoneId, assigneeAgentId: tickets.assigneeAgentId, risk: tickets.risk })
         .from(tickets)
         .where(and(eq(tickets.companyId, scope.companyId), ne(tickets.systemState, "done")))
         .orderBy(asc(tickets.createdAt))
         .limit(300);
-      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as, openTickets: ts }));
+      const ref = await refsOf(db, scope.companyId);
+      return text(JSON.stringify({ projects: ps, objectives: os.map((o) => ({ ...o, milestones: ms.filter((m) => m.objectiveId === o.id) })), agents: as, openTickets: ts.map(ref) }));
     },
   );
 }
@@ -1201,10 +1217,11 @@ function registerListMyWork(server: Pick<McpServer, "registerTool">, db: Db, sco
     async () => {
       if (!scope.agentId) return text("[]");
       const rows = await db
-        .select({ id: tickets.id, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, lastActivityAt: tickets.lastActivityAt })
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, due: tickets.dueDate, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, lastActivityAt: tickets.lastActivityAt })
         .from(tickets)
         .where(and(eq(tickets.assigneeAgentId, scope.agentId), ne(tickets.systemState, "done")));
-      return text(JSON.stringify(rows.map(withNote)));
+      const ref = await refsOf(db, scope.companyId);
+      return text(JSON.stringify(rows.map((r) => withNote(ref(r)))));
     },
   );
 }
