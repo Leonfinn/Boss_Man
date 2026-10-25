@@ -49,6 +49,8 @@ describe("company export (docs/11, step 1)", () => {
     const read = (p: string) => JSON.parse(strFromU8(zip[p]!));
     expect(read("manifest.json")).toMatchObject({ format: "bossman-company/1", company: "Holiday Hours", includes: { wiki: true, tickets: "open" } });
     expect(read("company.json")).toMatchObject({ name: "Holiday Hours", mission: "Help people work out leave." });
+    // A new company's CEO starts with the CEO template's instructions, not an empty box.
+    expect(strFromU8(zip["agents/ceo/INSTRUCTIONS.md"]!)).toContain("You run the company for the owner");
     expect(read("skills.json")).toEqual([expect.objectContaining({ name: "deploy", agents: ["celebrimbor"] })]);
     expect(strFromU8(zip["skills/deploy/run.sh"]!)).toBe("#!/bin/sh\necho hi");
     expect(read("secrets.json")).toEqual([{ name: "Gitea token", kind: "generic", envName: "GITEA_TOKEN", agents: ["celebrimbor"] }]);

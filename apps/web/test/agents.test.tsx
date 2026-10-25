@@ -47,3 +47,26 @@ describe("Refresh models", () => {
     expect(fetchMock.mock.calls.some(([u, i]) => String(u) === "/api/companies/c1/models/refresh" && (i as RequestInit).method === "POST")).toBe(true);
   });
 });
+
+describe("instructions from the template", () => {
+  it("offers to fill an empty box from the agent's template, and the CEO's from the CEO template", async () => {
+    const row = (over: object) => ({ id: "a1", companyId: "c1", name: "Ada", role: "worker", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null, title: "Engineer", template: "engineer", instructions: "", funding: null, fundingKind: null, retiredAt: null, status: "idle", current: null, openTickets: 0, pa: null, month: { costMicros: 0, runs: 0, tokens: 0 }, ...over });
+    for (const [agent, label, text] of [
+      [row({}), "Fill in from the Engineer template", "Engineer instructions"],
+      [row({ id: "a2", name: "Boss", role: "ceo", title: null, template: null }), "Fill in from the CEO template", "CEO instructions"],
+    ] as const) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          const body = url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")], ceo: { ...tpl("ceo", "CEO"), role: undefined } } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/history") ? [] : url.includes("/agents") ? [agent] : [];
+          return new Response(JSON.stringify(body), { status: 200 });
+        }),
+      );
+      render(<Agents company={company} onChanged={() => {}} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+      fireEvent.click(await screen.findByRole("button", { name: label }));
+      expect((screen.getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe(text);
+      cleanup();
+    }
+  });
+});

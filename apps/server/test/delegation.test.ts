@@ -197,6 +197,6 @@ describe("CEO rates risk", () => {
     const t = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id, risk });
     await ctx.scheduler.wake({ agentId: ctx.co.ceo.id, reason: "assigned", ticketId: t.id });
     await ctx.scheduler.tick();
-    expect(ctx.commands.at(-1)!.prompt.includes("set_ticket_risk")).toBe(asks);
+    expect(ctx.commands.at(-1)!.prompt.includes("This ticket has no risk rating yet")).toBe(asks);
   });
 });
