@@ -91,7 +91,8 @@ export function modelChoices(configOptions: unknown[] | null | undefined) {
       if (typeof value === "string" && value) out.push({ value, name: typeof name === "string" ? name : value, description: typeof description === "string" ? description : null });
     }
   }
-  return out.slice(0, 200);
+  // OpenRouter alone offers a few hundred; a lower cap dropped whole providers (e.g. Ollama) off the end.
+  return out.slice(0, 1000);
 }
 const currentModel = (configOptions: unknown[] | null | undefined) =>
   ((configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { currentValue?: string } | undefined)?.currentValue;

@@ -81,6 +81,10 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
   const fromApi = lists?.api.find((a) => a.fundingSourceId === fundingSourceId);
   const known = [...fromRunner, ...(fromApi?.models ?? [])].some((m) => m.value === value);
   const [typing, setTyping] = useState(false);
+  const [q, setQ] = useState("");
+  const match = (m: { value: string; name: string }) => `${m.name} ${m.value}`.toLowerCase().includes(q.trim().toLowerCase());
+  const runnerShown = fromRunner.filter(match);
+  const apiShown = (fromApi?.models ?? []).filter(match);
   const offered = fromRunner.length + (fromApi?.models.length ?? 0) > 0;
   if (!offered || typing)
     return (
@@ -100,22 +104,25 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
     );
   return (
     <>
+      <input type="search" className="mono" placeholder="Search models" aria-label="Search models" value={q} onChange={(e) => setQ(e.target.value)} />
       <select id={id} value={value} onChange={(e) => (e.target.value === OTHER ? setTyping(true) : onChange(e.target.value))}>
         <option value="">Default</option>
         {/* A full ID still works on Claude (the runner pins it to the opus alias), so it's shown as typed, not refused. */}
         {value && !known && <option value={value}>{value} (typed ID)</option>}
-        {fromRunner.length > 0 && (
+        {/* The chosen model stays listed while a search hides it, so the select still shows it. */}
+        {value && known && !runnerShown.concat(apiShown).some((m) => m.value === value) && <option value={value}>{value}</option>}
+        {runnerShown.length > 0 && (
           <optgroup label={`Offered by the runner (${agentKind})`}>
-            {fromRunner.map((m) => (
+            {runnerShown.map((m) => (
               <option key={`r-${m.value}`} value={m.value}>
                 {m.name === m.value ? m.value : `${m.name} (${m.value})`}
               </option>
             ))}
           </optgroup>
         )}
-        {fromApi && fromApi.models.length > 0 && (
+        {fromApi && apiShown.length > 0 && (
           <optgroup label={`On ${fromApi.name}'s API key`}>
-            {fromApi.models.map((m) => (
+            {apiShown.map((m) => (
               <option key={`a-${m.value}`} value={m.value}>
                 {m.name === m.value ? m.value : `${m.name} (${m.value})`}
               </option>
@@ -124,7 +131,10 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
         )}
         <option value={OTHER}>Other…</option>
       </select>
-      <small className="muted">{refreshButton}</small>
+      <small className="muted">
+        {q.trim() && `${runnerShown.length + apiShown.length} of ${fromRunner.length + (fromApi?.models.length ?? 0)} models match.`}
+        {refreshButton}
+      </small>
       {fromApi?.error && <small className="error">{fromApi.error}</small>}
     </>
   );

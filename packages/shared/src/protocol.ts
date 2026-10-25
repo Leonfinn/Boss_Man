@@ -56,7 +56,7 @@ export const RunnerEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("runner.models"),
     agentKind: z.string().min(1).max(40),
-    models: z.array(z.object({ value: z.string().min(1).max(200), name: z.string().max(200), description: z.string().max(500).nullable().optional() })).max(200),
+    models: z.array(z.object({ value: z.string().min(1).max(200), name: z.string().max(200), description: z.string().max(500).nullable().optional() })).max(1000),
   }),
   // Disk use of the runner's workspaces after its clean-up pass (R54).
   z.object({
