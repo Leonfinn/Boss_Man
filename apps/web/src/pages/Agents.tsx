@@ -361,7 +361,11 @@ function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: F
           <div className="field">
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
             <textarea id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
-            <small className="muted">{a.role === "ceo" ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)." : "Used from the agent's next run."}</small>
+            <small className="muted">{a.role === "ceo"
+                ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)."
+                : a.duty === "wiki"
+                  ? "Boss Man gives the wiki maintainer its job in every run (the Index, Log, Status pages, filing finished work, the health check). Add only extra house rules here; they're used from its next run."
+                  : "Used from the agent's next run."}</small>
           </div>
           <SaveButton {...sv} busy={busy} style={{ alignSelf: "flex-start" }} />
         </form>
