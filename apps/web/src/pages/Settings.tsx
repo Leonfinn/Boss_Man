@@ -266,14 +266,19 @@ function GrantAgents({ grant, agents, busy, onSave }: { grant: Grant; agents: Ag
 export function Credentials({ company, onChanged, title = "Credentials" }: { company: Company; onChanged?: () => void; title?: string }) {
   const grants = usePoll((signal) => api<Grant[]>(`/api/companies/${company.id}/grants`, { signal }), 30_000, `grants-${company.id}`);
   const secrets = usePoll((signal) => api<Secret[]>("/api/secrets", { signal }), 30_000, "secrets");
-  const [choice, setChoice] = useState(0);
+  // No default kind: a value checked as the wrong kind fails confusingly, so the owner always picks.
+  const [choice, setChoice] = useState(-1);
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
-  const [env, setEnv] = useState<string>(CREDENTIALS[0].env);
+  const [env, setEnv] = useState("");
   const [existing, setExisting] = useState("");
   const act = useAction();
   const sv = useSaveState({ choice, name, value, env, existing });
-  const c = CREDENTIALS[choice]!;
+  const c = CREDENTIALS[choice];
+  // A pasted key file (e.g. a Google service-account JSON) only fits "Other".
+  const looksLikeJson = !!c && c.kind !== "generic" && value.trim().startsWith("{");
+  // The name is only the label in the secret store; left blank it follows the variable for "Other".
+  const defaultName = !c ? "" : c.env ? `${company.name} ${c.label}` : env;
   const describe = (r: { problems?: string[]; live: { ok: boolean; message: string } | null }) => {
     const problems = r.problems?.length ? ` ${r.problems.join(" ")}` : "";
     if (r.live) {
@@ -281,10 +286,10 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       return `${r.live.message}${problems}`;
     }
     if (problems) throw new Error(problems.trim());
-    return c.kind === "claude_oauth_token" ? "The format looks right. A setup-token can only be fully checked by Claude Code itself: save it, then choose Check with Claude." : "The format looks right. Boss Man can't ask a provider about this kind of value.";
+    return c?.kind === "claude_oauth_token" ? "The format looks right. A setup-token can only be fully checked by Claude Code itself: save it, then choose Check with Claude." : "The format looks right. Boss Man can't ask a provider about this kind of value.";
   };
   const check = () =>
-    void act.run(async () => describe(await api<{ problems: string[]; live: { ok: boolean; message: string } | null }>("/api/secrets/check", { method: "POST", body: { kind: c.kind, value } })));
+    void act.run(async () => describe(await api<{ problems: string[]; live: { ok: boolean; message: string } | null }>("/api/secrets/check", { method: "POST", body: { kind: c!.kind, value } })));
   const checkSaved = (g: Grant) =>
     void act.run(async () => {
       if (g.envName === CLAUDE_TOKEN_ENV) {
@@ -321,15 +326,18 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       let secretId = existing;
       let warnings: string[] = [];
       if (!secretId) {
-        const created = await api<{ secret: { id: string }; warnings: string[] }>("/api/secrets", { method: "POST", body: { name: name || `${company.name} ${c.label}`, kind: c.kind, value } });
+        const created = await api<{ secret: { id: string }; warnings: string[] }>("/api/secrets", { method: "POST", body: { name: name.trim() || defaultName, kind: c!.kind, value } });
         secretId = created.secret.id;
         warnings = created.warnings;
       }
       await api(`/api/secrets/${secretId}/grants`, { method: "POST", body: { companyId: company.id, envName: env } });
+      // Each new credential starts from a blank form, so nothing carries over from the last one.
       setValue("");
       setName("");
       setExisting("");
-      sv.markSaved({ choice, name: "", value: "", env, existing: "" });
+      setChoice(-1);
+      setEnv("");
+      sv.markSaved({ choice: -1, name: "", value: "", env: "", existing: "" });
       grants.reload();
       secrets.reload();
       onChanged?.();
@@ -393,13 +401,17 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
           <label htmlFor="cred-kind">Add</label>
           <select
             id="cred-kind"
-            value={choice}
+            required={!existing}
+            value={choice < 0 ? "" : choice}
             onChange={(e) => {
               const i = Number(e.target.value);
               setChoice(i);
               setEnv(CREDENTIALS[i]!.env);
             }}
           >
+            <option value="" disabled>
+              Choose what you're adding
+            </option>
             {CREDENTIALS.map((k, i) => (
               <option key={k.label} value={i}>
                 {k.label}
@@ -425,7 +437,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
           <>
             <div className="field">
               <label htmlFor="cred-name">Name</label>
-              <input id="cred-name" placeholder={`${company.name} ${c.label}`} value={name} onChange={(e) => setName(e.target.value)} />
+              <input id="cred-name" autoComplete="off" aria-describedby="cred-name-hint" placeholder={defaultName} value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div className="field">
               <label htmlFor="cred-value">Value</label>
@@ -435,20 +447,32 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
         )}
         <div className="field">
           <label htmlFor="cred-env">Variable name</label>
-          <input id="cred-env" className="mono" required pattern="[A-Z_][A-Z0-9_]*" value={env} onChange={(e) => setEnv(e.target.value.toUpperCase())} />
+          <input id="cred-env" className="mono" autoComplete="off" required pattern="[A-Z_][A-Z0-9_]*" value={env} onChange={(e) => setEnv(e.target.value.toUpperCase())} />
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {!existing && (
-            <button className="btn" type="button" disabled={act.busy || !value.trim()} onClick={check}>
+            <button className="btn" type="button" disabled={act.busy || !value.trim() || !c} onClick={check}>
               Check
             </button>
           )}
           <SaveButton {...sv} busy={act.busy} />
         </div>
       </form>
-      <p className="muted" style={{ fontSize: 13 }}>
-        {c.help.split("`").map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part))}
-      </p>
+      {!existing && (
+        <p id="cred-name-hint" className="muted" style={{ fontSize: 13 }}>
+          <strong>Name</strong> is optional: it's how the value is listed under Secrets, and lets you reuse it in another company under a different variable name. Leave it blank to use the one shown. <strong>Variable name</strong> is what agents see.
+        </p>
+      )}
+      {looksLikeJson && (
+        <p role="alert" className="error" style={{ fontSize: 14 }}>
+          This looks like a JSON key file (such as a Google service-account key), not a {c!.label}. Choose <strong>Other</strong> under Add, and keep the whole file as the value.
+        </p>
+      )}
+      {c && (
+        <p className="muted" style={{ fontSize: 13 }}>
+          {c.help.split("`").map((part, i) => (i % 2 ? <code key={i}>{part}</code> : part))}
+        </p>
+      )}
       {act.view}
     </Section>
   );
