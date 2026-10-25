@@ -2,7 +2,7 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, Kanban, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Settings, Sparkles, Star, Users, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Settings, Sparkles, Star, Users, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
@@ -20,7 +20,6 @@ const GROUPS: Array<{ title: string; items: Item[] }> = [
     title: "Work",
     items: [
       { id: "projects", label: "Projects", icon: FolderGit2 },
-      { id: "board", label: "Kanban", icon: Kanban },
       { id: "roadmap", label: "Roadmap", icon: Map },
       { id: "plan", label: "Plan", icon: ListChecks },
       { id: "wiki", label: "Wiki", icon: BookOpen },
@@ -130,7 +129,7 @@ export function Sidebar(props: {
   const starredProjects = props.current?.projects?.filter((p) => p.starred) ?? [];
   const waiting = (companyId: string) => props.decisions.filter((d) => d.companyId === companyId).length;
   const decisionsHere = props.current ? waiting(props.current.id) : props.decisions.length;
-  const label = GROUPS.flatMap((g) => g.items).find((i) => i.id === props.active || (props.active === "tickets" && i.id === "board"))?.label ?? "Menu";
+  const label = GROUPS.flatMap((g) => g.items).find((i) => i.id === props.active || ((props.active === "tickets" || props.active === "board") && i.id === "projects"))?.label ?? "Menu";
   return (
     <nav className="side" aria-label="Main">
       <div className="brand">
@@ -148,7 +147,7 @@ export function Sidebar(props: {
             <ul>
               {g.items.map((n) => (
                 <li key={n.id}>
-                  <a className="nav" href={`#/${n.id}`} onClick={() => setMenu(false)} aria-current={props.active === n.id || (props.active === "tickets" && n.id === "board") ? "page" : undefined}>
+                  <a className="nav" href={`#/${n.id}`} onClick={() => setMenu(false)} aria-current={props.active === n.id || ((props.active === "tickets" || props.active === "board") && n.id === "projects") ? "page" : undefined}>
                     <n.icon size={18} strokeWidth={1.75} aria-hidden="true" />
                     <span className="nav-label">{n.label}</span>
                     {n.id === "decisions" && decisionsHere > 0 && <span className="count" aria-label={`${decisionsHere} waiting`}>{decisionsHere}</span>}

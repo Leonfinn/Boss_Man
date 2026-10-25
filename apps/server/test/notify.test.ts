@@ -5,7 +5,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runs, wakes } from "../src/db/schema.js";
+import { agents, decisions, runs, wakes } from "../src/db/schema.js";
+import { eq } from "drizzle-orm";
 import { issueRunToken } from "../src/mcp.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -179,34 +180,32 @@ describe("nudge (R86)", () => {
     expect(await nudge(c, c.alice.id, run.id, c.ceo.id, "Question 5")).toMatchObject({ ok: true });
   });
 
-  it("drops an A to B to A ping-pong on one ticket, with one alert", async () => {
+  it("lets a question, its answer and a follow-up through on a ticket, then drops the loop with one alert", async () => {
     const c = (ctx = await setup());
     const a = await c.liveRun(c.alice.id, c.ticket.id);
     const b = await c.liveRun(c.bob.id, c.ticket.id);
     expect(await nudge(c, c.alice.id, a.id, "Bob", "Over to you", c.ticket.id)).toMatchObject({ ok: true });
-    expect(await nudge(c, c.bob.id, b.id, "Alice", "Back to you", c.ticket.id)).toMatchObject({ ok: false, error: expect.stringContaining("Answer them on the ticket") });
-    expect(await nudge(c, c.bob.id, b.id, "Alice", "Back again", c.ticket.id)).toMatchObject({ ok: false });
+    expect(await nudge(c, c.bob.id, b.id, "Alice", "Done, but item 3 needs you", c.ticket.id)).toMatchObject({ ok: true });
+    expect(await nudge(c, c.alice.id, a.id, "Bob", "Item 3 is fixed", c.ticket.id)).toMatchObject({ ok: true });
+    expect(await nudge(c, c.bob.id, b.id, "Alice", "Thanks, closing", c.ticket.id)).toMatchObject({ ok: true });
+    expect(await nudge(c, c.alice.id, a.id, "Bob", "One more thing", c.ticket.id)).toMatchObject({ ok: false, error: expect.stringContaining("4 times about this") });
+    expect(await nudge(c, c.alice.id, a.id, "Bob", "And another", c.ticket.id)).toMatchObject({ ok: false });
     const alerts = (await c.db.select().from(decisions)).filter((d) => d.question.includes("keep nudging each other"));
     expect(alerts).toHaveLength(1);
     // The alert says what each asked and where to answer, so the owner can act on it.
     expect(alerts[0]!.question).toMatch(/about [A-Z]+-\d+ "Rate limiting"/);
-    expect(alerts[0]!.question).toContain('Alice to Bob: "Over to you"');
-    expect(alerts[0]!.question).toContain('Bob to Alice (not delivered): "Back to you"');
+    expect(alerts[0]!.question).toContain('Bob to Alice: "Thanks, closing"');
+    expect(alerts[0]!.question).toContain('Alice to Bob (not delivered): "One more thing"');
     // About another ticket it's a new conversation.
     expect(await nudge(c, c.bob.id, b.id, "Alice", "Different matter")).toMatchObject({ ok: true });
   });
 
-  it("lets one reply through when there's no ticket to answer on, and drops the third", async () => {
+  it("finds a colleague by the first part of their name, and lists the names when it can't", async () => {
     const c = (ctx = await setup());
-    const a = await c.liveRun(c.alice.id, null);
-    const b = await c.liveRun(c.bob.id, null);
-    expect(await nudge(c, c.alice.id, a.id, "Bob", "Please set the organising ticket to in_progress")).toMatchObject({ ok: true });
-    expect(await nudge(c, c.bob.id, b.id, "Alice", "There is no such ticket; which one?")).toMatchObject({ ok: true });
-    expect(await nudge(c, c.alice.id, a.id, "Bob", "Then create it")).toMatchObject({ ok: false, error: expect.stringContaining("Put it on a ticket") });
-    const [alert] = (await c.db.select().from(decisions)).filter((d) => d.question.includes("keep nudging each other"));
-    expect(alert!.question).toContain("with no ticket to work on");
-    expect(alert!.question).toContain('Bob to Alice: "There is no such ticket; which one?"');
-    expect(alert!.question).toContain("Create one and assign it");
+    const run = await c.liveRun(c.alice.id, null);
+    await c.db.update(agents).set({ name: "Bob - Tester" }).where(eq(agents.id, c.bob.id));
+    expect(await nudge(c, c.alice.id, run.id, "bob", "Can you check it in a browser?")).toMatchObject({ ok: true });
+    expect(await nudge(c, c.alice.id, run.id, "Robert", "hi")).toMatchObject({ ok: false, error: expect.stringContaining("Bob - Tester") });
   });
 
   it("still counts toward the wake-chain depth limit", async () => {
