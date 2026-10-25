@@ -147,7 +147,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   return (
     <div className="app">
       <Sidebar
-        active={page}
+        active={page === "funding" || page === "rules" || page === "secrets" ? "settings" : page}
         activeAgent={route[2]}
         activeProject={route[1]}
         companies={list}
@@ -186,18 +186,16 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           <Roadmap companies={mine} tab={route[1]} go={go} />
         ) : page === "plan" ? (
           <Plan companies={list} companyId={companyId} go={go} />
-        ) : page === "funding" ? (
-          <Funding companies={list} />
         ) : page === "runs" ? (
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
         ) : page === "tickets" && route[1] ? (
           <Ticket key={route[1]} id={route[1]} companies={list} />
-        ) : page === "rules" ? (
-          <Rules companies={list} companyId={companyId} go={go} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} />
-        ) : page === "secrets" ? (
-          <Secrets companies={list} companyId={companyId} onChanged={companies.reload} />
+        ) : page === "funding" || page === "rules" || page === "secrets" ? (
+          <Settings companies={list} companyId={companyId} tab={page} go={go} onChanged={companies.reload}>
+            {page === "funding" ? <Funding companies={list} /> : page === "rules" ? <Rules companies={list} companyId={companyId} go={go} /> : <Secrets companies={list} companyId={companyId} onChanged={companies.reload} />}
+          </Settings>
         ) : page === "projects" ? (
           <ProjectsPage companies={list} companyId={companyId} go={go} onChanged={companies.reload} />
         ) : page === "settings" ? (
