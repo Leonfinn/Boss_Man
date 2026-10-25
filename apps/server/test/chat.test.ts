@@ -26,7 +26,7 @@ async function setup() {
   ctx = { close: async () => (await built.app.close(), await close()) };
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json();
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json();
   const project = (await req("POST", `/api/companies/${company.id}/projects`, { name: "App" })).json();
@@ -150,6 +150,37 @@ describe("owner chat", () => {
     expect((await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "bug", title: "x" })).statusCode).toBe(400);
   });
 
+  it("says when a run finishes without a reply, or keeps working after its last one", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("PUT", `/api/companies/${c.company.id}/agent-approvals`, { approvals: "hires_and_edits" });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Tidy up the team's instructions." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start")!;
+    // A progress message, then more work, then the run ends without another reply.
+    await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: "Four of nine done so far." } });
+    await c.settle();
+    const client = await c.mcp(start.runId);
+    await client.callTool({ name: "update_instructions", arguments: { agent: "Engineer", instructions: "Work only on the API.", reason: "Tidy." } });
+    await client.callTool({ name: "create_ticket", arguments: { title: "Check the API docs" } });
+    await client.close();
+    await c.emit({ type: "run.ended", runId: start.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    const items = (await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items as Array<{ role: string; text: string }>;
+    expect(items.map((m) => m.role)).toEqual(["owner", "assistant", "system"]);
+    // Tickets made in the chat are the owner's requests, so they aren't in the agent's activity; decisions are.
+    expect(items[2]!.text).toBe("CEO finished after its last message. Since that message: 1 decision sent to Decisions.");
+
+    // No reply at all, and nothing done: still said, so the owner isn't left waiting.
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "Anything else?" });
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    const second = c.sent.find((x): x is Start => x.type === "run.start")!;
+    await c.emit({ type: "run.ended", runId: second.runId, stopReason: "end_turn", error: null });
+    await c.settle();
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "system", text: "CEO finished without a reply." });
+  });
+
   it("says when a run fails, and asks again after a runner restart", async () => {
     const c = await setup();
     await c.db.delete(wakes);
@@ -167,6 +198,8 @@ describe("owner chat", () => {
     await c.emit({ type: "run.ended", runId: second.runId, stopReason: null, error: null, interrupted: true });
     await c.settle();
     await c.settle();
+    // An interrupted run isn't finished, so no note.
+    expect((await c.req("GET", `/api/companies/${c.company.id}/chat`)).json().items.at(-1)).toMatchObject({ role: "owner", text: "Try again." });
     // Asked again as a chat run: board tools only, not resumed as CEO work.
     const again = c.sent.filter((x): x is Start => x.type === "run.start").at(-1)!;
     expect(again.runId).not.toBe(second.runId);

@@ -5,10 +5,10 @@
 // Boss Man's board tools is refused. Each agent has its own conversation and answers one
 // message batch at a time.
 import path from "node:path";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNull, ne, or } from "drizzle-orm";
 import { agentIdentity } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, ownerChatMessages, projects, runs, wakes } from "../db/schema.js";
+import { activity, agents, companies, decisions, ownerChatMessages, projects, runs, wakes } from "../db/schema.js";
 
 export const CHAT_REASON = "owner_chat";
 const HISTORY = 30;
@@ -25,6 +25,8 @@ export class ChatError extends Error {
 type Agent = typeof agents.$inferSelect;
 
 export function chatService(db: Db, deps: { notify: (agentId: string, input: { reason: string; priority: number }) => Promise<unknown>; workspaceRoot: string }) {
+  // shortcut: replies being saved, by run, so the end-of-run check sees them; lost on restart, harmless because a run dies with the restart.
+  const saving = new Map<string, Promise<unknown>>();
   async function agentOf(companyId: string, agentId: string): Promise<Agent> {
     const [a] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.id, agentId)));
     if (!a) throw new ChatError(404, "No such agent in this company.");
@@ -171,13 +173,52 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
       // The PA speaks only through pa_reply, which is checked; its own closing text never reaches the owner (R87).
       if (r?.purpose !== "chat" || r.duty === "assistant") return;
-      await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text, runId });
+      // Started once and shared: awaiting a query builder twice would insert the reply twice.
+      const save = db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text, runId }).then(() => {});
+      saving.set(runId, save.catch(() => {}));
+      await save;
     },
 
-    async onRunEnded(runId: string, error: string | null) {
-      const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(eq(runs.id, runId));
-      if (r?.purpose !== "chat" || !error) return;
-      await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "system", text: `The reply couldn't be finished: ${error.slice(0, 500)}`, runId });
+    async onRunEnded(runId: string, error: string | null, interrupted = false) {
+      await saving.get(runId);
+      saving.delete(runId);
+      const [r] = await db
+        .select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, startedAt: runs.startedAt, name: agents.name, duty: agents.duty })
+        .from(runs)
+        .innerJoin(agents, eq(agents.id, runs.agentId))
+        .where(eq(runs.id, runId));
+      if (r?.purpose !== "chat") return;
+      if (error) {
+        await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "system", text: `The reply couldn't be finished: ${error.slice(0, 500)}`, runId });
+        return;
+      }
+      // The PA answers only through pa_reply, which posts its own message.
+      const agentId = r.agentId;
+      // An interrupted run is asked again, so it hasn't finished.
+      if (r.duty === "assistant" || !agentId || interrupted) return;
+      // A run that ends without a reply, or keeps working after its last one, would otherwise end silently: say it finished, and what it did since.
+      const [last] = await db
+        .select({ at: ownerChatMessages.createdAt })
+        .from(ownerChatMessages)
+        .where(and(eq(ownerChatMessages.runId, runId), eq(ownerChatMessages.role, "assistant")))
+        .orderBy(desc(ownerChatMessages.createdAt))
+        .limit(1);
+      const since = last?.at ?? r.startedAt ?? new Date(0);
+      // What the agent did is kept per agent, not per run, so it is only listed when no other run of theirs overlapped.
+      const [other] = await db
+        .select({ id: runs.id })
+        .from(runs)
+        .where(and(eq(runs.agentId, agentId), ne(runs.id, runId), or(isNull(runs.endedAt), gt(runs.endedAt, since))))
+        .limit(1);
+      const done = other ? [] : await db.select({ summary: activity.summary }).from(activity).where(and(eq(activity.agentId, agentId), gt(activity.at, since))).orderBy(activity.at);
+      const [asked] = other ? [{ n: 0 }] : await db.select({ n: count() }).from(decisions).where(and(eq(decisions.raisedByAgentId, agentId), gt(decisions.createdAt, since)));
+      // With a reply and nothing known to be done after it, the reply is the last word.
+      if (last && (other || (!done.length && !asked!.n))) return;
+      const parts = [...(asked!.n ? [`${asked!.n} decision${asked!.n === 1 ? "" : "s"} sent to Decisions`] : []), ...done.slice(0, 5).map((a) => a.summary)];
+      const more = done.length > 5 ? ` (and ${done.length - 5} more)` : "";
+      const head = `${r.name} finished${last ? " after its last message" : " without a reply"}.`;
+      const text = parts.length ? `${head} ${last ? "Since that message" : "In this run"}: ${parts.join("; ")}${more}.` : head;
+      await db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId, role: "system", text, runId });
     },
   };
 }
