@@ -48,6 +48,24 @@ describe("Refresh models", () => {
   });
 });
 
+describe("model search", () => {
+  it("narrows the list to models whose name or ID matches", async () => {
+    const models = { runner: { claude: { models: [{ value: "sonnet", name: "Sonnet" }, { value: "opus", name: "Opus" }] } }, api: [] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("agent-templates") ? { templates: [tpl("engineer", "Engineer")] } : url.includes("/models") ? models : []), { status: 200 })),
+    );
+    render(<Agents company={company} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: /hire/i }));
+    const search = await screen.findByLabelText("Search models");
+    expect(screen.getByRole("option", { name: "Opus (opus)" })).toBeTruthy();
+    fireEvent.change(search, { target: { value: "SON" } });
+    expect(screen.queryByRole("option", { name: "Opus (opus)" })).toBeNull();
+    expect(screen.getByRole("option", { name: "Sonnet (sonnet)" })).toBeTruthy();
+    expect(screen.getByText(/1 of 2 models match/)).toBeTruthy();
+  });
+});
+
 describe("instructions from the template", () => {
   it("offers to fill an empty box from the agent's template, and the CEO's from the CEO template", async () => {
     const row = (over: object) => ({ id: "a1", companyId: "c1", name: "Ada", role: "worker", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null, title: "Engineer", template: "engineer", instructions: "", funding: null, fundingKind: null, retiredAt: null, status: "idle", current: null, openTickets: 0, pa: null, month: { costMicros: 0, runs: 0, tokens: 0 }, ...over });
