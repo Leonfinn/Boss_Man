@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, companies, decisions, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 const clients: Client[] = [];
@@ -164,5 +164,39 @@ describe("firing", () => {
     await ctx.db.update(companies).set({ paused: false }).where(eq(companies.id, ctx.co.company.id));
     await ctx.scheduler.tick();
     expect(await checkWakes(t.id)).toHaveLength(1);
+  });
+});
+
+describe("carry on after a run", () => {
+  const ranOn = async (ticketId: string, startedAt = new Date(Date.now() - 60_000)) =>
+    (await ctx.db.insert(runs).values({ companyId: ctx.co.company.id, agentId: ctx.co.ceo.id, ticketId, purpose: "ticket", startedAt, endedAt: new Date() }).returning())[0]!;
+
+  it("wakes the agent in 15 minutes after a run that made progress and set no check, and says so", async () => {
+    const t = await working();
+    // The wake that started the run has been used.
+    await ctx.db.delete(wakes);
+    const run = await ranOn(t.id);
+    await ctx.work.updateTicket(t.id, { stateNote: "Filed batch 5 of 9." });
+    await ctx.db.update(tickets).set({ monitorAttempts: 3 }).where(eq(tickets.id, t.id));
+    await ctx.scheduler.afterTicketRun(run.id);
+    const r = await row(t.id);
+    expect(r.monitorAt!.getTime() - Date.now()).toBeGreaterThan(14 * 60_000);
+    expect(r.monitorAt!.getTime() - Date.now()).toBeLessThanOrEqual(15 * 60_000);
+    // Progress resets the count, so a long job isn't reported as "checked 5 times and still not resolved".
+    expect(r).toMatchObject({ monitorAttempts: 0, monitorNote: expect.stringContaining("Carry on") });
+    const log = await ctx.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "monitor")));
+    expect(log.map((a) => a.summary).join()).toMatch(/so Boss Man will wake CEO at \d\d:\d\d UTC to carry on/);
+  });
+
+  it("leaves a check the agent set, and never polls a run that did nothing", async () => {
+    const t = await working();
+    await ctx.db.delete(wakes);
+    const idle = await ranOn(t.id);
+    await ctx.scheduler.afterTicketRun(idle.id);
+    expect((await row(t.id)).monitorAt).toBeNull();
+    const own = new Date(Date.now() + 60 * 60_000);
+    await ctx.db.update(tickets).set({ monitorAt: own, stateNote: "Waiting on CI.", stateNoteAt: new Date() }).where(eq(tickets.id, t.id));
+    await ctx.scheduler.afterTicketRun(idle.id);
+    expect((await row(t.id)).monitorAt).toEqual(own);
   });
 });

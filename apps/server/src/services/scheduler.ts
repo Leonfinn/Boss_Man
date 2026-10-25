@@ -10,7 +10,7 @@ import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
-import { agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -73,6 +73,10 @@ export const PLAIN_SUMMARY_RULE =
 const WATCH_LINE = /^Watch ticket ([0-9a-f-]{36})$/gm;
 const OWNER_REASONS = new Set([CHAT_REASON, "woken by owner", "message", "rule request"]);
 const fromOwner = (w: { reason: string; causedByRunId?: string | null }) => OWNER_REASONS.has(w.reason) && (w.reason !== "message" || !w.causedByRunId);
+
+/** How long after a run that made progress Boss Man wakes the agent to carry on, when it set no check itself. */
+export const CARRY_ON_MS = 15 * 60_000;
+const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
 
 export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };
 
@@ -462,7 +466,11 @@ export function schedulerService(
             `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Only do the work yourself when nobody on the team can. New functionality is a feature: reuse a matching one (feedback features) or create_feature (with the objectiveId it serves, if any), and give every ticket for it that featureId; bug fixes and chores are plain tasks.${t.t.featureId && /^plan:/i.test(t.t.title) ? " This is a feature's plan ticket, so keep it: create the build task (create_ticket with feature and assignee) and a QA task that waitsOn the build, assigned to your QA agent or else a reviewer, then move this plan ticket to review so the owner can approve it closed. Never hand the plan ticket itself to a worker." : ""}${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,
           );
         }
-        if (t.t.systemState === "in_progress") lines.push("", "If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan.");
+        if (t.t.systemState === "in_progress")
+          lines.push(
+            "",
+            `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
+          );
         lines.push("", PLAIN_SUMMARY_RULE);
         lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
@@ -772,6 +780,36 @@ export function schedulerService(
      * run as the cause, so the depth and self-wake limits apply, plus two limits of its own:
      * a few per pair per ten minutes, and no A-to-B-to-A ping-pong on one ticket.
      */
+    /**
+     * After a ticket run: a run that made progress resets its check count (the owner is only told
+     * after checks that go nowhere). If it left the ticket in progress with nothing set to wake it,
+     * Boss Man sets a check to carry on in CARRY_ON_MS, and says so on the ticket. A run that made
+     * no progress gets nothing: the missed-work sweep handles that, so an idle agent is never polled.
+     */
+    async afterTicketRun(runId: string) {
+      const [run] = await db.select().from(runs).where(eq(runs.id, runId));
+      if (!run?.ticketId || !run.agentId || run.purpose === "chat") return;
+      const [t] = await db.select().from(tickets).where(eq(tickets.id, run.ticketId));
+      if (!t || t.assigneeAgentId !== run.agentId) return;
+      const since = run.startedAt;
+      const [made] = await db.select({ id: ticketArtifacts.id }).from(ticketArtifacts).where(eq(ticketArtifacts.runId, runId)).limit(1);
+      const [did] = await db
+        .select({ id: activity.id })
+        .from(activity)
+        .where(and(eq(activity.ticketId, t.id), eq(activity.agentId, run.agentId), gt(activity.at, since), sql`${activity.kind} not in ('run_started', 'run_ended', 'monitor')`))
+        .limit(1);
+      const progressed = !!made || !!did || (!!t.stateNoteAt && t.stateNoteAt > since);
+      if (!progressed) return;
+      if (t.monitorAttempts) await db.update(tickets).set({ monitorAttempts: 0 }).where(eq(tickets.id, t.id));
+      if (t.systemState !== "in_progress" || t.monitorAt) return;
+      const [queued] = await db.select({ id: wakes.id }).from(wakes).where(and(eq(wakes.agentId, run.agentId), eq(wakes.ticketId, t.id), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+      if (queued) return;
+      const at = new Date(now().getTime() + CARRY_ON_MS);
+      await db.update(tickets).set({ monitorAt: at, monitorNote: CARRY_ON_NOTE, monitorAttempts: 0 }).where(and(eq(tickets.id, t.id), isNull(tickets.monitorAt)));
+      const [{ name } = { name: "The agent" }] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, run.agentId));
+      await record(db, { companyId: t.companyId, agentId: run.agentId, ticketId: t.id, kind: "monitor", summary: `${name} stopped with this still in progress and no check set, so Boss Man will wake ${name} at ${at.toISOString().slice(11, 16)} UTC to carry on.`, at: now() });
+    },
+
     async nudge(input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }): Promise<{ ok: true; delivered: string } | { ok: false; error: string }> {
       const [from] = await db.select().from(agents).where(eq(agents.id, input.fromAgentId));
       if (!from) return { ok: false, error: "No such agent." };
