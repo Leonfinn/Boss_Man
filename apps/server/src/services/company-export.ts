@@ -41,7 +41,7 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
   const avatars = team.length ? await db.select().from(agentAvatars).where(inArray(agentAvatars.agentId, team.map((a) => a.id))) : [];
   for (const a of team) {
     const dir = `agents/${agentSlug.get(a.id)}`;
-    files[`${dir}/agent.json`] = json({ ref: a.id, name: a.name, role: a.role, title: a.title, template: a.template, duty: a.duty, reviewKind: a.reviewKind, agentKind: a.agentKind, model: a.model, reportsTo: a.reportsTo ? (agentSlug.get(a.reportsTo) ?? null) : null, paused: a.paused });
+    files[`${dir}/agent.json`] = json({ ref: a.id, name: a.name, role: a.role, title: a.title, template: a.template, duty: a.duty, reviewKind: a.reviewKind, agentKind: a.agentKind, model: a.model, thinking: a.thinking, reportsTo: a.reportsTo ? (agentSlug.get(a.reportsTo) ?? null) : null, paused: a.paused });
     if (a.instructions) files[`${dir}/INSTRUCTIONS.md`] = strToU8(a.instructions);
     const pic = avatars.find((p) => p.agentId === a.id);
     if (pic) files[`${dir}/avatar.${pic.type.split("/")[1]?.replace("svg+xml", "svg") ?? "img"}`] = new Uint8Array(pic.bytes);

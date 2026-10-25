@@ -79,6 +79,8 @@ export const agents = pgTable(
     agentKind: text("agent_kind").notNull(),
     /** A pinned model ID applied at launch (spike S2: ACP refuses unlisted models). */
     model: text("model"),
+    /** How hard the model thinks (low…max), set through the agent's ACP "thought_level" option; null keeps the adapter's default. */
+    thinking: text("thinking"),
     fundingSourceId: uuid("funding_source_id").references(() => fundingSources.id, { onDelete: "set null" }),
     /** A paused agent isn't started; its work waits until the owner unpauses it. */
     paused: boolean("paused").notNull().default(false),

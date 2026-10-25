@@ -16,13 +16,14 @@ export class AgentError extends Error {
 }
 
 type AgentRow = typeof agents.$inferSelect;
-export type AgentPatch = Partial<Pick<AgentRow, "name" | "title" | "instructions" | "model" | "fundingSourceId" | "agentKind" | "paused" | "starred">>;
+export type AgentPatch = Partial<Pick<AgentRow, "name" | "title" | "instructions" | "model" | "thinking" | "fundingSourceId" | "agentKind" | "paused" | "starred">>;
 /** Fields whose changes are kept, and can be undone, under the name the history shows. */
 const TRACKED: Array<[keyof AgentPatch, string]> = [
   ["name", "name"],
   ["title", "title"],
   ["instructions", "instructions"],
   ["model", "model"],
+  ["thinking", "thinking"],
   ["fundingSourceId", "funding"],
   ["agentKind", "kind"],
   ["paused", "paused"],
@@ -237,7 +238,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
     },
 
     /** Hires an agent, optionally from a template; the template fills in what isn't given. */
-    async hire(companyId: string, input: { name: string; template?: string; title?: string | null; instructions?: string | null; role?: "manager" | "worker"; agentKind?: string; model?: string | null; fundingSourceId?: string | null; reportsTo?: string | null }, byAgentId: string | null = null) {
+    async hire(companyId: string, input: { name: string; template?: string; title?: string | null; instructions?: string | null; role?: "manager" | "worker"; agentKind?: string; model?: string | null; thinking?: string | null; fundingSourceId?: string | null; reportsTo?: string | null }, byAgentId: string | null = null) {
       const tpl = input.template ? AGENT_TEMPLATES.find((x) => x.id === input.template) : undefined;
       if (input.template && !tpl) throw new AgentError(422, `There's no template called ${input.template}.`);
       // One assistant per company (R87); it starts paused so the owner picks its (cheap) model first.
@@ -252,6 +253,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
           role: input.role ?? tpl?.role ?? "worker",
           agentKind: input.agentKind ?? "claude",
           model: input.model ?? null,
+          thinking: input.thinking ?? null,
           fundingSourceId: input.fundingSourceId ?? null,
           reportsTo: input.reportsTo ?? null,
           template: tpl?.id ?? null,

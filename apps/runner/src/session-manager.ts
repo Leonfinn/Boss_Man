@@ -81,8 +81,8 @@ export function writeSkills(dir: string, list: NonNullable<StartCommand["skills"
 const CLAUDE_ALIASES = new Set(["default", "opus", "sonnet", "haiku", "fable"]);
 
 /** The choices in an ACP session's model option, groups flattened (R60). */
-export function modelChoices(configOptions: unknown[] | null | undefined) {
-  const opt = (configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { options?: unknown[] } | undefined;
+export function modelChoices(configOptions: unknown[] | null | undefined, category = "model") {
+  const opt = (configOptions ?? []).find((o) => (o as { category?: string }).category === category) as { options?: unknown[] } | undefined;
   const out: Array<{ value: string; name: string; description: string | null }> = [];
   for (const o of opt?.options ?? []) {
     const group = o as { options?: unknown[] };
@@ -93,6 +93,11 @@ export function modelChoices(configOptions: unknown[] | null | undefined) {
   }
   // OpenRouter alone offers a few hundred; a lower cap dropped whole providers (e.g. Ollama) off the end.
   return out.slice(0, 1000);
+}
+/** The config option to set for a thinking level, when the session's "thought_level" option offers it for the current model. */
+export function thinkingOption(configOptions: unknown[] | null | undefined, level: string) {
+  const id = ((configOptions ?? []).find((o) => (o as { category?: string }).category === "thought_level") as { id?: string } | undefined)?.id;
+  return id && modelChoices(configOptions, "thought_level").some((c) => c.value === level) ? { configId: id, value: level } : null;
 }
 const currentModel = (configOptions: unknown[] | null | undefined) =>
   ((configOptions ?? []).find((o) => (o as { category?: string }).category === "model") as { currentValue?: string } | undefined)?.currentValue;
@@ -631,14 +636,26 @@ export class SessionManager {
       state.cancel = () => void agent.notify(methods.agent.session.cancel, { sessionId: session.sessionId });
 
       let model = cmd.model;
+      // Setting an option answers with the session's options again; the thinking levels on offer depend on the model.
+      let options = session.configOptions;
+      const setOption = async (configId: string, value: string) => {
+        const r = (await agent.request(methods.agent.session.setConfigOption, { sessionId: session.sessionId, configId, value } as never)) as { configOptions?: unknown[] | null } | null;
+        // An empty reply (some adapters send {}) keeps the options seen so far.
+        if (r?.configOptions?.length) options = r.configOptions;
+      };
       if (cmd.agentKind === "opencode" && cmd.model && cmd.model !== currentModel(session.configOptions)) {
         // Model ids are provider/model, as the session lists them (spike).
-        await agent.request(methods.agent.session.setConfigOption, { sessionId: session.sessionId, configId: "model", value: cmd.model } as never);
+        await setOption("model", cmd.model);
       }
       if (cmd.agentKind === "claude" && cmd.model) {
         // Listed aliases are selected directly; anything else was pinned to "opus" at launch.
-        const value = CLAUDE_ALIASES.has(cmd.model) ? cmd.model : "opus";
-        await agent.request(methods.agent.session.setConfigOption, { sessionId: session.sessionId, configId: "model", value } as never);
+        await setOption("model", CLAUDE_ALIASES.has(cmd.model) ? cmd.model : "opus");
+      }
+      if (cmd.thinking) {
+        const t = thinkingOption(options, cmd.thinking);
+        // A level the adapter refuses leaves the run on its default rather than failing it.
+        const set = t && (await setOption(t.configId, t.value).then(() => true, () => false));
+        if (!set) emit({ type: "runner.log", level: "warn", message: `${cmd.agentKind} doesn't offer the "${cmd.thinking}" thinking level for this model, so run ${cmd.runId} uses its default.` });
       }
       // Plan-first tickets (R40) start in plan mode; a reopened session keeps the mode it had.
       // shortcut: OpenCode's plan mode has no approval step Boss Man understands, so plan-first tickets run in build mode for it; add one if wanted.

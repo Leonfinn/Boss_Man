@@ -9,7 +9,7 @@ import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, TOOL_KINDS, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
 import { CEO_TEMPLATE, timeZoneOr } from "@boss-man/shared";
-import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, type DetectResult } from "@boss-man/shared";
+import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
@@ -1684,6 +1684,7 @@ export async function buildApp(opts: AppOptions) {
           role: z.enum(["manager", "worker"]).optional(),
           agentKind: z.string().min(1).optional(),
           model: z.string().nullable().optional(),
+          thinking: z.enum(THINKING_LEVELS).nullable().optional(),
           fundingSourceId: Uuid.nullable().optional(),
           reportsTo: Uuid.optional(),
         })
@@ -1694,7 +1695,7 @@ export async function buildApp(opts: AppOptions) {
     owner.patch("/api/agents/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z
-        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean(), reviewKind: z.enum(REVIEW_KINDS).nullable() })
+        .object({ name: z.string().trim().min(1).max(80), title: z.string().trim().max(80).nullable(), instructions: Instructions, model: z.string().nullable(), thinking: z.enum(THINKING_LEVELS).nullable(), fundingSourceId: Uuid.nullable(), agentKind: z.string().min(1), paused: z.boolean(), starred: z.boolean(), reviewKind: z.enum(REVIEW_KINDS).nullable() })
         .partial()
         .parse(req.body);
       const { reviewKind, ...patch } = b;
