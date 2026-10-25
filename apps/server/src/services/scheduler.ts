@@ -173,12 +173,20 @@ export function schedulerService(
         linkedTo.add(l);
         if (!exists.has(l)) broken.push(`${p.slug} → ${l}`);
       }
-    const orphans = pages.map((p) => p.slug).filter((s) => s !== "index" && !linkedTo.has(s));
+    const orphans = pages.map((p) => p.slug).filter((s) => s !== "index" && s !== "log" && !linkedTo.has(s));
+    // A missing page that several pages link to is a topic waiting to be written, not a typo.
+    const missingFrom = new Map<string, number>(); // lost on restart, harmless: rebuilt on every wake.
+    const target = (b: string) => b.split(" → ")[1]!;
+    for (const b of broken) missingFrom.set(target(b), (missingFrom.get(target(b)) ?? 0) + 1);
+    const wanted = [...missingFrom].filter(([, n]) => n > 1).sort((a, b) => b[1] - a[1]);
+    const typos = broken.filter((b) => missingFrom.get(target(b))! < 2);
     const briefs = new Map<string, string>();
     for (const projectId of new Set(finished.map((t) => t.projectId))) if (await findBrief(db, agent.companyId, projectId)) briefs.set(projectId, briefSlug(projectId));
     return [
       "You are the company's wiki maintainer. Your job is to keep the wiki accurate, tidy and easy to find things in, using the wiki tool:",
       "- Keep an \"Index\" page at the top level (slug index) that lists every folder and its main pages, with a line on each.",
+      "- Keep a \"Log\" page at the top level (slug log), linked from the Index. At the end of every run, add one line at the top: \"- <date>: filed …; changed …; fixed …\" saying what you did, or \"nothing to do\". Never edit or remove older lines; when the page passes 200 lines, move the oldest into a page \"Log <year>\" in a Log folder.",
+      "- When several pages mention a topic that has no page of its own, write one and link those pages to it.",
       "- File pages into sensible folders (for example Research, Product, Engineering, How-tos), move strays, and merge duplicates into one page.",
       "- Product pages go one level down: Product/Features (one page per feature: what it does and the decisions behind it), Product/Analysis (proposals, reviews, research into options) or Product/Strategy (direction, objectives, roadmap thinking). Move any page sitting straight in Product into the right one.",
       "- When finished work produced a document, make sure it's in the wiki, linked to its ticket, and linked from related pages. Read the ticket with tickets read, and a document that's only in the repo with tickets file (it reads the ticket's branch even if it was never merged). Copy it into the wiki with the ticket's id. Write a short summary page if a ticket produced something useful but no page.",
@@ -195,8 +203,9 @@ export function schedulerService(
       ...(broken.length || orphans.length
         ? [
             "",
-            "Wiki health check. Fix what you can: point a broken link at the right page or write the missing page, and link each orphan from the Index or a related page (or merge it away if it duplicates one).",
-            ...(broken.length ? [`Broken links (page → missing page)${broken.length > 15 ? `, first 15 of ${broken.length}` : ""}:`, ...broken.slice(0, 15).map((b) => `- ${b}`)] : []),
+            "Wiki health check. Fix what you can: write each wanted page, point a broken link at the right page or write the missing page, and link each orphan from the Index or a related page (or merge it away if it duplicates one).",
+            ...(wanted.length ? [`Wanted pages (missing, linked from several pages)${wanted.length > 15 ? `, first 15 of ${wanted.length}` : ""}:`, ...wanted.slice(0, 15).map(([slug, n]) => `- ${slug} (${n} pages)`)] : []),
+            ...(typos.length ? [`Broken links (page → missing page)${typos.length > 15 ? `, first 15 of ${typos.length}` : ""}:`, ...typos.slice(0, 15).map((b) => `- ${b}`)] : []),
             ...(orphans.length ? [`Pages nothing links to${orphans.length > 15 ? `, first 15 of ${orphans.length}` : ""}:`, ...orphans.slice(0, 15).map((o) => `- ${o}`)] : []),
           ]
         : []),
