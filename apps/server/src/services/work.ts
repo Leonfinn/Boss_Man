@@ -32,8 +32,10 @@ type TicketPatch = {
   risk?: RiskTier | null;
   /** The feature request this ticket delivers. */
   featureId?: string | null;
-  /** Makes this a sub-task of that task: it joins the parent's feature and the parent waits on it. */
-  parentTicketId?: string;
+  /** Makes this a sub-task of that task: it joins the parent's feature and the parent waits on it. Null on an update takes it out. */
+  parentTicketId?: string | null;
+  /** Moves the ticket, with its sub-tasks, to another project in the company (update only). */
+  projectId?: string;
   /** The agent that created it, so a repeated call after a resume returns the same task. */
   createdByAgentId?: string | null;
   /** Start in plan mode until a plan is approved (R40). */
@@ -320,9 +322,33 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
       if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
-      const moves = patch.columnId !== undefined || patch.state !== undefined;
-      const col = moves ? await placement(t.projectId, { columnId: patch.columnId, state: patch.state }, { ticketId, overLimit: patch.overLimit }) : null;
-      const { overLimit: _ignored, state: _s, columnId: _c, ...fields } = patch;
+      const { overLimit: _ignored, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
+      const dest = patch.projectId && patch.projectId !== t.projectId ? await project(patch.projectId) : null;
+      const kids = dest || newParent ? await db.select().from(tickets).where(eq(tickets.parentTicketId, t.id)) : [];
+      if (dest) {
+        if (dest.companyId !== t.companyId) throw new WorkError(422, "That project isn't in this company.");
+        if (dest.archivedAt) throw new WorkError(409, `${dest.name} is archived.`);
+        // Its branch and working copy belong to the current project's repo.
+        const busy = [t, ...kids].find((x) => x.systemState === "in_progress" || x.systemState === "review");
+        if (busy) throw new WorkError(409, `"${busy.title}" is ${busy.systemState === "review" ? "in review" : "in progress"}. Move tickets before work starts or after it ends.`);
+      }
+      const parent = newParent ? await parentOf(newParent, t.companyId) : null;
+      if (parent) {
+        if (parent.id === t.id) throw new WorkError(422, "A ticket can't be its own parent.");
+        if (kids.length) throw new WorkError(422, "It has sub-tasks of its own, so it can't become a sub-task.");
+        if (parent.projectId !== (dest?.id ?? t.projectId)) throw new WorkError(422, "The parent task is in another project. Move the parent, or move this ticket to the parent's project in the same call.");
+        fields.featureId = parent.featureId;
+      }
+      if (dest && t.parentTicketId && newParent === undefined) {
+        const [old] = await db.select({ projectId: tickets.projectId }).from(tickets).where(eq(tickets.id, t.parentTicketId));
+        if (old?.projectId !== dest.id) throw new WorkError(422, "It is a sub-task: move its parent task (sub-tasks go with it), or take it out of the parent first.");
+      }
+      const reparent = newParent !== undefined && newParent !== t.parentTicketId;
+      if (reparent) Object.assign(fields, { parentTicketId: newParent });
+      const moves = patch.columnId !== undefined || patch.state !== undefined || !!dest;
+      // A move between projects keeps the state, in the new board's column for it.
+      const col = moves ? await placement(dest?.id ?? t.projectId, { columnId: patch.columnId, state: patch.state ?? (dest ? t.systemState : undefined) }, { ticketId, overLimit: patch.overLimit || !!dest }) : null;
+      if (dest) Object.assign(fields, { projectId: dest.id });
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.
       if (patch.risk !== undefined && patch.planFirst === undefined && !t.planApprovedAt && (t.systemState === "backlog" || t.systemState === "ready"))
@@ -331,13 +357,27 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         .update(tickets)
         .set({
           ...fields,
-          ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? "completed") : null, ...(col.systemState === "done" ? { monitorAt: null } : {}) } : {}),
+          ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? (t.systemState === "done" ? t.outcome : null) ?? "completed") : null, ...(col.systemState === "done" ? { monitorAt: null } : {}) } : {}),
           lastActivityAt: now(),
           ...(patch.stateNote ? { stateNoteAt: now() } : {}),
         })
         .where(eq(tickets.id, ticketId))
         .returning();
       if (updated!.systemState !== t.systemState) await record(db, { companyId: t.companyId, ticketId: t.id, kind: "state", summary: `${t.systemState} -> ${updated!.systemState}`, at: now() });
+      if (dest) {
+        const [from] = await db.select({ name: projects.name }).from(projects).where(eq(projects.id, t.projectId));
+        for (const k of kids) {
+          const kc = await placement(dest.id, { state: k.systemState }, { ticketId: k.id, overLimit: true });
+          await db.update(tickets).set({ projectId: dest.id, columnId: kc.id, lastActivityAt: now() }).where(eq(tickets.id, k.id));
+        }
+        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "moved", summary: `Moved from ${from?.name ?? "another project"} to ${dest.name}${kids.length ? `, with ${kids.length} sub-task${kids.length === 1 ? "" : "s"}` : ""}`, at: now() });
+      }
+      if (reparent) {
+        // The old parent no longer waits on it; the new one does while it is open.
+        if (t.parentTicketId) await db.delete(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, t.parentTicketId), eq(ticketDependencies.blockerTicketId, t.id)));
+        if (parent && updated!.systemState !== "done") await this.waitOnSubtask(parent, t.id);
+        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "parent", summary: parent ? `Now a sub-task of "${parent.title}"` : "No longer a sub-task", at: now() });
+      }
       if (updated!.assigneeAgentId !== t.assigneeAgentId) {
         const [to] = updated!.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, updated!.assigneeAgentId)) : [];
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });

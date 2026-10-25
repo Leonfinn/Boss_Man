@@ -184,6 +184,44 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   );
 
   server.registerTool(
+    "update_ticket",
+    {
+      description:
+        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), or fix its title or description. Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
+      inputSchema: {
+        ticketId: z.string().uuid(),
+        project: z.string().min(1).optional(),
+        featureId: z.string().uuid().nullable().optional(),
+        parentTicketId: z.string().uuid().nullable().optional(),
+        title: z.string().trim().min(1).max(200).optional(),
+        body: z.string().max(10_000).optional(),
+        reason: z.string().trim().min(1).max(240),
+        expected_version: z.number().int().optional(),
+      },
+    },
+    async ({ ticketId, project, featureId, parentTicketId, title, body, reason, expected_version }) => {
+      if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
+      const out = await outsideTree(ticketId);
+      if (out) return fail(out);
+      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title or body.");
+      const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
+      const p = project !== undefined ? await resolveProject(project) : null;
+      if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
+      try {
+        const u = await work.updateTicket(ticketId, { ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}) });
+        const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it: ${reason}` });
+        return text(`Ticket ${ticketId} updated (version ${u.version}).`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
     "create_ticket",
     {
       description:
