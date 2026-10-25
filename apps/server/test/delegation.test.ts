@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, features, projects, runners, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, features, projects, runners, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -18,7 +18,7 @@ async function setup() {
   const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
-  const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
+  const req = (method: "GET" | "POST" | "PATCH", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const co = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const dev = (await req("POST", `/api/companies/${co.company.id}/agents`, { name: "Dev", template: "engineer" })).json() as { id: string };
   const [p] = await db.insert(projects).values({ companyId: co.company.id, name: "Customer app" }).returning();
@@ -198,5 +198,67 @@ describe("CEO rates risk", () => {
     await ctx.scheduler.wake({ agentId: ctx.co.ceo.id, reason: "assigned", ticketId: t.id });
     await ctx.scheduler.tick();
     expect(ctx.commands.at(-1)!.prompt.includes("This ticket has no risk rating yet")).toBe(asks);
+  });
+});
+
+describe("CEO reorganises tickets", () => {
+  const update = (c: Client, args: Record<string, unknown>) => c.callTool({ name: "update_ticket", arguments: { reason: "Backlog review.", ...args } });
+
+  it("moves a ticket with its sub-tasks to another project, keeping state, and records why", async () => {
+    const from = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/projects`, { name: "Imported" })).json() as { id: string };
+    const to = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/projects`, { name: "Main" })).json() as { id: string };
+    const parent = (await ctx.req("POST", `/api/projects/${from.id}/tickets`, { title: "Parent", state: "ready" })).json() as { id: string };
+    const kid = (await ctx.req("POST", `/api/projects/${from.id}/tickets`, { title: "Kid" })).json() as { id: string };
+    const c = await agent(ctx.co.ceo.id);
+    expect((await update(c, { ticketId: kid.id, parentTicketId: parent.id })).isError).toBeFalsy();
+    const res = await update(c, { ticketId: parent.id, project: "main" });
+    expect(res.isError).toBeFalsy();
+    // The parent waits on its open sub-task, and keeps that state in the new project.
+    expect(await row(parent.id)).toMatchObject({ projectId: to.id, systemState: "blocked" });
+    expect(await row(kid.id)).toMatchObject({ projectId: to.id, parentTicketId: parent.id });
+    // Each landed in the new board's column for its state.
+    const cols = (await ctx.req("GET", `/api/projects/${to.id}/board`)).json() as { columns: Array<{ id: string }> };
+    expect(cols.columns.map((x) => x.id)).toEqual(expect.arrayContaining([(await row(parent.id)).columnId, (await row(kid.id)).columnId]));
+    const log = (await ctx.db.select().from(activity).where(eq(activity.ticketId, parent.id))).map((a) => a.summary);
+    expect(log).toContain("Moved from Imported to Main, with 1 sub-task");
+    expect(log).toContain("CEO reorganised it: Backlog review.");
+    // A sub-task alone can't leave its parent's project.
+    const back = await update(c, { ticketId: kid.id, project: "Imported" });
+    expect(textOf(back)).toMatch(/It is a sub-task/);
+    await c.close();
+  });
+
+  it("refuses work in progress, a worker, and an empty change; keeps a cancelled outcome", async () => {
+    const to = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/projects`, { name: "Main" })).json() as { id: string };
+    await ctx.req("POST", `/api/companies/${ctx.co.company.id}/projects`, { name: "Other" });
+    const busy = await ctx.ticket({ systemState: "in_progress" });
+    const c = await agent(ctx.co.ceo.id);
+    expect(textOf(await update(c, { ticketId: busy.id, project: "Main" }))).toMatch(/in progress. Move tickets before work starts/);
+    expect(textOf(await update(c, { ticketId: busy.id }))).toMatch(/Nothing to change/);
+    const dup = (await ctx.req("POST", `/api/projects/${to.id}/tickets`, { title: "Dup" })).json() as { id: string };
+    await ctx.req("POST", `/api/tickets/${dup.id}/state`, { state: "done" });
+    await ctx.db.update(tickets).set({ outcome: "cancelled" }).where(eq(tickets.id, dup.id));
+    expect((await update(c, { ticketId: dup.id, project: "Other" })).isError).toBeFalsy();
+    expect(await row(dup.id)).toMatchObject({ systemState: "done", outcome: "cancelled" });
+    const dev = await agent(ctx.dev.id);
+    expect(textOf(await update(dev, { ticketId: busy.id, title: "New" }))).toMatch(/Only your company's CEO or a manager/);
+    await c.close();
+    await dev.close();
+  });
+
+  it("puts a ticket under a feature and a parent, and takes it out again", async () => {
+    const p = (await ctx.req("POST", `/api/companies/${ctx.co.company.id}/projects`, { name: "Main" })).json() as { id: string };
+    const [f] = await ctx.db.insert(features).values({ companyId: ctx.co.company.id, title: "Rate limits" }).returning();
+    const parent = (await ctx.req("POST", `/api/projects/${p.id}/tickets`, { title: "Parent", featureId: f!.id, state: "ready" })).json() as { id: string };
+    const t = (await ctx.req("POST", `/api/projects/${p.id}/tickets`, { title: "Loose" })).json() as { id: string };
+    const c = await agent(ctx.co.ceo.id);
+    expect((await update(c, { ticketId: t.id, parentTicketId: parent.id, title: "Limiter" })).isError).toBeFalsy();
+    expect(await row(t.id)).toMatchObject({ parentTicketId: parent.id, featureId: f!.id, title: "Limiter" });
+    expect((await row(parent.id)).systemState).toBe("blocked");
+    expect(textOf(await update(c, { ticketId: parent.id, parentTicketId: t.id }))).toMatch(/sub-task/);
+    expect((await update(c, { ticketId: t.id, parentTicketId: null, featureId: null })).isError).toBeFalsy();
+    expect(await row(t.id)).toMatchObject({ parentTicketId: null, featureId: null });
+    expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, t.id))).toHaveLength(0);
+    await c.close();
   });
 });
