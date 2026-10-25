@@ -121,6 +121,8 @@ export type Ticket = {
   /** The feature it delivers and the task it is a sub-task of, by title, on a board card. */
   featureId?: string | null;
   featureTitle?: string | null;
+  /** The description; board cards carry it for the search box. */
+  body?: string | null;
   parentTitle?: string | null;
   lastActivityAt?: string;
   /** In review with an owner sign-off decision still open (the "Your review" lane). */

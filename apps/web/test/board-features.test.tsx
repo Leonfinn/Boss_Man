@@ -159,6 +159,23 @@ describe("board lanes", () => {
     columns.pop();
   });
 
+  it("finds tasks by reference, title or description words", async () => {
+    columns[0]!.tickets.push(card({ id: "t9", title: "Fix the header", number: 42, body: "The Safari menu overlaps." }));
+    withColumns([]);
+    render(<Board companies={[{ ...company, ticketPrefix: "HOL", agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
+    await screen.findByText("Fix the header");
+    const search = screen.getByRole("searchbox", { name: "Search tasks" });
+    fireEvent.change(search, { target: { value: "hol-42" } });
+    expect(screen.getByText("Fix the header")).toBeTruthy();
+    expect(screen.queryByText("Mine to do")).toBeNull();
+    fireEvent.change(search, { target: { value: "safari menu" } });
+    expect(screen.getByText("Fix the header")).toBeTruthy();
+    fireEvent.change(search, { target: { value: "agent" } });
+    expect(screen.getByText("Agent job")).toBeTruthy();
+    expect(screen.queryByText("Fix the header")).toBeNull();
+    columns[0]!.tickets.pop();
+  });
+
   it("filters cards by who they are assigned to", async () => {
     withColumns([]);
     render(<Board companies={[{ ...company, agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
