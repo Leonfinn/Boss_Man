@@ -73,7 +73,14 @@ describe("agents per key", () => {
 
 describe("adding a credential", () => {
   it("starts with no kind chosen and points a pasted JSON key at Other", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => json([])));
+    const posts: Array<{ url: string; body: { name?: string } }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) });
+        return json(init?.method === "POST" && url === "/api/secrets" ? { secret: { id: "s9" }, warnings: [] } : init?.method === "POST" ? {} : []);
+      }),
+    );
     render(<Secrets companies={[company]} companyId="c1" />);
     const kind = (await screen.findByLabelText("Add")) as HTMLSelectElement;
     expect(kind.value).toBe("");
@@ -86,5 +93,11 @@ describe("adding a credential", () => {
 
     fireEvent.change(kind, { target: { value: String(Array.from(kind.options).findIndex((o) => o.text === "Other") - 1) } });
     expect(screen.queryByText(/looks like a JSON key file/)).toBeNull();
+
+    // A blank name under Other takes the variable name, so it isn't typed twice.
+    fireEvent.change(screen.getByLabelText("Variable name"), { target: { value: "GSC_SERVICE_ACCOUNT_JSON" } });
+    expect((screen.getByLabelText("Name") as HTMLInputElement).placeholder).toBe("GSC_SERVICE_ACCOUNT_JSON");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await vi.waitFor(() => expect(posts.find((p) => p.url === "/api/secrets")?.body.name).toBe("GSC_SERVICE_ACCOUNT_JSON"));
   });
 });

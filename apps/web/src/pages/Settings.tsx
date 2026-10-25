@@ -277,6 +277,8 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
   const c = CREDENTIALS[choice];
   // A pasted key file (e.g. a Google service-account JSON) only fits "Other".
   const looksLikeJson = !!c && c.kind !== "generic" && value.trim().startsWith("{");
+  // The name is only the label in the secret store; left blank it follows the variable for "Other".
+  const defaultName = !c ? "" : c.env ? `${company.name} ${c.label}` : env;
   const describe = (r: { problems?: string[]; live: { ok: boolean; message: string } | null }) => {
     const problems = r.problems?.length ? ` ${r.problems.join(" ")}` : "";
     if (r.live) {
@@ -324,7 +326,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
       let secretId = existing;
       let warnings: string[] = [];
       if (!secretId) {
-        const created = await api<{ secret: { id: string }; warnings: string[] }>("/api/secrets", { method: "POST", body: { name: name || `${company.name} ${c!.label}`, kind: c!.kind, value } });
+        const created = await api<{ secret: { id: string }; warnings: string[] }>("/api/secrets", { method: "POST", body: { name: name.trim() || defaultName, kind: c!.kind, value } });
         secretId = created.secret.id;
         warnings = created.warnings;
       }
@@ -432,7 +434,7 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
           <>
             <div className="field">
               <label htmlFor="cred-name">Name</label>
-              <input id="cred-name" placeholder={c ? `${company.name} ${c.label}` : ""} value={name} onChange={(e) => setName(e.target.value)} />
+              <input id="cred-name" aria-describedby="cred-name-hint" placeholder={defaultName} value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div className="field">
               <label htmlFor="cred-value">Value</label>
@@ -453,6 +455,11 @@ export function Credentials({ company, onChanged, title = "Credentials" }: { com
           <SaveButton {...sv} busy={act.busy} />
         </div>
       </form>
+      {!existing && (
+        <p id="cred-name-hint" className="muted" style={{ fontSize: 13 }}>
+          <strong>Name</strong> is optional: it's how the value is listed under Secrets, and lets you reuse it in another company under a different variable name. Leave it blank to use the one shown. <strong>Variable name</strong> is what agents see.
+        </p>
+      )}
       {looksLikeJson && (
         <p role="alert" className="error" style={{ fontSize: 14 }}>
           This looks like a JSON key file (such as a Google service-account key), not a {c!.label}. Choose <strong>Other</strong> under Add, and keep the whole file as the value.
