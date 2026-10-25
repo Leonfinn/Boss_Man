@@ -1091,9 +1091,23 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     },
   );
   server.registerTool(
+    "agent_instructions",
+    {
+      description: "Read an agent's standing instructions (CEO only): its title, the template it was hired from, and the full text, so you can revise it with update_instructions. Long text comes in parts; pass offset to continue.",
+      inputSchema: { agent: z.string().trim().min(1).max(80), offset: z.number().int().min(0).optional() },
+    },
+    async ({ agent, offset }) => {
+      if (!(await ceoOnly())) return fail("Only your company's CEO can read other agents' instructions.");
+      const [who] = await db.select({ name: agents.name, title: agents.title, role: agents.role, template: agents.template, instructions: agents.instructions }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`, isNull(agents.retiredAt)));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      return text(`# ${who.name}: ${who.title ?? who.role}${who.template ? ` (hired from the ${who.template} template)` : ""}\n\n${who.instructions ? cut(who.instructions, CAP, (m) => `continue with agent_instructions agent="${who.name}" offset=${m}`, offset) : "(no instructions yet)"}`);
+    },
+  );
+
+  server.registerTool(
     "update_instructions",
     {
-      description: "Change an agent's standing instructions (CEO only): the whole new text, which replaces the old. Say why. The owner is told, and can undo it; if they've asked to approve such changes, it waits in Decisions.",
+      description: "Change an agent's standing instructions (CEO only): the whole new text, which replaces the old. Read the current text first with agent_instructions. Say why. The owner is told, and can undo it; if they've asked to approve such changes, it waits in Decisions.",
       inputSchema: { agent: z.string().trim().min(1).max(80), instructions: z.string().trim().min(1).max(20_000), reason: z.string().trim().min(1).max(2000) },
     },
     async ({ agent, instructions, reason }) => {

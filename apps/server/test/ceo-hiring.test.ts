@@ -75,6 +75,13 @@ describe("the CEO builds the team (R62)", () => {
   it("changes instructions with a notification and undo, or waits when the owner approves edits too", async () => {
     const c = (ctx = await setup());
     const client = await c.mcp(c.ceo.id);
+    // The CEO reads the current text before revising it; other agents can't.
+    const read = textOf(await client.callTool({ name: "agent_instructions", arguments: { agent: "engineer" } }));
+    expect(read).toMatch(/^# Engineer: Engineer \(hired from the engineer template\)/);
+    expect(read).toContain("You build and fix software");
+    const worker = await c.mcp(c.worker.id);
+    expect(textOf(await worker.callTool({ name: "agent_instructions", arguments: { agent: "CEO" } }))).toBe("Only your company's CEO can read other agents' instructions.");
+    await worker.close();
     expect(textOf(await client.callTool({ name: "update_instructions", arguments: { agent: "engineer", instructions: "Work only on the API.", reason: "The site is frozen." } }))).toContain("updated from their next run");
     const [eng] = await c.db.select().from(agents).where(eq(agents.id, c.worker.id));
     expect(eng!.instructions).toBe("Work only on the API.");

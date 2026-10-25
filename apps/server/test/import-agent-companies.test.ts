@@ -43,7 +43,7 @@ const FILES: Record<string, string> = {
     '        defaultRef: "trunk"',
   ].join("\n"),
   "agents/boss/AGENTS.md": '---\nname: "Boss"\nskills:\n  - "paperclipai/paperclip/paperclip"\n  - "company/1234/seo-audit"\n---\nRun the company.\n',
-  "agents/builder/AGENTS.md": '---\nname: "Builder"\ntitle: "Web Engineer"\nreportsTo: "boss"\nskills:\n  - "someone/seo-pack/seo-audit"\n  - "vercel-labs/agent-browser/dogfood"\n  - "nobody/gone/missing-skill"\n---\nBuild the site.\n',
+  "agents/builder/AGENTS.md": '---\nname: "Builder"\ntitle: "Web Engineer"\nreportsTo: "boss"\nskills:\n  - "someone/seo-pack/seo-audit"\n  - "vercel-labs/agent-browser/dogfood"\n  - "nobody/gone/missing-skill"\n---\nBuild the site. Leave a comment every heartbeat.\n',
   "skills/company/ACME/seo-audit/SKILL.md": skill("seo-audit", "Our own SEO audit."),
   "skills/someone/seo-pack/seo-audit/SKILL.md": skill("seo-audit", "Someone else's SEO audit."),
   "skills/vercel-labs/agent-browser/dogfood/SKILL.md": skill("dogfood", "Explores a site in a real browser."),
@@ -71,7 +71,7 @@ describe("Agent Companies import (docs/11, step 4)", () => {
     expect(pre.skills.map((s: { name: string }) => s.name).sort()).toEqual(["dogfood", "seo-audit", "seo-pack-seo-audit"]);
     expect(pre.secrets).toEqual([{ name: "GIT_TOKEN", envName: "GIT_TOKEN", agents: ["builder"] }]);
     expect(pre.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("Left out 1 skills that drive Paperclip itself, since Boss Man has its own tools for that: paperclip."), expect.stringContaining("imported as seo-pack-seo-audit"), "Builder had skills that aren't in the export: missing-skill."]),
+      expect.arrayContaining([expect.stringContaining("Left out 1 skills that drive Paperclip itself, since Boss Man has its own tools for that: paperclip."), expect.stringContaining("imported as seo-pack-seo-audit"), "Builder had skills that aren't in the export: missing-skill.", expect.stringContaining("1 agent's instructions describe working in Paperclip (the paperclip skill, heartbeats, its API or /paperclip paths), which Boss Man doesn't have: Builder.")]),
     );
 
     const res = await req("POST", "/api/companies/import", { zip });
