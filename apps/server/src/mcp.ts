@@ -1405,6 +1405,25 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
   );
 
   server.registerTool(
+    "create_feature",
+    {
+      description: "Add a feature to the company's feature requests (it starts as an idea). Give a title and a description: the problem, who it's for, what done looks like, what's out of scope and the risk. Pass objectiveId or milestoneId from board when it serves one. Pass the returned id as featureId to create_ticket to deliver it.",
+      inputSchema: { title: z.string().min(1).max(200), description: z.string().max(10_000).optional(), objectiveId: z.string().uuid().optional(), milestoneId: z.string().uuid().optional() },
+    },
+    async (input) => {
+      const existing = (await feedback.scored(scope.companyId)).features.find((f) => f.title.toLowerCase() === input.title.toLowerCase());
+      if (existing) return text(`Feature ${existing.id} "${existing.title}" already exists; use its id as featureId.`);
+      try {
+        const f = await feedback.createFeature(scope.companyId, { title: input.title, description: input.description ?? null, objectiveId: input.objectiveId ?? null, milestoneId: input.milestoneId ?? null, createdByAgentId: scope.agentId });
+        return text(`Created feature ${f.id} "${f.title}": #/features/${scope.companyId}/${f.id}`);
+      } catch (err) {
+        if (err instanceof FeedbackError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
     "link_tickets",
     { description: "Make one ticket wait on another: ticketId can't start until waitsOnTicketId is done.", inputSchema: { ticketId: z.string().uuid(), waitsOnTicketId: z.string().uuid() } },
     async ({ ticketId, waitsOnTicketId }) => {

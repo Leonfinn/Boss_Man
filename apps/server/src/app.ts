@@ -1635,6 +1635,13 @@ export async function buildApp(opts: AppOptions) {
       return chat.send(id, text, agentId).then((m) => reply.code(201).send(m), chatErrors(reply));
     });
 
+    // "Let the CEO question me first": the Board's add form sends its draft here instead of creating it.
+    owner.post("/api/companies/:id/chat/grill", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ kind: z.enum(["task", "feature"]), title: z.string().trim().min(1).max(200), description: z.string().trim().max(10_000).nullable().optional(), projectId: Uuid.optional() }).parse(req.body);
+      return chat.grill(id, b).then((r) => reply.code(201).send(r), chatErrors(reply));
+    });
+
     // CEO continuity: the CEO's chapters, and asking for a new one.
     owner.get("/api/companies/:id/chapters", async (req) => chapters.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/chapters/roll", async (req, reply) => {

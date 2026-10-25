@@ -93,11 +93,14 @@ describe("owner chat", () => {
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_ticket", "features", "link_tickets", "log_feedback", "propose_hire", "propose_rule", "propose_team", "set_milestone", "skills", "tickets", "update_instructions", "whats_new", "wiki"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_feature", "create_ticket", "features", "link_tickets", "log_feedback", "propose_hire", "propose_rule", "propose_team", "set_milestone", "skills", "tickets", "update_instructions", "whats_new", "wiki"]);
     expect(textOf(await client.callTool({ name: "log_feedback", arguments: { text: "Acme wants SSO.", from: "Acme" } }))).toMatch(/^Filed in the feedback inbox: #\/feedback\//);
     expect((await c.feedback.notes(c.company.id))[0]).toMatchObject({ source: "chat", customer: "Acme", text: "Acme wants SSO." });
     const board = JSON.parse(textOf(await client.callTool({ name: "board", arguments: {} })));
     expect(board.objectives[0].milestones[0]).toMatchObject({ id: c.ms.id, title: "Beta" });
+    expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "SSO", description: "For Acme.", milestoneId: c.ms.id } }))).toMatch(/^Created feature [0-9a-f-]{36} "SSO"/);
+    expect((await c.feedback.scored(c.company.id)).features[0]).toMatchObject({ title: "SSO", description: "For Acme.", milestoneId: c.ms.id });
+    expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "sso" } }))).toMatch(/already exists/);
     const auth = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Refactor auth", risk: "medium" } }));
     const authId = /#\/tickets\/([0-9a-f-]{36})/.exec(auth)![1]!;
     const made = textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Rate-limit login", risk: "high", milestoneId: c.ms.id, assignee: "engineer", waitsOn: [authId] } }));
@@ -117,6 +120,34 @@ describe("owner chat", () => {
     expect(chat.state).toBe("idle");
     expect(chat.items.map((m: { role: string }) => m.role)).toEqual(["owner", "owner", "assistant"]);
     expect(chat.items[2].text).toContain(`#/tickets/${rateId}`);
+  });
+
+  it("sends the owner's draft to the CEO with how to question them, before anything is created", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    const r = await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "task", title: "Add SSO", description: "Acme needs it", projectId: c.project.id });
+    expect(r.statusCode).toBe(201);
+    expect(r.json()).toEqual({ agentId: c.ceo.id });
+    const [m] = (await c.req("GET", `/api/companies/${c.company.id}/chat?agentId=${c.ceo.id}`)).json().items;
+    expect(m.role).toBe("owner");
+    expect(m.text).toContain("I want to add a task");
+    expect(m.text).toContain("Title: Add SSO\nProject: App\nDescription: Acme needs it");
+    expect(m.text).toContain("Ask one question at a time");
+    expect(m.text).toContain("recommended answer");
+    expect(m.text).toContain("usually 3 to 7 questions");
+    expect(m.text).toContain("create_ticket");
+    expect(m.text).toContain("acceptanceCriteria");
+    expect((await c.db.select().from(wakes).where(eq(wakes.reason, "owner_chat"))).length).toBe(1);
+    expect((await c.db.select().from(tickets)).length).toBe(0);
+
+    const f = await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "feature", title: "Export" });
+    expect(f.statusCode).toBe(201);
+    const last = (await c.req("GET", `/api/companies/${c.company.id}/chat?agentId=${c.ceo.id}`)).json().items.at(-1);
+    expect(last.text).toContain("I want to add a feature");
+    expect(last.text).toContain("Description: (none yet)");
+    expect(last.text).toContain("create_feature");
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "task", title: "x", projectId: "00000000-0000-4000-8000-000000000000" })).statusCode).toBe(404);
+    expect((await c.req("POST", `/api/companies/${c.company.id}/chat/grill`, { kind: "bug", title: "x" })).statusCode).toBe(400);
   });
 
   it("says when a run fails, and asks again after a runner restart", async () => {

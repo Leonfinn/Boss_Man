@@ -8,7 +8,7 @@ import path from "node:path";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { agentIdentity } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, ownerChatMessages, runs, wakes } from "../db/schema.js";
+import { agents, companies, ownerChatMessages, projects, runs, wakes } from "../db/schema.js";
 
 export const CHAT_REASON = "owner_chat";
 const HISTORY = 30;
@@ -61,6 +61,32 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       // One chat run at a time per agent picks up everything sent to it so far: notify joins a waiting wake.
       await deps.notify(agent.id, { reason: CHAT_REASON, priority: 4 });
       return m!;
+    },
+
+    /** The owner's draft task or feature goes to the CEO, with how to question them about it before creating it. */
+    async grill(companyId: string, draft: { kind: "task" | "feature"; title: string; description?: string | null; projectId?: string }) {
+      const ceo = (await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"))))[0];
+      if (!ceo) throw new ChatError(409, "This company has no CEO to answer.");
+      const [project] = draft.projectId ? await db.select({ name: projects.name }).from(projects).where(and(eq(projects.id, draft.projectId), eq(projects.companyId, companyId))) : [];
+      if (draft.projectId && !project) throw new ChatError(404, "No such project in this company.");
+      const text = [
+        `I want to add a ${draft.kind} and I'd like you to question me about it first.`,
+        "",
+        `Title: ${draft.title}`,
+        ...(project ? [`Project: ${project.name}`] : []),
+        `Description: ${draft.description || "(none yet)"}`,
+        "",
+        "How to run this:",
+        "- Ask one question at a time and wait for my answer. With each question, give your recommended answer, so I can just accept it.",
+        "- Cover the goal and who it's for, what done looks like, edge cases and what's out of scope, the risk, and anything it depends on. Check the board, tickets and features first, and don't ask what you can find out yourself.",
+        '- Stop when it\'s clear (usually 3 to 7 questions), or when I say "go".',
+        draft.kind === "task"
+          ? "- Then write it up and create it with create_ticket: a body with the problem or goal, what's out of scope and the risk; what done looks like as acceptanceCriteria; the feature it belongs to (featureId) and who should do it (assignee), if that's clear; and its risk."
+          : "- Then write it up and create it with create_feature: a description with the problem and who it's for, the goal, what done looks like as a list of criteria, what's out of scope, the risk and who should build it. Link it to the objective or milestone it serves. Don't break it into tasks unless I ask.",
+        "- Reply with what you created.",
+      ].join("\n");
+      const m = await this.send(companyId, text, ceo.id);
+      return { agentId: m.agentId };
     },
 
     async list(companyId: string, agentId?: string | null) {
@@ -118,7 +144,7 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
           : `You are ${agentIdentity(agent, company?.name ?? "this company").who}. The owner is messaging you directly in Boss Man's chat. Answer their questions about your work, and turn what they ask for into work on the board.`,
         ...agentIdentity(agent, company?.name ?? "this company").instructions,
         "",
-        "In this chat your tools are Boss Man's: board (projects, objectives and milestones, agents, open tickets), tickets (find any ticket, read it in full with what it produced, and read files from its work in the repo), create_ticket, link_tickets (one ticket waits on another), set_milestone, features (the feature requests, by priority), log_feedback (file feedback the owner passes on), wiki (read, write and file the company's pages) skills (the skill library; the CEO can give and take them), propose_hire, agent_instructions and update_instructions (the CEO builds the team and reads and revises each agent's instructions: a hire waits for the owner's approval unless they've said otherwise), and propose_team (when the owner asks for a team or a project needs one: one decision listing every proposed hire, with skills). You can't read or change code, run commands or browse; Claude's own file and shell tools are off here. Work that needs code happens on tickets, so create a ticket (assigned to the right agent) rather than promising to do it here.",
+        "In this chat your tools are Boss Man's: board (projects, objectives and milestones, agents, open tickets), tickets (find any ticket, read it in full with what it produced, and read files from its work in the repo), create_ticket, create_feature, link_tickets (one ticket waits on another), set_milestone, features (the feature requests, by priority), log_feedback (file feedback the owner passes on), wiki (read, write and file the company's pages) skills (the skill library; the CEO can give and take them), propose_hire, agent_instructions and update_instructions (the CEO builds the team and reads and revises each agent's instructions: a hire waits for the owner's approval unless they've said otherwise), and propose_team (when the owner asks for a team or a project needs one: one decision listing every proposed hire, with skills). You can't read or change code, run commands or browse; Claude's own file and shell tools are off here. Work that needs code happens on tickets, so create a ticket (assigned to the right agent) rather than promising to do it here.",
         "- Use your tools before saying you can't see something: look tickets up with tickets, and pages up with wiki. If you can resolve something yourself, do it now rather than leaving a note that someone should.",
         "- Look at the board first, so you reuse existing tickets and milestones instead of making duplicates.",
         "- Rate each ticket's risk honestly. Assign an agent only if the owner says who, or it's obvious. When a ticket delivers a feature request, pass its featureId.",
