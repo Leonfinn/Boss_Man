@@ -699,7 +699,9 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 - After a hand-applied change, the deployer may still show the alert about deployment files for a few minutes: press **Got it**.
 - Runner updates are unchanged (the drain); they never touch the proxy.
 
-**Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. The UI is down for about 20 to 30 seconds. Use the live colour's name; the examples say blue.
+**Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. For ordinary app changes use Settings → Updates → **Deploy latest** instead: it swaps colours with no downtime. The UI is down for about 20 to 30 seconds.
+
+`scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. The steps by hand, for reference (the examples say blue):
 
 1. Back up the database:
 ```sh
