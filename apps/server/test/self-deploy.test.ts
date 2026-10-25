@@ -132,7 +132,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.db.select().from(notifications)).map((n) => n.level).sort()).toEqual(["flag", "page"]);
   });
 
-  it("only alerts for a change to deployment files: the owner deploys those at the NAS", async () => {
+  it("only alerts for a change to deployment files: the owner deploys those by hand on the host", async () => {
     const c = (ctx = await setup());
     await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
     await c.selfDeploy.sync();

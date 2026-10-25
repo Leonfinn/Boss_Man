@@ -86,7 +86,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       target === "runner"
         ? `Update the runners to ${short(commit)}? The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
-          ? `Main has moved to ${short(commit)}, but the change touches deployment files (${a!.infraPaths.slice(0, 5).join(", ")}), so Boss Man cannot deploy it. Run scripts/deploy.sh at the NAS yourself.`
+          ? `Main has moved to ${short(commit)}, but the change touches deployment files (${a!.infraPaths.slice(0, 5).join(", ")}), so Boss Man cannot deploy it. Apply it by hand on the machine that runs Boss Man: scripts/deploy.sh, or with blue/green, the steps in docs/06-install-truenas.md section 9d ("What the deployer will not do for you").`
           : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}.${subjects ? `\n${subjects}` : ""}\nThe database is backed up first, then Boss Man restarts (a minute or two).`;
     const options = infra ? ["Got it"] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
     const [row] = await db
