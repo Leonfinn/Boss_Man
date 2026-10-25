@@ -70,3 +70,21 @@ describe("agents per key", () => {
     await vi.waitFor(() => expect(calls).toContain('PUT /api/grants/g1/agents {"agentIds":["a2"]}'));
   });
 });
+
+describe("adding a credential", () => {
+  it("starts with no kind chosen and points a pasted JSON key at Other", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json([])));
+    render(<Secrets companies={[company]} companyId="c1" />);
+    const kind = (await screen.findByLabelText("Add")) as HTMLSelectElement;
+    expect(kind.value).toBe("");
+    expect(kind.required).toBe(true);
+    expect((screen.getByRole("button", { name: "Check" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(kind, { target: { value: "0" } }); // Claude setup-token
+    fireEvent.change(screen.getAllByLabelText("Value").at(-1)!, { target: { value: '{"type": "service_account", "private_key": "x"}' } });
+    expect(screen.getByRole("alert").textContent).toContain("looks like a JSON key file");
+
+    fireEvent.change(kind, { target: { value: String(Array.from(kind.options).findIndex((o) => o.text === "Other") - 1) } });
+    expect(screen.queryByText(/looks like a JSON key file/)).toBeNull();
+  });
+});
