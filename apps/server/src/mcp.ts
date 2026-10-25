@@ -425,9 +425,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "nudge",
     {
-      description:
-        "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, and none back and forth about the same ticket.",
-      inputSchema: { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) },
+      description: NUDGE_DESCRIPTION,
+      inputSchema: NUDGE_INPUT,
     },
     async ({ agent, ticketId, why }) => {
       if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
@@ -1328,11 +1327,15 @@ function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa }
   return server;
 }
 
+const NUDGE_DESCRIPTION =
+  "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, and none back and forth about the same ticket.";
+const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
+
 /**
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team }: Services, scope: Scope) {
+function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
@@ -1342,6 +1345,13 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
   };
 
   registerBoard(server, db, scope);
+
+  // So an agent asked in chat for something it can't do here (a ticket's state, say) asks the colleague who can, instead of the owner.
+  server.registerTool("nudge", { description: NUDGE_DESCRIPTION, inputSchema: NUDGE_INPUT }, async ({ agent, ticketId, why }) => {
+    if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
+    const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
+    return r.ok ? text(`Nudged: ${r.delivered}.`) : fail(r.error);
+  });
 
   server.registerTool(
     "create_ticket",
@@ -1470,7 +1480,7 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
     const [run] = await db.select({ purpose: runsTable.purpose }).from(runsTable).where(eq(runsTable.id, scope.runId));
     // A PA gets its read-only server whatever woke it (R87).
     const [me] = scope.agentId ? await db.select({ duty: agents.duty }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-    const server = me?.duty === "assistant" ? buildPaServer(db, services, scope) : run?.purpose === "chat" ? buildChatServer(db, services, scope) : buildServer(db, services, scope, hooks);
+    const server = me?.duty === "assistant" ? buildPaServer(db, services, scope) : run?.purpose === "chat" ? buildChatServer(db, services, scope, hooks) : buildServer(db, services, scope, hooks);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {
