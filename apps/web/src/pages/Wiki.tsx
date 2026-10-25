@@ -195,19 +195,23 @@ function PageView({ companyId, slug, folders, go, onChanged, onNewHere }: { comp
 /** Not a stored page: the server builds it when asked (R84). "~" can't appear in a page address. */
 const BRIEF = "~brief";
 
-type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null };
+type Semantic = { enabled: boolean; baseUrl: string; model: string; dims: number; secretId: string | null; status?: { pages: number; indexed: number; lastError: { message: string; at: string } | null } };
 
 /** Semantic search: off by default. The key is a secret from the encrypted store. */
 function SemanticSettings({ companyId }: { companyId: string }) {
-  const cur = usePoll((signal) => api<Semantic>(`/api/companies/${companyId}/wiki-semantic`, { signal }), 600_000, `sem-${companyId}`);
+  // Polled while open, so the indexed count moves as pages are embedded in the background.
+  const cur = usePoll((signal) => api<Semantic>(`/api/companies/${companyId}/wiki-semantic`, { signal }), 15_000, `sem-${companyId}`);
   const secrets = usePoll((signal) => api<Array<{ id: string; name: string }>>("/api/secrets", { signal }), 600_000, "secrets");
   const [v, setV] = useState<Semantic | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const sv = useSaveState(v);
+  // Only the first load fills the form, so a background refresh never overwrites an edit in progress.
   useEffect(() => {
-    setV(cur.data ?? null);
-    if (cur.data) sv.reset(cur.data);
+    if (!cur.data || v) return;
+    setV(cur.data);
+    sv.reset(cur.data);
   }, [cur.data]);
+  const status = cur.data?.status;
   const [busy, setBusy] = useState(false);
   if (!v) return null;
   const save = (e: FormEvent) => {
@@ -254,8 +258,27 @@ function SemanticSettings({ companyId }: { companyId: string }) {
           <button type="button" className="btn" onClick={() => api(`/api/companies/${companyId}/wiki-semantic/reindex`, { method: "POST" }).then(() => setMsg("Re-embedding all pages."), (err: Error) => setMsg(err.message))}>
             Re-embed all
           </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={() =>
+              api<{ ok: boolean; message: string }>(`/api/companies/${companyId}/wiki-semantic/test`, { method: "POST" }).then(
+                (r) => (setMsg(r.message), cur.reload()),
+                (err: Error) => setMsg(err.message),
+              )
+            }
+          >
+            Test
+          </button>
         </div>
         {msg && <p role="status">{msg}</p>}
+        {cur.data?.enabled && status && (
+          <p className={status.lastError ? "error" : "muted"} style={{ fontSize: 14 }}>
+            {status.indexed} of {status.pages} pages indexed.
+            {status.lastError ? ` Last error (${new Date(status.lastError.at).toLocaleString()}): ${status.lastError.message}. Full-text search is still working.` : status.indexed < status.pages ? " The rest are being embedded." : " Up to date."}
+          </p>
+        )}
       </form>
     </details>
   );

@@ -1381,7 +1381,11 @@ export async function buildApp(opts: AppOptions) {
     });
     // Semantic wiki search settings. dims stays at the 768 the embeddings column holds.
     const semanticView = (s: Awaited<ReturnType<typeof semantic.settings>>) => ({ enabled: s.enabled, baseUrl: s.baseUrl, model: s.model, dims: s.dims, secretId: s.secretId });
-    owner.get("/api/companies/:id/wiki-semantic", async (req) => semanticView(await semantic.settings(IdParam.parse(req.params).id)));
+    owner.get("/api/companies/:id/wiki-semantic", async (req) => {
+      const id = IdParam.parse(req.params).id;
+      return { ...semanticView(await semantic.settings(id)), status: await semantic.status(id) };
+    });
+    owner.post("/api/companies/:id/wiki-semantic/test", async (req) => semantic.test(IdParam.parse(req.params).id));
     owner.put("/api/companies/:id/wiki-semantic", async (req) => {
       const { id } = IdParam.parse(req.params);
       const b = z.object({ enabled: z.boolean(), baseUrl: z.string().url().max(300).regex(/^https?:/), model: z.string().trim().min(1).max(200), secretId: Uuid.nullable() }).parse(req.body);
