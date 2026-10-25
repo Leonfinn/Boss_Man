@@ -119,7 +119,7 @@ export async function refreshBriefs(
   deps: { work: ReturnType<typeof workService>; gitHosts: Pick<ReturnType<typeof gitHostService>, "branchHead">; gitToken: (companyId: string) => Promise<string | undefined>; log: (m: string) => void; now?: () => Date },
 ) {
   const now = deps.now ?? (() => new Date());
-  for (const p of await db.select().from(projects)) {
+  for (const p of await db.select().from(projects).where(isNull(projects.archivedAt))) {
     try {
       const a = p.repoUrl ? parseRepoUrl(p.repoUrl) : null;
       if (!a || (p.gitHost !== "github" && p.gitHost !== "gitea") || !p.gitApiBase) continue;

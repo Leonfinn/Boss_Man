@@ -8,7 +8,7 @@ import { usePoll } from "../hooks";
 import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
-import { ProjectBrief, ProjectRow } from "./Settings";
+import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
 import { Avatar } from "../components/Avatar";
 
 const DONE_SHOWN = 8;
@@ -334,7 +334,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     60_000,
     companies.map((c) => c.id).join(","),
   );
-  const current = projects.data?.find((p) => p.id === projectId) ?? projects.data?.[0];
+  // An archived project opens only by its own link.
+  const current = projects.data?.find((p) => p.id === projectId) ?? projects.data?.find((p) => !p.archivedAt);
   const board = usePoll((signal) => (current ? api<BoardData>(`/api/projects/${current.id}/board`, { signal }) : Promise.resolve(null)), 10_000, current?.id ?? "none");
   const feats = usePoll((signal) => (current ? api<ScoredFeatures>(`/api/companies/${current.companyId}/features`, { signal }) : Promise.resolve(null)), 30_000, `board-feats-${current?.companyId ?? "none"}`);
   const goals = usePoll((signal) => (current ? api<Tree>(`/api/companies/${current.companyId}/objectives`, { signal }) : Promise.resolve(null)), 120_000, `board-goals-${current?.companyId ?? "none"}`);
@@ -428,9 +429,10 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <div className="field">
             <label htmlFor="project-pick">Project</label>
             <select id="project-pick" value={current?.id} onChange={(e) => go(`board/${e.target.value}`)}>
-              {projects.data!.map((p) => (
+              {projects.data!.filter((p) => !p.archivedAt || p.id === current?.id).map((p) => (
                 <option key={p.id} value={p.id}>
                   {companies.find((c) => c.id === p.companyId)?.name} · {p.name}
+                  {p.archivedAt ? " (archived)" : ""}
                 </option>
               ))}
             </select>
@@ -453,7 +455,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       <>
         {head}
         <div id="proj-panel" role="tabpanel" aria-labelledby={`proj-tab-${tab}`} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-          {tab === "budget" ? <ProjectBudget key={current.id} project={current} /> : <><ProjectRow key={current.id} p={current} agents={company?.agents} onChanged={() => { projects.reload(); onCompaniesChanged(); }} /><ProjectBrief key={`brief-${current.id}`} p={current} /></>}
+          {tab === "budget" ? <ProjectBudget key={current.id} project={current} /> : <><ProjectRow key={current.id} p={current} agents={company?.agents} onChanged={() => { projects.reload(); onCompaniesChanged(); }} /><ProjectBrief key={`brief-${current.id}`} p={current} /><ArchiveProject key={`archive-${current.id}`} p={current} onChanged={() => { projects.reload(); onCompaniesChanged(); }} /></>}
         </div>
       </>
     );

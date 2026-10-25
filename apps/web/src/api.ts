@@ -40,6 +40,7 @@ export type Project = {
   id: string;
   companyId: string;
   name: string;
+  archivedAt?: string | null;
   repoUrl: string | null;
   defaultBranch: string;
   verifyCommand: string | null;

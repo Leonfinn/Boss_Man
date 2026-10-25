@@ -800,6 +800,38 @@ function CheckPicker({ id, label, value, onChange, presets }: { id: string; labe
 }
 
 /** `only`: "repo" hides the check pickers (detection needs the runner and git token), "checks" shows just them. */
+/** Archive hides a finished project from menus and agents; its tasks and history stay, and it can come back. */
+export function ArchiveProject({ p, onChanged }: { p: Project; onChanged: () => void }) {
+  const act = useAction();
+  const archived = !!p.archivedAt;
+  return (
+    <Section id={`archive-${p.id}-h`} title={archived ? "Archived" : "Archive this project"}>
+      <p className="muted" style={{ fontSize: 14 }}>
+        {archived
+          ? `${p.name} is archived: it's hidden from the menus and from agents, and takes no new tasks. Its tasks and history are kept.`
+          : `Hides ${p.name} from the menus and from agents, and stops new tasks being added. Its tasks and history are kept, and you can unarchive it. Finish or cancel its open tasks first.`}
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/projects/${p.id}`, { method: "PATCH", body: { archived: !archived } });
+              onChanged();
+              return archived ? "Unarchived." : "Archived.";
+            })
+          }
+        >
+          {archived ? `Unarchive ${p.name}` : `Archive ${p.name}`}
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 export function ProjectRow({ p, only, onChanged, agents }: { p: Project; only?: "repo" | "checks"; onChanged?: () => void; agents?: Agent[] }) {
   const showRepo = only !== "checks";
   const showChecks = only !== "repo";
@@ -953,12 +985,12 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
               }}
             />
           </Section>
-          <Section id="projects-h" title={`Projects (${projects.data?.length ?? 0})`}>
+          <Section id="projects-h" title={`Projects (${projects.data?.filter((p) => !p.archivedAt).length ?? 0})`}>
             <p className="muted" style={{ fontSize: 14 }}>
               With a repo, each task gets its own branch and worktree. Approved work is checked, then merged into the default branch or sent as a pull request. The token in <span className="mono">GIT_TOKEN</span> is used to clone, push and open pull requests. Don't put a token in the URL.
             </p>
             {projects.data?.length
-              ? projects.data.map((p) => (
+              ? projects.data.filter((p) => !p.archivedAt).map((p) => (
                   <div key={p.id}>
                     <a href={`#/board/${p.id}`} style={{ fontWeight: 600, marginRight: 8 }}>{p.name}</a>
                     <StarButton agent={p} where="Projects" onToggle={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { starred: !p.starred } }).then(() => { projects.reload(); onChanged?.(); })} />
@@ -969,6 +1001,19 @@ export function ProjectsPage({ companies, companyId, go, onChanged }: { companie
                   </div>
                 ))
               : projects.data && <p>No projects yet.</p>}
+            {projects.data?.some((p) => p.archivedAt) && (
+              <details>
+                <summary>Archived ({projects.data.filter((p) => p.archivedAt).length})</summary>
+                {projects.data.filter((p) => p.archivedAt).map((p) => (
+                  <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+                    <a href={`#/board/${p.id}`}>{p.name}</a>
+                    <button type="button" className="btn small" onClick={() => void api(`/api/projects/${p.id}`, { method: "PATCH", body: { archived: false } }).then(() => { projects.reload(); onChanged?.(); })}>
+                      Unarchive
+                    </button>
+                  </div>
+                ))}
+              </details>
+            )}
           </Section>
         </div>
       )}

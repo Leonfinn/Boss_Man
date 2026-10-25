@@ -96,7 +96,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
   async function resolveProject(project?: string) {
-    const rows = await db.select().from(projects).where(eq(projects.companyId, scope.companyId));
+    const rows = await db.select().from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt)));
     if (project) return rows.find((p) => p.id === project || p.name.toLowerCase() === project.toLowerCase()) ?? null;
     return rows.length === 1 ? rows[0]! : null;
   }
@@ -228,7 +228,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const p = parentTask ? (await db.select().from(projects).where(eq(projects.id, parentTask.projectId)))[0] : await resolveProject(project);
       if (!p) {
-        const names = (await db.select({ name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId))).map((r) => r.name);
+        const names = (await db.select({ name: projects.name }).from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt)))).map((r) => r.name);
         return fail(names.length ? `Name the project: one of ${names.join(", ")}.` : "Your company has no projects yet; ask your CEO to create one.");
       }
       if (engagementId) {
@@ -1194,7 +1194,7 @@ function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: S
     "board",
     { description: "See the company's board: projects, objectives with their milestones, agents, and open tickets with their ids.", inputSchema: {} },
     async () => {
-      const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId)).orderBy(asc(projects.name));
+      const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt))).orderBy(asc(projects.name));
       const os = await db.select({ id: objectives.id, title: objectives.title, priority: objectives.priority }).from(objectives).where(and(eq(objectives.companyId, scope.companyId), eq(objectives.status, "active")));
       const ms = os.length ? await db.select({ id: milestones.id, objectiveId: milestones.objectiveId, title: milestones.title, targetDate: milestones.targetDate }).from(milestones).where(inArray(milestones.objectiveId, os.map((o) => o.id))) : [];
       const as = await db.select({ id: agents.id, name: agents.name, role: agents.role }).from(agents).where(eq(agents.companyId, scope.companyId));
@@ -1326,7 +1326,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
       },
     },
     async (input) => {
-      const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(eq(projects.companyId, scope.companyId));
+      const ps = await db.select({ id: projects.id, name: projects.name }).from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt)));
       const p = input.project ? ps.find((x) => x.name.toLowerCase() === input.project!.toLowerCase()) : ps.length === 1 ? ps[0] : undefined;
       if (!p) return fail(ps.length ? `Name the project: one of ${ps.map((x) => x.name).join(", ")}.` : "The company has no projects yet; the owner creates them on the Board.");
       let assigneeAgentId: string | undefined;

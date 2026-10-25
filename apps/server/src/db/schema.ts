@@ -193,6 +193,8 @@ export const projects = pgTable("projects", {
   monthlyCapMicros: micros("monthly_cap_micros"),
   /** Overrides the company's review policy for this project's tickets; null uses the company's. */
   reviewPolicy: jsonb("review_policy").$type<ReviewPolicy>(),
+  /** An archived project is hidden from menus and agents and takes no new tickets; its tickets and history stay. */
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 
