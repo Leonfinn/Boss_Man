@@ -569,7 +569,7 @@ export async function buildApp(opts: AppOptions) {
       const rows = await db.select().from(companies).orderBy(companies.name);
       // Retired agents (R62) only show on the Agents page, so they can't be given new work.
       const allAgents = await db.select().from(agents).where(isNull(agents.retiredAt));
-      const allProjects = await db.select({ id: projects.id, companyId: projects.companyId, name: projects.name, starred: projects.starred }).from(projects).orderBy(projects.name);
+      const allProjects = await db.select({ id: projects.id, companyId: projects.companyId, name: projects.name, starred: projects.starred }).from(projects).where(isNull(projects.archivedAt)).orderBy(projects.name);
       return rows.map((c) => ({ ...c, agents: allAgents.filter((a) => a.companyId === c.id), projects: allProjects.filter((p) => p.companyId === c.id) }));
     });
 
@@ -1033,6 +1033,7 @@ export async function buildApp(opts: AppOptions) {
           ticketCostCapUsd: z.number().positive().nullable(),
           starred: z.boolean(),
           monthlyCapUsd: z.number().positive().nullable(),
+          archived: z.boolean(),
           landing: z.enum(["merge", "pull_request"]),
           gitHost: z.enum(["github", "gitea"]).nullable(),
           gitApiBase: z
@@ -1044,7 +1045,13 @@ export async function buildApp(opts: AppOptions) {
         })
         .partial()
         .parse(req.body);
-      const { ticketCostCapUsd, monthlyCapUsd, ...fields } = b;
+      const { ticketCostCapUsd, monthlyCapUsd, archived, ...fields } = b;
+      // Archiving hides the project from agents, so work still open in it would be stranded.
+      if (archived) {
+        const [open] = await db.select({ n: count() }).from(tickets).where(and(eq(tickets.projectId, id), ne(tickets.systemState, "done")));
+        if (open!.n) return reply.code(409).send({ error: "open_tickets", message: `This project has ${open!.n} open task${open!.n === 1 ? "" : "s"}. Finish or cancel ${open!.n === 1 ? "it" : "them"} before archiving.` });
+      }
+      if (archived !== undefined) Object.assign(fields, { archivedAt: archived ? new Date() : null, ...(archived ? { starred: false } : {}) });
       // A new repo address finds its host (R59), unless the owner set one with it.
       if (fields.repoUrl !== undefined && fields.gitHost === undefined) {
         const found = fields.repoUrl ? await gitHosts.detect(fields.repoUrl) : null;

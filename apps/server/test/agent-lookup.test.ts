@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { projects, runners } from "../src/db/schema.js";
+import { projects, runners, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -52,6 +52,31 @@ async function setup() {
 }
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
+
+describe("archived projects", () => {
+  it("archives a project with no open tasks: hidden from menus and agents, no new tasks, history kept, and it can come back", async () => {
+    const c = (ctx = await setup());
+    const old = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "LLM Wiki" })).json() as { id: string };
+    const t = (await c.req("POST", `/api/projects/${old.id}/tickets`, { title: "Old setup" })).json() as { id: string };
+    expect((await c.req("PATCH", `/api/projects/${old.id}`, { archived: true })).json()).toMatchObject({ message: "This project has 1 open task. Finish or cancel it before archiving." });
+    await c.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, t.id));
+    expect((await c.req("PATCH", `/api/projects/${old.id}`, { archived: true })).json()).toMatchObject({ archivedAt: expect.any(String), starred: false });
+
+    const listed = (await c.req("GET", "/api/companies")).json() as Array<{ projects: Array<{ name: string }> }>;
+    expect(listed[0]!.projects.map((p) => p.name)).toEqual(["Site"]);
+    expect((await c.req("POST", `/api/projects/${old.id}/tickets`, { title: "More" })).statusCode).toBe(409);
+    expect((await c.req("GET", `/api/tickets/${t.id}`)).json()).toMatchObject({ title: "Old setup" });
+
+    await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Work", assigneeAgentId: c.worker.id });
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    expect(textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Sneak in", project: "LLM Wiki" } }))).toContain("Name the project: one of Site.");
+    await client.close();
+
+    expect((await c.req("PATCH", `/api/projects/${old.id}`, { archived: false })).json()).toMatchObject({ archivedAt: null });
+    expect((await c.req("POST", `/api/projects/${old.id}/tickets`, { title: "More" })).statusCode).toBe(201);
+  });
+});
 
 describe("agents look tickets up (R77)", () => {
   it("numbers tickets per company as PREFIX-n, and finds and reads one by its reference", async () => {
