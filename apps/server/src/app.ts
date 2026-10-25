@@ -344,6 +344,7 @@ export async function buildApp(opts: AppOptions) {
           const [run] = await db.select().from(runsTable).where(eq(runsTable.id, event.runId));
           if (run) await loops.failure({ companyId: run.companyId, ticketId: run.ticketId, agentId: run.agentId, text: event.error, what: "An agent run" });
         })
+        .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err }, "run-ended handling failed"));
     }
