@@ -51,12 +51,15 @@ describe("the Agents tab (R62)", () => {
     expect(sam.instructions).toContain("keep the owner and the CEO informed");
     expect((await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "X", template: "astronaut" })).statusCode).toBe(422);
 
+    await c.req("PATCH", `/api/agents/${sam.id}`, { model: "deepseek/deepseek-4.1-flash", thinking: "low" });
     await c.req("POST", `/api/agents/${sam.id}/wake`, { note: "Say hello." });
     await c.scheduler.tick();
     const start = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start" && x.agentId === sam.id)!;
     expect(start.prompt).toContain("You are Sam, the Scrum Master of App Co, working through Boss Man.");
     expect(start.prompt).toContain("Your instructions from the owner:");
     expect(start.prompt).toContain("You report; you do not do the work");
+    // The model comes from the agent's setting, which wins over any model its instructions name.
+    expect(start.prompt).toContain("Your model is set in Boss Man: deepseek/deepseek-4.1-flash, with low thinking. If anything in your instructions names a different model, this setting is the right one.");
   });
 
   it("keeps a thinking level, refuses an unknown one, and sends it with the run", async () => {
