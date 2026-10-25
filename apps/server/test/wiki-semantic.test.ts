@@ -125,4 +125,27 @@ describe("semantic wiki search", () => {
     await s.semantic.drain();
     expect(s.fetchFn).not.toHaveBeenCalled();
   });
+
+  it("shows how far indexing has got, tests the provider, and keeps the last error until it works again", async () => {
+    const s = await setup();
+    const view = async () => (await s.req("GET", `/api/companies/${s.company}/wiki-semantic`)).json() as { status: { pages: number; indexed: number; lastError: { message: string } | null } };
+    const test = async () => (await s.req("POST", `/api/companies/${s.company}/wiki-semantic/test`)).json() as { ok: boolean; message: string };
+    expect(await test()).toMatchObject({ ok: false, message: expect.stringContaining("is off") });
+    await s.write("Notes", "## Draft\nnot embedded while off");
+    await s.settings();
+    await s.semantic.drain();
+    await s.write("Security", "## Login\nlogin steps");
+    expect((await view()).status).toEqual({ pages: 2, indexed: 2, lastError: null });
+    expect(await test()).toEqual({ ok: true, message: "Working: google/gemini-embedding-001 returned a 768-number embedding." });
+
+    s.failing.on = true;
+    const failed = await test();
+    expect(failed).toEqual({ ok: false, message: "Not working: the embeddings provider answered 500." });
+    expect((await view()).status.lastError?.message).toBe("the embeddings provider answered 500");
+    expect(JSON.stringify(await view())).not.toContain(KEY);
+
+    s.failing.on = false;
+    await s.write("Security", "## Login\nlogin steps changed");
+    expect((await view()).status.lastError).toBeNull();
+  });
 });

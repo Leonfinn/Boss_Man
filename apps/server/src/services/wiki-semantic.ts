@@ -2,7 +2,7 @@
 // embedded in the background after a write; wiki.search fuses the closest sections with full-text
 // hits. Embedding failures are logged as one short line and never block a write or a search.
 import { createHash } from "node:crypto";
-import { and, cosineDistance, eq, inArray } from "drizzle-orm";
+import { and, cosineDistance, countDistinct, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { wikiPages, wikiSectionEmbeddings, wikiSemanticSettings } from "../db/schema.js";
 import { splitSections } from "./wiki.js";
@@ -30,6 +30,9 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
   const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; companyId: string }>();
   // shortcut: in-flight embeds in this process only; lost on restart, harmless because drain() waits for them on shutdown.
   const running = new Set<Promise<void>>();
+  // The last provider error per company, for the settings panel. Lost on restart, harmless: the next embed or Test sets it again.
+  const lastError = new Map<string, { message: string; at: Date }>();
+  const failed = (companyId: string, err: Error) => (lastError.set(companyId, { message: err.message, at: new Date() }), log(`wiki embeddings: ${err.message}`));
 
   async function settings(companyId: string): Promise<SemanticSettings> {
     const [row] = await db.select().from(wikiSemanticSettings).where(eq(wikiSemanticSettings.companyId, companyId));
@@ -70,11 +73,11 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
   }
 
   /** Brings one page's embeddings up to date: embeds new or changed sections, drops sections that are gone. */
-  async function embedPage(companyId: string, pageId: string) {
+  async function embedPage(companyId: string, pageId: string): Promise<boolean> {
     const r = await ready(companyId);
-    if (!r) return;
+    if (!r) return false;
     const [p] = await db.select().from(wikiPages).where(and(eq(wikiPages.id, pageId), eq(wikiPages.companyId, companyId)));
-    if (!p) return;
+    if (!p) return false;
     const seen = new Set<string>();
     const wanted = splitSections(p.body)
       .filter((s) => !seen.has(s.path) && !!seen.add(s.path) && p.body.slice(s.start, s.ownEnd).trim())
@@ -86,16 +89,20 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
     const stale = [...have.keys()].filter((path) => !wanted.some((w) => w.path === path));
     if (stale.length) await db.delete(wikiSectionEmbeddings).where(and(eq(wikiSectionEmbeddings.pageId, pageId), inArray(wikiSectionEmbeddings.sectionPath, stale)));
     const todo = wanted.filter((w) => have.get(w.path) !== w.hash);
-    if (!todo.length) return;
+    if (!todo.length) return false;
     const vectors = await embed(r.s, r.key, todo.map((t) => t.text));
     for (const [i, t] of todo.entries()) {
       const row = { companyId, pageId, sectionPath: t.path, contentHash: t.hash, model: r.s.model, dims: r.s.dims, embedding: vectors[i]!, updatedAt: new Date() };
       await db.insert(wikiSectionEmbeddings).values(row).onConflictDoUpdate({ target: [wikiSectionEmbeddings.pageId, wikiSectionEmbeddings.sectionPath], set: row });
     }
+    return true;
   }
 
   const run = (companyId: string, pageId: string) => {
-    const job = embedPage(companyId, pageId).catch((err: Error) => log(`wiki embeddings: ${err.message}`));
+    const job = embedPage(companyId, pageId).then(
+      (embedded) => void (embedded && lastError.delete(companyId)),
+      (err: Error) => failed(companyId, err),
+    );
     running.add(job);
     void job.finally(() => running.delete(job));
     return job;
@@ -126,6 +133,35 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
       return pages.length;
     },
 
+    /** How far indexing has got: pages with sections embedded by the current model, of all pages, and the last provider error. */
+    async status(companyId: string) {
+      const s = await settings(companyId);
+      const [all] = await db.select({ n: countDistinct(wikiPages.id) }).from(wikiPages).where(eq(wikiPages.companyId, companyId));
+      const [done] = await db
+        .select({ n: countDistinct(wikiSectionEmbeddings.pageId) })
+        .from(wikiSectionEmbeddings)
+        .where(and(eq(wikiSectionEmbeddings.companyId, companyId), eq(wikiSectionEmbeddings.model, s.model), eq(wikiSectionEmbeddings.dims, s.dims)));
+      const err = lastError.get(companyId);
+      return { pages: Number(all?.n ?? 0), indexed: Number(done?.n ?? 0), lastError: err ? { message: err.message, at: err.at.toISOString() } : null };
+    },
+
+    /** Embeds one short text with the saved settings, so the owner can see the provider answer. */
+    async test(companyId: string): Promise<{ ok: boolean; message: string }> {
+      const s = await settings(companyId);
+      if (!s.enabled) return { ok: false, message: "Semantic search is off. Tick the box and save first." };
+      if (!s.secretId) return { ok: false, message: "No API key is chosen." };
+      const key = await deps.reveal(s.secretId);
+      if (!key) return { ok: false, message: "The chosen API key couldn't be read from the secret store." };
+      try {
+        await embed(s, key, ["Boss Man connection test"]);
+        lastError.delete(companyId);
+        return { ok: true, message: `Working: ${s.model} returned a ${s.dims}-number embedding.` };
+      } catch (err) {
+        failed(companyId, err as Error);
+        return { ok: false, message: `Not working: ${(err as Error).message}.` };
+      }
+    },
+
     /** Runs whatever is waiting now and waits for everything in flight. For tests and shutdown. */
     async drain() {
       for (const [pageId, { timer, companyId }] of [...pending]) (clearTimeout(timer), pending.delete(pageId), void run(companyId, pageId));
@@ -144,7 +180,7 @@ export function wikiSemanticService(db: Db, deps: { reveal: (secretId: string) =
       try {
         qv = (await embed(r.s, r.key, [q]))[0]!;
       } catch (err) {
-        log(`wiki embeddings: ${(err as Error).message}`);
+        failed(companyId, err as Error);
         return null;
       }
       const dist = cosineDistance(wikiSectionEmbeddings.embedding, qv);
