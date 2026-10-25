@@ -41,9 +41,10 @@ describe("runner add-ons (docs/12)", () => {
     expect(await canaryAddons("", async () => {})).toEqual({ ok: true, failures: [] });
   });
 
-  it("the image pins the same agent-browser version as the catalogue", () => {
+  it("the image pins the same add-on versions as the catalogue", () => {
     const docker = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
     expect(docker.match(/^ARG AGENT_BROWSER_VERSION=(.+)$/m)?.[1]).toBe(addonById("agent-browser")!.version);
+    expect(docker.match(/^ARG PLAYWRIGHT_VERSION=(.+)$/m)?.[1]).toBe(addonById("webkit")!.version);
     // Off by default: a plain build holds no add-ons.
     expect(docker).toMatch(/^ARG RUNNER_ADDONS=""$/m);
   });

@@ -26,7 +26,7 @@ IMAGE=boss-man-runner
 profiles="${COMPOSE_PROFILES:-$(grep -s '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2- || true)}"
 # The deployer folder (docs/09-self-deploy.md) is where the drain request goes; .env has it once self-deploy is set up.
 BOSSMAN_DEPLOYER="${BOSSMAN_DEPLOYER:-$(grep -s '^BOSSMAN_DEPLOYER=' .env | tail -1 | cut -d= -f2- || true)}"
-# Optional runner add-ons (docs/12), e.g. RUNNER_ADDONS=agent-browser in .env; empty builds the plain image.
+# Optional runner add-ons (docs/12), e.g. RUNNER_ADDONS=agent-browser,webkit in .env; empty builds the plain image.
 addons="${RUNNER_ADDONS:-$(grep -s '^RUNNER_ADDONS=' .env | tail -1 | cut -d= -f2- || true)}"
 compose() { COMPOSE_PROFILES="${profiles:-runners}" docker compose "$@"; }
 launcher_id() { docker ps -q --filter label=com.docker.compose.project=boss-man --filter label=com.docker.compose.service=launcher; }

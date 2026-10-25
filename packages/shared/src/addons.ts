@@ -19,6 +19,18 @@ export const RUNNER_ADDONS: RunnerAddon[] = [
     check: ["agent-browser", "--version"],
     canary: [["agent-browser", "open", "about:blank"], ["agent-browser", "close"]],
   },
+  {
+    id: "webkit",
+    title: "WebKit (Playwright)",
+    summary:
+      "Safari's engine, headless, for Safari-style checks: playwright screenshot -b webkit --device \"iPhone 13\" <url> <file.png>, or a Node script using require(\"playwright\").webkit. Close to Safari but not Safari itself (Linux fonts, no Apple-only behaviour).",
+    npm: "playwright",
+    version: "1.64.1",
+    licence: "Apache-2.0",
+    homepage: "https://playwright.dev",
+    check: ["playwright", "--version"],
+    canary: [["playwright", "screenshot", "-b", "webkit", "about:blank", "/tmp/bossman-webkit-canary.png"]],
+  },
 ];
 
 /** What a runner last said about its add-ons. */
