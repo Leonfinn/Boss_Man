@@ -1,6 +1,6 @@
 # 11 — Company import and export
 
-Status: steps 1 (export) and 2 (import of Boss Man packages, API only) built. Owner asked for a general tool, not a one-off migration (24 Oct 2026).
+Status: steps 1 (export), 2 (import of Boss Man packages) and 3 (Settings → Import and export) built. Owner asked for a general tool, not a one-off migration (24 Oct 2026).
 
 ## Goal
 
@@ -82,7 +82,7 @@ Paperclip's company export carries no issues. Its issues, comments and issue doc
 
 ## Export
 
-- In the UI: Settings → company → **Export**, with tick boxes for wiki and tickets (none, open or all).
+- In the UI: Settings → **Import and export**, with a tick box for the wiki and a choice of tickets (none, open or all). Import is on the same tab.
 - Over the API: `GET /api/companies/:id/export?wiki=1&tickets=open`. It's read-only, so a standby server can serve it too.
 
 ## Build order (one PR each)
