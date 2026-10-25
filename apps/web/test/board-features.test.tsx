@@ -160,7 +160,7 @@ describe("board lanes", () => {
   });
 
   it("finds tasks by reference, title or description words", async () => {
-    columns[0]!.tickets.push(card({ id: "t9", title: "Fix the header", number: 42, body: "The Safari menu overlaps." }));
+    (columns[0]!.tickets as unknown[]).push(card({ id: "t9", title: "Fix the header", number: 42, body: "The Safari menu overlaps." }));
     withColumns([]);
     render(<Board companies={[{ ...company, ticketPrefix: "HOL", agents: [dev] } as unknown as Company]} projectId="p1" go={() => {}} onCompaniesChanged={() => {}} />);
     await screen.findByText("Fix the header");
