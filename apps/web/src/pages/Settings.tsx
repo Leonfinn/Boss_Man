@@ -1314,7 +1314,7 @@ export function ImportCompany({ go, onChanged }: { go: (to: string) => void; onC
   return (
     <Section id="import-h" title="Import a company">
       <p className="muted" style={{ fontSize: 14 }}>
-        Pick a <code>.bossman.zip</code> exported from Boss Man. Nothing is created until you press Import. It becomes a new company with every agent paused and no secrets: you add those yourself.
+        Pick a zip of either a Boss Man export (<code>.bossman.zip</code>) or a <strong>Paperclip company export</strong>. For Paperclip, put <code>paperclip-issues.json</code> next to <code>COMPANY.md</code> first to bring its tickets, comments and documents too (see docs/14-paperclip-migration.md). Nothing is created until you press Import. It becomes a new company with every agent paused and no secrets: you add those yourself.
       </p>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <label htmlFor="import-file">Package</label>

@@ -281,7 +281,7 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
   );
 }
 
-function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void }) {
+function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string } }) {
   const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -361,7 +361,16 @@ function Edit({ a, sources, lists, refresh, onSaved }: { a: AgentRow; sources: F
           <div className="field">
             <label htmlFor={`instructions-${a.id}`}>Instructions</label>
             <textarea id={`instructions-${a.id}`} rows={6} value={form.instructions} onChange={(e) => setForm({ ...form, instructions: e.target.value })} />
-            <small className="muted">{a.role === "ceo" ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)." : "Used from the agent's next run."}</small>
+            <small className="muted">{a.role === "ceo"
+                ? "The CEO picks up new instructions in its next chapter (Settings › CEO chapters)."
+                : a.duty === "wiki"
+                  ? "Boss Man gives the wiki maintainer its job in every run (the Index, Log, Status pages, filing finished work, the health check). Add only extra house rules here; they're used from its next run."
+                  : "Used from the agent's next run."}</small>
+            {template && form.instructions.trim() !== template.instructions.trim() && (
+              <button type="button" className="linkish" style={{ alignSelf: "flex-start" }} onClick={() => setForm({ ...form, instructions: template.instructions })}>
+                {form.instructions.trim() ? `Replace with the current ${template.title} template` : `Fill in from the ${template.title} template`}
+              </button>
+            )}
           </div>
           <SaveButton {...sv} busy={busy} style={{ alignSelf: "flex-start" }} />
         </form>
@@ -454,7 +463,7 @@ function CeoApprovals({ companyId }: { companyId: string }) {
 
 export function Agents({ company, onChanged }: { company: Company | undefined; onChanged: () => void }) {
   const list = usePoll((signal) => (company ? api<AgentRow[]>(`/api/companies/${company.id}/agents`, { signal }) : Promise.resolve([])), 15_000, `agents-${company?.id ?? "none"}`);
-  const templates = usePoll((signal) => api<{ templates: Template[] }>("/api/agent-templates", { signal }), 3_600_000, "agent-templates");
+  const templates = usePoll((signal) => api<{ templates: Template[]; ceo?: Omit<Template, "role"> }>("/api/agent-templates", { signal }), 3_600_000, "agent-templates");
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, "sources");
   const models = usePoll((signal) => (company ? api<ModelLists>(`/api/companies/${company.id}/models`, { signal }) : Promise.resolve(null)), 300_000, `models-${company?.id ?? "none"}`);
   const [hiring, setHiring] = useState(false);
@@ -540,7 +549,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             )}
           </div>
         </div>
-        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} />}
+        {open === a.id && <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} template={a.role === "ceo" ? templates.data?.ceo : templates.data?.templates.find((t) => t.id === a.template)} />}
       </li>
     );
   };
