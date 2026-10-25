@@ -105,7 +105,7 @@ describe("Paperclip issues (docs/11, step 5)", () => {
       { identifier: "ACM-2", title: "Write the copy", status: "cancelled", priority: "low", parent: "ACM-1", project: "Site", description: null, created_at: "2026-10-02T09:00:00Z", comments: null, documents: null },
       { identifier: "ACM-3", title: "Loose idea", status: "todo", priority: "medium", parent: null, project: null, description: null, created_at: "2026-10-03T09:00:00Z", comments: [], documents: [] },
     ];
-    const withIssues = Buffer.from(zipSync(Object.fromEntries([...Object.entries(FILES), ["paperclip-issues.json", JSON.stringify(issues)]].map(([p, t]) => [`acme/${p}`, strToU8(t)])))).toString("base64");
+    const withIssues = Buffer.from(zipSync(Object.fromEntries([...Object.entries(FILES), ["paperclip-issues.json", JSON.stringify(issues)] as [string, string]].map(([p, t]) => [`acme/${p}`, strToU8(t)])))).toString("base64");
     const req = await setup();
     const pre = (await req("POST", "/api/companies/import/preview", { zip: withIssues })).json();
     expect(pre.counts).toMatchObject({ tickets: 3, projects: 2, wikiPages: 4 });
