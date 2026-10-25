@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from "react";
+import { SCRATCH_RULE } from "@boss-man/shared";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
-type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string };
+type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean };
 type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number };
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }> };
 
@@ -24,6 +25,7 @@ function describeMatch(m: Match) {
   if (m.kinds?.length) parts.push(`tool kind is ${m.kinds.join(" or ")}`);
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
+  if (m.scratchOnly) parts.push("everything it changes or deletes is in /tmp");
   return parts.join(" and ");
 }
 
@@ -85,6 +87,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
     }
   };
   const rules = list.data ? (scopeId ? list.data.company : list.data.global) : [];
+  const scratchRule = rules.find((r) => r.match.scratchOnly);
   const move = (i: number, d: -1 | 1) => {
     const ids = rules.map((r) => r.id);
     [ids[i], ids[i + d]] = [ids[i + d]!, ids[i]!];
@@ -153,6 +156,21 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}
           onDelete={(r) => window.confirm(`Delete "${r.name}"?`) && void act(() => api(`/api/policy-rules/${r.id}`, { method: "DELETE" }))}
         />
+      </section>
+
+      <section className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontWeight: 600 }}>
+          <input
+            type="checkbox"
+            checked={Boolean(scratchRule)}
+            disabled={!list.data}
+            onChange={() => void act(() => (scratchRule ? api(`/api/policy-rules/${scratchRule.id}`, { method: "DELETE" }) : api("/api/policy-rules", { method: "POST", body: { companyId: scopeId, ...SCRATCH_RULE } })))}
+          />
+          {SCRATCH_RULE.name}
+        </label>
+        <p className="muted" style={{ fontSize: 14 }}>
+          Agents often copy the project into /tmp to try something out. When this is on, a command is allowed without asking if every file it changes or deletes is in /tmp. It still asks you about anything that touches files outside /tmp, pushes, uses the network, or runs a program Boss Man can't see inside (such as node or a script). Off by default.
+        </p>
       </section>
 
       <section className="card" aria-labelledby="add-rule-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>

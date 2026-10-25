@@ -2,6 +2,8 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
+import { explainCommand } from "./explain.js";
+
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
 export type PermissionInfo = {
@@ -19,9 +21,14 @@ export type PolicyMatch = {
   titlePattern?: string;
   /** Never matches a command the built-in rules send to the owner (destructive, push). Set on rules made by "Allow always". */
   safeOnly?: boolean;
+  /** Only matches a shell command whose every change or deletion is under /tmp, with no push, network or program Boss Man can't see into. Set by the owner's "/tmp only" switch. */
+  scratchOnly?: boolean;
 };
 
 export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: PolicyOutcome };
+
+/** The owner's opt-in standing rule for scratch work (Rules page switch). */
+export const SCRATCH_RULE: PolicyRuleSpec = { name: "Always allow commands that only work in /tmp", match: { kinds: ["execute"], scratchOnly: true }, outcome: "allow" };
 
 const DESTRUCTIVE = String.raw`\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\b|\bmkfs\b|\bdd\s+if=|\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)\b|\bgit\s+push\s+.*--force\b|\bzfs\s+destroy\b|\bshred\b`;
 
@@ -42,7 +49,7 @@ export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute"
 /** What's wrong with a rule's match, if anything: it needs a condition, and its patterns must compile. */
 export function ruleProblems(match: PolicyMatch): string[] {
   const problems: string[] = [];
-  if (!match.kinds?.length && !match.commandPattern && !match.titlePattern) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
+  if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
   for (const k of match.kinds ?? []) if (!(TOOL_KINDS as readonly string[]).includes(k)) problems.push(`"${k}" isn't a tool kind. Use: ${TOOL_KINDS.join(", ")}.`);
   for (const [label, p] of [["command pattern", match.commandPattern], ["title pattern", match.titlePattern]] as const) {
     if (p == null) continue;
@@ -81,11 +88,16 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const cmd = commandOf(info.rawInput) ?? "";
     if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
   }
+  if (rule.scratchOnly) {
+    // shortcut: paths are checked as written, so a symlink inside /tmp pointing elsewhere isn't caught; resolving them needs the runner's filesystem.
+    const scratch = explainCommand(commandOf(info.rawInput) ?? "").scratch;
+    if (!scratch || scratch.unchecked.length) return false;
+  }
   if (rule.titlePattern) {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern);
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly);
 }
 
 /** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
