@@ -1,7 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { commandOf, evaluatePermission, recommendedVerdict } from "../src/policy.js";
+import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
+
+describe("the /tmp-only switch", () => {
+  it("allows commands that only work in /tmp when on, and still asks when off", () => {
+    for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && cp -r src /tmp/a", "cd /tmp/x && find . -delete"]) {
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toEqual({ outcome: "allow", rule: SCRATCH_RULE.name });
+    }
+    expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("owner");
+  });
+
+  it("never covers anything outside /tmp, pushes, the network or programs it can't see into", () => {
+    for (const c of ["rm -rf /srv/x", "cd /tmp && rm -rf ../home", "rm -rf /tmp/a; rm -rf ~/b", "tee /tmp/x /etc/y", "cd /tmp/a && git push --force", "cd /tmp && curl -o x http://a", "cd /tmp && bash -c 'rm -rf /'", "cd /tmp && docker system prune -a", "cd /tmp && zfs destroy tank/apps"]) {
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule).not.toBe(SCRATCH_RULE.name);
+    }
+  });
+});
 
 describe("evaluatePermission defaults", () => {
   it("allows Boss Man's own MCP tools for Claude and Codex naming", () => {
