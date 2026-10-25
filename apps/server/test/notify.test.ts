@@ -186,10 +186,27 @@ describe("nudge (R86)", () => {
     expect(await nudge(c, c.alice.id, a.id, "Bob", "Over to you", c.ticket.id)).toMatchObject({ ok: true });
     expect(await nudge(c, c.bob.id, b.id, "Alice", "Back to you", c.ticket.id)).toMatchObject({ ok: false, error: expect.stringContaining("Answer them on the ticket") });
     expect(await nudge(c, c.bob.id, b.id, "Alice", "Back again", c.ticket.id)).toMatchObject({ ok: false });
-    const alerts = (await c.db.select().from(decisions)).filter((d) => d.question.includes("nudging each other"));
+    const alerts = (await c.db.select().from(decisions)).filter((d) => d.question.includes("keep nudging each other"));
     expect(alerts).toHaveLength(1);
+    // The alert says what each asked and where to answer, so the owner can act on it.
+    expect(alerts[0]!.question).toMatch(/about [A-Z]+-\d+ "Rate limiting"/);
+    expect(alerts[0]!.question).toContain('Alice to Bob: "Over to you"');
+    expect(alerts[0]!.question).toContain('Bob to Alice (not delivered): "Back to you"');
     // About another ticket it's a new conversation.
     expect(await nudge(c, c.bob.id, b.id, "Alice", "Different matter")).toMatchObject({ ok: true });
+  });
+
+  it("lets one reply through when there's no ticket to answer on, and drops the third", async () => {
+    const c = (ctx = await setup());
+    const a = await c.liveRun(c.alice.id, null);
+    const b = await c.liveRun(c.bob.id, null);
+    expect(await nudge(c, c.alice.id, a.id, "Bob", "Please set the organising ticket to in_progress")).toMatchObject({ ok: true });
+    expect(await nudge(c, c.bob.id, b.id, "Alice", "There is no such ticket; which one?")).toMatchObject({ ok: true });
+    expect(await nudge(c, c.alice.id, a.id, "Bob", "Then create it")).toMatchObject({ ok: false, error: expect.stringContaining("Put it on a ticket") });
+    const [alert] = (await c.db.select().from(decisions)).filter((d) => d.question.includes("keep nudging each other"));
+    expect(alert!.question).toContain("with no ticket to work on");
+    expect(alert!.question).toContain('Bob to Alice: "There is no such ticket; which one?"');
+    expect(alert!.question).toContain("Create one and assign it");
   });
 
   it("still counts toward the wake-chain depth limit", async () => {
