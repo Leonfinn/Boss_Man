@@ -133,6 +133,9 @@ describe("wiki and ticket outputs (R69)", () => {
     await c.wiki.write(c.company.id, { folder: "Research", title: "Landscape", body: "25 products. See [[research/pricing]].", ticketId: t.id, agentId: c.worker.id, runId: null });
     await c.wiki.write(c.company.id, { title: "Index", body: "- [[research/landscape]]", agentId: c.worker.id, runId: null });
     await c.wiki.write(c.company.id, { title: "Old notes", body: "Nobody links here.", agentId: c.worker.id, runId: null });
+    await c.wiki.write(c.company.id, { title: "Log", body: "- 2026-10-24: nothing to do", agentId: c.worker.id, runId: null });
+    await c.wiki.write(c.company.id, { title: "Pricing notes", body: "Terms are in [[glossary]].", agentId: c.worker.id, runId: null });
+    await c.wiki.write(c.company.id, { title: "Licence notes", body: "See [[glossary]] and [[pricing-notes]].", agentId: c.worker.id, runId: null });
     const t2 = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Pick a licence" })).json() as { id: string };
     await c.req("PATCH", `/api/tickets/${t.id}`, { state: "done" });
     await c.req("PATCH", `/api/tickets/${t2.id}`, { state: "done" });
@@ -157,7 +160,9 @@ describe("wiki and ticket outputs (R69)", () => {
     expect(start.prompt).toContain("> Changed <date>: <what it said before> → <what it says now>");
     expect(start.prompt).toContain("Status page (slug status-<project id>");
     // The health check names the broken link and the orphan; Index and the linked page are not orphans.
-    expect(start.prompt).toContain("Broken links (page → missing page):\n- research/landscape → research/pricing\nPages nothing links to:\n- old-notes\n");
+    // A missing page linked from several pages is wanted; one linked once is a broken link. Log, like Index, is never an orphan.
+    expect(start.prompt).toContain("Wanted pages (missing, linked from several pages):\n- glossary (2 pages)\nBroken links (page → missing page):\n- research/landscape → research/pricing\nPages nothing links to:\n- old-notes\n- licence-notes\n");
+    expect(start.prompt).toContain('Keep a "Log" page at the top level (slug log)');
 
     // Any agent can be paused; its work waits.
     await c.req("PATCH", `/api/agents/${c.worker.id}`, { paused: true });
