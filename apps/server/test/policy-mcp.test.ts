@@ -85,7 +85,7 @@ describe("permission requests through the policy engine", () => {
 
       // The owner's answer, lost.
       waiting.add("r2");
-      conn.emit({ type: "run.permission_request", runId, requestId: "r2", title: "rm -rf /tmp/x", kind: "execute", rawInput: { command: "rm -rf /tmp/x" }, optionKinds: ["allow_once", "reject_once"] });
+      conn.emit({ type: "run.permission_request", runId, requestId: "r2", title: "rm -rf /srv/x", kind: "execute", rawInput: { command: "rm -rf /srv/x" }, optionKinds: ["allow_once", "reject_once"] });
       const [d] = await waitFor(async () => (await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json() as Array<{ id: string; recommendedOption: string }>, (x) => x.length === 1);
       dropNext = true;
       await ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: d!.recommendedOption } });
@@ -149,6 +149,12 @@ describe("permission requests through the policy engine", () => {
     expect(ans.json()).toMatchObject({ delivered: true });
     await waitFor(() => commands.length, (n) => n === 3);
     expect(commands[2]).toEqual({ type: "permission.decide", runId, requestId: "r3", verdict: "deny" });
+    // A delete that only touches a temporary folder is still asked about, but says so and recommends allowing it.
+    ask("r4", "rm -rf /tmp/mut && mkdir -p /tmp/mut");
+    const tmp = await waitFor(async () => (await ctx.app.inject({ method: "GET", url: "/api/decisions", headers: { cookie: ctx.cookie } })).json() as Array<{ recommendedOption: string; context: { explain?: { scratch?: { note: string } } } }>, (d) => d.length === 1);
+    expect(tmp[0]).toMatchObject({ recommendedOption: "Allow once", context: { explain: { scratch: { note: expect.stringContaining("temporary folder") } } } });
+    await ctx.app.inject({ method: "POST", url: `/api/decisions/${(tmp[0] as unknown as { id: string }).id}/answer`, headers: { cookie: ctx.cookie }, payload: { answer: "Deny" } });
+    await waitFor(() => commands.length, (n) => n === 4);
     conn.stop();
   });
   it("Allow always answers the request and saves a rule, so the next identical request skips the owner", async () => {

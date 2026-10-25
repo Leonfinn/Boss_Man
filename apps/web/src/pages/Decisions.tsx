@@ -265,6 +265,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     )}
                     {x && (
                       <>
+                        {x.scratch && (
+                          <p>
+                            <span className="tag green">Temporary folder only</span> {x.scratch.note}
+                          </p>
+                        )}
                         <p>
                           <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
                           {x.effect === "unknown" && " Read the exact command before you allow it."}

@@ -20,6 +20,8 @@ export type PermissionExplanation = {
   reason?: string;
   /** Why "Allow always" isn't offered, when it isn't. */
   alwaysNote?: string;
+  /** Every file it changes or deletes is under /tmp: the plain reassurance, and programs Boss Man couldn't check. */
+  scratch?: { note: string; unchecked: string[] };
 };
 
 /** A standing rule the owner can pick instead of "Allow once". */
@@ -65,7 +67,7 @@ function segments(command: string): string[] {
 
 const unquote = (t: string) => t.replace(/^(['"])(.*)\1$/, "$2");
 
-type Part = { effect: Effect; text: string; targets: string[]; env?: boolean };
+type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean };
 
 function explainSegment(seg: string): Part {
   const tokens = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
@@ -94,12 +96,17 @@ function explainSegment(seg: string): Part {
   else if (DELETES.has(program)) p = part("deletes", "Deletes files", operands);
   else if (program === "find") {
     p = flags.includes("-delete") ? part("deletes", "Deletes files", paths) : flags.some((f) => f.startsWith("-exec")) ? part("unknown", "Runs other programs through find -exec") : part("reads", "", paths);
-  } else if (program === "sed") p = flags.some((f) => /^-\w*i/.test(f)) ? part("changes", "Edits files in place", paths) : part("reads", "", paths);
+  } else if (program === "sed") {
+    // Without -e the first operand is the script, not a file.
+    const files = flags.some((f) => f === "-e" || f === "-f") ? operands : operands.slice(1);
+    p = flags.some((f) => /^-\w*i/.test(f)) ? part("changes", "Edits files in place", files) : part("reads", "", files.filter((a) => a.includes("/")));
+  }
   else if (program === "git") {
     const sub = rest.find((a) => !a.startsWith("-")) ?? "";
     p =
       sub === "push" ? part("pushes", "Pushes code to the repository")
       : sub === "clean" || sub === "rm" ? part("deletes", "Deletes files from the project")
+      : sub === "clone" && rest.filter((a) => !a.startsWith("-"))[1]?.startsWith("/") ? { ...part("changes", "Copies a repository on this machine", rest.filter((a) => !a.startsWith("-")).slice(2)), local: true }
       : GIT_NETWORK.has(sub) ? part("network", "Uses the network (git)")
       : GIT_CHANGES.has(sub) ? part("changes", "Changes the project's files or history")
       : GIT_READS.has(sub) ? part("reads", "", paths)
@@ -107,11 +114,12 @@ function explainSegment(seg: string): Part {
   } else if (PKG.has(program) && PKG_INSTALL.has(rest[0] ?? "")) p = part("changes", `Installs or removes packages (${program})`);
   else if (program === "node" && flags.length && flags.every((f) => f === "--version" || f === "-v") && !operands.length) p = part("reads", "");
   else if (NETWORK.has(program)) p = part("network", `Uses the network (${program})`);
-  else if (CHANGES.has(program)) p = part("changes", "Changes files", operands);
+  else if (CHANGES.has(program)) p = part("changes", "Changes files", program === "cp" || program === "tee" ? operands.slice(program === "cp" ? -1 : 0) : operands);
   else if (READS.has(program)) p = part("reads", "", paths);
   else p = part("unknown", `Runs a program Boss Man doesn't recognise: ${program}`);
 
   if (/\$\(|`/.test(seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
+  p.program = program;
   if (writes.length) {
     const worse = WORST.indexOf(p.effect) < WORST.indexOf("changes") ? p : null;
     p = worse ?? { ...part("changes", "Changes files", writes), env: p.env };
@@ -121,9 +129,54 @@ function explainSegment(seg: string): Part {
 
 const list = (xs: string[]) => [...new Set(xs.map(friendly))].slice(0, 4).join(", ");
 
+const SCRATCH = /^\/tmp(\/|$)/;
+/** An absolute path with . and .. worked out; null for ~, $VARS and other things only the shell knows. */
+function norm(p: string): string | null {
+  if (!p.startsWith("/") || /[$~`]/.test(p)) return null;
+  const out: string[] = [];
+  for (const s of p.split("/")) {
+    if (!s || s === ".") continue;
+    if (s === "..") out.pop();
+    else out.push(s);
+  }
+  return `/${out.join("/")}`;
+}
+
+/**
+ * Whether everything the command changes or deletes is under /tmp, following its cd's. Null when
+ * anything could reach further: a push, the network, a relative path from an unknown folder, or a
+ * change with no named target outside a /tmp folder. Programs it can't see into are listed.
+ */
+function scratchOnly(segs: string[], parts: Part[]): { unchecked: string[] } | null {
+  let cwd: string | null = null;
+  const at = (p: string) => norm(p.startsWith("/") ? p : cwd ? `${cwd}/${p}` : "");
+  const unchecked: string[] = [];
+  let wrote = false;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]!;
+    if (p.program === "cd") {
+      const to = (segs[i]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote)[1] ?? "";
+      cwd = to ? at(to) : null;
+      continue;
+    }
+    if (p.effect === "pushes" || p.effect === "network") return null;
+    if (p.effect === "unknown") {
+      if (!cwd || !SCRATCH.test(cwd)) return null;
+      unchecked.push(p.program || "a program");
+      continue;
+    }
+    if (p.effect !== "changes" && p.effect !== "deletes") continue;
+    wrote = true;
+    const where = p.targets.length ? p.targets.map(at) : [cwd];
+    if (where.some((w) => !w || !SCRATCH.test(w))) return null;
+  }
+  return wrote ? { unchecked: [...new Set(unchecked)] } : null;
+}
+
 /** What a shell command would do, in one sentence led by the worst thing in it. */
-export function explainCommand(command: string): { summary: string; effect: Effect } {
-  const parts = segments(command).map(explainSegment);
+export function explainCommand(command: string): { summary: string; effect: Effect; scratch?: PermissionExplanation["scratch"] } {
+  const segs = segments(command);
+  const parts = segs.map(explainSegment);
   const effect = WORST.find((e) => parts.some((p) => p.effect === e)) ?? "reads";
   const sentences: string[] = [];
   for (const e of WORST) {
@@ -136,7 +189,12 @@ export function explainCommand(command: string): { summary: string; effect: Effe
     } else sentences.push([...new Set(group.map((p) => p.text))].join("; ") + (targets ? ` (${targets})` : "") + ".");
   }
   if (parts.some((p) => p.env)) sentences.push("Shows environment variables, which can include secrets.");
-  return { summary: sentences.join(" ") || "Does nothing visible.", effect };
+  const tmp = parts.some((p) => p.env) ? null : scratchOnly(segs, parts);
+  const scratch = tmp && {
+    unchecked: tmp.unchecked,
+    note: `Works only in a temporary folder (/tmp): every file it changes or deletes is there, so your project, its branch and the repository aren't touched.${tmp.unchecked.length ? ` It also runs ${tmp.unchecked.join(", ")} in that folder; Boss Man can't see inside ${tmp.unchecked.length === 1 ? "that program" : "those programs"}.` : ""}`,
+  };
+  return { summary: sentences.join(" ") || "Does nothing visible.", effect, ...(scratch ? { scratch } : {}) };
 }
 
 const TOOL: Record<string, { what: string; effect: Effect; verb: string }> = {

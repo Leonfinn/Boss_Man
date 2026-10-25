@@ -442,7 +442,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           kind: "permission",
           question: `${explain.title}. ${explain.summary}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
-          recommendedOption: recommendedVerdict(info) === "deny" ? DENY : ALLOW,
+          // A command that only touches /tmp, with nothing in it Boss Man can't check, is safe to allow.
+          recommendedOption: recommendedVerdict(info) === "deny" && !(explain.scratch && !explain.scratch.unchecked.length) ? DENY : ALLOW,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,

@@ -82,3 +82,29 @@ describe("alwaysChoices", () => {
     expect(run("ls").rule).toBe("all");
   });
 });
+
+describe("work only in a temporary folder", () => {
+  const scratch = (c: string) => explainCommand(c).scratch;
+
+  it("says so when every change and delete is under /tmp, following cd, and names programs it can't check", () => {
+    const s = scratch(`cd /tmp && rm -rf hol398-parent && git clone -q /home/node/workspaces/tickets/abc hol398-parent 2>&1 | tail -2; cd hol398-parent && git checkout -q 6471aee^ && cp /home/node/workspaces/tickets/abc/tests/x.test.mjs tests/ && node tests/x.test.mjs; echo "EXIT=$?"`);
+    expect(s?.unchecked).toEqual(["node"]);
+    expect(s?.note).toMatch(/^Works only in a temporary folder \(\/tmp\)/);
+    expect(s?.note).toContain("It also runs node in that folder");
+    expect(scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && sed -i 's/a/b/' /tmp/opencode/mut/x.js")?.unchecked).toEqual([]);
+  });
+
+  it("doesn't when anything could reach outside /tmp", () => {
+    expect(scratch("rm -rf /tmp/x /home/node/project")).toBeUndefined();
+    expect(scratch("cd /tmp && rm -rf ../home/node")).toBeUndefined();
+    expect(scratch("cd ~ && rm -rf work")).toBeUndefined();
+    expect(scratch("rm -rf build")).toBeUndefined();
+    expect(scratch("cd /tmp/x && git push origin main")).toBeUndefined();
+    expect(scratch("cd /tmp && git clone https://example.com/r.git r")).toBeUndefined();
+    expect(scratch("cd /tmp/x && git checkout main && cd /home/node && git checkout main")).toBeUndefined();
+    expect(scratch("rm -rf /tmp/$DIR")).toBeUndefined();
+    expect(scratch("node build.js")).toBeUndefined();
+    // Only reading isn't the case this line is for.
+    expect(scratch("cat /tmp/x")).toBeUndefined();
+  });
+});
