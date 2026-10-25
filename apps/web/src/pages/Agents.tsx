@@ -2,6 +2,7 @@
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
+import { THINKING_LEVELS } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource } from "../api";
 import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -18,6 +19,7 @@ type AgentRow = {
   instructions: string | null;
   agentKind: string;
   model: string | null;
+  thinking: string | null;
   fundingSourceId: string | null;
   funding: string | null;
   fundingKind: string | null;
@@ -130,6 +132,24 @@ function ModelPicker({ id, value, onChange, agentKind, fundingSourceId, lists, r
   );
 }
 
+/** How hard the model thinks; the run skips a level the model doesn't offer and says so in the runner log. */
+function ThinkingField({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="field">
+      <label htmlFor={id}>Thinking</label>
+      <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Default</option>
+        {THINKING_LEVELS.map((l) => (
+          <option key={l} value={l}>
+            {l === "xhigh" ? "Extra high" : l[0]!.toUpperCase() + l.slice(1)}
+          </option>
+        ))}
+      </select>
+      <small className="muted">More thinking is slower and uses more tokens. Not every model offers every level; one it doesn't is left at its default.</small>
+    </div>
+  );
+}
+
 export function StarButton({ agent, onToggle, where = "Chat" }: { agent: { name: string; starred: boolean }; onToggle: () => void; where?: string }) {
   return (
     <button type="button" className="btn star" aria-pressed={agent.starred} aria-label={`Star ${agent.name}`} title={agent.starred ? `Starred: shown under ${where}` : `Star to show under ${where}`} onClick={onToggle}>
@@ -139,7 +159,7 @@ export function StarButton({ agent, onToggle, where = "Chat" }: { agent: { name:
 }
 
 const STATUS: Record<AgentRow["status"], [string, string]> = { working: ["Working", "green"], idle: ["Idle", ""], paused: ["Paused", "amber"], retired: ["Retired", ""] };
-const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", funding: "Paid from", kind: "Agent kind", paused: "Paused" };
+const FIELD: Record<string, string> = { hired: "Hired", retired: "Retired", rehired: "Rehired", name: "Name", title: "Job title", instructions: "Instructions", model: "Model", thinking: "Thinking", funding: "Paid from", kind: "Agent kind", paused: "Paused" };
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 const jobOf = (a: Pick<AgentRow, "role" | "title" | "duty">) => (a.role === "ceo" ? "CEO" : (a.title ?? (a.duty === "wiki" ? "Wiki Maintainer" : a.role === "manager" ? "Manager" : "Agent")));
 /** Boolean fields read as plain words, e.g. paused true -> "Paused", false -> "Unpaused", not "yes -> no". */
@@ -150,7 +170,7 @@ const show = (v: unknown, sources: FundingSource[]) =>
 
 function Hire({ companyId, templates, sources, lists, refresh, onDone }: { companyId: string; templates: Template[]; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onDone: (name: string) => void }) {
   const [tpl, setTpl] = useState<Template | null>(null);
-  const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", fundingSourceId: "", agentKind: "claude" });
+  const [form, setForm] = useState({ name: "", title: "", instructions: "", model: "", thinking: "", fundingSourceId: "", agentKind: "claude" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const choose = (t: Template | null) => {
@@ -171,6 +191,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
           title: form.title.trim() || null,
           instructions: form.instructions.trim() || null,
           model: form.model.trim() || null,
+          thinking: form.thinking || null,
           fundingSourceId: form.fundingSourceId || null,
           agentKind: form.agentKind,
         },
@@ -225,6 +246,7 @@ function Hire({ companyId, templates, sources, lists, refresh, onDone }: { compa
           <ModelPicker id="hire-model" value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={form.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
           <small className="muted">{tpl ? `Suggested: a ${tpl.modelTier} model. ` : ""}Blank uses the agent's default.</small>
         </div>
+        <ThinkingField id="hire-thinking" value={form.thinking} onChange={(thinking) => setForm({ ...form, thinking })} />
         <div className="field">
           <label htmlFor="hire-funding">Paid from</label>
           <select id="hire-funding" value={form.fundingSourceId} onChange={(e) => setForm({ ...form, fundingSourceId: e.target.value })}>
@@ -282,7 +304,7 @@ function Picture({ a, run }: { a: AgentRow; run: (fn: () => Promise<unknown>, do
 }
 
 function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; sources: FundingSource[]; lists: ModelLists | null; refresh: () => Promise<string>; onSaved: () => void; template?: { title: string; instructions: string } }) {
-  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
+  const [form, setForm] = useState({ name: a.name, title: a.title ?? "", instructions: a.instructions ?? "", model: a.model ?? "", thinking: a.thinking ?? "", fundingSourceId: a.fundingSourceId ?? "", agentKind: a.agentKind });
   const history = usePoll((signal) => api<Change[]>(`/api/agents/${a.id}/history`, { signal }), 60_000, `history-${a.id}`);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const sv = useSaveState(form);
@@ -301,7 +323,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; 
   };
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, fundingSourceId: form.fundingSourceId || null, agentKind: form.agentKind };
+    const body = { name: form.name.trim(), title: form.title.trim() || null, instructions: form.instructions.trim() || null, model: form.model.trim() || null, thinking: form.thinking || null, fundingSourceId: form.fundingSourceId || null, agentKind: form.agentKind };
     setBusy(true);
     const ok = await run(() => api(`/api/agents/${a.id}`, { method: "PATCH", body }), "Saved.");
     setBusy(false);
@@ -346,6 +368,7 @@ function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; 
               <label htmlFor={`model-${a.id}`}>Model</label>
               <ModelPicker id={`model-${a.id}`} value={form.model} onChange={(model) => setForm({ ...form, model })} agentKind={form.agentKind} fundingSourceId={form.fundingSourceId} lists={lists} refresh={refresh} />
             </div>
+            <ThinkingField id={`thinking-${a.id}`} value={form.thinking} onChange={(thinking) => setForm({ ...form, thinking })} />
             <div className="field">
               <label htmlFor={`funding-${a.id}`}>Paid from</label>
               <select id={`funding-${a.id}`} value={form.fundingSourceId} onChange={(e) => setForm({ ...form, fundingSourceId: e.target.value })}>
@@ -515,7 +538,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
                 "No open tasks"
               )}
               {" · "}
-              <span className="mono">{a.model ?? "default model"}</span> · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
+              <span className="mono">{a.model ?? "default model"}</span>{a.thinking ? `, ${a.thinking} thinking` : ""} · {a.funding ?? "no funding set"} · this month {a.month.runs} run{a.month.runs === 1 ? "" : "s"}, {used}
             </div>
             {a.pa && (
               <div className="muted" style={{ fontSize: 13 }}>

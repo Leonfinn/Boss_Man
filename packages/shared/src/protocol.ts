@@ -74,6 +74,9 @@ export type DiskReport = Omit<Extract<RunnerEvent, { type: "runner.disk" }>, "ty
 export const JournalEntry = z.object({ seq: z.number().int().positive(), at: z.string(), event: RunnerEvent });
 export type JournalEntry = z.infer<typeof JournalEntry>;
 
+/** Thinking levels an agent can ask for; the adapter's thought_level option says which its model takes. */
+export const THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+
 export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("run.start"),
@@ -81,6 +84,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     agentId: Uuid,
     agentKind: z.string(),
     model: z.string().nullable(),
+    /** The agent's thinking level (THINKING_LEVELS); an older runner ignores it. */
+    thinking: z.string().optional(),
     fundingSourceId: Uuid.nullable(),
     cwd: z.string(),
     prompt: z.string(),

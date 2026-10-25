@@ -557,6 +557,7 @@ export function schedulerService(
       agentId: agent.id,
       agentKind: agent.agentKind,
       model: agent.model,
+      ...(agent.thinking ? { thinking: agent.thinking } : {}),
       fundingSourceId: agent.fundingSourceId,
       cwd: chat ? chat.cwd(w.companyId, w.agentId) : path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).

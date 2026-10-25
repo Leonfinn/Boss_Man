@@ -12,7 +12,7 @@ import { adapterArgs, defaultBin, SessionManager } from "../src/session-manager.
 
 const fake = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-opencode.mjs");
 
-async function run(opts: { model: string | null; boardToolsOnly?: boolean; secrets?: Record<string, string> }) {
+async function run(opts: { model: string | null; boardToolsOnly?: boolean; secrets?: Record<string, string>; thinking?: string }) {
   const dump = path.join(mkdtempSync(path.join(tmpdir(), "bm-oc-")), "dump.json");
   const events: RunnerEvent[] = [];
   let done!: () => void;
@@ -24,13 +24,21 @@ async function run(opts: { model: string | null; boardToolsOnly?: boolean; secre
     resolveEnv: async () => ({ DUMP: dump, ...opts.secrets }),
     emit: (e) => (events.push(e), e.type === "run.ended" && done()),
   });
-  manager.handle({ type: "run.start", runId: "r1", agentId: "a1", agentKind: "opencode", model: opts.model, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t", ...(opts.boardToolsOnly ? { boardToolsOnly: true } : {}) } as never);
+  manager.handle({ type: "run.start", runId: "r1", agentId: "a1", agentKind: "opencode", model: opts.model, cwd: mkdtempSync(path.join(tmpdir(), "bm-oc-ws-")), prompt: "hi", mcpToken: "t", ...(opts.boardToolsOnly ? { boardToolsOnly: true } : {}), ...(opts.thinking ? { thinking: opts.thinking } : {}) } as never);
   await ended;
   manager.shutdown();
   return { events, dump: JSON.parse(readFileSync(dump, "utf8")) };
 }
 
 describe("opencode agent kind", () => {
+  it("sets the thinking level through the effort option, and leaves one the model doesn't offer at its default", async () => {
+    const high = await run({ model: "b/two", thinking: "high" });
+    expect(high.dump.effort).toBe("high");
+    const max = await run({ model: "b/two", thinking: "max" });
+    expect(max.dump.effort).toBeNull();
+    expect(max.events.some((e) => e.type === "runner.log" && e.message.includes('"max" thinking level'))).toBe(true);
+  });
+
   it("starts `opencode acp` from PATH", () => {
     expect(defaultBin("opencode")).toBe("opencode");
     expect(adapterArgs("opencode")).toEqual(["acp"]);

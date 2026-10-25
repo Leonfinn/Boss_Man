@@ -59,6 +59,21 @@ describe("the Agents tab (R62)", () => {
     expect(start.prompt).toContain("You report; you do not do the work");
   });
 
+  it("keeps a thinking level, refuses an unknown one, and sends it with the run", async () => {
+    const c = (ctx = await setup());
+    const eng = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Eng", thinking: "high" })).json() as { id: string; thinking: string | null };
+    expect(eng.thinking).toBe("high");
+    expect((await c.req("PATCH", `/api/agents/${eng.id}`, { thinking: "huge" })).statusCode).toBe(400);
+    await c.req("POST", `/api/agents/${eng.id}/wake`, { note: "Go." });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start" && x.agentId === eng.id)!;
+    expect(start.thinking).toBe("high");
+    // Default sends nothing, so an older runner and the adapter's own default are unaffected.
+    expect((await c.req("PATCH", `/api/agents/${eng.id}`, { thinking: null })).json()).toMatchObject({ thinking: null });
+    const history = (await c.req("GET", `/api/agents/${eng.id}/history`)).json() as Array<{ c: { field: string } }>;
+    expect(history.map((h) => h.c.field)).toContain("thinking");
+  });
+
   it("lists each agent with what it's doing and its use this month", async () => {
     const c = (ctx = await setup());
     const eng = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", template: "engineer" })).json() as { id: string };

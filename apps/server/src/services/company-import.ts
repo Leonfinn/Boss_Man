@@ -5,7 +5,7 @@
 import { eq } from "drizzle-orm";
 import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
-import { columnProblems, DEFAULT_REVIEW_POLICY, ReviewPolicySchema, repoUrlAllowed, findCredential, type ReviewPolicy } from "@boss-man/shared";
+import { columnProblems, DEFAULT_REVIEW_POLICY, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
@@ -38,6 +38,7 @@ const Agent = z.object({
   reviewKind: opt(32),
   agentKind: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/).default("claude"),
   model: opt(200),
+  thinking: z.enum(THINKING_LEVELS).nullable().optional().catch(null),
   reportsTo: opt(120),
   instructions: opt(100_000),
 });
@@ -303,7 +304,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
     for (const a of pkg.agents) {
       const [row] = await tx
         .insert(agents)
-        .values({ companyId, name: a.name, role: a.role, title: a.title ?? null, template: a.template ?? null, duty: a.duty ?? null, reviewKind: a.reviewKind ?? null, agentKind: a.agentKind, model: a.model ?? null, instructions: a.instructions ?? null, fundingSourceId: opts.fundingSourceId ?? null, paused: true, avatarAt: a.avatar ? new Date() : null })
+        .values({ companyId, name: a.name, role: a.role, title: a.title ?? null, template: a.template ?? null, duty: a.duty ?? null, reviewKind: a.reviewKind ?? null, agentKind: a.agentKind, model: a.model ?? null, thinking: a.thinking ?? null, instructions: a.instructions ?? null, fundingSourceId: opts.fundingSourceId ?? null, paused: true, avatarAt: a.avatar ? new Date() : null })
         .returning();
       agentId.set(a.slug, row!.id);
       if (a.ref) agentRef.set(a.ref, row!.id);
