@@ -30,6 +30,23 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
 });
 
 describe("decision queue", () => {
+  it("an instruction change shows the full new text from the decision, first lines until opened", async () => {
+    const full = Array.from({ length: 30 }, (_, i) => `Line ${i + 1} of Radagast's instructions.`).join("\n");
+    const d = decision({
+      kind: "approval",
+      question: `The CEO wants to change Radagast's instructions.\n\nWhy: migration.\n\nNew instructions:\n${full.slice(0, 200)}`,
+      options: ["Apply the change", "Keep them as they are"],
+      recommendedOption: "Apply the change",
+      context: { type: "instructions", instructions: full },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByRole("heading", { name: /The CEO wants to change Radagast's instructions\.\s+Why: migration\.$/ })).toBeTruthy();
+    expect(screen.getByText(/Line 8 of/)).toBeTruthy();
+    expect(screen.queryByText(/Line 30 of/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show all (22 more lines)" }));
+    expect(screen.getByText(/Line 30 of Radagast's instructions\./)).toBeTruthy();
+  });
+
   it("a team plan: the owner unticks a hire and only the ticked ones are sent (docs/13)", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
     vi.stubGlobal("fetch", fetch);
