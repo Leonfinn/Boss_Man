@@ -182,7 +182,7 @@ export async function buildApp(opts: AppOptions) {
       for (const id of ticketIds) {
         const [t] = await db.select({ assignee: tickets.assigneeAgentId, state: tickets.systemState }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
         if (!t || t.assignee || t.state === "done") continue;
-        await work.updateTicket(id, { assigneeAgentId: hired.id, stateNote: `Assigned to ${hired.name}: the hire was approved.` }).catch(() => undefined);
+        await work.updateTicket(id, { assigneeAgentId: hired.id, stateNote: `Assigned to ${hired.name}: the hire was approved.` }).catch((e) => app.log.warn(`Could not assign planned ticket ${id} to ${hired.name}: ${e instanceof Error ? e.message : String(e)}`));
       }
     },
   });
