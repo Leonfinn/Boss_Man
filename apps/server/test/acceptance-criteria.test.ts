@@ -67,6 +67,14 @@ describe("acceptance criteria", () => {
     expect(readVerdicts(CRITERIA, "0 pass; 4 pass; 99 fail; 2 fail").map((r) => r.verdict)).toEqual([null, "fail", null]);
   });
 
+  it("test counts in prose never override a stated verdict", () => {
+    const c = ["Migration is expand-only", "Secrets are never logged", "Docs updated for the owner"];
+    const a = readVerdicts(c, "Migration is expand-only: fail. Secrets are never logged: pass. Docs updated for the owner: fail. Suite: 3 passed, 1 failed.");
+    expect(a.map((r) => r.verdict)).toEqual(["fail", "pass", "fail"]);
+    const b = readVerdicts(c, "Migration is expand-only: pass. Secrets are never logged: fail, 2 ok of 5 checks. Docs updated for the owner: pass.");
+    expect(b.map((r) => r.verdict)).toEqual(["pass", "fail", "pass"]);
+  });
+
   it("create_ticket accepts 1 to 10 criteria and refuses 11; the tickets tool shows them", async () => {
     const c = await agent(ctx.dev.id);
     const ten = Array.from({ length: 10 }, (_, i) => `criterion ${i + 1}`);

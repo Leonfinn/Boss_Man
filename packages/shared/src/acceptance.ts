@@ -24,12 +24,15 @@ const PASS = /\b(pass|passed|passes|passing|ok|done|yes|green|✓|✔)\b/i;
 const FAIL = /\b(fail|failed|fails|failing|broken|red|✗|✘)\b/i;
 
 /** "1 pass", "C2 fail: why", "3: ok": a criterion's number (in criteria order) then its verdict word. */
-const NUMBERED = /(?<![\w.])c?(\d{1,2})\s*[:=)-]?\s*(pass(?:ed|es|ing)?|ok|done|yes|green|✓|✔|fail(?:ed|s|ing)?|broken|red|✗|✘)(?!\w)/gi;
+const NUMBERED = /^c?(\d{1,2})\s*[:=)-]?\s*(pass(?:ed|es|ing)?|ok|done|yes|green|✓|✔|fail(?:ed|s|ing)?|broken|red|✗|✘)(?!\w)/i;
 
-/** Verdicts given by number; the first one stated for a number wins, numbers out of range are ignored. */
+/** Verdicts given by number; only where a segment (split on . ; , and newlines) starts with the number, so
+ * "Suite: 3 passed" is not criterion 3. The first one stated for a number wins, numbers out of range are ignored. */
 function numberedVerdicts(count: number, note: string): Map<number, Exclude<Verdict, null>> {
   const found = new Map<number, Exclude<Verdict, null>>();
-  for (const m of note.matchAll(NUMBERED)) {
+  for (const seg of note.split(/[.;,\n]/)) {
+    const m = NUMBERED.exec(seg.trim());
+    if (!m) continue;
     const n = Number(m[1]);
     if (n < 1 || n > count || found.has(n)) continue;
     found.set(n, FAIL.test(m[2]!) ? "fail" : "pass");
@@ -42,7 +45,7 @@ function numberedVerdicts(count: number, note: string): Map<number, Exclude<Verd
  * sentences (on . ; and newlines); a sentence counts for a criterion when it contains enough of
  * the criterion's words (60%, or every word if the criterion has few), and that sentence's pass
  * or fail word is the verdict. Numbered verdicts ("1 pass; 2 fail: why", "C3 ok") in criteria order
- * also count, and win over word matching for the numbers they cover. A criterion no sentence claims comes back as null: not reported.
+ * also count when they start a segment; a fail from either reading wins. A criterion no sentence claims comes back as null: not reported.
  */
 export function readVerdicts(criteria: readonly string[], note: string | null | undefined): Array<{ criterion: string; verdict: Verdict }> {
   const segments = (note ?? "").split(/[.;\n]/).map((s) => s.trim()).filter(Boolean);
@@ -50,8 +53,7 @@ export function readVerdicts(criteria: readonly string[], note: string | null | 
   const raw = segments;
   const numbered = numberedVerdicts(criteria.length, note ?? "");
   return criteria.map((criterion, idx) => {
-    const byNumber = numbered.get(idx + 1);
-    if (byNumber) return { criterion, verdict: byNumber };
+    const byNumber = numbered.get(idx + 1) ?? null;
     const want = tokens(criterion);
     let verdict: Verdict = null;
     if (want.length) {
@@ -63,6 +65,9 @@ export function readVerdicts(criteria: readonly string[], note: string | null | 
       }
       if (best >= 0) verdict = FAIL.test(raw[best]!) ? "fail" : PASS.test(raw[best]!) ? "pass" : null;
     }
+    // A fail from either reading wins, so stray prose can never turn a stated fail into a pass.
+    if (byNumber === "fail" || verdict === "fail") verdict = "fail";
+    else verdict = byNumber ?? verdict;
     return { criterion, verdict };
   });
 }
