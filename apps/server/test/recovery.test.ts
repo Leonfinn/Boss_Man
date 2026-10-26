@@ -110,7 +110,7 @@ describe("MCP writes are safe to repeat after a resume (R42)", () => {
     expect(two).toMatch(/already exists/);
     expect(await c.db.select().from(tickets)).toHaveLength(1);
 
-    const ask = { question: "Which CDN?", options: ["Bunny", "Cloudflare"], recommended: "Bunny" };
+    const ask = { question: "Which CDN?", options: ["Bunny", "Cloudflare"], recommended: "Bunny", triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." };
     await m.callTool({ name: "raise_decision", arguments: ask });
     expect(textOf(await m.callTool({ name: "raise_decision", arguments: ask }))).toMatch(/already in the owner's queue/);
     expect(await c.db.select().from(decisions).where(eq(decisions.kind, "question"))).toHaveLength(1);

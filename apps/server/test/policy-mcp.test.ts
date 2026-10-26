@@ -278,9 +278,9 @@ describe("Boss Man MCP server", () => {
     const [p] = await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" }).returning();
     const [t] = await ctx.db.insert(tickets).values({ companyId: ctx.appCo.company.id, projectId: p!.id, title: "Pick DNS provider", systemState: "in_progress" }).returning();
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
-    const noRec = await c.callTool({ name: "raise_decision", arguments: { question: "Which DNS?", options: ["Cloudflare", "deSEC"], recommended: "Route 53" } });
+    const noRec = await c.callTool({ name: "raise_decision", arguments: { question: "Which DNS?", options: ["Cloudflare", "deSEC"], recommended: "Route 53", triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
     expect(noRec.isError).toBe(true);
-    await c.callTool({ name: "raise_decision", arguments: { question: "Which DNS provider?", options: ["Cloudflare", "deSEC"], recommended: "deSEC", blocksTicketId: t!.id } });
+    await c.callTool({ name: "raise_decision", arguments: { question: "Which DNS provider?", options: ["Cloudflare", "deSEC"], recommended: "deSEC", blocksTicketId: t!.id, triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t!.id)))[0]!.systemState).toBe("blocked");
 
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
@@ -290,9 +290,28 @@ describe("Boss Man MCP server", () => {
     await c.close();
   });
 
+  it("refuses an ask with no real triedFirst, or an action ask with no steps, and keeps steps as a list", async () => {
+    const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
+    const base = { question: "Update the runners?", options: ["Done", "Not now"], recommended: "Done" };
+    const tried = "Looked for a way to do this from the agent run; it has no access to the host.";
+    for (const triedFirst of ["", "   ", "n/a", "none"]) {
+      const r = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst } });
+      expect(r.isError).toBe(true);
+    }
+    const noSteps = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true } });
+    expect(noSteps.isError).toBe(true);
+    expect(await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"))).toHaveLength(0);
+    const steps = ["Open Settings → Server and runner → Updates.", "Click Build and update runners.", "To undo, click Update runners again after reverting."];
+    const ok = await c.callTool({ name: "raise_decision", arguments: { ...base, triedFirst: tried, ownerMustDo: true, steps } });
+    expect(ok.isError).toBeFalsy();
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
+    expect(d!.context).toMatchObject({ type: "question", triedFirst: tried, steps });
+    await c.close();
+  });
+
   it("lets the owner answer an agent's question in their own words, and only a question", async () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
-    await c.callTool({ name: "raise_decision", arguments: { question: "Which of C1-C6 should become tickets?", options: ["C1, C2 and C4", "All six"], recommended: "C1, C2 and C4" } });
+    await c.callTool({ name: "raise_decision", arguments: { question: "Which of C1-C6 should become tickets?", options: ["C1, C2 and C4", "All six"], recommended: "C1, C2 and C4", triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "question"));
     const answer = (payload: object) => ctx.app.inject({ method: "POST", url: `/api/decisions/${d!.id}/answer`, headers: { cookie: ctx.cookie }, payload });
     // Without saying it's the owner's own answer, the options still rule.

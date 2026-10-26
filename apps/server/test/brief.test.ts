@@ -92,7 +92,7 @@ describe("activity log (R83)", () => {
     const c = await agent(ctx.dev.id, run!.id);
     await ctx.req("POST", `/api/tickets/${a.id}/messages`, { text: "Please hurry" });
     await c.callTool({ name: "ticket_reply", arguments: { ticketId: a.id, text: "x".repeat(900) } });
-    await c.callTool({ name: "raise_decision", arguments: { question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: a.id } });
+    await c.callTool({ name: "raise_decision", arguments: { question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: a.id, triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
     await c.callTool({ name: "create_ticket", arguments: { title: "Follow-up" } });
     await c.close();
     const kinds = (await log()).map((r) => r.kind).sort();

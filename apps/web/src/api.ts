@@ -83,7 +83,7 @@ export type Decision = {
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
   dueDate: string | null;
-  context?: { type?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string }>; output?: string; planText?: string | null; ticketId?: string | null; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string }>; output?: string; planText?: string | null; ticketId?: string | null; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
