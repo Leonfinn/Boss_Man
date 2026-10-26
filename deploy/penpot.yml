@@ -45,7 +45,7 @@ volumes:
 services:
   penpot-frontend:
     <<: *common
-    image: penpotapp/frontend:${PENPOT_VERSION:-2.18.0}
+    image: penpotapp/frontend:${PENPOT_VERSION:-2.18}
     ports:
       - "${PENPOT_BIND:?Set PENPOT_BIND in .env to the LAN address}:${PENPOT_HOST_PORT:-9001}:8080"
     volumes:
@@ -59,7 +59,7 @@ services:
 
   penpot-backend:
     <<: *common
-    image: penpotapp/backend:${PENPOT_VERSION:-2.18.0}
+    image: penpotapp/backend:${PENPOT_VERSION:-2.18}
     volumes:
       - penpot_assets:/opt/data/assets
     depends_on:
@@ -83,7 +83,7 @@ services:
 
   penpot-admin-console:
     <<: *common
-    image: penpotapp/admin-console:${PENPOT_VERSION:-2.18.0}
+    image: penpotapp/admin-console:${PENPOT_VERSION:-2.18}
     depends_on:
       penpot-postgres: { condition: service_healthy }
     environment:
@@ -93,12 +93,12 @@ services:
 
   penpot-mcp:
     <<: *common
-    image: penpotapp/mcp:${PENPOT_VERSION:-2.18.0}
+    image: penpotapp/mcp:${PENPOT_VERSION:-2.18}
     mem_limit: ${PENPOT_MEM_MCP:-256m}
 
   penpot-exporter:
     <<: *common
-    image: penpotapp/exporter:${PENPOT_VERSION:-2.18.0}
+    image: penpotapp/exporter:${PENPOT_VERSION:-2.18}
     depends_on:
       penpot-valkey: { condition: service_healthy }
     environment:
