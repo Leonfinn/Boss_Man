@@ -27,7 +27,10 @@ export type PermissionExplanation = {
 /** A standing rule the owner can pick instead of "Allow once". */
 export type AlwaysChoice = { label: string; name: string; match: PolicyMatch };
 
-const READS = new Set("cat grep egrep rg ls head tail wc stat du df free ps which pwd echo cd date whoami uname sort uniq cut tr diff file test [ true sleep".split(" "));
+/** Shell grammar, not programs: skipped to find the program that follows. */
+const KEYWORDS = new Set("if then else elif fi for do done while until case esac function { } ! [[ ]] (( ))".split(" "));
+const SHELLS = new Set("bash sh zsh dash python python3 node".split(" "));
+const READS = new Set("set export local declare readonly unset shift return exit printf read trap break continue cat grep egrep rg ls head tail wc stat du df free ps which pwd echo cd date whoami uname sort uniq cut tr diff file test [ true sleep".split(" "));
 const CHANGES = new Set("tee mv cp mkdir touch chmod chown ln".split(" "));
 const DELETES = new Set("rm rmdir unlink shred".split(" "));
 const NETWORK = new Set("curl wget ssh scp nc ncat rsync".split(" "));
@@ -44,20 +47,37 @@ const FRIENDLY: Array<[RegExp, string]> = [
 ];
 const friendly = (p: string) => FRIENDLY.find(([re]) => re.test(p))?.[1] ?? p;
 
-/** Splits on ; && || | and newlines outside quotes. shortcut: no escapes, subshells or heredocs; commands that use $( ) or backticks are flagged unknown instead. */
+/** Splits on ; && || | and newlines outside quotes, leaving out heredoc bodies (text fed to a program, not commands). shortcut: no escapes or subshells; commands that use $( ) or backticks are flagged unknown instead. */
 function segments(command: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quote = "";
+  const heredocs: string[] = [];
   for (let i = 0; i < command.length; i++) {
     const c = command[i]!;
     if (quote) {
       if (c === quote) quote = "";
     } else if (c === "'" || c === '"') quote = c;
-    else if (c === ";" || c === "|" || c === "\n" || (c === "&" && command[i + 1] === "&")) {
+    else if (c === "<" && command.startsWith("<<", i) && command[i + 2] !== "<") {
+      const m = /^<<-?\s*(['"]?)(\w+)\1/.exec(command.slice(i));
+      if (m) {
+        heredocs.push(m[2]!);
+        cur += m[0];
+        i += m[0].length - 1;
+        continue;
+      }
+    } else if (c === ";" || c === "|" || c === "\n" || (c === "&" && command[i + 1] === "&")) {
       if (c === "&" || (c === "|" && command[i + 1] === "|")) i++;
       out.push(cur);
       cur = "";
+      // Skip each heredoc's body, up to its closing word on a line of its own.
+      if (c === "\n") {
+        for (const end of heredocs.splice(0)) {
+          const lines = command.slice(i + 1).split("\n");
+          const stop = lines.findIndex((l) => l.trim() === end);
+          i += stop < 0 ? command.length : lines.slice(0, stop + 1).join("\n").length + 1;
+        }
+      }
       continue;
     }
     cur += c;
@@ -70,7 +90,10 @@ const unquote = (t: string) => t.replace(/^(['"])(.*)\1$/, "$2");
 type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean };
 
 function explainSegment(seg: string): Part {
-  const tokens = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
+  const all = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
+  const comment = all.findIndex((t) => t.startsWith("#"));
+  const inline = all.some((t) => t.startsWith("<<") && !t.startsWith("<<<"));
+  const tokens = all.slice(0, comment < 0 ? all.length : comment).filter((t) => !t.startsWith("<<") || t.startsWith("<<<"));
   const args: string[] = [];
   const writes: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
@@ -82,7 +105,7 @@ function explainSegment(seg: string): Part {
     const target = m[1] || tokens[++i] || "";
     if (target && target !== "/dev/null" && !target.startsWith("&")) writes.push(target);
   }
-  while (args[0] && /^\w+=/.test(args[0])) args.shift();
+  while (args[0] && (/^\w+=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) args.shift();
   const program = (args[0] ?? "").split("/").pop() ?? "";
   const rest = args.slice(1);
   const flags = rest.filter((a) => a.startsWith("-"));
@@ -114,9 +137,10 @@ function explainSegment(seg: string): Part {
   } else if (PKG.has(program) && PKG_INSTALL.has(rest[0] ?? "")) p = part("changes", `Installs or removes packages (${program})`);
   else if (program === "node" && flags.length && flags.every((f) => f === "--version" || f === "-v") && !operands.length) p = part("reads", "");
   else if (NETWORK.has(program)) p = part("network", `Uses the network (${program})`);
-  else if (CHANGES.has(program)) p = part("changes", "Changes files", program === "cp" || program === "tee" ? operands.slice(program === "cp" ? -1 : 0) : operands);
+  else if (CHANGES.has(program)) p = part("changes", "Changes files", program === "cp" || program === "tee" ? operands.slice(program === "cp" ? -1 : 0) : program === "chmod" || program === "chown" ? operands.slice(1) : operands);
   else if (READS.has(program)) p = part("reads", "", paths);
-  else p = part("unknown", `Runs a program Boss Man doesn't recognise: ${program}`);
+  else if (inline && SHELLS.has(program)) p = part("unknown", `Runs a script written into the command (${program})`);
+  else p = part("unknown", "Runs a program Boss Man doesn't recognise", [program]);
 
   if (/\$\(|`/.test(seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
   p.program = program;
@@ -127,7 +151,10 @@ function explainSegment(seg: string): Part {
   return p;
 }
 
-const list = (xs: string[]) => [...new Set(xs.map(friendly))].slice(0, 4).join(", ");
+const list = (xs: string[]) => {
+  const all = [...new Set(xs.map(friendly))];
+  return all.slice(0, 4).join(", ") + (all.length > 4 ? ` and ${all.length - 4} more` : "");
+};
 
 const SCRATCH = /^\/tmp(\/|$)/;
 /** An absolute path with . and .. worked out; null for ~, $VARS and other things only the shell knows. */
@@ -186,7 +213,10 @@ export function explainCommand(command: string): { summary: string; effect: Effe
     if (e === "reads") {
       if (group.every((p) => p.env && !p.targets.length)) continue;
       sentences.push(`${effect === "reads" ? "Only reads" : "Reads"} information${targets ? ` (${targets})` : ""}${effect === "reads" ? "; it doesn't change anything" : ""}.`);
-    } else sentences.push([...new Set(group.map((p) => p.text))].join("; ") + (targets ? ` (${targets})` : "") + ".");
+    } else {
+      const many = new Set(group.flatMap((p) => p.targets)).size > 1;
+      sentences.push([...new Set(group.map((p) => (many ? p.text.replace("a program", "programs") : p.text)))].join("; ") + (targets ? ` (${targets})` : "") + ".");
+    }
   }
   if (parts.some((p) => p.env)) sentences.push("Shows environment variables, which can include secrets.");
   const tmp = parts.some((p) => p.env) ? null : scratchOnly(segs, parts);
