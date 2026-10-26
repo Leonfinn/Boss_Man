@@ -462,7 +462,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId }).from(tickets).where(eq(tickets.id, ticketId));
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
-      await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body: body.slice(0, 300), link: `#/tickets/${ticketId}` });
+      await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
       return text("Posted on the ticket's conversation.");
     },
   );

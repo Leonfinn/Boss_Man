@@ -43,7 +43,7 @@ describe("decision queue", () => {
     expect(screen.getByRole("heading", { name: /The CEO wants to change Radagast's instructions\.\s+Why: migration\.$/ })).toBeTruthy();
     expect(screen.getByText(/Line 8 of/)).toBeTruthy();
     expect(screen.queryByText(/Line 30 of/)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Show all (22 more lines)" }));
+    fireEvent.click(screen.getByRole("button", { name: "▸ Show all (22 more lines)" }));
     expect(screen.getByText(/Line 30 of Radagast's instructions\./)).toBeTruthy();
   });
 
