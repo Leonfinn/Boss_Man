@@ -367,6 +367,8 @@ export async function buildApp(opts: AppOptions) {
     isConnected: (runnerId) => runners.isConnected(runnerId),
     endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
+    // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
+    retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
   });
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
@@ -385,6 +387,7 @@ export async function buildApp(opts: AppOptions) {
     gitHosts,
     gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "pull_request")).GIT_TOKEN,
     notes,
+    isLeader: () => leader.isLeader(),
   });
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   decisionsSvc.setLoopHooks({

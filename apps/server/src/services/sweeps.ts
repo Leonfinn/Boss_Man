@@ -34,7 +34,7 @@ const MISSED_NUDGES_PER_DAY = 2;
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -272,10 +272,15 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return result;
   }
 
+  // Tickets this server has already tried merging again, so each gets one automatic retry per server.
+  // shortcut: lost on restart, harmless because a restarted server retrying once more is safe: a merge already done is found and closes the ticket.
+  const retried = new Set<string>();
+
   /**
    * Tickets whose reviews all passed but that still sit in review: the merge never finished (the server
-   * stopped mid-way, say). Nothing else would move them, so the owner is asked to merge again or send back.
-   * One waiting on the owner's sign-off is left alone.
+   * stopped mid-way, or a deploy handed over while the runner was merging). The merge is tried again once
+   * by itself, which is safe (a branch already merged is found and the ticket closes); if that fails too,
+   * the owner is asked to merge again or send back. One waiting on the owner's sign-off is left alone.
    */
   async function unmergedApprovals(t: Date) {
     const stuck = await db
@@ -293,6 +298,14 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
         .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
       if (signoff) continue;
+      const [asked] = await db.select({ id: decisions.id }).from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${ticket.id}`));
+      if (asked) continue;
+      if (opts.retryLand && !retried.has(ticket.id)) {
+        retried.add(ticket.id);
+        await opts.retryLand(ticket.id).catch(() => undefined);
+        raised++;
+        continue;
+      }
       raised += (await raiseMergeStuck(db, ticket, "it was approved, then nothing merged it; the server may have restarted part-way")).length;
     }
     return raised;
