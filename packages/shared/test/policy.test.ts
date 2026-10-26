@@ -75,6 +75,11 @@ describe("helpers", () => {
   it("recommends refusing destructive commands", () => {
     expect(recommendedVerdict(exec("rm -rf /"))).toBe("deny");
     expect(recommendedVerdict(exec("git push origin x"))).toBe("allow");
+    // rm -rf inside a sed script is text being edited, not run; inside bash -c it runs.
+    expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("allow");
+    expect(recommendedVerdict(exec("git commit -m 'stop rm -rf in scripts'"))).toBe("allow");
+    expect(recommendedVerdict(exec("bash -c 'rm -rf /'"))).toBe("deny");
+    expect(recommendedVerdict(exec("eval \"rm -rf $d\""))).toBe("deny");
   });
 });
 

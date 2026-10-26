@@ -25,7 +25,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
 3. **GitHub is the source of truth.** The `src` checkout pulls from `git@github.com:Leonfinn/Boss_Man.git` over a read-only deploy key set as `core.sshCommand` (`docs/06`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` through that same key: no API token, no second credential.
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
-5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, `scripts/`, `.github/` and the like only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
+5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, `scripts/` and the like only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
 6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
 7. The server can write **one folder** and read **one folder**. It can never run anything on the host, and the host never executes anything from the request.
 8. At most **one deploy per target every 10 minutes**; the cron job runs every minute.
@@ -85,7 +85,7 @@ The owner enables it once by hand (it is an infra file): add it to `COMPOSE_FILE
 3. **Replay:** the `id` must not already be in `history.jsonl`.
 4. **Tip of main** (target `server`): `git ls-remote origin refs/heads/main` must equal `commit`. An older commit or a side branch is refused. For target `runner` the commit must equal the commit that is deployed (runners are built from what is checked out), not the tip.
 5. **Rate limit:** at most one deploy per target per `RATE_LIMIT_SECONDS` (600), measured from when the last one started, successful or not.
-6. **Infra paths** (`server` only): `git fetch`, require the commit to be a fast-forward of what is deployed, then refuse if `git diff --name-only HEAD..commit` matches the infra list: `docker-compose*.yml`, `deploy/`, `scripts/`, `.github/`, `.gitea/`, `.dockerignore`, `.npmrc`, `.env*` (top level), and any `Dockerfile*`. Documentation is not on the list.
+6. **Infra paths** (`server` only): `git fetch`, require the commit to be a fast-forward of what is deployed, then refuse if `git diff --name-only HEAD..commit` matches the infra list: `docker-compose*.yml`, `deploy/` (except `deploy/penpot.yml`, the separate Penpot add-on), `scripts/`, `.dockerignore`, `.npmrc`, `.env*` (top level), and any `Dockerfile*`. Documentation and CI files (`.github/`, `.gitea/`) are not on the list: they never run on the host.
 7. Run the fixed action under git settings that disable hooks: server = `scripts/deploy.sh --yes --no-runner --commit <sha>`; runner = `scripts/update-runner.sh`. Both go through one function each, so a later phase changes one place.
 8. Write `status.json` and append it to `history.jsonl`; post the webhook if it was a failure (or on success when `WEBHOOK_ON_SUCCESS=1`).
 

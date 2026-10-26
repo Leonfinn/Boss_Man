@@ -149,5 +149,7 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
 /** What the decision queue recommends for an escalated request: refuse destructive commands, allow the rest. */
 export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const cmd = commandOf(info.rawInput) ?? info.title ?? "";
-  return new RegExp(DESTRUCTIVE, "i").test(cmd) ? "deny" : "allow";
+  // Quoted text is data (a sed script, a commit message) unless a shell runs it.
+  const run = /\b(sh|bash|zsh)\s+-c\b|\beval\b/.test(cmd) ? cmd : cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+  return new RegExp(DESTRUCTIVE, "i").test(run) ? "deny" : "allow";
 }

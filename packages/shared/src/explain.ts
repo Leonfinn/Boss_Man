@@ -66,8 +66,8 @@ function segments(command: string): string[] {
         i += m[0].length - 1;
         continue;
       }
-    } else if (c === ";" || c === "|" || c === "\n" || (c === "&" && command[i + 1] === "&")) {
-      if (c === "&" || (c === "|" && command[i + 1] === "|")) i++;
+    } else if (c === ";" || c === "|" || c === "\n" || (c === "&" && (command[i + 1] === "&" || (command[i - 1] !== ">" && command[i + 1] !== ">")))) {
+      if ((c === "&" && command[i + 1] === "&") || (c === "|" && command[i + 1] === "|")) i++;
       out.push(cur);
       cur = "";
       // Skip each heredoc's body, up to its closing word on a line of its own.
@@ -105,6 +105,8 @@ function explainSegment(seg: string): Part {
     const target = m[1] || tokens[++i] || "";
     if (target && target !== "/dev/null" && !target.startsWith("&")) writes.push(target);
   }
+  const nested = /^\w+=\$\((.+)$/.exec(args[0] ?? "");
+  if (nested) args[0] = nested[1]!.replace(/\)$/, "");
   while (args[0] && (/^\w+=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) args.shift();
   const program = (args[0] ?? "").split("/").pop() ?? "";
   const rest = args.slice(1);
@@ -142,7 +144,7 @@ function explainSegment(seg: string): Part {
   else if (inline && SHELLS.has(program)) p = part("unknown", `Runs a script written into the command (${program})`);
   else p = part("unknown", "Runs a program Boss Man doesn't recognise", [program]);
 
-  if (/\$\(|`/.test(seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
+  if (/\$\(|`/.test(nested ? seg.slice(seg.indexOf("$(") + 2) : seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
   p.program = program;
   if (writes.length) {
     const worse = WORST.indexOf(p.effect) < WORST.indexOf("changes") ? p : null;
