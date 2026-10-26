@@ -43,17 +43,19 @@ const minutesAgo = (iso: string) => {
 const PREVIEW_LINES = 8;
 
 /** Long text shows its first lines and opens in place, so a card stays short until it's read. */
-function MoreText({ text, label }: { text: string; label?: string }) {
+export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { text: string; label?: string; lines?: number; chars?: number }) {
   const [open, setOpen] = useState(false);
   const lines = text.split("\n");
-  const long = lines.length > PREVIEW_LINES + 2;
+  const byLines = lines.length > keep + 2 ? lines.slice(0, keep).join("\n") : text;
+  const preview = chars && byLines.length > chars ? byLines.slice(0, chars).replace(/\s+\S*$/, "") : byLines;
+  const long = preview !== text;
   return (
     <div>
       {label && <p style={{ fontWeight: 600, margin: "8px 0 4px" }}>{label}</p>}
-      <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{long && !open ? `${lines.slice(0, PREVIEW_LINES).join("\n")}\n…` : text}</p>
+      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{long && !open ? `${preview}…` : text}</p>
       {long && (
-        <button type="button" className="linkish" onClick={() => setOpen(!open)}>
-          {open ? "Show less" : `Show all (${lines.length - PREVIEW_LINES} more lines)`}
+        <button type="button" className="linkish" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? "▾ Show less" : `▸ Show all${byLines !== text ? ` (${lines.length - keep} more lines)` : ""}`}
         </button>
       )}
     </div>

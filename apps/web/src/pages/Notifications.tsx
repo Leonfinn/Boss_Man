@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, type Notice, type NoticeFeed, type NotifyLevel, type NotifySettings } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
+import { MoreText } from "./Decisions";
 import { SaveButton, useSaveState } from "../components/SaveButton";
 
 const LEVEL: Record<NotifyLevel, { label: string; tone: string; help: string }> = {
@@ -23,7 +24,7 @@ function Item({ n, onRead }: { n: Notice; onRead: (id: string) => void }) {
           {when(n.createdAt)}
         </span>
       </div>
-      {n.body && <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{n.body}</p>}
+      {n.body && <MoreText text={n.body} lines={3} chars={300} />}
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13 }}>
         <a href={n.link} onClick={() => !n.readAt && onRead(n.id)}>
           See the evidence
