@@ -273,7 +273,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
   }
 
   // Tickets this server has already tried merging again, so each gets one automatic retry per server.
-  // Lost on restart, harmless because a restarted server retrying once more is safe: a merge already done is found and closes the ticket.
+  // shortcut: lost on restart, harmless because a restarted server retrying once more is safe: a merge already done is found and closes the ticket.
   const retried = new Set<string>();
 
   /**
