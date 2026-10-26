@@ -91,6 +91,7 @@ grep -q "refused the agent account" "$t/err" || fail "login failure unexplained"
 
 # Ids must be UUID-looking (they go into the Transit body).
 if run export 'x"y' $U $U "$t/board.png" >/dev/null; then fail "accepted a bad id"; fi
+grep -q "ids must be UUIDs" "$t/err" || fail "bad id unexplained"
 
 # Not a PNG: the file is removed and the failure is explained.
 export FAKE_FILE_BYTES='\x00\x01\x02'
@@ -101,6 +102,11 @@ if run export $U $U $U "$t/board.png" >/dev/null; then fail "accepted a non-PNG"
 export FAKE_NO_URI=1
 if run export $U $U $U "$t/board.png" >/dev/null; then fail "accepted a missing uri"; fi
 grep -q "gave no image link" "$t/err" || fail "no fallback message"
+grep -q 'api/rpc/command/logout' "$t/curl.log" || fail "no logout after a failed export"
+
+# A relative /assets/ link is accepted.
+export FAKE_NO_URI=0 FAKE_EXPORT_URI="/assets/by-id/x" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'
+run export $U $U $U "$t/board.png" >/dev/null || fail "rejected a relative /assets/ link"
 
 # Export link spelled with another host but an /assets/ path: fetched from our own base.
 export FAKE_NO_URI=0 FAKE_EXPORT_URI="http://penpot.example/assets/by-id/x" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'

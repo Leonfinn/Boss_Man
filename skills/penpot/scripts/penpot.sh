@@ -72,6 +72,8 @@ case "${1:-}" in
     pid="$(jq -r '.id // empty' "$tmp")"
     [ -n "$session" ] && [ -n "$pid" ] || die "logged in, but Penpot gave no session. Tell the owner."
     cookie_curl() { printf 'header = "Cookie: auth-token=%s"\n' "$session" | curl -sS -K - -m 120 "$@" 2>/dev/null; }
+    # End the session on every exit path (failures included); a failure here doesn't matter.
+    trap 'cookie_curl -o /dev/null -X POST -H "Content-Type: application/json" --data "{}" "$base/api/rpc/command/logout" || true; rm -f "$hdr" "$tmp"' EXIT
     body="[\"^ \",\"~:cmd\",\"~:export-shapes\",\"~:profile-id\",\"~u$pid\",\"~:wait\",true,\"~:exports\",[[\"^ \",\"~:file-id\",\"~u$2\",\"~:page-id\",\"~u$3\",\"~:object-id\",\"~u$4\",\"~:type\",\"~:png\",\"~:scale\",1,\"~:suffix\",\"\",\"~:name\",\"board\"]]]"
     code="$(cookie_curl -o "$tmp" -w '%{http_code}' -X POST -H 'Content-Type: application/transit+json' -H 'Accept: application/transit+json' --data "$body" "$base/api/export")" || die "can't reach Penpot's export service."
     [ "$code" = 200 ] || die "Penpot's export failed (HTTP $code): $(head -c 300 "$tmp"). Check the ids; tell the owner if it keeps failing."
@@ -79,14 +81,12 @@ case "${1:-}" in
     [ -n "$uri" ] || die "the export call worked but gave no image link. Tell the owner."
     # Take only the /assets/... path and fetch it from our own base, so a different spelling of Penpot's
     # public address (hostname vs IP) still works and the session is never sent to another host.
-    path="/${uri#*://*/}"
+    case "$uri" in /*) path="$uri" ;; *) path="/${uri#*://*/}" ;; esac
     case "$path" in
       /assets/*) ;;
       *) die "the export link is not a Penpot asset link; not sending the session there." ;;
     esac
     cookie_curl -f -o "$out" "$base$path" || { rm -f "$out"; die "could not download the exported image."; }
-    # Log out so the session doesn't stay alive in Penpot; a failure here doesn't matter.
-    cookie_curl -o /dev/null -X POST -H 'Content-Type: application/json' --data '{}' "$base/api/rpc/command/logout" || true
     [ "$(head -c 8 "$out" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || { rm -f "$out"; die "what came back was not a PNG."; }
     size="$(wc -c <"$out")"
     [ "$size" -le 5242880 ] || { rm -f "$out"; die "the PNG is over 5 MB, too big to attach. Export a smaller board."; }
