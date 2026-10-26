@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, tickets } from "../src/db/schema.js";
+import { activity, agents, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { NOTHING_CHANGED } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
@@ -143,6 +143,36 @@ describe("a ticket that changed nothing", () => {
     expect(plain.noCode).toBe(false);
     await ctx.req("PATCH", `/api/tickets/${plain.id}`, { noCode: true });
     expect((await row(plain.id)).noCode).toBe(true);
+  });
+
+  it("create_ticket advertises noCode, and a ticket created with it reaches review with an empty diff", async () => {
+    const c = await agent();
+    const tool = (await c.listTools()).tools.find((x) => x.name === "create_ticket")!;
+    expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toContain("noCode");
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { project: "Customer app", title: "Research limits", noCode: true } }));
+    const id = /([0-9a-f-]{36})/.exec(out)![1]!;
+    await ctx.db.update(tickets).set({ systemState: "in_progress", assigneeAgentId: ctx.dev.id, branch: "bossman/x" }).where(eq(tickets.id, id));
+    expect(await toReview(id)).toContain("is now review");
+  });
+
+  it("the CEO or a manager sets and clears noCode with update_ticket, and it is logged; a worker can't", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id);
+    const call = async (noCode: boolean) => textOf(await (await agent()).callTool({ name: "update_ticket", arguments: { ticketId: t.id, noCode, reason: "Research only." } }));
+    expect(await call(true)).toMatch(/Only your company's CEO or a manager/);
+    expect((await row(t.id)).noCode).toBe(false);
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    expect(await call(true)).toContain("updated");
+    expect((await row(t.id)).noCode).toBe(true);
+    expect(await toReview(t.id)).toContain("is now review");
+    await call(false);
+    expect((await row(t.id)).noCode).toBe(false);
+    const log = (await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary);
+    expect(log).toContain("Dev reorganised it (marked no code): Research only.");
+    expect(log).toContain("Dev reorganised it (no longer marked no code): Research only.");
+  });
+
+  it("the refusal says who can mark the ticket no code", () => {
+    expect(NOTHING_CHANGED).toMatch(/CEO or a manager/);
   });
 
   it("the project brief ticket is created as no code", async () => {
