@@ -191,7 +191,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "tickets" && route[1] ? (
           <Ticket key={route[1]} id={route[1]} companies={list} />
         ) : page === "notifications" ? (
-          <Notifications feed={feed.data} onChanged={feed.reload} />
+          <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
         ) : page === "funding" || page === "rules" || page === "secrets" ? (
           <Settings companies={list} companyId={companyId} tab={page} go={go} onChanged={companies.reload}>
             {page === "funding" ? <Funding companies={list} /> : page === "rules" ? <Rules companies={list} companyId={companyId} go={go} /> : <Secrets companies={list} companyId={companyId} onChanged={companies.reload} />}

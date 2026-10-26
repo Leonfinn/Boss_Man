@@ -3,7 +3,7 @@
 // hours and each agent's hourly cap lower it rather than drop it, and every one links to its
 // evidence. Pages and asks also go to the owner's phone through their own ntfy server, so
 // Boss Man only ever sends outbound requests and is never exposed at the router.
-import { and, count, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { effectiveLevel, inQuietHours, NOTIFY_LEVELS, type NotifyLevel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -163,13 +163,20 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
       return open.length;
     },
 
-    async list(opts: { before?: Date; limit?: number } = {}) {
+    async list(opts: { before?: Date; limit?: number; status?: "unread" | "read"; level?: NotifyLevel; company?: string } = {}) {
       await readAnswered();
+      // `company: "none"` means notices that belong to no company.
+      const where = and(
+        opts.before ? lt(notifications.createdAt, opts.before) : undefined,
+        opts.status === "unread" ? isNull(notifications.readAt) : opts.status === "read" ? isNotNull(notifications.readAt) : undefined,
+        opts.level ? eq(notifications.level, opts.level) : undefined,
+        opts.company === "none" ? isNull(notifications.companyId) : opts.company ? eq(notifications.companyId, opts.company) : undefined,
+      );
       return db
         .select({ n: notifications, company: companies.name })
         .from(notifications)
         .leftJoin(companies, eq(companies.id, notifications.companyId))
-        .where(opts.before ? lt(notifications.createdAt, opts.before) : undefined)
+        .where(where)
         .orderBy(desc(notifications.createdAt))
         .limit(Math.min(opts.limit ?? 50, 200))
         .then((rows) => rows.map((r) => ({ ...r.n, company: r.company })));

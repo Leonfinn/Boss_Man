@@ -163,4 +163,22 @@ describe("notification ladder (R44)", () => {
     expect(row).toMatchObject({ agentId: c.worker.id, companyId: c.company.id, level: "flag", link: `#/runs/${runId}`, body: "3 of 10 runs failed." });
     await client.close();
   });
+
+  it("filters the feed by status, type and company, and the filters combine", async () => {
+    const c = await setup();
+    const a = await c.notes.notify({ companyId: c.company.id, agentId: null, level: "flag", title: "a", link: "#/" });
+    await c.notes.notify({ companyId: c.company.id, agentId: null, level: "note", title: "b", link: "#/" });
+    await c.notes.notify({ companyId: null, agentId: null, level: "flag", title: "c", link: "#/" });
+    await c.req("POST", "/api/notifications/read", { ids: [a!.id] });
+    const titles = async (qs: string) => ((await c.req("GET", `/api/notifications?${qs}`)).json().items as { title: string }[]).map((i) => i.title).sort();
+    expect(await titles("status=unread")).toEqual(["b", "c"]);
+    expect(await titles("status=read")).toEqual(["a"]);
+    expect(await titles("level=flag")).toEqual(["a", "c"]);
+    expect(await titles("company=none")).toEqual(["c"]);
+    expect(await titles(`company=${c.company.id}`)).toEqual(["a", "b"]);
+    expect(await titles(`company=${c.company.id}&level=flag&status=unread`)).toEqual([]);
+    expect(await titles("level=flag&status=unread")).toEqual(["c"]);
+    expect((await c.req("GET", "/api/notifications?status=bogus")).statusCode).toBe(400);
+    expect((await c.req("GET", "/api/notifications?status=unread")).json().unread).toBe(2);
+  });
 });

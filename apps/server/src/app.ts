@@ -699,7 +699,15 @@ export async function buildApp(opts: AppOptions) {
 
     // Notifications (R44): the feed, settings and a test push.
     owner.get("/api/notifications", async (req) => {
-      const q = z.object({ before: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(200).optional() }).parse(req.query);
+      const q = z
+        .object({
+          before: z.coerce.date().optional(),
+          limit: z.coerce.number().int().min(1).max(200).optional(),
+          status: z.enum(["unread", "read"]).optional(),
+          level: z.enum(["note", "flag", "page", "ask"]).optional(),
+          company: z.union([z.literal("none"), Uuid]).optional(),
+        })
+        .parse(req.query);
       return { items: await notes.list(q), unread: await notes.unread() };
     });
     owner.post("/api/notifications/read", async (req) => {
