@@ -19,7 +19,7 @@ FROM node:22-bookworm-slim
 
 # Tools agents expect in a workspace: git for code, ssh for SSH deploy targets.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-client ca-certificates ripgrep \
+ && apt-get install -y --no-install-recommends git openssh-client ca-certificates ripgrep curl jq \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --no-audit --no-fund pnpm@10.28.0
