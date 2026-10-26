@@ -1,17 +1,17 @@
 # 00 — First-time install
 
-This is the short path from nothing to a working Boss Man. For the full detail behind any step, follow the links to [docs/06-install-truenas.md](06-install-truenas.md).
+This is the short path from nothing to a working Boss Man on a Linux host with Docker. For a worked example on TrueNAS SCALE, with backups, the host deployer and more, see [docs/06-install-truenas.md](06-install-truenas.md).
 
 ## What you'll end up with
 
-- Boss Man running on your own box, with its web page open on your home network.
+- Boss Man running on a machine you own, with its web page open on your home network.
 - One company, with a CEO agent already in it, and one more agent you hire.
 - One project (a git repo) and a first ticket that an agent runs.
 
 ## What you need first
 
-- **A TrueNAS SCALE box**, version 24.10 or later, with an apps pool chosen (Apps > Configuration > Choose Pool). Docker only runs once a pool is chosen. The repo doesn't state a minimum amount of RAM or disk. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`).
-- **A plain Linux box with Docker** also works for the server and database: `docker-compose.yml` says it "runs on any Docker host". But the update scripts assume TrueNAS folder names, and this guide's commands are written for TrueNAS. If you use plain Linux, use the commands in the header of `docker-compose.yml`, and set `BOSSMAN_BACKUP_DIR` when you run `scripts/deploy.sh`.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`).
+- **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.
 - **An AI provider for at least one agent program.** The runner supports three:
   - **Claude Code**: a Claude Pro or Max subscription, or an Anthropic API key.
@@ -19,24 +19,40 @@ This is the short path from nothing to a working Boss Man. For the full detail b
   - **OpenCode**: an OpenRouter or Ollama Cloud key (or an OpenAI or Anthropic key).
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
-- **A second computer** (your Mac or PC) with a web browser. It is also where you make the Claude token in step 9.
-- **Access to the repo's code.** The guide uses a read-only deploy key on GitHub, as `docs/06` does. If you can't use one, check how you can get the code onto the box (`git --version` must work on the TrueNAS host).
+- **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
+- **The address of Boss Man's git repo**, written `<repo-url>` below.
 
 ## A note on commands
 
-- On TrueNAS SCALE you work in a **root shell**: TrueNAS UI > System > Shell, or `su -` over SSH. So there is no `sudo` in any command here.
+- The commands are written for a **root shell**. On a normal Linux host, either run them as root, or put `sudo` in front of each command (a redirect such as `> file` then needs `sudo sh -c '...'`), or add your user to the `docker` group. On TrueNAS there is no `sudo`: use the root shell.
 - Each command is in its own box. Copy it whole.
-- Where you see something in `<angle brackets>`, replace it, brackets and all.
+- Where you see something in `<angle brackets>`, replace it, brackets and all. `<host-ip>` is your host's address on your home network.
+
+## If you're on TrueNAS SCALE
+
+Do these differences, then follow the steps as written:
+- **Choose an apps pool first** (Apps > Configuration > Choose Pool). Docker only runs once a pool is chosen.
+- **Use a root shell:** System > Shell in the TrueNAS web page, or `su -` over SSH.
+- **Put the folder on a dataset** (make one for Boss Man), so you can snapshot it. [docs/06, step 1](06-install-truenas.md#1-create-a-dataset) shows how.
+- **Use the `deploy/truenas.yml` overlay**, which keeps the database in your own folder instead of a Docker volume. Steps 3 and 4 say where. Skip it on other hosts.
 
 ## 1. Choose where Boss Man lives
 
-What you do: pick a folder on your apps pool. `docs/06` makes it a dataset so you can snapshot it ([step 1 there](06-install-truenas.md#1-create-a-dataset)). A plain folder works too.
+Pick a folder for everything Boss Man keeps. `/opt/boss-man` is an example. This guide calls it `<install-dir>`.
 
-Set a shell variable for it. Replace `<your-pool>` with your pool name. Use the same shell for the next steps. If you close it, run this line again.
+Set a shell variable for it. Replace the path if you chose another.
 
 ```sh
-B=/mnt/<your-pool>/boss-man
+B=/opt/boss-man
 ```
+
+Three of the repo's scripts have a built-in default folder that belongs to the author's own server. So tell them where yours is. Run this too:
+
+```sh
+export BOSSMAN_BACKUP_DIR=$B BOSSMAN_DEPLOYER=$B/deployer
+```
+
+**Run both lines again in every new shell**, before any `scripts/...` command. If you skip them, a script may try to write backups to a folder that doesn't exist on your host.
 
 Make the folder:
 
@@ -52,36 +68,12 @@ ls -ld $B
 
 You should see the folder listed.
 
-## 2. Get the code onto the box
+## 2. Get the code onto the host
 
-The repo is private, so the box reads it with a **deploy key**: an SSH key for this one repo, read-only. It has no passphrase, so updates can run unattended. The full reasoning is in [docs/06, step 2](06-install-truenas.md#2-get-the-code).
-
-Make the key:
+Clone it into `<install-dir>/src`:
 
 ```sh
-ssh-keygen -t ed25519 -N "" -C "truenas-boss-man" -f $B/deploy_key
-```
-
-Show the public half. It's safe to copy. Never copy the file without `.pub`.
-
-```sh
-cat $B/deploy_key.pub
-```
-
-On your own computer, open `https://github.com/Leonfinn/Boss_Man/settings/keys`, choose **Add deploy key**, call it `TrueNAS`, paste the line, and leave **Allow write access** unticked.
-
-Clone the code into `$B/src`:
-
-```sh
-GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" git clone git@github.com:Leonfinn/Boss_Man.git $B/src
-```
-
-The first time, ssh asks whether to trust github.com. Type `yes` only if the fingerprint matches the one on GitHub's [SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) page.
-
-Make later updates use the same key:
-
-```sh
-git -C $B/src config core.sshCommand "ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts"
+git clone <repo-url> $B/src
 ```
 
 Check it worked:
@@ -90,14 +82,46 @@ Check it worked:
 git -C $B/src log --oneline -1
 ```
 
-You should see one commit line. If the clone hangs, port 22 may be blocked on your router.
+You should see one commit line.
+
+**If the repo is private** (optional): GitHub doesn't accept account passwords for git, so use a **deploy key**: an SSH key for this one repo, read-only. It has no passphrase, so updates can run unattended. Use the SSH form of the address as `<repo-url>` (for GitHub, `git@github.com:<owner>/<repo>.git`).
+
+Make the key:
+
+```sh
+ssh-keygen -t ed25519 -N "" -C "boss-man-host" -f $B/deploy_key
+```
+
+Show the public half. It's safe to copy. Never copy the file without `.pub`.
+
+```sh
+cat $B/deploy_key.pub
+```
+
+In your repo's settings on GitHub, open Deploy keys, choose **Add deploy key**, paste the line, and leave **Allow write access** unticked.
+
+Clone with that key instead of the plain clone above:
+
+```sh
+GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" git clone <repo-url> $B/src
+```
+
+The first time, ssh asks whether to trust the host. Type `yes` only if the fingerprint matches the one the host publishes (for GitHub, its [SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) page).
+
+Make later updates use the same key:
+
+```sh
+git -C $B/src config core.sshCommand "ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts"
+```
+
+If the clone hangs, outbound port 22 may be blocked on your network. The full version of this is [docs/06, step 2](06-install-truenas.md#2-get-the-code).
 
 ## 3. Make the folders, the master key and the token file
 
 The server and runners run as user ID 1000, so the folders they write to must belong to 1000.
 
 ```sh
-mkdir -p $B/data/postgres $B/data/companies $B/src/secrets
+mkdir -p $B/data/companies $B/src/secrets
 ```
 
 ```sh
@@ -110,7 +134,7 @@ The **master key** encrypts every secret Boss Man stores. Make it:
 openssl rand -base64 32 > $B/src/secrets/master.key && chown 1000:1000 $B/src/secrets/master.key && chmod 600 $B/src/secrets/master.key
 ```
 
-Copy that file somewhere safe outside the box now. Without it, stored secrets cannot be read again.
+Copy that file somewhere safe outside the host now. Without it, stored secrets cannot be read again.
 
 Docker Compose refuses to start while a secret file named in the compose file is missing. Make the runner token file empty. The launcher (step 4) doesn't use it:
 
@@ -126,24 +150,28 @@ ls -l $B/src/secrets
 
 You should see `master.key` and `runner-app-co.token`.
 
+**On TrueNAS only:** also make the database folder the overlay uses:
+
+```sh
+mkdir -p $B/data/postgres
+```
+
 ## 4. Write the settings file
 
 Boss Man reads a file called `.env` in the repo folder. This one:
-- adds the TrueNAS file so your data lives in your own folders;
 - turns on the **launcher**, which starts each company's runner for you (details in [docs/06, step 7b](06-install-truenas.md#7b-let-the-launcher-run-the-runners-recommended));
-- opens the web page on your box's LAN address only.
+- opens the web page on your host's LAN address only.
 
-Find your box's LAN address first (TrueNAS UI > Network). Replace `<your-truenas-ip>` below with it. The command reads the Docker socket's group number for you.
+Replace `<host-ip>` below with your host's address on your home network. The command reads the Docker socket's group number for you.
 
 ```sh
 cat > $B/src/.env <<EOF
-COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml
 COMPOSE_PROFILES=launcher
 BOSSMAN_LAUNCHER=1
 BOSSMAN_DOCKER_GID=$(stat -c %g /var/run/docker.sock)
 BOSSMAN_DATA=$B/data
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
-BOSSMAN_BIND=<your-truenas-ip>
+BOSSMAN_BIND=<host-ip>
 BOSSMAN_HOST_PORT=3100
 BOSSMAN_INSECURE_COOKIES=1
 EOF
@@ -153,8 +181,15 @@ EOF
 chmod 600 $B/src/.env
 ```
 
+**On TrueNAS only:** add the overlay line, so the database lives in `$B/data/postgres`:
+
+```sh
+echo "COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml" >> $B/src/.env
+```
+
 What the settings mean:
-- `BOSSMAN_BIND` publishes the web page on that address only. The default is `127.0.0.1`, which only the box itself can reach.
+- `BOSSMAN_DATA` is where the launcher keeps each company's files (under `companies/`). The compose file's own default is `/srv/boss-man/data`.
+- `BOSSMAN_BIND` publishes the web page on that address only. The default is `127.0.0.1`, which only the host itself can reach.
 - `BOSSMAN_HOST_PORT` is the port you type in the browser. The compose file's default is 3100. If something else uses it, pick another free port (see Troubleshooting).
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://` on your home network. Without it, login needs HTTPS.
 
@@ -164,7 +199,7 @@ Check the file:
 cat $B/src/.env
 ```
 
-`BOSSMAN_DOCKER_GID` should be a number (999 on the box in `docs/06`), and `BOSSMAN_BIND` should be your address.
+`BOSSMAN_DOCKER_GID` should be a number (the compose file's default is 999), and `BOSSMAN_BIND` should be your address.
 
 ## 5. Build the images and start Boss Man
 
@@ -199,14 +234,14 @@ You should see `db` and `server` as running (the server `healthy` after a short 
 Check the server answers:
 
 ```sh
-curl -s http://<your-truenas-ip>:3100/api/health
+curl -s http://<host-ip>:3100/api/health
 ```
 
 You should get a short line of JSON. The database tables are created by themselves when the server starts.
 
 ## 6. Open the web page and make the owner account
 
-On your own computer, open `http://<your-truenas-ip>:3100` in a browser. Use the port from your `.env`.
+On your own computer, open `http://<host-ip>:3100` in a browser. Use the port from your `.env`.
 
 You see "Create the owner account. There's only one, and it controls every company on this server."
 1. Type a **Username** and a **Password** (at least 12 characters).
@@ -307,29 +342,31 @@ Check it worked: a run appears under **Runs** within a minute or two and the tic
 
 ## 14. Updating later
 
-Take a backup first if you can. Both update commands below make a database backup themselves.
+Run these in a shell where you have run the two lines from step 1 (`B=...` and the `export` line). The scripts read `BOSSMAN_BACKUP_DIR` and `BOSSMAN_DEPLOYER` from your shell.
 
-**The server and web page.** Run the deploy script from the repo folder. It backs up the database, pulls the code, rebuilds, restarts, waits for the server to be healthy, and updates runners only if their code changed:
+**The server and web page.** The deploy script backs up the database to `<install-dir>`, pulls the code, rebuilds, restarts, waits for the server to be healthy, and updates runners only if their code changed:
 
 ```sh
-cd $B/src && BOSSMAN_BACKUP_DIR=$B scripts/deploy.sh
+cd $B/src && scripts/deploy.sh
 ```
 
 Add `--dry-run` to see the steps without running them. It stops if the checkout has uncommitted changes or isn't on the default branch, and says so. If the health check fails it prints the rollback commands and changes nothing by itself.
 
-**The runner** (roughly weekly, for new Claude Code releases, and after any change under `apps/runner`, `apps/launcher` or `packages/shared`). It builds a new image, checks it, and with the launcher on, Boss Man drains (nothing new starts, runs finish) and swaps each runner when its company is idle:
+**The runner** (roughly weekly, for new Claude Code releases, and after any change under `apps/runner`, `apps/launcher` or `packages/shared`). It builds a new image and checks it. With the launcher on, Boss Man then drains (nothing new starts, runs finish) and swaps each runner when its company is idle. It doesn't back up anything.
 
 ```sh
 cd $B/src && scripts/update-runner.sh
 ```
 
-Follow it under **Settings > Server and runner**, in **Runner update**, which also has **Cancel the update**. Without a host deployer folder set up, the script tells you to start the swap there with **Update runners (finish runs first)**. To undo, run `scripts/update-runner.sh --rollback`.
+Follow it under **Settings > Server and runner**, in **Runner update**, which also has **Cancel the update**. The script asks Boss Man to drain through the folder in `BOSSMAN_DEPLOYER`. If that folder has no `inbox` (you haven't set up the host deployer), it tells you to start the swap in Boss Man with **Update runners (finish runs first)**. To undo, run `scripts/update-runner.sh --rollback`.
 
-**Deploy latest.** If you set up the optional host deployer ([docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional)), Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves. You can also choose **Settings > Server and runner > Updates > Deploy latest**. The **Updates** section only appears once the deployer is set up. The deployer refuses changes to files like `scripts/`, `deploy/`, compose files and Dockerfiles. Apply those by hand with `scripts/deploy.sh`.
+**Deploy latest** is optional. It needs the host deployer, a root script run by a one-minute cron job. [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional) is a worked example, and its paths are the TrueNAS ones: use `<install-dir>/deployer` in their place. Make sure `BOSSMAN_DEPLOYER` and `BOSSMAN_BACKUP_DIR` are set for the cron job too, because `scripts/host-deployer.sh` has the same built-in default folder. Once it works, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates > Deploy latest** asks on demand. The **Updates** section only appears once the deployer is set up. The deployer refuses changes to files like `scripts/`, `deploy/`, compose files and Dockerfiles. Apply those by hand with `scripts/deploy.sh`.
 
-**The infra rebuild script.** `scripts/rebuild-live.sh` is only for the optional blue/green setup ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)). It rebuilds the live copy in place after a change the deployer refuses. The page is down for about 20 to 30 seconds. On a plain install, use `scripts/deploy.sh` instead. How it all fits together: [docs/09-self-deploy.md](09-self-deploy.md).
+**The infra rebuild script.** `scripts/rebuild-live.sh` is only for the optional blue/green setup ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)), which needs Docker Compose 2.24 or newer. It rebuilds the live copy in place after a change the deployer refuses, and the page is down for about 20 to 30 seconds. It reads `BOSSMAN_DEPLOYER` and `BOSSMAN_BACKUP_DIR` too. On a plain install, use `scripts/deploy.sh` instead. How it all fits together: [docs/09-self-deploy.md](09-self-deploy.md).
 
 ## Troubleshooting
+
+The commands below use `$B` from step 1. If you opened a new shell, set it again first.
 
 **The runner stays Offline, or never says Connected.**
 Check the runner's container and log:
@@ -362,7 +399,7 @@ Nothing printed means it's free. If something is listed, change `BOSSMAN_HOST_PO
 cd $B/src && docker compose up -d
 ```
 
-Use the new port in the browser. (`docs/06` uses 3101 because another app on that box used 3100.)
+Use the new port in the browser.
 
 **I can't log in, or the login page just reloads.**
 Session cookies are Secure by default and need HTTPS. For plain `http://` on a trusted home network, `.env` needs `BOSSMAN_INSECURE_COOKIES=1`. Check:
@@ -387,7 +424,7 @@ You need `.env`, `secrets/master.key` and `secrets/runner-app-co.token`.
 - "The host refused the token (HTTP 401 or 403)": the token is wrong, expired or lacks permission. Make a new one.
 - "The token can't see the repo": check the repo's owner and name in **Git repo**, and that the token has access to it.
 - "can read the repo but not push to it": give the token write permission (Contents and Pull requests on GitHub, `write:repository` on Gitea).
-- For a Gitea on your network, check the address is reachable from the box.
+- For a Gitea on your network, check the address is reachable from the host.
 
 **The Claude token is refused.**
 Boss Man rejects a token with stray spaces or quotes. Paste only the token. Then choose **Check with Claude** in the credentials table. A setup-token can only be fully proved by Claude Code on the runner, so the runner must be **Connected** first.
@@ -402,7 +439,7 @@ cd $B/src && docker compose logs --tail 100 server
 If a migration failed, don't edit the database by hand. Keep the log. Restore from a backup if you have one (`scripts/deploy.sh` keeps them in `$B`). Also check Postgres is healthy with `docker compose ps`.
 
 **The disk is filling up.**
-Check the box and Docker:
+Check the host and Docker:
 
 ```sh
 df -h $B
@@ -417,17 +454,17 @@ docker system df
 ## Security notes
 
 - **Keep it on your home network.** Never forward the web port (the one in `BOSSMAN_HOST_PORT`) on your router. `BOSSMAN_INSECURE_COOKIES=1` is for a trusted home network only. For access from outside, use HTTPS in front (for example Tailscale Serve) and remove that setting.
-- **The only port that may ever face the internet is the feedback portal's own port**, and only if you choose to share it ([docs/06, section 11](06-install-truenas.md#11-feedback-portal-optional)). By default it is bound to the box itself.
+- **The only port that may ever face the internet is the feedback portal's own port**, and only if you choose to share it ([docs/06, section 11](06-install-truenas.md#11-feedback-portal-optional)). By default it is bound to the host itself.
 - **Runners need no open ports.** They connect out to the server.
 - **Secrets live in Boss Man's secrets.** They're encrypted with the master key, shown once and never again. Agents get them as environment variables for their runs only. Add them only through the credentials form or the **Secrets** page.
 - **Never paste tokens into chats, tickets or wiki pages.** Anything an agent can read, it may repeat.
-- **Back up `secrets/master.key` off the box.** Without it, stored secrets can't be decrypted.
+- **Back up `secrets/master.key` off the host.** Without it, stored secrets can't be decrypted.
 - **Give git tokens the least access needed:** only the repos the company works on.
 - **Protect your default branch** so agents can only land reviewed pull requests, especially if you set up Deploy latest.
 
 ## Next steps
 
-- [docs/06-install-truenas.md](06-install-truenas.md): the full TrueNAS install, with backups, the host deployer, blue/green, phone notifications and the feedback portal.
+- [docs/06-install-truenas.md](06-install-truenas.md): a worked example on TrueNAS SCALE, with backups, the host deployer, blue/green, phone notifications and the feedback portal.
 - [docs/09-self-deploy.md](09-self-deploy.md): how "Deploy latest", the drain and blue/green updates work.
 - [docs/12-runner-add-ons.md](12-runner-add-ons.md): optional tools in the runner image, such as a browser for agents.
 - [docs/14-paperclip-migration.md](14-paperclip-migration.md): move a company over from Paperclip, as an optional later step.
