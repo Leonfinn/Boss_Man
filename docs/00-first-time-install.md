@@ -276,7 +276,7 @@ claude setup-token
 It prints a long-lived token for your subscription. Paste it into **Value**, leave **Variable name** as `CLAUDE_CODE_OAUTH_TOKEN`, then choose **Check** and save. Boss Man refuses a token with stray spaces or quotes and says why. In the table, choose **Check with Claude**: it runs one tiny prompt on the runner and uses a little of your allowance. If you use an API key instead, choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key** or **Ollama Cloud API key** from the same list.
 
 **A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Agents get it as `GIT_TOKEN`.
-- **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents and Pull requests, read and write. The wizard's **How do I get a token?** also lists Checks read, so Boss Man can read CI results.
+- **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Checks read, so Boss Man can read CI results.
 - **Gitea:** Settings > Applications > Generate New Token, with repository scope **Read and Write** (`write:repository`).
 
 Paste it and save. Then choose **Check the token against <project>**.
@@ -413,7 +413,7 @@ You need `.env`, `secrets/master.key` and `secrets/runner-app-co.token`.
 **Check the token against <project>** says what the host answered:
 - "The host refused the token (HTTP 401 or 403)": the token is wrong, expired or lacks permission. Make a new one.
 - "The token can't see the repo": check the repo's owner and name in **Git repo**, and that the token has access to it.
-- "can read the repo but not push to it": give the token write permission (Contents and Pull requests on GitHub, `write:repository` on Gitea).
+- "can read the repo but not push to it": give the token write permission (Contents, Pull requests and Workflows on GitHub, `write:repository` on Gitea).
 - For a Gitea on your network, check the address is reachable from the host.
 
 **The Claude token is refused.**

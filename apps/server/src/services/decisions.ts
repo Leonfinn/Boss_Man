@@ -84,12 +84,16 @@ export const CHECK_SKIP = "Merge without the check";
  * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
  */
 export async function raiseMergeStuck(db: Db, t: { id: string; title: string; companyId: string }, why: string) {
+  // GitHub's own words when the token can't change .github/workflows/.
+  const fix = /without [`']?workflows?[`']? (scope|permission)/i.test(why)
+    ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
+    : "";
   return db
     .insert(decisions)
     .values({
       companyId: t.companyId,
       kind: "question",
-      question: `"${t.title}" was approved, but its merge didn't finish (${why}). This isn't a problem with the agent's work.`,
+      question: `"${t.title}" was approved, but its merge didn't finish (${why}). This isn't a problem with the agent's work.${fix}`,
       options: [CHECK_AGAIN, CHECK_SEND_BACK],
       recommendedOption: CHECK_AGAIN,
       tier: "owner",

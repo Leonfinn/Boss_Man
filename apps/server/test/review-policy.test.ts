@@ -9,6 +9,7 @@ import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
+import { raiseMergeStuck } from "../src/services/decisions.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
@@ -149,6 +150,15 @@ describe("review wake", () => {
 });
 
 describe("an approval whose merge fails", () => {
+  it("tells the owner how to fix a token that can't change CI files", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    const [d] = await raiseMergeStuck(c.db, await c.row(t.id), "! [remote rejected] HEAD -> main (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)");
+    const [row] = await c.db.select().from(decisions).where(eq(decisions.id, d!.id));
+    expect(row!.question).toContain("Workflows to Read and write");
+    const [other] = await raiseMergeStuck(c.db, await c.row((await c.ticket()).id), "The runner went away");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, other!.id)))[0]!.question).not.toContain("Workflows");
+  });
   it("says so on the ticket and asks the owner, instead of leaving it in review with nothing pending", async () => {
     const c = await setup();
     const t = await c.ticket();

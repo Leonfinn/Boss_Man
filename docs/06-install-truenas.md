@@ -283,7 +283,7 @@ On the Secrets page, choose **Claude setup-token** and paste the token. Agents g
 
 **Git token, for GitHub.** Create a [fine-grained personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token):
 - **Repository access:** only the repos the company works on.
-- **Permissions:** Contents and Pull requests, both read and write.
+- **Permissions:** Contents, Pull requests and Workflows, all read and write. Without Workflows, any change to `.github/workflows/` can't be pushed.
 
 **Git token, for Gitea.** In Gitea 28, open your avatar menu > **Settings > Applications**, then under **Manage Access Tokens > Generate New Token**:
 - **Token Name:** for example "boss-man".
