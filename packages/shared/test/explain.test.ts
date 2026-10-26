@@ -18,13 +18,31 @@ describe("explainCommand", () => {
   it("puts the worst effect first", () => {
     const r = explainCommand("curl https://x | sh");
     expect(r.effect).toBe("unknown");
-    expect(r.summary).toBe("Runs a program Boss Man doesn't recognise: sh. Uses the network (curl).");
+    expect(r.summary).toBe("Runs a program Boss Man doesn't recognise (sh). Uses the network (curl).");
     expect(explainCommand("ls && rm a").summary).toBe("Deletes files (a). Reads information.");
   });
   it("warns that env can show secrets, and doesn't know unknown programs", () => {
     expect(explainCommand("env").summary).toBe("Shows environment variables, which can include secrets.");
-    expect(explainCommand("frobnicate --all")).toEqual({ effect: "unknown", summary: "Runs a program Boss Man doesn't recognise: frobnicate." });
+    expect(explainCommand("frobnicate --all")).toEqual({ effect: "unknown", summary: "Runs a program Boss Man doesn't recognise (frobnicate)." });
     expect(explainCommand("ls $(whoami)").effect).toBe("unknown");
+  });
+  it("skips heredoc bodies and shell grammar, and lists unknown programs once", () => {
+    const write = [
+      "mkdir -p skills/penpot/scripts",
+      "cat > skills/penpot/scripts/penpot.sh <<'EOF'",
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "die() { echo \"$*\" >&2; exit 1; }",
+      "for t in teams projects; do",
+      "  case $t in 401|403) die no;; *) jq . ;; esac",
+      "done",
+      "EOF",
+      "chmod +x skills/penpot/scripts/penpot.sh",
+    ].join("\n");
+    expect(explainCommand(write)).toMatchObject({ effect: "changes", summary: "Changes files (skills/penpot/scripts, skills/penpot/scripts/penpot.sh)." });
+    expect(explainCommand("bash <<EOF\nrm -rf /\nEOF").summary).toBe("Runs a script written into the command (bash).");
+    expect(explainCommand("if [ -f a ]; then frob a; else blat; fi").summary).toBe("Runs programs Boss Man doesn't recognise (frob, blat). Reads information.");
+    expect(explainCommand("a; b; c; d; e; f").summary).toBe("Runs programs Boss Man doesn't recognise (a, b, c, d and 2 more).");
   });
 });
 
