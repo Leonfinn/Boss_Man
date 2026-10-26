@@ -15,10 +15,12 @@ Use `scripts/penpot.sh` (next to this file). It needs two granted secrets as env
 
 ## Steps
 
-1. `bash .claude/skills/penpot/scripts/penpot.sh check` confirms the connection.
-2. `bash .claude/skills/penpot/scripts/penpot.sh teams`, then `projects TEAM_ID`, then `files PROJECT_ID`. Each prints `id<TAB>name`.
-3. `bash .claude/skills/penpot/scripts/penpot.sh boards FILE_ID` prints `page-id<TAB>board-id<TAB>name` for each top-level board.
-4. `bash .claude/skills/penpot/scripts/penpot.sh export FILE_ID PAGE_ID BOARD_ID ./board.png` saves a PNG in the ticket workspace (it checks it really is a PNG and at most 5 MB).
+In the steps below, `<skill dir>` is this skill's base directory (shown when the skill loads). The runner puts skills in a per-run folder, not the working folder, so do not use a relative `.claude/skills` path.
+
+1. `bash <skill dir>/scripts/penpot.sh check` confirms the connection.
+2. `bash <skill dir>/scripts/penpot.sh teams`, then `projects TEAM_ID`, then `files PROJECT_ID`. Each prints `id<TAB>name`.
+3. `bash <skill dir>/scripts/penpot.sh boards FILE_ID` prints `page-id<TAB>board-id<TAB>name` for each top-level board.
+4. `bash <skill dir>/scripts/penpot.sh export FILE_ID PAGE_ID BOARD_ID /tmp/board.png` saves a PNG outside the git workspace, so it is not committed (it checks it really is a PNG and at most 5 MB).
 5. Attach it with `attach_image` (PNG only, max 5 MB; no SVG). Say in the ticket which file and board it shows.
 
 ## If export fails
