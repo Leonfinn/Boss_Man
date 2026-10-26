@@ -59,6 +59,14 @@ describe("ticket in review", () => {
     expect(screen.getByText("Approving runs `pnpm test` and, if it passes, merges bm/fix-typo into main of Leonfinn/customer-app. The change is under Changes above.")).toBeTruthy();
   });
 
+  it("when no agent can review it, the review is yours: no 'reviewer' to wait for, the buttons show straight away", async () => {
+    show({}, [{ ...review("pending"), reviewer: null }]);
+    expect(await screen.findByText("waiting for you")).toBeTruthy();
+    expect(screen.queryByText(/Waiting for a reviewer/)).toBeNull();
+    expect(screen.queryByText("Decide now instead")).toBeNull();
+    expect(screen.getByRole("button", { name: "Approve and merge" })).toBeTruthy();
+  });
+
   it("describes a pull request landing, and no repo", async () => {
     show({ landing: "pull_request" }, []);
     expect(await screen.findByText("Approving opens a pull request from bm/fix-typo into main of Leonfinn/customer-app. The change is under Changes above.")).toBeTruthy();
