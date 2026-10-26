@@ -60,3 +60,7 @@ Make a copy of `.env` called `.env.test` with `PENPOT_HOST_PORT=9101`, then:
 To restore over the live Penpot: `down` (without `-v`), remove the `boss-man-penpot_penpot_postgres_v15`
 volume (only after the backup is confirmed good), then follow steps 2 to 6 with the real project
 name and `.env`.
+
+## Agent access
+
+Agents read files and attach PNG exports of boards through the `penpot` skill (`skills/penpot`), using an access token kept as a Boss Man secret. Owner setup steps: [16-penpot-agent-setup.md](16-penpot-agent-setup.md).
