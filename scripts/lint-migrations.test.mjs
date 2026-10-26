@@ -45,4 +45,5 @@ test("in-memory state check wants a note", () => {
   assert.equal(findUnannotated("f.ts", "const m = new Map<string, number>();").length, 1);
   assert.equal(findUnannotated("f.ts", "// shortcut: lost on restart\nconst m = new Map<string, number>();").length, 0);
   assert.equal(findUnannotated("f.ts", "const OK = new Set([1, 2]);\n    const local = new Map();").length, 0);
+  assert.equal(findUnannotated("f.ts", "  const out = new Map(); // not state: built per call").length, 0);
 });

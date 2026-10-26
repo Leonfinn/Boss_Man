@@ -12,10 +12,10 @@ root as its own Compose project with
 `docker compose -p boss-man-penpot --env-file .env -f deploy/penpot.yml --profile penpot up -d` (no Boss Man or
 TrueNAS `-f` files). Never add `deploy/penpot.yml` to `COMPOSE_FILE`: its required variables
 would make every compose command on the host, including the deployer, fail. Registration is
-always off. To create the first accounts, do it straight away (while it is on, anyone on the
-LAN can sign up with any email): add `PENPOT_EXTRA_FLAGS=enable-registration` to `.env`, re-run
+off by default. To create the first accounts, do it straight away (while it is on, anyone on the
+LAN can sign up with any email): add `PENPOT_REGISTRATION=enable` to `.env`, re-run
 the command, register, then **delete that line** (do not set it to another value) and re-run so
-registration is off again. The admin console and the backend REPL are not deployed. The
+registration is off again. On a LAN where you trust everyone you can instead leave the line in, so people can sign themselves up. The admin console and the backend REPL are not deployed. The
 air-gapped setting is on, so there is no Google Fonts picker and no templates gallery, and the
 Penpot container makes no outbound calls for them. Turn on access tokens per user in Penpot's profile
 settings. Web page: `http://<PENPOT_BIND>:9001`. Only that port is published; mailpit (8025),

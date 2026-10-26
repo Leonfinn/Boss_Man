@@ -103,7 +103,7 @@ export async function listReviews(db: Db, ticketId: string) {
 
 /** Who each ticket's open reviews are waiting on and why, one short line per ticket ("Sam is busy on BOS-7"). Tickets nobody is holding up are left out. */
 export async function reviewWaits(db: Db, ticketIds: string[]): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
+  const out = new Map<string, string>(); // not state: built per call and returned
   for (const ticketId of ticketIds) {
     const lines: string[] = [];
     for (const r of activeRows(await latestRows(db, ticketId))) {
