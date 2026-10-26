@@ -14,8 +14,9 @@ FAKE
 cat >"$t/bin/curl" <<'FAKE'
 #!/usr/bin/env bash
 echo "curl $*" >>"$FAKE_CURL_LOG"
-stdin="$(cat)"  # -K - reads the auth config from stdin; capture it to prove no argv token
-echo "$stdin" >>"$FAKE_CURL_LOG"
+if [[ "$*" == *" -K -"* ]]; then # -K - reads the auth config from stdin; capture it to prove no argv token
+  echo "stdin: $(cat)" >>"$FAKE_CURL_LOG"
+fi
 if [[ ${FAKE_HTTP_FAIL:-0} == 1 ]]; then exit 7; fi
 # Honour -o FILE and -w '%{http_code}' the way the script relies on.
 out=""; wc=""
@@ -45,14 +46,14 @@ grep -q "grant both secrets to you" "$t/err" || fail "message doesn't tell the a
 if [[ -e $t/curl.log ]]; then fail "called curl without a token"; fi
 
 # Missing curl or jq: the script says so instead of a cryptic "command not found".
-mkdir -p "$t/empty"; oldPATH="$PATH"; PATH="$t/empty"
-PATH="$t/empty" /usr/bin/bash "$here/penpot.sh" check >"$t/inner.out" 2>"$t/inner.err" || true
-/usr/bin/grep -q "not installed here" "$t/inner.err" || fail "missing-tools case unclear"
+system_bash="$(command -v bash)" system_grep="$(command -v grep)"
+mkdir -p "$t/empty"; oldPATH="$PATH"
+PATH="$t/empty" "$system_bash" "$here/penpot.sh" check >"$t/inner.out" 2>"$t/inner.err" || true
+"$system_grep" -q "not installed here" "$t/inner.err" || fail "missing-tools case unclear"
 PATH="$oldPATH"
 
 # Granted: a token set but only ever used via stdin; it appears in no output or argv.
 export PENPOT_URL="http://10.9.9.9:9001" PENPOT_TOKEN="SUPERSECRET123" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'
-: >"$t/board.png"
 run export F P B "$t/board.png" >/dev/null
 [[ "$(grep -c 'header = "Authorization: Token SUPERSECRET123"' "$t/curl.log")" -ge 1 ]] || fail "no auth header reached curl"
 if grep -rqs 'SUPERSECRET123' "$t/err"; then fail "token printed in stderr"; fi
@@ -75,6 +76,14 @@ grep -q "Per-board PNG export is not confirmed" "$t/err" || fail "no fallback me
 # Unreachable Penpot: a plain error, no token leaked.
 export FAKE_HTTP_FAIL=1
 if run check >/dev/null; then fail "should fail when Penpot is down"; fi
+grep -q "can't reach Penpot" "$t/err" || fail "unreachable case not explained"
 if grep -rqs 'SUPERSECRET123' "$t/err"; then fail "token leaked when unreachable"; fi
+
+# The export uri points at another host: the download must go without the token.
+export FAKE_HTTP_FAIL=0 FAKE_NO_URI=0 PENPOT_URL="http://10.9.9.9:9001" FAKE_EXPORT_URI="http://other.example/x.png" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'
+: >"$t/curl.log"
+run export F P B "$t/board.png" >/dev/null
+# Two calls (the export, then the download); only the export to our base carries the auth header.
+[[ "$(grep -c 'header = "Authorization: Token SUPERSECRET123"' "$t/curl.log")" == 1 ]] || fail "token sent to a foreign host on the download"
 
 echo "penpot.test.sh: ok"
