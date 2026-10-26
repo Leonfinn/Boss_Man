@@ -1,15 +1,21 @@
 # Penpot (design tool) as an optional add-on. OFF by default: every service is in the "penpot"
 # profile, so a plain `docker compose up -d` starts nothing from this file.
-# Use it with the main file, from the repository root (see docs/15-penpot.md):
-#   docker compose -f docker-compose.yml -f deploy/penpot.yml --profile penpot up -d
+# It is its OWN Compose project, never merged with Boss Man's files (see docs/15-penpot.md):
+#   docker compose -p boss-man-penpot -f deploy/penpot.yml --profile penpot up -d
+# Never add this file to COMPOSE_FILE: the required PENPOT_* variables below are checked when
+# the file is parsed, so every compose command on the host (including the deployer) would fail.
 #
 # In .env (never commit these; generate them once, see the doc):
 #   PENPOT_SECRET_KEY=<openssl rand -base64 48>
 #   PENPOT_DB_PASSWORD=<openssl rand -hex 24>
 #   PENPOT_BIND=<the host's LAN address, e.g. 192.168.1.20>   # required; never 0.0.0.0
 #   PENPOT_PUBLIC_URI=http://<same LAN address>:9001           # must match what people type
-# Optional: PENPOT_VERSION (pinned below), PENPOT_HOST_PORT (9001), PENPOT_REGISTRATION=enable
-#   (only while creating the first accounts; the default keeps registration off).
+# Optional: PENPOT_VERSION (pinned below), PENPOT_HOST_PORT (9001), PENPOT_EXTRA_FLAGS.
+#   Registration is hard-coded off. To create the first accounts set
+#   PENPOT_EXTRA_FLAGS=enable-registration for that run, then REMOVE the line (flags are
+#   last-wins, so a typo there leaves registration closed). enable-prepl-server (an
+#   unauthenticated REPL) is off; set PENPOT_EXTRA_FLAGS=enable-prepl-server only for a
+#   one-off manage.py run.
 #
 # Only the Penpot web page is published, and only on PENPOT_BIND. Mailpit (8025), the backend,
 # valkey and postgres stay on Penpot's own internal network, apart from Boss Man's database.
@@ -18,9 +24,9 @@
 
 x-flags: &flags
   PENPOT_FLAGS: >-
-    disable-email-verification enable-smtp enable-prepl-server
-    disable-secure-session-cookies enable-access-tokens enable-admin-console
-    ${PENPOT_REGISTRATION:-disable}-registration
+    disable-email-verification enable-smtp
+    disable-secure-session-cookies enable-access-tokens
+    disable-registration ${PENPOT_EXTRA_FLAGS:-}
 x-uri: &uri
   PENPOT_PUBLIC_URI: ${PENPOT_PUBLIC_URI:?Set PENPOT_PUBLIC_URI in .env, e.g. http://192.168.1.20:9001}
 x-secret: &secret
@@ -50,11 +56,10 @@ services:
       - "${PENPOT_BIND:?Set PENPOT_BIND in .env to the LAN address}:${PENPOT_HOST_PORT:-9001}:8080"
     volumes:
       - penpot_assets:/opt/data/assets
-    depends_on: [penpot-backend, penpot-admin-console, penpot-mcp, penpot-exporter]
+    depends_on: [penpot-backend, penpot-mcp, penpot-exporter]
     environment:
       <<: [*flags, *uri]
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
-      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
     mem_limit: ${PENPOT_MEM_FRONTEND:-256m}
 
   penpot-backend:
@@ -68,7 +73,6 @@ services:
     environment:
       <<: [*flags, *uri, *secret, *database]
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
-      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
       PENPOT_REDIS_URI: redis://penpot-valkey/0
       PENPOT_OBJECTS_STORAGE_BACKEND: fs
       PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
@@ -80,16 +84,6 @@ services:
       PENPOT_SMTP_TLS: "false"
       PENPOT_SMTP_SSL: "false"
     mem_limit: ${PENPOT_MEM_BACKEND:-1536m}
-
-  penpot-admin-console:
-    <<: *common
-    image: penpotapp/admin-console:${PENPOT_VERSION:-2.18}
-    depends_on:
-      penpot-postgres: { condition: service_healthy }
-    environment:
-      <<: [*uri, *secret, *database]
-      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
-    mem_limit: ${PENPOT_MEM_ADMIN:-256m}
 
   penpot-mcp:
     <<: *common
