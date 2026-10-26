@@ -11,7 +11,7 @@ import { z } from "zod";
 import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
@@ -1313,7 +1313,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
       // A ticket waiting on the owner has to show in their Your review lane, which it only does through an open decision.
       if (state === "blocked" && !(await hasOpenBlocker(db, ticketId))) {
-        return fail("A blocked ticket must be waiting on something the board can see. If you need the owner (to run something, answer or sign off), call raise_decision with blocksTicketId set to this ticket: it blocks the ticket and puts the ask in their Your review lane. A note in the summary or ticket_reply does not reach them. If you are waiting on another ticket, make this one a sub-task of it; for CI or an outside service, use schedule_check instead.");
+        return fail("A blocked ticket must be waiting on something the board can see. If you need the owner (to run something, answer or sign off), call raise_decision with blocksTicketId set to this ticket: it blocks the ticket and puts the ask in their Your review lane. A note in the summary or ticket_reply does not reach them. If you need a colleague's work first, create_ticket with parent set to this ticket: that blocks it until the sub-task is done. For CI or an outside service, use schedule_check instead.");
       }
       // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
       const [col] = await db
@@ -1356,7 +1356,10 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
 async function hasOpenBlocker(db: Db, ticketId: string) {
   const deps = await db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, ticketId));
   for (const d of deps) {
-    if (d.blockerEngagementId) return true;
+    if (d.blockerEngagementId) {
+      const [x] = await db.select({ s: engagementsTable.status }).from(engagementsTable).where(eq(engagementsTable.id, d.blockerEngagementId));
+      if (x && x.s !== "signed_off") return true;
+    }
     if (d.blockerDecisionId) {
       const [x] = await db.select({ s: decisionsTable.status }).from(decisionsTable).where(eq(decisionsTable.id, d.blockerDecisionId));
       if (x?.s === "open") return true;
