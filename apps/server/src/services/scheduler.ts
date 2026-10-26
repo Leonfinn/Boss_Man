@@ -25,6 +25,8 @@ import type { runnersService } from "./runners.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
+// The watchdog has its own hourly cap (watchdog.ts), so its wakes don't count as ticketless churn.
+import { WATCHDOG_REASON } from "./watchdog.js";
 
 export type Limits = {
   instance: number;
@@ -683,7 +685,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -818,7 +820,7 @@ export function schedulerService(
       await record(db, { companyId: t.companyId, agentId: run.agentId, ticketId: t.id, kind: "monitor", summary: `${name} stopped with this still in progress and no check set, so Boss Man will wake ${name} at ${at.toISOString().slice(11, 16)} UTC to carry on.`, at: now() });
     },
 
-    async nudge(input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }): Promise<{ ok: true; delivered: string } | { ok: false; error: string }> {
+    async nudge(input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }): Promise<{ ok: true; delivered: string; wakeId: string } | { ok: false; error: string }> {
       const [from] = await db.select().from(agents).where(eq(agents.id, input.fromAgentId));
       if (!from) return { ok: false, error: "No such agent." };
       const team = await db.select().from(agents).where(and(eq(agents.companyId, from.companyId), isNull(agents.retiredAt)));
@@ -874,7 +876,7 @@ export function schedulerService(
       }
       await db.insert(nudges).values(row);
       const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });
-      return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it" };
+      return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it", wakeId: w.id };
     },
 
     /**
