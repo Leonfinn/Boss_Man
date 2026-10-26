@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef } from "@boss-man/shared";
-import { useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -212,6 +212,7 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
           onPaste={img.onPaste}
           style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
         />
+        <ImagePreviews text={form.body} onChange={(body) => setForm({ ...form, body })} />
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           {img.button}
           <small className="muted">Or paste a screenshot into the description.</small>

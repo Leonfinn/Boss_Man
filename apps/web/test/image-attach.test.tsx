@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useImageAttach, withImage } from "../src/components/ImageAttach";
+import { ImagePreviews, useImageAttach, withImage } from "../src/components/ImageAttach";
 import { linked } from "../src/pages/Chat";
 
 afterEach(() => {
@@ -18,6 +18,7 @@ function Box() {
   return (
     <>
       <textarea aria-label="text" value={text} onChange={(e) => setText(e.target.value)} onPaste={img.onPaste} />
+      <ImagePreviews text={text} onChange={setText} />
       {img.button}
       {img.error && <p role="alert">{img.error}</p>}
     </>
@@ -36,6 +37,16 @@ describe("pasting images", () => {
     expect(url).toBe("/api/companies/c1/images");
     expect(JSON.parse(String(init.body))).toMatchObject({ name: "image.png", ticketId: "t1", data: "iVBORw==" });
     expect(screen.getByRole("button", { name: "Attach image" })).toBeTruthy();
+  });
+
+  it("shows a thumbnail of each attached image under the box, and Remove takes it out of the text", () => {
+    render(<Box />);
+    const box = screen.getByLabelText("text") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: `Look:\n![bug.png](/api/ticket-images/${ID})\nThanks` } });
+    expect(screen.getByRole("img", { name: "bug.png" }).getAttribute("src")).toBe(`/api/ticket-images/${ID}`);
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(box.value).toBe("Look:\nThanks");
+    expect(screen.queryByRole("img")).toBeNull();
   });
 
   it("shows an image in a message as a thumbnail that opens full size", () => {

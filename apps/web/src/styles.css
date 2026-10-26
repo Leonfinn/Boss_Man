@@ -669,3 +669,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 /* Pasted images in messages and descriptions. */
 .msg-img { display: block; width: fit-content; margin: 6px 0; }
 .msg-img img, .md img { display: block; max-width: min(100%, 360px); max-height: 260px; border-radius: 6px; border: 1px solid var(--line); }
+.image-previews { display: flex; flex-direction: column; gap: 4px; }
+.image-thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.image-thumbs figure { margin: 0; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.image-thumbs img { width: 120px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }

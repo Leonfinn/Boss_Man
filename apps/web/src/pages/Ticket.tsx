@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
-import { useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
@@ -382,6 +382,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   onPaste={img.onPaste}
                   style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
                 />
+                <ImagePreviews text={draft} onChange={setDraft} />
                 {img.error && (
                   <p className="error" role="alert">
                     {img.error}

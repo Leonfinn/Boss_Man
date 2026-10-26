@@ -7,7 +7,7 @@ import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
-import { useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
@@ -209,6 +209,9 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                   Send
                 </button>
               </form>
+              <div style={{ padding: "0 20px" }}>
+                <ImagePreviews text={text} onChange={setText} />
+              </div>
               {img.error && (
                 <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
                   {img.error}

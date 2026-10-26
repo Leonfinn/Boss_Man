@@ -65,3 +65,26 @@ export function useImageAttach(companyId: string | undefined, insert: (markdown:
   );
   return { onPaste, button, error, busy };
 }
+
+const IMAGE_MD = /!\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)\n?/g;
+
+/** The pictures in a text box's text as thumbnails, each with Remove, so the owner sees what they attached. */
+export function ImagePreviews({ text, onChange }: { text: string; onChange: (text: string) => void }) {
+  const found = [...text.matchAll(IMAGE_MD)];
+  if (!found.length) return null;
+  return (
+    <div className="image-previews">
+      <div className="image-thumbs">
+        {found.map((m, i) => (
+          <figure key={`${m[2]}-${i}`}>
+            <img src={m[2]} alt={m[1] || "image"} />
+            <button type="button" className="btn small" onClick={() => onChange(text.replace(m[0], ""))}>
+              Remove
+            </button>
+          </figure>
+        ))}
+      </div>
+      <small className="muted">In the text, each picture is a line starting with ![. Leave it there: it shows as the picture once sent.</small>
+    </div>
+  );
+}
