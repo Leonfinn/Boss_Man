@@ -1235,6 +1235,20 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
           }
         >
           Deploy latest
+        </button>{" "}
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || v.pending || s?.result === "running"}
+          title="Builds a new runner image from the deployed code (for example new tools in apps/runner/Dockerfile), checks it, then swaps each runner when its company is idle."
+          onClick={() =>
+            act.run(async () => {
+              await api("/api/self-deploy/update-runners", { method: "POST", body: {} });
+              go("decisions");
+            })
+          }
+        >
+          Build and update runners
         </button>
       </div>
       {act.view}
@@ -1256,7 +1270,7 @@ function RunnerUpdate() {
       <p className="muted" style={{ fontSize: 14 }}>
         {m.on
           ? `Update pending: ${m.runs > 0 ? `waiting for ${m.runs} run${m.runs === 1 ? "" : "s"} in ${m.companies} ${m.companies === 1 ? "company" : "companies"}; you are asked at ${when(m.deadline)} if some are still going` : "swapping the runners now"}. Nothing new starts until it is done.`
-          : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Run scripts/update-runner.sh first to build the image."}
+          : "Puts every company's runner on the newest image: nothing new starts, runs in progress finish, and each runner is swapped as its company goes idle. Build the image first with Build and update runners under Updates, which also starts this; use this button only after scripts/update-runner.sh."}
       </p>
       <p role="status" style={{ fontSize: 14 }}>
         {m.last ? (
