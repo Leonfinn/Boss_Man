@@ -42,7 +42,7 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
 }
 
 /** What the author hears when a ticket that needs code changes has none. */
-export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or mark the ticket as not needing code and say why.";
+export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or ask your CEO or a manager to mark the ticket as not needing code (update_ticket with noCode true) and say why.";
 
 /** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
