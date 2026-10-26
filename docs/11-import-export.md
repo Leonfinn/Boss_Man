@@ -1,6 +1,6 @@
 # 11 — Company import and export
 
-Status: steps 1 (export), 2 (import of Boss Man packages) and 3 (Settings → Import and export) built. Owner asked for a general tool, not a one-off migration (24 Oct 2026).
+Status: built, all five steps (export, import of Boss Man packages, Settings → Import and export, the Agent Companies adapter, and the Paperclip tickets and documents adapter). Owner asked for a general tool, not a one-off migration (24 Oct 2026).
 
 ## Goal
 

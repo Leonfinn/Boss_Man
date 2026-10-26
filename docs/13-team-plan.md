@@ -1,6 +1,6 @@
 # 13 — Team plan from a project's scope
 
-Status: design, not built (asked 24 Oct 2026).
+Status: built. The CEO's `propose_team` tool, the team-plan decision, the chat trigger and the "owner added scope" note on the CEO's next run all exist (asked 24 Oct 2026).
 
 ## Today
 
