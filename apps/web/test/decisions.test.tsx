@@ -211,3 +211,21 @@ describe("Allow always", () => {
     expect(screen.getByRole("button", { name: "Write my own answer" })).toBeTruthy();
   });
 });
+
+describe("owner asks with steps", () => {
+  it("shows the steps as a numbered list and what the agent tried first, collapsed", () => {
+    const d = decision({
+      kind: "question",
+      question: "Please update the runners.",
+      options: ["Done"],
+      recommendedOption: "Done",
+      context: { type: "question", steps: ["Open Settings → Server and runner.", "Click Build and update runners."], triedFirst: "Tried from the run; no host access." },
+    });
+    const { container } = render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const items = container.querySelectorAll("ol[data-steps] > li");
+    expect(Array.from(items).map((li) => li.textContent)).toEqual(["Open Settings → Server and runner.", "Click Build and update runners."]);
+    const tried = screen.getByText(/tried first/).closest("details")!;
+    expect(tried.open).toBe(false);
+    expect(tried.textContent).toMatch(/no host access/);
+  });
+});

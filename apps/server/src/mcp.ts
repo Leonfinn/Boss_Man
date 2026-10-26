@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, type decisionsService } from "./services/decisions.js";
+import { AnswerError, checkAsk, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
@@ -365,16 +365,21 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide something you shouldn't decide alone. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer.",
       inputSchema: {
         question: z.string().min(1).max(1000),
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
         recommended: z.string(),
         blocksTicketId: z.string().uuid().optional(),
+        triedFirst: z.string().max(1000),
+        ownerMustDo: z.boolean().optional(),
+        steps: z.array(z.string().min(1).max(500)).max(12).optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      const bad = checkAsk({ triedFirst, ownerMustDo, steps });
+      if (bad) return fail(bad);
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
@@ -387,7 +392,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .where(and(eq(decisionsTable.raisedByAgentId, scope.agentId), eq(decisionsTable.status, "open"), eq(decisionsTable.question, question)));
         if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
-      const d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId });
+      const d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined });
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
     },
   );

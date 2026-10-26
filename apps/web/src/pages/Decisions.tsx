@@ -295,6 +295,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       ))}
                     </div>
                     {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
+                    {d.context?.steps && d.context.steps.length > 0 && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
+                        <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                          {d.context.steps.map((s, i) => (
+                            <li key={i}>{s}</li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
+                    {d.context?.triedFirst && (
+                      <details className="plan">
+                        <summary>What {d.agentName ?? "the agent"} tried first</summary>
+                        <p style={{ fontSize: 14 }}>{d.context.triedFirst}</p>
+                      </details>
+                    )}
                     {d.context?.planText && (
                       <details className="plan" open={!done}>
                         <summary>The plan</summary>

@@ -34,7 +34,7 @@ type Sender = (runnerId: string, command: RunnerCommand) => boolean;
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[] }
   | { type: "engagement"; engagementId: string }
-  | { type: "question" }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[] }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -111,6 +111,18 @@ export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${mi
 export const CANCEL_UPDATE = "Cancel the update";
 
 export class AnswerError extends Error {}
+
+/** Why an agent's ask is refused, or null: it must say what was tried first, and give steps when the owner has to act. */
+export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[] }): string | null {
+  const t = a.triedFirst.trim();
+  if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
+    return "triedFirst is too thin. Say what you tried yourself and why an agent can't do this (no host access, a secret only the owner can grant, owner sign-off). Try again once you have, or do it yourself.";
+  }
+  if (a.ownerMustDo && !a.steps?.length) {
+    return "The owner has to do something, so give steps: a short numbered list in plain words, with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners) and how to undo it. Prefer an in-app button over host commands.";
+  }
+  return null;
+}
 
 /** One proposed hire in a team plan (docs/13). */
 export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string; serves?: string | null };
@@ -459,7 +471,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[] }) {
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -470,7 +482,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question" },
+            context: { type: "question", ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}) },
           })
           .returning();
         if (input.blocksTicketId) {
