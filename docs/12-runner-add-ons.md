@@ -1,6 +1,6 @@
 # 12 — Runner add-ons
 
-Status: design, not built. The owner chose this over a browser running as a separate tool server, because browser checks are central to their projects (24 Oct 2026).
+Status: built (steps 1 to 4 below). The owner chose this over a browser running as a separate tool server, because browser checks are central to their projects (24 Oct 2026).
 
 ## Rule
 
@@ -13,12 +13,12 @@ The runner runs as the non-root `node` user. A browser needs system libraries th
 ## Pieces
 
 1. **Catalogue** (`packages/shared`): the add-ons Boss Man knows about. Each entry has an id, the npm package and its pinned version, a check command, the canary commands, and a description. The first entry is `agent-browser` (Vercel Labs, Apache-2.0), pinned to 0.39.0. Its README offers `agent-browser install --with-deps` to download Chrome for Testing and the Linux libraries. Instead, the image installs Debian's `chromium` package with apt, so it gets security updates, and points agent-browser at it with `AGENT_BROWSER_EXECUTABLE_PATH`, which that README documents. That avoids a separate download, and avoids `--with-deps`, which calls `sudo apt-get` (the slim image has no sudo). Chromium's own sandbox is off (`AGENT_BROWSER_ARGS=--no-sandbox`). It needs privileges the runner container doesn't have, and the container is already the boundary, since agents run shell commands in it.
-2. **Build argument**: `RUNNER_ADDONS="agent-browser"` in the runner Dockerfile. With the argument empty, the build is byte-for-byte what it is today. This is an infra PR, applied by hand.
+2. **Build argument**: `RUNNER_ADDONS` in the runner Dockerfile, a comma-separated list such as `agent-browser,webkit`. `scripts/update-runner.sh` reads it from the environment or from `.env`. With the argument empty, the build is byte-for-byte what it was before add-ons existed. The Dockerfile is an infra file, so changes to it are applied by hand.
    The second entry is `webkit`: Playwright (Microsoft, Apache-2.0), pinned to 1.64.1, with its WebKit build (Safari's engine) installed by `playwright install --with-deps webkit` while the image is built as root, into `/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`), readable by the `node` user. `NODE_PATH` points at the global modules so an agent's script can `require("playwright")`. It is close to Safari but not Safari: Safari itself only runs on Apple systems. The add-ons' settings (`AGENT_BROWSER_*`, `PLAYWRIGHT_BROWSERS_PATH`, `NODE_PATH`) are passed to agent runs, which otherwise get only a short list of the runner's environment.
 3. **Canary**: for each add-on the image holds (listed in `/etc/bossman-addons`), run its canary commands. For agent-browser that means opening `about:blank` headless, then closing it. A failure fails the canary, so the build isn't promoted.
 4. **Runner reports**: at connect, the runner tells the server which add-ons it has, their versions, and whether their checks pass. A periodic check catches an add-on that breaks later.
 5. **Skills declare needs**: a new nullable column, `skills.requires_addons`. The owner sets it in the skill's settings. The importer sets it for skills it recognises (`dogfood`, `agent-browser`). A run only receives a skill when its runner reports every add-on that skill requires as healthy. Otherwise the skill is left out of that run and the owner gets one notification ("dogfood is off because agent-browser isn't working on App Co's runner").
-6. **UI**: Settings → Runner → **Add-ons** lists the catalogue, what's installed with its version and health, and for anything not installed, the exact rebuild command for TrueNAS.
+6. **UI**: Settings → Server and runner → Runner → **Add-ons** lists the catalogue, what's installed with its version and health, and for anything not installed, how to add it: put `RUNNER_ADDONS=<id>` in `.env` and run `scripts/update-runner.sh`. A skill's settings (Skills page) have a tick box for each add-on it needs.
 
 ## Not in scope
 

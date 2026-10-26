@@ -1,6 +1,6 @@
 # 02 — Architecture
 
-This is the proposed architecture. Spikes S1–S3 in [03-phased-plan.md](03-phased-plan.md) may change parts of it.
+This is the architecture as built. The spikes S1–S3 in [03-phased-plan.md](03-phased-plan.md) settled the open questions. The data model below is a sketch: the full tables are in `apps/server/src/db/schema.ts`.
 
 ## Components
 
@@ -54,7 +54,7 @@ flowchart LR
 - **Connection:** the daemon **dials out** to the server over WebSocket using a per-runner token. A runner can therefore run on a different host from the server without any inbound ports.
 - **Work:** it starts and manages ACP sessions over JSON-RPC on stdio, one session per agent task. It streams events back to the server: messages, tool calls, `usage_update`, permission requests, and `rate_limit_event` if spike S1 shows it is available.
 - **Workspace:** each company has its own volumes. Secrets are injected at runtime from that company's grants and never written into the image.
-- **Rebuilds:** the image is rebuilt weekly and on demand, to pick up new releases (R9). `scripts/update-runner.sh` builds a candidate and runs a canary in it with networking off: a real Claude Code session against a stand-in model, including one permission-checked tool call. Only a passing build replaces `boss-man-runner:current`; the one before is kept as `:previous` for `--rollback` (R52).
+- **Rebuilds:** the image is rebuilt by hand, roughly weekly, to pick up new releases (R9); nothing rebuilds it on a timer. `scripts/update-runner.sh` builds a candidate and runs a canary in it with networking off: a real Claude Code session against a stand-in model, including one permission-checked tool call. Only a passing build replaces `boss-man-runner:current`; the one before is kept as `:previous` for `--rollback` (R52). The runners then move onto it without cutting off runs in progress (see [09-self-deploy.md](09-self-deploy.md), "Phase 2"). With the launcher (R55), the server asks a small launcher container to start, stop and swap each company's runner.
 - **Spike S2 settled these details** (see `spikes/s2-acp/README.md`):
   - **Installing Claude Code:** use Anthropic's npm package `@anthropic-ai/claude-code`, which installs the same native binary as the standalone installer. Set `CLAUDE_CODE_EXECUTABLE` so the adapter uses it rather than its own bundled copy. Set `DISABLE_UPDATES=1`.
   - **Codex approvals:** Codex must start in `INITIAL_AGENT_MODE=workspace-write`. Its default `agent` mode sends approvals to Codex's own AI reviewer instead of Boss Man.
@@ -85,19 +85,19 @@ flowchart LR
 | `workflow_column` | project, name, systemState, order, wipLimit | Each column maps to one of 6 system states |
 | `ticket` | project, milestone?, keyResult?, systemState, columnId, assignee (agent/owner), dueDate (derived/override), customFields JSONB | |
 | `ticket_dependency` | blocked, blockerTicket? **or** blockerEngagement? **or** blockerDecision? | One table models every kind of blocker |
-| `decision` | company, kind (`question`/`approval`/`permission`/`stale_blocker`/`engagement`), question, options[], recommendedOption, raisedBy, tier, status, answer, answeredBy | |
+| `decision` | company, kind (`question`/`approval`/`permission`/`stale_blocker`/`stalled_run`/`engagement`/`budget`), question, options[], recommendedOption, raisedBy, tier, status, answer, answeredBy | |
 | `engagement` | requesterCompany, requesterProject, providerCompany, scope, deliverables, acceptanceCriteria, budgetCapCents, status | |
 | `engagement_message` | engagement, fromCompany, body, attachments | The only channel between companies |
 | `run` | agent, ticket?, engagement?, acpSessionId, startedAt, endedAt, model, outcome | |
 | `cost_event` | run, fundingSource, tokens, estimatedUsd, chargedToProject | |
 | `quota_sample` | fundingSource, window (`five_hour`/`seven_day`/…), usedPct, resetsAt, source | |
-| `funding_source` | kind (`api_credit`/`subscription_quota`/`api_key`), provider, cycleAnchorDay, monthlyGrantCents | |
-| `budget_policy` | scope (company/project/agent), fundingSource, window, limit, thresholdKind (soft/hard) | |
+| `funding_source` | kind (`api_credit`/`subscription`/`usage_credits`/`api_payg`), provider, cycleAnchorDay, monthlyGrantCents | |
+| `budget_policy` | scope (company/project/agent/instance), fundingSource, window, limit, onLimit (`ask`/`pause`) | |
 | `secret` | name, ciphertext, version, owner | Encrypted with envelope encryption; the master key comes from a file or env var |
 | `secret_grant` | secret, company, envName / mountPath, deployTarget? | Points to the secret; it is not a copy |
 | `secret_access_log` | grant, run, at | |
 | `deploy_target` | company, kind (`ssh`/`docker`/`git`), endpoint, grantIds, rules, prodFlag | |
-| `policy_rule` | company?, trigger, condition, outcome (`allow`/`ceo`/`owner`) | |
+| `policy_rule` | company?, trigger, condition, outcome (`allow`/`ceo`/`owner`/`deny`) | |
 
 Agents never see status names. They see the meaning of the system states through the MCP tool descriptions, for example `set_ticket_state(state: "review")`. A project's custom columns are labels for people only.
 
@@ -118,7 +118,7 @@ score = W_block * Σ (priority_weight(objective of t))  for t in tickets transit
 - Engagement offers that need the owner's approval.
 - **Stale-blocker rows** from the sweep.
 
-**Stale-blocker sweep.** Every 15 minutes, it looks for any open blocker that has dependents and no activity for longer than the threshold (24 hours by default). It creates or updates **one** `stale_blocker` decision for each blocker. The decision offers three choices: *chase* (wake the assignee with a nudge), *reassign*, or *drop the dependency*.
+**Stale-blocker sweep.** Every minute (`BOSSMAN_SWEEP_MS`), it looks for any open blocker that has dependents and no activity for longer than the threshold (24 hours by default). It creates or updates **one** `stale_blocker` decision for each blocker. The decision offers three choices: *chase* (wake the assignee with a nudge), *reassign*, or *drop the dependency*.
 
 **Answering a row.**
 - It is answered in place. A "yes" accepts the recommended option.

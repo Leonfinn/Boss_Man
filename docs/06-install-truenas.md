@@ -20,7 +20,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 ## What you need
 
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
-- SSH access as your admin user, who can use `sudo`.
+- A root shell on the NAS: TrueNAS UI > System > Shell, or `su -` over SSH. Every command in this guide is typed there, so none has `sudo` in front.
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
 - A GitHub account that can create a fine-grained token for the repos the agents will work on, and admin access to `Leonfinn/Boss_Man` to add a deploy key (the repo is private).
 
@@ -30,10 +30,10 @@ The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, ne
 
 Boss Man gets its own dataset under `Container_files`, so you can snapshot and roll it back on its own.
 
-First check that `Container_files` is a dataset and not a plain folder. Over SSH (step 2 shows how to connect):
+First check that `Container_files` is a dataset and not a plain folder. In a root shell on the NAS (step 2 says how to open one):
 
 ```sh
-sudo zfs list -o name,mountpoint -r NVME_Apps
+zfs list -o name,mountpoint -r NVME_Apps
 ```
 
 If `NVME_Apps/Container_files` is in the list, it's a dataset. In the TrueNAS UI, go to Datasets, select `NVME_Apps/Container_files`, and Add Dataset:
@@ -43,20 +43,14 @@ If `NVME_Apps/Container_files` is in the list, it's a dataset. In the TrueNAS UI
 If `Container_files` isn't in the list, it's a plain folder, and TrueNAS can't create a dataset inside it. Then just make the folder; snapshots of the dataset that holds `Container_files` still cover it:
 
 ```sh
-sudo mkdir -p /mnt/NVME_Apps/Container_files/boss-man
+mkdir -p /mnt/NVME_Apps/Container_files/boss-man
 ```
 
 Everything Boss Man keeps goes in this folder.
 
 ## 2. Get the code
 
-SSH into the NAS from iTerm2 on your Mac:
-
-```sh
-ssh admin@<nas-ip>
-```
-
-Go to the dataset:
+Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip>` from your Mac and then `su -`). Go to the dataset:
 
 ```sh
 cd /mnt/NVME_Apps/Container_files/boss-man
@@ -67,13 +61,13 @@ The repo is private, and GitHub doesn't accept account passwords for git. The NA
 Make the key. It has no passphrase, so updates can run unattended:
 
 ```sh
-sudo ssh-keygen -t ed25519 -N "" -C "truenas-boss-man" -f /mnt/NVME_Apps/Container_files/boss-man/deploy_key
+ssh-keygen -t ed25519 -N "" -C "truenas-boss-man" -f /mnt/NVME_Apps/Container_files/boss-man/deploy_key
 ```
 
 Show the public half. It's safe to copy; never copy the file without `.pub`.
 
 ```sh
-sudo cat /mnt/NVME_Apps/Container_files/boss-man/deploy_key.pub
+cat /mnt/NVME_Apps/Container_files/boss-man/deploy_key.pub
 ```
 
 On your Mac, open `https://github.com/Leonfinn/Boss_Man/settings/keys`, choose **Add deploy key**, call it `TrueNAS`, paste the line, and leave **Allow write access** unticked.
@@ -81,7 +75,7 @@ On your Mac, open `https://github.com/Leonfinn/Boss_Man/settings/keys`, choose *
 Clone with that key:
 
 ```sh
-sudo env GIT_SSH_COMMAND='ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts' git clone git@github.com:Leonfinn/Boss_Man.git src
+env GIT_SSH_COMMAND='ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts' git clone git@github.com:Leonfinn/Boss_Man.git src
 ```
 
 The first time, ssh asks whether to trust github.com. Type `yes` only if the ED25519 fingerprint matches the one on [GitHub's SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) page, `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU` when this was written.
@@ -89,7 +83,7 @@ The first time, ssh asks whether to trust github.com. Type `yes` only if the ED2
 Make later `git pull`s use the same key:
 
 ```sh
-sudo git -C /mnt/NVME_Apps/Container_files/boss-man/src config core.sshCommand 'ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts'
+git -C /mnt/NVME_Apps/Container_files/boss-man/src config core.sshCommand 'ssh -i /mnt/NVME_Apps/Container_files/boss-man/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=/mnt/NVME_Apps/Container_files/boss-man/known_hosts'
 ```
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route needs the key mounted in, which this guide doesn't cover yet.
@@ -98,14 +92,14 @@ If the clone hangs, outbound port 22 is probably blocked, for example on your ro
 
 ## 3. Folders and ownership
 
-The server and runners run as uid 1000. Postgres (the Alpine image) runs as uid 70 and sets the ownership of its own data folder on first start, so you only create that folder. These commands use full paths, so they work from any folder.
+The server and runners run as uid 1000. Postgres runs as its own user and sets the ownership of its own data folder on first start, so you only create that folder. These commands use full paths, so they work from any folder.
 
 ```sh
-sudo mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/postgres /mnt/NVME_Apps/Container_files/boss-man/data/app-co/workspaces /mnt/NVME_Apps/Container_files/boss-man/data/app-co/runner-data /mnt/NVME_Apps/Container_files/boss-man/data/app-co/claude /mnt/NVME_Apps/Container_files/boss-man/src/secrets
+mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/postgres /mnt/NVME_Apps/Container_files/boss-man/data/app-co/workspaces /mnt/NVME_Apps/Container_files/boss-man/data/app-co/runner-data /mnt/NVME_Apps/Container_files/boss-man/data/app-co/claude /mnt/NVME_Apps/Container_files/boss-man/src/secrets
 ```
 
 ```sh
-sudo chown -R 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/app-co /mnt/NVME_Apps/Container_files/boss-man/src/secrets && sudo chmod 700 /mnt/NVME_Apps/Container_files/boss-man/src/secrets
+chown -R 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/app-co /mnt/NVME_Apps/Container_files/boss-man/src/secrets && chmod 700 /mnt/NVME_Apps/Container_files/boss-man/src/secrets
 ```
 
 ## 4. Settings and the master key
@@ -119,19 +113,19 @@ cd /mnt/NVME_Apps/Container_files/boss-man/src
 The master key encrypts every stored secret. Back it up somewhere safe outside the NAS. Without it, stored secrets can't be read.
 
 ```sh
-sudo sh -c 'openssl rand -base64 32 > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key' && sudo chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key && sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key
+openssl rand -base64 32 > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key && chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key && chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/master.key
 ```
 
 Compose won't start anything while a secret file is missing, so create the runner's token file now, empty. You fill it in at step 7.
 
 ```sh
-sudo touch /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && sudo chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token
+touch /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token && chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token
 ```
 
 Create `.env`. Compose reads it automatically. Its first two lines add the TrueNAS file and start the runners, so plain `docker compose` commands and the update script both use them.
 
 ```sh
-sudo tee /mnt/NVME_Apps/Container_files/boss-man/src/.env > /dev/null <<EOF
+cat > /mnt/NVME_Apps/Container_files/boss-man/src/.env <<EOF
 COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml
 COMPOSE_PROFILES=runners
 BOSSMAN_DATA=/mnt/NVME_Apps/Container_files/boss-man/data
@@ -144,7 +138,7 @@ EOF
 ```
 
 ```sh
-sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
+chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 ```
 
 - `BOSSMAN_BIND` publishes the web UI on the NAS's LAN address only. The TrueNAS UI keeps 80 and 443.
@@ -152,7 +146,7 @@ sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 - Check both ports are free before you start. This prints nothing if they are:
 
   ```sh
-  sudo ss -tlnp | grep -E ':(3101|3102)\b'
+  ss -tlnp | grep -E ':(3101|3102)\b'
   ```
 
   If either is taken, pick other free ports and use them in `.env` and in the addresses below.
@@ -165,54 +159,53 @@ sudo chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 Build the server image, which includes the web UI, and start Postgres and the server. For now, start them without the runner, which has no token yet.
 
 ```sh
-sudo docker compose build server
+docker compose build server
 ```
 
 ```sh
-sudo docker compose up -d db server
+docker compose up -d db server
 ```
 
 Build the runner image with the canary check. The script builds a candidate image and runs a real Claude Code session in it, with networking off and no credentials. It tags the image `boss-man-runner:current` only if that passes.
 
 ```sh
-sudo scripts/update-runner.sh
+scripts/update-runner.sh
 ```
 
 With no launcher yet, the script also runs `docker compose up -d` at the end (a runner update later drains first, step 7b). Until its token file holds a token (step 7), the runner stops at start-up with "Set BOSSMAN_RUNNER_TOKEN_FILE..." and Docker keeps restarting it. That's expected.
 
 ## 6. First login and the setup wizard
 
-Open `http://<nas-ip>:3101` on your Mac and create the owner account. The **setup wizard** opens. It has seven steps; each can be skipped and done later, and it remembers where you were. Anything left over shows as **Finish setting up** on Decisions until it's done or you dismiss it. **Settings > Run the setup wizard** brings it back.
+Open `http://<nas-ip>:3101` on your Mac and create the owner account. The **setup wizard** opens. It has eight steps; each can be skipped and done later, and it remembers where you were. Anything left over shows as **Finish setting up** on Decisions until it's done or you dismiss it. **Run the setup wizard**, at the top of Settings, brings it back.
 
 1. **Your company:** a name, for example "Boss Man Co", and what it's for. The CEO plans from this.
 2. **A project:** a name, for example "Boss Man", and its **Git repo**:
    - GitHub: `https://github.com/Leonfinn/Boss_Man.git`
    - your Gitea: `http://192.168.68.67:3003/<owner>/<repo>.git` (plain http is allowed for private LAN addresses)
-
-   **Before merging, Boss Man will** proposes a check from the repo once a runner is connected. For Boss Man itself that's **Run the tests (detected)**: `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test`. Until then it offers the standard list; choose **Re-detect** after step 7 or 7b.
 3. **The runner:** set it up with step 7b (the launcher, recommended) or step 7, then come back. It shows **Connected** when it's up.
 4. **Claude:** a setup-token or API key (step 8).
 5. **A git token** (step 8). **Check the token against <project>** reads the repo once and says whether the token can push. It changes nothing.
-6. **What pays for the CEO:** add a funding source and pick it for the CEO (step 8).
-7. **A first ticket:** optional.
+6. **Checks before merging:** **Before merging, Boss Man will** proposes a check from the repo through the runner. For Boss Man itself that's **Run the tests (detected)**: `pnpm install --frozen-lockfile && pnpm typecheck && pnpm test`. Until a runner is connected it offers the standard list; choose **Re-detect** once it is.
+7. **What pays for the CEO:** add a funding source and pick it for the CEO (step 8).
+8. **A first task:** optional.
 
-If you'd rather use the screens directly, **"I know what I'm doing, let me get on with it"** on the first step closes the wizard. Everything it does is also in **Settings** and **Agents**.
+If you'd rather use the screens directly, **"I know what I'm doing, let me get on with it"** on the first step closes the wizard. Everything it does is also in **Settings**, **Projects** and **Agents**.
 
 ## 7. The runner token
 
-In **Settings > Runner**, choose **Register a runner**. The token is shown once. Write it into the token file without it landing in your shell history: run the command, paste the token, press Return, then Ctrl-D.
+In **Settings > Server and runner > Runner**, choose **Register a runner**. The token is shown once. Write it into the token file without it landing in your shell history: run the command, paste the token, press Return, then Ctrl-D.
 
 ```sh
-sudo sh -c 'cat > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token'
+cat > /mnt/NVME_Apps/Container_files/boss-man/src/secrets/runner-app-co.token
 ```
 
 The token file must hold only the token. A trailing newline is fine, because the runner trims it.
 
 ```sh
-sudo docker compose up -d
+docker compose up -d
 ```
 
-Settings > Runner should show **Connected** within a minute.
+Settings > Server and runner > Runner should show **Connected** within a minute.
 
 The example service is called `runner-app-co`. For a second company:
 1. Copy its block in `docker-compose.yml` and its volumes in `deploy/truenas.yml` under a new name.
@@ -220,7 +213,7 @@ The example service is called `runner-app-co`. For a second company:
 
 ## 7b. Let the launcher run the runners (recommended)
 
-With the launcher (R55), each company's runner starts by itself when you create the company, and **Settings > Runner** gets **Start**, **Reconnect**, **Restart** and **Stop** buttons. There are no token files to copy and no compose blocks to duplicate per company.
+With the launcher (R55), each company's runner starts by itself when you create the company, and **Settings > Server and runner > Runner** gets **Start**, **Reconnect**, **Restart** and **Stop** buttons. There are no token files to copy and no compose blocks to duplicate per company.
 - **How it stays safe.** The launcher is the only container that can reach Docker. It joins the socket's group (`docker`, group 999 on your NAS, from `stat -c '%U:%G %g %a %n' /var/run/docker.sock`) instead of running as root.
 - **What it accepts.** It publishes no ports, and only the server can reach it, over an internal network with a key. It accepts only "start, stop or restart company X's runner".
 - **What it builds.** It builds the container itself: uid 1000, all capabilities dropped, `no-new-privileges`, not privileged, the 4 GB memory limit, and only that company's folders under `data/companies/<slug>`.
@@ -228,51 +221,51 @@ With the launcher (R55), each company's runner starts by itself when you create 
 These steps move an existing install, including the compose runner from step 7, over to the launcher. Run them from the repo folder.
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src && sudo git pull
+cd /mnt/NVME_Apps/Container_files/boss-man/src && git pull
 ```
 
 The launcher keeps company data under `data/companies`, owned by uid 1000:
 
 ```sh
-sudo mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/companies && sudo chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/companies
+mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/companies && chown 1000:1000 /mnt/NVME_Apps/Container_files/boss-man/data/companies
 ```
 
 In `.env`, replace `COMPOSE_PROFILES=runners` with the launcher profile and turn it on. The first command shows the file so you can check it before changing it.
 
 ```sh
-sudo cat /mnt/NVME_Apps/Container_files/boss-man/src/.env
+cat /mnt/NVME_Apps/Container_files/boss-man/src/.env
 ```
 
 ```sh
-sudo sed -i 's/^COMPOSE_PROFILES=runners$/COMPOSE_PROFILES=launcher/' /mnt/NVME_Apps/Container_files/boss-man/src/.env && printf 'BOSSMAN_LAUNCHER=1\nBOSSMAN_DOCKER_GID=999\n' | sudo tee -a /mnt/NVME_Apps/Container_files/boss-man/src/.env > /dev/null
+sed -i 's/^COMPOSE_PROFILES=runners$/COMPOSE_PROFILES=launcher/' /mnt/NVME_Apps/Container_files/boss-man/src/.env && printf 'BOSSMAN_LAUNCHER=1\nBOSSMAN_DOCKER_GID=999\n' >> /mnt/NVME_Apps/Container_files/boss-man/src/.env
 ```
 
 Stop and remove the old compose runner. Its folders in `data/app-co` stay where they are.
 
 ```sh
-sudo docker compose --profile runners rm -sf runner-app-co
+docker compose --profile runners rm -sf runner-app-co
 ```
 
 Build the launcher and the server, then start everything:
 
 ```sh
-sudo docker compose build server launcher && sudo docker compose up -d
+docker compose build server launcher && docker compose up -d
 ```
 
-Open **Settings > Runner** and choose **Start runner**. It shows **Starting…**, then **Connected** within a minute. A new company's runner starts by itself.
+Open **Settings > Server and runner > Runner** and choose **Start runner**. It shows **Starting…**, then **Connected** within a minute. A new company's runner starts by itself.
 
-- **The old runner's work.** The new runner starts with empty folders under `data/companies/<slug>`, where `<slug>` comes from the company's name (e.g. `boss-man-co`) and is shown in Settings > Runner. To bring over unfinished work and Claude sessions, choose **Stop**, then copy the old folders, then choose **Start runner** again:
+- **The old runner's work.** The new runner starts with empty folders under `data/companies/<slug>`, where `<slug>` comes from the company's name (e.g. `boss-man-co`) and is shown in Settings > Server and runner > Runner. To bring over unfinished work and Claude sessions, choose **Stop**, then copy the old folders, then choose **Start runner** again:
 
   ```sh
-  sudo cp -a /mnt/NVME_Apps/Container_files/boss-man/data/app-co/. /mnt/NVME_Apps/Container_files/boss-man/data/companies/boss-man-co/
+  cp -a /mnt/NVME_Apps/Container_files/boss-man/data/app-co/. /mnt/NVME_Apps/Container_files/boss-man/data/companies/boss-man-co/
   ```
 
-- **Updates.** `sudo scripts/update-runner.sh` builds and checks the new image, then Boss Man drains (nothing new starts, runs finish) and the launcher recreates each company's runner as soon as that company is idle; `--rollback` does the same onto the previous image, and `--now` recreates everything at once (see the runner update section below).
-- **Going back.** Choose **Stop** in Settings > Runner, put `COMPOSE_PROFILES=runners` back in `.env`, remove the two lines you added, and follow step 7.
+- **Updates.** `scripts/update-runner.sh` builds and checks the new image, then Boss Man drains (nothing new starts, runs finish) and the launcher recreates each company's runner as soon as that company is idle; `--rollback` does the same onto the previous image, and `--now` recreates everything at once (see the runner update section below).
+- **Going back.** Choose **Stop** in Settings > Server and runner > Runner, put `COMPOSE_PROFILES=runners` back in `.env`, remove the two lines you added, and follow step 7.
 
 ## 8. Credentials and funding
 
-Make both credentials on your Mac, then paste them into **Settings > Credentials**. Values are encrypted on the server and never shown again.
+Make both credentials on your Mac, then paste them into **Settings > Secrets**. Values are encrypted on the server and never shown again.
 
 **Claude setup-token.** If Claude Code isn't on your Mac yet, install it ([docs](https://code.claude.com/docs/en/setup)):
 
@@ -286,7 +279,7 @@ Then create the token. It prints a long-lived token for your subscription and do
 claude setup-token
 ```
 
-In Settings, choose **Claude setup-token** and paste the token. Agents get it as `CLAUDE_CODE_OAUTH_TOKEN`. Boss Man refuses a token with stray spaces or quotes and says why.
+On the Secrets page, choose **Claude setup-token** and paste the token. Agents get it as `CLAUDE_CODE_OAUTH_TOKEN`. Boss Man refuses a token with stray spaces or quotes and says why.
 
 **Git token, for GitHub.** Create a [fine-grained personal access token](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token):
 - **Repository access:** only the repos the company works on.
@@ -299,11 +292,11 @@ In Settings, choose **Claude setup-token** and paste the token. Agents get it as
 
 Choose **Generate Token** and copy it; Gitea shows it only once. The token can do what your Gitea user can, so a user with write access to the repo is enough. (Labels from Gitea 28.0.0's [`access_tokens.tmpl`](https://github.com/go-gitea/gitea/blob/v28.0.0/templates/shared/user/access_tokens.tmpl); see also Gitea's [scopes documentation](https://docs.gitea.com/development/oauth2-provider#scopes).)
 
-In Settings, choose **Git token (GitHub or Gitea)** and paste it. Agents get it as `GIT_TOKEN`, and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check under Settings > Projects, tells you whether it can push.
+On the Secrets page, choose **Git token (GitHub or Gitea)** and paste it. Agents get it as `GIT_TOKEN`, and it's used for clone, fetch, push and pull requests. It's never written into a URL or onto disk. The wizard's git step, or the same check on the Projects page, tells you whether it can push.
 
-**When work is approved** (Settings > Projects) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
+**When work is approved** (the Projects page) is either **Merge into the default branch** (R46) or **Open a pull request** (R59). If the default branch is protected so that only pull requests can change it, choose the pull request option; a direct push would be refused and the ticket would go back to the agent with the error.
 
-**Funding.** Under **Settings > Funding sources**, add one:
+**Funding.** Under **Settings > Access and funding > Funding sources**, add one:
 - "Subscription (setup-token)" for a Claude subscription;
 - "API credit" with your monthly grant for an API key.
 
@@ -314,22 +307,22 @@ Then, on the **Agents** page, set each agent's **Paid from** to that source, so 
 **See what's running:**
 
 ```sh
-sudo docker compose ps
+docker compose ps
 ```
 
 **Server logs:**
 
 ```sh
-sudo docker compose logs --tail 100 server
+docker compose logs --tail 100 server
 ```
 
 **Update to the latest code** with the deploy script. It backs up the database, pulls, rebuilds, restarts, waits until the server reports healthy, and updates the runners only when their code changed. Run it from the `src` folder:
 
 ```sh
-sudo scripts/deploy.sh
+scripts/deploy.sh
 ```
 
-It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to `/mnt/NVME_Apps/Container_files/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
+It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to the folder above the checkout, here `/mnt/NVME_Apps/Container_files/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
 
 - `--dry-run` shows the steps without running anything.
 - `--runner` / `--no-runner` force or skip the runner update. Updating runners builds the image and asks Boss Man to drain first (runs in progress finish); without the launcher it restarts them at once and cuts runs off. The script asks first (`--yes` skips the question).
@@ -341,21 +334,24 @@ Database changes apply by themselves when the server starts.
 **The manual steps** (the same thing, by hand, if the script is ever unavailable):
 
 ```sh
-sudo docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F-%H%M).sql.gz
-sudo git pull && sudo docker compose build server launcher && sudo docker compose up -d
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F-%H%M).sql.gz
+```
+
+```sh
+git pull && docker compose build server launcher && docker compose up -d
 ```
 
 Leave `launcher` out of the build if you don't use it (step 7b).
 
-`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. Run it after any update that changes `apps/runner`, `apps/launcher` or `packages/shared`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary and keeps the old one for rollback. It then asks Boss Man to **drain** (`docs/09-self-deploy.md`, phase 2): a banner appears on every page, nothing new starts in any company, runs in progress finish, and each company's runner is swapped as soon as it is idle. When every runner is on the new image the banner goes, and you get a notification. If runs are still going after 30 minutes (`BOSSMAN_DRAIN_MINUTES` in `.env` changes that) you get one decision: stop them and update now, keep waiting another 30 minutes, or cancel the update. Companies you paused stay paused.
+`docker compose build` skips the runner image (it sits behind the `runners` profile), so runners keep their old code until you run the next command. Run it after any update that changes `apps/runner`, `apps/launcher`, `packages/shared` or `pnpm-lock.yaml`, and for each new Claude Code release, roughly weekly (R9). It checks a new runner image with the canary and keeps the old one for rollback. It then asks Boss Man to **drain** (`docs/09-self-deploy.md`, phase 2): a banner appears on every page, nothing new starts in any company, runs in progress finish, and each company's runner is swapped as soon as it is idle. When every runner is on the new image the banner goes, and you get a notification. If runs are still going after 30 minutes (`BOSSMAN_DRAIN_MINUTES` in `.env` changes that) you get one decision: stop them and update now, keep waiting another 30 minutes, or cancel the update. Companies you paused stay paused.
 
 ```sh
-sudo scripts/update-runner.sh
+scripts/update-runner.sh
 ```
 
-The script returns as soon as it has asked; follow the swap in the banner or **Settings > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Runner update.
+The script returns as soon as it has asked; follow the swap in the banner or **Settings > Server and runner > Runner update**, which also has **Cancel the update**. It finds the deployer folder from `BOSSMAN_DEPLOYER` in `.env` (step 9a). If you have not set that up, it says so and leaves the swap for you to start with **Update runners** in Settings > Server and runner > Runner update.
 
-**Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `sudo scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
+**Runner add-ons** (docs/12) are optional tools baked into the runner image, off by default. To give agents a browser (`agent-browser`, which drives Debian's Chromium), add this line to `.env`, then run `scripts/update-runner.sh` as above. The canary opens and closes a blank page in the new image before it is used. Remove the line and update again to take the add-on out.
 
 ```sh
 RUNNER_ADDONS=agent-browser
@@ -364,21 +360,21 @@ RUNNER_ADDONS=agent-browser
 **Emergency: restart every runner now,** cutting off runs in progress (crash recovery restarts them):
 
 ```sh
-sudo scripts/update-runner.sh --now
+scripts/update-runner.sh --now
 ```
 
 **Undo a runner update** (drains onto the previous image; add `--now` to do it at once):
 
 ```sh
-sudo scripts/update-runner.sh --rollback
+scripts/update-runner.sh --rollback
 ```
 
-**After a TrueNAS update,** check `sudo docker compose ps`. Images and containers live on the apps pool and survive OS updates. TrueNAS doesn't document how its own app actions treat containers started from the shell. Running Boss Man as its own `boss-man` project is what keeps it out of their way.
+**After a TrueNAS update,** check `docker compose ps`. Images and containers live on the apps pool and survive OS updates. TrueNAS doesn't document how its own app actions treat containers started from the shell. Running Boss Man as its own `boss-man` project is what keeps it out of their way.
 
 **Backups.** Snapshot the `boss-man` dataset (or the one that holds it) and keep a copy of `src/secrets/master.key` off the NAS. A Postgres data folder copied while the database is running may not restore cleanly. For a consistent backup, also dump it:
 
 ```sh
-sudo docker compose exec -T db pg_dump -U bossman bossman | gzip | sudo tee /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz > /dev/null
+docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz
 ```
 
 **Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps the deploy key and `known_hosts`, so GitHub needs nothing new. Check what's there first:
@@ -388,11 +384,11 @@ ls -la /mnt/NVME_Apps/Container_files/boss-man
 ```
 
 ```sh
-cd /mnt/NVME_Apps/Container_files/boss-man/src && sudo docker compose down; cd /mnt/NVME_Apps/Container_files/boss-man
+cd /mnt/NVME_Apps/Container_files/boss-man/src && docker compose down; cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
 ```sh
-sudo rm -rf /mnt/NVME_Apps/Container_files/boss-man/src /mnt/NVME_Apps/Container_files/boss-man/data
+rm -rf /mnt/NVME_Apps/Container_files/boss-man/src /mnt/NVME_Apps/Container_files/boss-man/data
 ```
 
 ## 9a. Install the host deployer (optional)
@@ -500,7 +496,7 @@ docker compose up -d server
 docker compose exec server ls /run/deployer
 ```
 
-`COMPOSE_FILE` should now end in `:deploy/truenas-deployer.yml`, and the last command should list `inbox` and `outbox`. Reload Boss Man: **Settings** now has an **Updates** section.
+`COMPOSE_FILE` should now end in `:deploy/truenas-deployer.yml`, and the last command should list `inbox` and `outbox`. Reload Boss Man: **Settings > Server and runner** now has an **Updates** section.
 
 **7. The cron job.** In the TrueNAS UI: **System > Advanced > Cron Jobs > Add** (field names as of 25.10; UNVERIFIED, check them on your version):
 - **Description:** `Boss Man host deployer`
@@ -512,7 +508,7 @@ docker compose exec server ls /run/deployer
 
 Save it. A few minutes later `$D/outbox/available.json` should have a newer `checkedAt`. The log is `$D/deployer.log`.
 
-**8. Try it for real.** When `main` is ahead, a "Deploy abc1234?" decision appears (with a notification); **Settings > Updates > Deploy latest** raises it on demand. Approve it. Within a minute the host starts, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the NAS with `tail -f $D/deployer.log`.
+**8. Try it for real.** When `main` is ahead, a "Deploy abc1234?" decision appears (with a notification); **Settings > Server and runner > Updates > Deploy latest** raises it on demand. Approve it. Within a minute the host starts, Boss Man restarts for a minute or two, and when it is back you get a notification and **Updates** shows the result. Watch it on the NAS with `tail -f $D/deployer.log`.
 
 What you may see instead of a deploy:
 - "Rejected: this change touches deployment files": run `scripts/deploy.sh` yourself in the `src` folder.
@@ -581,9 +577,9 @@ cd /mnt/NVME_Apps/Container_files/boss-man/src
 4. **Move to the launcher** (recommended): step 7b. If you stay on the compose runner, step 3 is enough.
 
 5. **Check in the UI:**
-   - **Settings > Projects:** your existing check command shows as the preset it matches (Boss Man's own matches **Run the tests (detected)** once the runner is connected), otherwise as **Custom command…**. Either is fine.
+   - **Projects page:** your existing check command shows as the preset it matches (Boss Man's own matches **Run the tests (detected)** once the runner is connected), otherwise as **Custom command…**. Either is fine.
    - **Agents:** model and funding for each agent now live here.
-   - The setup wizard doesn't open by itself on an install that already has a company. Open it from **Settings > Run the setup wizard** if you want its checklist.
+   - The setup wizard doesn't open by itself on an install that already has a company. Open it with **Run the setup wizard** at the top of Settings if you want its checklist.
 
 Keep the dump from step 1 until you're happy with v1.2. Going back means restoring it and checking out the older code, which hasn't been tried here, so ask before doing it.
 
@@ -677,9 +673,9 @@ grep 'Live colour' $D/proxy/active.caddy
 docker compose logs server-blue | grep 'LEADER: \*\*\*'
 ```
 
-The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Runner** should show each company's runner `Connected` within a minute: runners retry every 30 seconds, and reconnect through the proxy by themselves. **Settings > Server** shows "Blue/green: On" with blue Live and green Not running. If any of this is wrong: "If something goes wrong" below, or "Go back".
+The first line should show `"role":"leader"`, the second `200`, the third `blue`. In Boss Man, **Settings > Server and runner > Runner** should show each company's runner `Connected` within a minute: runners retry every 30 seconds, and reconnect through the proxy by themselves. **Settings > Server and runner > Server** shows "Blue/green: On" with blue Live and green Not running. If any of this is wrong: "If something goes wrong" below, or "Go back".
 
-**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in 9a step 5) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`; a good swap ends with a line like `deployed: Deployed 5d983a16 to 46822c2b: green is live; blue stays up as a standby for 15 minutes`. The UI stays up throughout. **Settings > Server** then shows green Live and blue Standby, and **Settings > Runner** shows "Connected since" the time of the swap. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
+**7. Try a swap.** `$D/host-deployer.sh --dry-run` with a request (as in 9a step 5) should say `would run: a blue/green swap to ...`. For a real one, approve a deploy as usual. Watch with `tail -f $D/deployer.log`; a good swap ends with a line like `deployed: Deployed 5d983a16 to 46822c2b: green is live; blue stays up as a standby for 15 minutes`. The UI stays up throughout. **Settings > Server and runner > Server** then shows green Live and blue Standby, and **Settings > Server and runner > Runner** shows "Connected since" the time of the swap. A good swap leaves the old colour running for 15 minutes (`SOAK_SECONDS=900`, changeable in `host.conf`); a later cron minute then stops it.
 
 **Which colour is live?**
 
@@ -699,7 +695,7 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
 - After a hand-applied change, the deployer may still show the alert about deployment files for a few minutes: press **Got it**.
 - Runner updates are unchanged (the drain); they never touch the proxy.
 
-**Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. For ordinary app changes use Settings → Updates → **Deploy latest** instead: it swaps colours with no downtime. The UI is down for about 20 to 30 seconds.
+**Rebuild the live colour in place.** This is for an image change the deployer refuses, or for a colour built from an older image. For ordinary app changes use Settings → Server and runner → Updates → **Deploy latest** instead: it swaps colours with no downtime. The UI is down for about 20 to 30 seconds.
 
 `scripts/rebuild-live.sh` does all of the steps below in one go: it backs up, builds the colour the proxy points at, migrates, recreates it, sends SIGUSR2, and waits until `/api/ready` shows it leading at the new commit. It stops at the first failure and says which step. The steps by hand, for reference (the examples say blue):
 

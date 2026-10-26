@@ -4,6 +4,8 @@ Each phase ends with a working build that has tests. The phases deal with the ri
 
 ## Status (16 Oct 2026)
 
+Now: this table is a snapshot from 16 Oct. Everything in it has since been built, along with v1.1 and v1.2 (see [08-v1.2-plan.md](08-v1.2-plan.md)), the self-deploy work ([09-self-deploy.md](09-self-deploy.md)), and the Paperclip importer ([14-paperclip-migration.md](14-paperclip-migration.md)). Where it says "in review" or "isn't built", the code is the source of truth, and the docs listed in the README describe how things work today.
+
 | Step | Status |
 |---|---|
 | Spikes S1–S3 | Answered. Quota windows are visible under a setup-token. There is no Admin API on an individual account, so credit is tracked from Boss Man's own run costs. |

@@ -10,7 +10,7 @@ When `main` moves on GitHub, Boss Man shows an owner decision "Deploy Boss Man a
 host script, every minute ─▶ outbox/available.json   "main is ahead of what runs"
       ▲                                │
       │                                ▼
-      │                  Boss Man raises an owner decision (or: Settings > Updates > Deploy latest)
+      │                  Boss Man raises an owner decision (or: Settings > Server and runner > Updates > Deploy latest)
       │                                │ owner approves
       │                                ▼
       │                  server writes inbox/request.json (tmp + rename)
@@ -66,7 +66,7 @@ services:
       - ${BOSSMAN_DEPLOYER}/outbox:/run/deployer/outbox:ro
 ```
 
-The owner enables it once by hand (it is an infra file): add it to `COMPOSE_FILE` and set `BOSSMAN_DEPLOYER` in `.env`. Without `BOSSMAN_DEPLOYER_DIR` the server's feature is off and the Settings panel is hidden. CI renders the merged file and checks both mounts and that no socket is mounted.
+The owner enables it once by hand (it is an infra file): add it to `COMPOSE_FILE` and set `BOSSMAN_DEPLOYER` in `.env`. Without `BOSSMAN_DEPLOYER_DIR` the server's feature is off and the Updates panel in Settings is hidden. CI renders the merged file and checks both mounts and that no socket is mounted.
 
 ## Request file
 
@@ -119,11 +119,11 @@ Failure means `failed`, `partial`, `rolled_back` or `rejected`. A webhook that c
 ## Decisions in Boss Man
 
 - A decision of kind `approval` with context type `self_deploy` (no migration: no new enum value), tier `owner`, so only the owner's session can answer it; the CEO tool only answers `ceo`-tier decisions. Decisions belong to a company, so it is raised under the oldest one.
-- **Server:** raised by the poller when `available.json` shows `tip` differs from `deployed`, one per tip (`dedupeKey`); an older open one is withdrawn when main moves again, or when the owner hand-deploys. `available.json` lags `main`: the host rewrites it at most every 5 minutes and only in a minute with no request waiting. So the poller does not offer a commit the latest `status.json` already settled (refused, deployed or nothing new) until `checkedAt` is later than that status. After a not-the-tip refusal the host also deletes `available.json`, so the next minute writes a fresh one. Without both, two merges a few minutes apart made a loop: the stale offer was approved, refused and raised again. The migrations count in the question counts `apps/server/drizzle/*.sql` only, not Drizzle's `meta/` files. Options `Deploy` / `Not now`. The text shows the commit range, subjects, file count, migrations, and whether runner code changed. If the range touches infra files it is only an alert (`Got it`) saying to run `scripts/deploy.sh` on the host. Settings > Updates > **Deploy latest** raises it again for the current tip even if it was put off.
+- **Server:** raised by the poller when `available.json` shows `tip` differs from `deployed`, one per tip (`dedupeKey`); an older open one is withdrawn when main moves again, or when the owner hand-deploys. `available.json` lags `main`: the host rewrites it at most every 5 minutes and only in a minute with no request waiting. So the poller does not offer a commit the latest `status.json` already settled (refused, deployed or nothing new) until `checkedAt` is later than that status. After a not-the-tip refusal the host also deletes `available.json`, so the next minute writes a fresh one. Without both, two merges a few minutes apart made a loop: the stale offer was approved, refused and raised again. The migrations count in the question counts `apps/server/drizzle/*.sql` only, not Drizzle's `meta/` files. Options `Deploy` / `Not now`. The text shows the commit range, subjects, file count, migrations, and whether runner code changed. If the range touches infra files it is only an alert (`Got it`) saying to run `scripts/deploy.sh` on the host. Settings > Server and runner > Updates > **Deploy latest** raises it again for the current tip even if it was put off.
 - **Runner:** after a server deploy of a range that changed runner paths succeeds, the poller raises a separate `Update runners` / `Not now` decision for the deployed commit, whose text explains the drain (phase 2).
 - Approving checks that no deploy is running and no request is waiting, then writes the request. If the write fails the decision stays open.
 - **Notifications** (from the poller, once per result; the ladder): deployed = note, refused = flag, failed / partial / rolled back = page (phone through ntfy if configured). They link to Settings. The result is also stored on the decision and in the activity feed. `notifications.decision_id` is unique and already used by the "ask" notification, so the result notification is not linked to the decision row.
-- **Settings > Updates** shows the last deploy (result, commit, time, message), what is waiting, and the button.
+- **Settings > Server and runner > Updates** shows the last deploy (result, commit, time, message), what is waiting, and the button.
 - The poller and the request writer are marked `// leader-only` in the code (`main.ts`, `self-deploy.ts`) for phase 3.
 
 ## Security: what a merged PR could and could not do
@@ -183,7 +183,7 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 1. **The hold is one `settings` row** (`maintenance`: `{reason, since, deadline, minutes, force?, swapped?, failed?}`), so no migration, and it survives a restart. It is separate from a company's Pause: Pause is `companies.paused`, which the drain never reads or writes, so companies the owner paused stay paused afterwards.
 2. **What the hold blocks.** The scheduler, in `tickOnce`, launches no new run in any company. Held wakes stay `queued` with the reason `update pending` (the same way a paused company's wakes wait), so nothing is lost and the first pass after the hold lifts starts them. Wakes that were `deferred` with a time (quiet hours, budgets) keep their own reason and time. **Nothing is exempt, chat and owner messages included.** Exempting chat would let a conversation start a run in a company mid-drain and keep that company's runner from swapping; the cost is that a chat message sent during a drain is answered after it. Runs already going are untouched.
 3. **Telling everyone.**
-   - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Runner update has **Update runners** (start by hand, for a manual `update-runner.sh` run) and **Cancel the update**.
+   - The web app polls `GET /api/maintenance` every 5 s and shows "Update pending: waiting for N runs in M companies to finish" on every page (and "swapping the runners now" once nothing runs). Settings > Server and runner > Runner update has **Update runners** (start by hand, for a manual `update-runner.sh` run) and **Cancel the update**.
    - A CEO's brief (and the owner's plain brief page) starts with an `UPDATE PENDING` line: finish what is in flight, do not delegate new work. A CEO run that was already going when the hold started has its old brief; the hold is what actually stops its delegations from launching anything.
    - The stall and missed-work sweeps: held wakes are `queued`, so a ticket with one counts as busy (not forgotten), and watchers' "tree stopped" check treats queued wakes as work. The missed-work sweep is skipped while the hold is on, so it cannot pile up wakes or raise "looks stuck" decisions for tickets that simply cannot start.
 4. **Drain and the deadline.** The first wait is `BOSSMAN_DRAIN_MINUTES` (default 30). If runs are still going at the deadline the owner gets one `maintenance` decision, owner tier, key `maintenance:<since>:<deadline>`. "Keep waiting" moves the deadline by the same number of minutes and the next deadline asks again; "Stop the remaining runs" sets `force`, so the next step recreates every runner whatever is running (crash recovery restarts those runs once the hold lifts); "Cancel" lifts the hold. Runners already swapped stay on the new image.
@@ -198,7 +198,7 @@ owner approves "Update runners" (or runs scripts/update-runner.sh)
 
 - `--now`: the old behaviour for emergencies on the host: `compose up -d` and `recreate-all`, runs cut off, no drain. It combines with `--rollback`.
 - `--rollback` retags `:previous` as `:current` and then drains onto it.
-- With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Runner update > **Update runners**.
+- With no deployer folder (a manual run without self-deploy) the script prints where to start the drain: Settings > Server and runner > Runner update > **Update runners**.
 - `deploy.sh --runner` calls `update-runner.sh`, so it drains too.
 
 ### Not covered
@@ -216,7 +216,7 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 **What changed**
 
 - **Leader lock** (`apps/server/src/leader.ts`). The server holds a Postgres advisory lock (key 5141440001) on its own connection and checks it every 2 s with `select 1`. Any error or lost connection makes it step down at once (background loops stop, runner sockets close with 1013) and it keeps retrying. A server that is not the leader is a **standby**.
-- **What only the leader does:** the four timers plus self-deploy sync and the drain step (`startBackground()`/`stopBackground()` follow leadership), and the runner websocket (`/api/runner/connect` answers 503 with `Retry-After`, so runners retry). Everything marked `// leader-only` is reached only from those loops or from owner writes, which a standby refuses.
+- **What only the leader does:** all the background loops (the scheduler tick, sweeps, notification sync, pull request sync, brief upkeep, self-deploy sync, add-on check and the drain step) (`startBackground()`/`stopBackground()` follow leadership), and the runner websocket (`/api/runner/connect` answers 503 with `Retry-After`, so runners retry). Everything marked `// leader-only` is reached only from those loops or from owner writes, which a standby refuses.
 - **A standby still serves reads** (`GET`), `/api/health`, `/api/ready`, login and logout, and the static UI. Every other write under `/api/`, all of `/api/runner/*` and `/mcp` answer `503 {"error":"standby"}`.
 - **Hand-over by host signals only.** `SIGUSR1` = demote (release the lock, stop background work, drop runner sockets, stay out of the contest). `SIGUSR2` = promote (contest the lock). No HTTP endpoint can change the role. Example: `docker kill --signal=USR1 <container>`.
 - **Separate migrate step.** `apps/server/src/migrate.ts` is shipped in the server image as `dist/migrate.js`: `docker run --rm --env DATABASE_URL=... --entrypoint node <server image> dist/migrate.js`. It takes its own advisory lock (key 5141440002), waits at most `BOSSMAN_MIGRATE_LOCK_TIMEOUT_MS` (default 60000) for another migration, runs the Drizzle migrations and exits non-zero on failure.
@@ -233,7 +233,7 @@ Built ahead of blue/green; on today's single server nothing changes. Nothing her
 
 PGlite (no `DATABASE_URL`) has no cross-process locks, so it is always the leader, with the same result as the kill switch.
 
-**How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings > Server shows it, with both colours when blue/green is on. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
+**How to check the role.** `GET /api/health` and `GET /api/ready` return `role`: `"leader"`, `"standby"`, or `"single"` (lock off or PGlite). Settings > Server and runner > Server shows it, with both colours when blue/green is on. Every change is logged as a line starting `LEADER: ***` (`docker logs <server> | grep LEADER`).
 
 **If the only server shows `standby`:** its role should be `leader` within about 2 s of boot. If it stays `standby`, another connection still holds the lock (look in `pg_locks` for `locktype = 'advisory'`; the leader connection sets `idle_session_timeout = 30s`, so Postgres ends a dead holder within about 30 s) or someone sent `SIGUSR1` or booted it with `BOSSMAN_ROLE=standby`. Fix: send `SIGUSR2`; or set `BOSSMAN_LEADER_LOCK=0` and restart to run exactly as before.
 
@@ -298,13 +298,13 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
 - The automatic switch-back after a failed hand-over.
 - A full swap blue to green with the UI up throughout.
 - Runners reconnecting through the proxy by themselves: they retry every 30 s with `ENOTFOUND server` while the proxy is down, then connect.
-- **Settings > Server** shows both colours' states, read from each colour's `/api/health` over the compose network (`GET /api/bluegreen`, owner only, shown only when `BOSSMAN_COLOUR` is set).
+- **Settings > Server and runner > Server** shows both colours' states, read from each colour's `/api/health` over the compose network (`GET /api/bluegreen`, owner only, shown only when `BOSSMAN_COLOUR` is set).
 
 **Still not verified**
 - The old colour being stopped when the soak ends.
 - An automatic switch-back during the soak.
 - The timing defaults (30 s hand-over wait, 120 s ready wait, 15 minutes) on slower hardware.
-- Whether the swap should also check each company's runner reconnected: it doesn't yet. A person can see it in Settings > Runner, "Connected since".
+- Whether the swap should also check each company's runner reconnected: it doesn't yet. A person can see it in Settings > Server and runner > Runner, "Connected since".
 
 ## Open items
 

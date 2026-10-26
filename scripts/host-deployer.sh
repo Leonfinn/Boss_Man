@@ -12,7 +12,7 @@
 #
 # Settings: environment, then the optional config file $BOSSMAN_DEPLOYER/host.conf (shell
 # KEY=value lines; must be owned by the user running this and not writable by anyone else):
-#   BOSSMAN_DEPLOYER   the deployer folder       (/mnt/NVME_Apps/Container_files/boss-man/deployer)
+#   BOSSMAN_DEPLOYER   the deployer folder       (the folder this copy is in)
 #   REPO               the git checkout          ($BOSSMAN_DEPLOYER/../src)
 #   WEBHOOK_URL        POSTed on failure; empty = off
 #   WEBHOOK_ON_SUCCESS 1 = also POST on success  (0)
@@ -30,7 +30,8 @@ DRY=0
 case "${1:-}" in --dry-run) DRY=1 ;; "") ;; *) echo "Usage: $0 [--dry-run]" >&2; exit 2 ;; esac
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron's PATH is minimal
-D="${BOSSMAN_DEPLOYER:-/mnt/NVME_Apps/Container_files/boss-man/deployer}"
+# The copy lives in the deployer folder, which sits beside the checkout (src) in the install folder.
+D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
 BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}"
@@ -208,7 +209,7 @@ wait_ready() { # service role commit seconds
 }
 
 backup_database() {
-  local dir="${BOSSMAN_BACKUP_DIR:-/mnt/NVME_Apps/Container_files/boss-man}" old f
+  local dir="${BOSSMAN_BACKUP_DIR:-$D/..}" old f
   mkdir -p "$dir"
   BG_BACKUP="$dir/bossman-$(date +%F-%H%M).sql.gz"
   compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial" || { rm -f "$BG_BACKUP.partial"; return 1; }
@@ -314,7 +315,7 @@ soak_tick() {
 }
 
 # Reads a field of scripts/deploy.sh's own status file.
-deploy_status_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-/mnt/NVME_Apps/Container_files/boss-man}/deploy-status.json}" "$1" 2>/dev/null || true; }
+deploy_status_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" "$1" 2>/dev/null || true; }
 
 main() {
   local req="$INBOX/request.json"

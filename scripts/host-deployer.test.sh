@@ -343,4 +343,10 @@ reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 b5="$(push deploy/caddy/Caddyfile)"; bgreq "$b5"; bg
 has "$D/outbox/status.json" "deployment files (deploy/caddy/Caddyfile)"; hasnt "$DL" "pg_dump"
 
+# With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
+own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"
+out="$( (unset BOSSMAN_DEPLOYER; bash "$own/deployer/host-deployer.sh" --dry-run 2>&1) || true)"
+[[ $out == *"$own/deployer/inbox"* ]] || { echo "FAIL: default deployer folder is not its own folder: $out"; exit 1; }
+rm -rf "$own"
+
 echo "host-deployer.test.sh: ok"
