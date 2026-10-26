@@ -1,0 +1,147 @@
+# Penpot (design tool) as an optional add-on. OFF by default: every service is in the "penpot"
+# profile, so a plain `docker compose up -d` starts nothing from this file.
+# Use it with the main file, from the repository root (see docs/15-penpot.md):
+#   docker compose -f docker-compose.yml -f deploy/penpot.yml --profile penpot up -d
+#
+# In .env (never commit these; generate them once, see the doc):
+#   PENPOT_SECRET_KEY=<openssl rand -base64 48>
+#   PENPOT_DB_PASSWORD=<openssl rand -hex 24>
+#   PENPOT_BIND=<the host's LAN address, e.g. 192.168.1.20>   # required; never 0.0.0.0
+#   PENPOT_PUBLIC_URI=http://<same LAN address>:9001           # must match what people type
+# Optional: PENPOT_VERSION (pinned below), PENPOT_HOST_PORT (9001), PENPOT_REGISTRATION=enable
+#   (only while creating the first accounts; the default keeps registration off).
+#
+# Only the Penpot web page is published, and only on PENPOT_BIND. Mailpit (8025), the backend,
+# valkey and postgres stay on Penpot's own internal network, apart from Boss Man's database.
+# Telemetry is off. Access tokens are on (agents use the API with a token). The MCP plugin
+# flag is NOT set (deferred); the mcp container is kept only because the frontend proxies to it.
+
+x-flags: &flags
+  PENPOT_FLAGS: >-
+    disable-email-verification enable-smtp enable-prepl-server
+    disable-secure-session-cookies enable-access-tokens enable-admin-console
+    ${PENPOT_REGISTRATION:-disable}-registration
+x-uri: &uri
+  PENPOT_PUBLIC_URI: ${PENPOT_PUBLIC_URI:?Set PENPOT_PUBLIC_URI in .env, e.g. http://192.168.1.20:9001}
+x-secret: &secret
+  PENPOT_SECRET_KEY: ${PENPOT_SECRET_KEY:?Set PENPOT_SECRET_KEY in .env}
+x-database: &database
+  PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
+  PENPOT_DATABASE_USERNAME: penpot
+  PENPOT_DATABASE_PASSWORD: ${PENPOT_DB_PASSWORD:?Set PENPOT_DB_PASSWORD in .env}
+x-common: &common
+  profiles: ["penpot"]
+  restart: unless-stopped
+  networks: [penpot]
+  security_opt: ["no-new-privileges:true"]
+
+networks:
+  penpot:
+
+volumes:
+  penpot_postgres_v15:
+  penpot_assets:
+
+services:
+  penpot-frontend:
+    <<: *common
+    image: penpotapp/frontend:${PENPOT_VERSION:-2.18.0}
+    ports:
+      - "${PENPOT_BIND:?Set PENPOT_BIND in .env to the LAN address}:${PENPOT_HOST_PORT:-9001}:8080"
+    volumes:
+      - penpot_assets:/opt/data/assets
+    depends_on: [penpot-backend, penpot-admin-console, penpot-mcp, penpot-exporter]
+    environment:
+      <<: [*flags, *uri]
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
+      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
+    mem_limit: ${PENPOT_MEM_FRONTEND:-256m}
+
+  penpot-backend:
+    <<: *common
+    image: penpotapp/backend:${PENPOT_VERSION:-2.18.0}
+    volumes:
+      - penpot_assets:/opt/data/assets
+    depends_on:
+      penpot-postgres: { condition: service_healthy }
+      penpot-valkey: { condition: service_healthy }
+    environment:
+      <<: [*flags, *uri, *secret, *database]
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
+      PENPOT_ADMIN_CONSOLE_URI: http://penpot-admin-console:3000
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+      PENPOT_TELEMETRY_ENABLED: "false"
+      PENPOT_SMTP_DEFAULT_FROM: no-reply@penpot.local
+      PENPOT_SMTP_DEFAULT_REPLY_TO: no-reply@penpot.local
+      PENPOT_SMTP_HOST: penpot-mailpit
+      PENPOT_SMTP_PORT: "1025"
+      PENPOT_SMTP_TLS: "false"
+      PENPOT_SMTP_SSL: "false"
+    mem_limit: ${PENPOT_MEM_BACKEND:-1536m}
+
+  penpot-admin-console:
+    <<: *common
+    image: penpotapp/admin-console:${PENPOT_VERSION:-2.18.0}
+    depends_on:
+      penpot-postgres: { condition: service_healthy }
+    environment:
+      <<: [*uri, *secret, *database]
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
+    mem_limit: ${PENPOT_MEM_ADMIN:-256m}
+
+  penpot-mcp:
+    <<: *common
+    image: penpotapp/mcp:${PENPOT_VERSION:-2.18.0}
+    mem_limit: ${PENPOT_MEM_MCP:-256m}
+
+  penpot-exporter:
+    <<: *common
+    image: penpotapp/exporter:${PENPOT_VERSION:-2.18.0}
+    depends_on:
+      penpot-valkey: { condition: service_healthy }
+    environment:
+      <<: [*flags, *secret, *uri]
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+    mem_limit: ${PENPOT_MEM_EXPORTER:-1g}
+
+  penpot-postgres:
+    <<: *common
+    image: postgres:15
+    stop_signal: SIGINT
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U penpot"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - penpot_postgres_v15:/var/lib/postgresql/data
+    environment:
+      POSTGRES_INITDB_ARGS: --data-checksums
+      POSTGRES_DB: penpot
+      POSTGRES_USER: penpot
+      POSTGRES_PASSWORD: ${PENPOT_DB_PASSWORD:?Set PENPOT_DB_PASSWORD in .env}
+    mem_limit: ${PENPOT_MEM_POSTGRES:-512m}
+
+  penpot-valkey:
+    <<: *common
+    image: valkey/valkey:8.1
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    environment:
+      VALKEY_EXTRA_FLAGS: --maxmemory 128mb --maxmemory-policy volatile-lfu
+    mem_limit: ${PENPOT_MEM_VALKEY:-192m}
+
+  # Receives Penpot's outgoing mail (internal only, no published port).
+  penpot-mailpit:
+    <<: *common
+    image: axllent/mailpit:v1
+    expose: ["1025"]
+    mem_limit: ${PENPOT_MEM_MAILPIT:-128m}
