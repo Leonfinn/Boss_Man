@@ -711,6 +711,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </span>
                       )}
                       {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
+                      {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
                       {!!t.working?.length && (
                         <span className="working" role="status">
                           <span className="pulse-dot" aria-hidden="true" />

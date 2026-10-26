@@ -1,13 +1,13 @@
 // Reviews by kind: when a ticket enters review, every review the tier requires (the code review plus
 // any security, infra or adversarial ones) is requested at once. The CEO may order them; each
 // verdict is kept; the ticket passes only when all approve or the CEO has overruled the rest.
-import { and, desc, eq, inArray, max } from "drizzle-orm";
-import { KIND_FOCUS, REVIEW_KINDS, ruleFor, type ReviewSlot } from "@boss-man/shared";
+import { and, desc, eq, inArray, isNull, like, max, ne, or } from "drizzle-orm";
+import { KIND_FOCUS, REVIEW_KINDS, ruleFor, ticketRef, type ReviewSlot } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, reviewRequests, tickets } from "../db/schema.js";
+import { agents, companies, reviewRequests, runs, tickets, wakes } from "../db/schema.js";
 import { record } from "./activity.js";
 import { readVerdicts } from "@boss-man/shared";
-import { effectivePolicy, resolveKindReviewer } from "./review-policy.js";
+import { effectivePolicy, otherReviewers, resolveKindReviewer } from "./review-policy.js";
 
 export type ReviewRow = typeof reviewRequests.$inferSelect;
 type Ticket = typeof tickets.$inferSelect;
@@ -91,11 +91,77 @@ export const reviveSkipped = (db: Db, rows: ReviewRow[]) => db.update(reviewRequ
 
 /** Every round of a ticket's reviews with reviewer names, newest round first, for the ticket page. */
 export async function listReviews(db: Db, ticketId: string) {
+  const waiting = (await reviewWaits(db, [ticketId])).get(ticketId) ?? null;
   return db
     .select({ r: reviewRequests, reviewer: agents.name })
     .from(reviewRequests)
     .leftJoin(agents, eq(agents.id, reviewRequests.reviewerAgentId))
     .where(eq(reviewRequests.ticketId, ticketId))
     .orderBy(desc(reviewRequests.round), reviewRequests.seq, reviewRequests.kind)
-    .then((rows) => rows.map(({ r, reviewer }) => ({ id: r.id, kind: r.kind, round: r.round, seq: r.seq, status: r.status, reviewer, reviewerAgentId: r.reviewerAgentId, notes: r.notes, overruleReason: r.overruleReason, createdAt: r.createdAt, decidedAt: r.decidedAt })));
+    .then((rows) => rows.map(({ r, reviewer }) => ({ waitingOn: r.status === "pending" ? waiting : null, id: r.id, kind: r.kind, round: r.round, seq: r.seq, status: r.status, reviewer, reviewerAgentId: r.reviewerAgentId, notes: r.notes, overruleReason: r.overruleReason, createdAt: r.createdAt, decidedAt: r.decidedAt })));
+}
+
+/** Who each ticket's open reviews are waiting on and why, one short line per ticket ("Sam is busy on BOS-7"). Tickets nobody is holding up are left out. */
+export async function reviewWaits(db: Db, ticketIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const ticketId of ticketIds) {
+    const lines: string[] = [];
+    for (const r of activeRows(await latestRows(db, ticketId))) {
+      if (!r.reviewerAgentId) continue;
+      const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, r.reviewerAgentId));
+      const [live] = await db
+        .select({ ticketId: runs.ticketId, number: tickets.number, prefix: companies.ticketPrefix })
+        .from(runs)
+        .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+        .leftJoin(companies, eq(companies.id, runs.companyId))
+        .where(and(eq(runs.agentId, r.reviewerAgentId), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+        .limit(1);
+      const name = who?.name ?? "The reviewer";
+      if (live?.ticketId === ticketId) lines.push(`${name} is reviewing it now`);
+      else if (live) lines.push(`${name} is busy on ${ticketRef(live.prefix, live.number) ?? "another run"}`);
+      else {
+        const [w] = await db
+          .select({ status: wakes.status, reason: wakes.statusReason })
+          .from(wakes)
+          .where(and(eq(wakes.agentId, r.reviewerAgentId), eq(wakes.reason, REVIEW_REASON), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId), like(wakes.note, `%- ${ticketId} %`)))
+          .limit(1);
+        if (w) lines.push(w.reason && w.status === "queued" ? `${name} is next, but is held up: ${w.reason}` : `${name} is about to start`);
+      }
+    }
+    if (lines.length) out.set(ticketId, [...new Set(lines)].join("; "));
+  }
+  return out;
+}
+
+/**
+ * A review wake that has waited behind a busy reviewer: each ticket it lists whose review has
+ * another qualified, free reviewer moves to them (logged on the ticket) and leaves the old wake.
+ * Returns the wake's remaining note, null once nothing is left on it.
+ */
+export async function handOverReviews(db: Db, wake: { agentId: string; note: string | null }, isBusy: (agentId: string) => boolean, notify: Notify, waitedMs: number): Promise<string | null> {
+  const blocks = (wake.note ?? "").split(/^(?=- [0-9a-f-]{36} )/m).filter((b) => b.trim());
+  const kept: string[] = [];
+  const [from] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, wake.agentId));
+  for (const block of blocks) {
+    const ticketId = block.match(/^- ([0-9a-f-]{36}) /)?.[1];
+    const [t] = ticketId ? await db.select().from(tickets).where(eq(tickets.id, ticketId)) : [];
+    if (!t || t.systemState !== "review") {
+      kept.push(block);
+      continue;
+    }
+    const mine = activeRows(await latestRows(db, t.id)).filter((r) => r.reviewerAgentId === wake.agentId);
+    const rule = ruleFor(await effectivePolicy(db, t), t.risk);
+    const moved: ReviewRow[] = [];
+    for (const r of mine) {
+      const ref = r.kind === "code" ? rule.reviewer : rule.kinds?.[r.kind as Exclude<ReviewSlot, "code">];
+      const [to] = ref ? (await otherReviewers(db, t.companyId, r.kind as ReviewSlot, ref, t.assigneeAgentId, [wake.agentId])).filter((a) => !isBusy(a.id)) : [];
+      if (!to) continue;
+      await db.update(reviewRequests).set({ reviewerAgentId: to.id }).where(eq(reviewRequests.id, r.id));
+      await record(db, { companyId: t.companyId, agentId: wake.agentId, ticketId: t.id, kind: "review_handover", summary: `${from?.name ?? "The reviewer"} was busy for ${Math.round(waitedMs / 60_000)} minutes, so ${to.name} takes the ${r.kind} review` });
+      moved.push({ ...r, reviewerAgentId: to.id });
+    }
+    if (moved.length) await wakeReviewers(db, t, moved, notify);
+    if (moved.length < mine.length || !mine.length) kept.push(block);
+  }
+  return kept.length ? kept.join("") : null;
 }

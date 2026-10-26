@@ -67,3 +67,18 @@ export async function resolveKindReviewer(db: Db, companyId: string, kind: Revie
   const { agent } = await resolveActor(db, companyId, "ceo", author);
   return { agent, note: pool[0] ? `${pool[0].name} is unavailable, so the CEO reviews it (${kind})` : `No ${kind} reviewer is marked, so the CEO reviews it` };
 }
+
+/**
+ * Other agents who could take a review of this kind from the one holding it: the rest of the senior
+ * developers, or the other agents marked for the kind. A review the policy gives to one named agent
+ * (or the CEO) has no stand-in. Nobody paused or retired, and never the author.
+ */
+export async function otherReviewers(db: Db, companyId: string, kind: ReviewSlot, ref: string, author: string | null, exclude: string[]): Promise<Who[]> {
+  if (ref !== SENIOR_DEV && ref !== MARKED) return [];
+  const pool = await db
+    .select({ id: agents.id, name: agents.name, paused: agents.paused })
+    .from(agents)
+    .where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), ref === SENIOR_DEV ? eq(agents.template, SENIOR_DEV_TEMPLATE) : eq(agents.reviewKind, kind)))
+    .orderBy(asc(agents.createdAt));
+  return pool.filter((a) => !a.paused && a.id !== author && !exclude.includes(a.id)).map(({ id, name }) => ({ id, name }));
+}
