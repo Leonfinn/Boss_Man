@@ -25,7 +25,7 @@ In the steps below, `<skill dir>` is this skill's base directory (shown when the
 
 ## If export fails
 
-Per-board PNG export through the API was not confirmed when this skill was written (it goes through Penpot's export service, which is lightly documented). If `export` reports that, say so on the ticket and ask the owner to export the board by hand in Penpot (right-click the board, Export, PNG) and attach it. Don't try other ways around it.
+`export` logs in as the agent account (PENPOT_EMAIL and PENPOT_PASSWORD, granted like the token) because Penpot's export service needs a session, not a token. If it says those are missing or refused, tell the owner on the ticket; they can fix the secrets. Don't try other ways around it.
 
 ## Limits
 
