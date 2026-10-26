@@ -5,6 +5,8 @@
 #
 #   host-deployer.sh              handle one request, if there is one
 #   host-deployer.sh --dry-run    run every check and say what would happen; changes nothing
+#   host-deployer.sh --rollback   blue/green only, by hand at the NAS, as root: go back to the other colour (the
+#                                 previous release), also after the 15-minute window. With --dry-run it only checks.
 #
 # It reads one small request file the server wrote, treats it as data only, checks it, and runs
 # one of two fixed actions: scripts/deploy.sh (target "server") or scripts/update-runner.sh
@@ -26,8 +28,10 @@
 # Without that, nothing under the "Blue/green" heading runs.
 set -euo pipefail
 
-DRY=0
-case "${1:-}" in --dry-run) DRY=1 ;; "") ;; *) echo "Usage: $0 [--dry-run]" >&2; exit 2 ;; esac
+DRY=0 ROLLBACK=0
+for arg in "$@"; do
+  case "$arg" in --dry-run) DRY=1 ;; --rollback) ROLLBACK=1 ;; *) echo "Usage: $0 [--dry-run] | --rollback [--dry-run]" >&2; exit 2 ;; esac
+done
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron's PATH is minimal
 # The copy lives in the deployer folder, which sits beside the checkout (src) in the install folder.
@@ -59,7 +63,8 @@ json() { python3 -I -c 'import json,sys; print(json.dumps(dict(a.split("=", 1) f
 [[ -d $INBOX && -d $OUTBOX ]] || { echo "ERROR: $INBOX and $OUTBOX must exist (docs/06-install-truenas.md, Install the host deployer)." >&2; exit 1; }
 mkdir -p "$STATE"
 exec 9>"$D/lock"
-flock -n 9 || exit 0 # a run is already going; the next minute tries again
+if ((ROLLBACK)); then flock -w 120 9 || { echo "ERROR: another deployer run holds the lock; try again in a minute." >&2; exit 1; }
+else flock -n 9 || exit 0; fi # a run is already going; the next minute tries again
 
 REQ_ID="" TARGET="" COMMIT="" STARTED="" FROM=""
 
@@ -316,11 +321,65 @@ soak_tick() {
   else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the NAS now (docker compose ps; $LOG)."; fi
 }
 
+# By hand, any time (also after the soak window): go back to the other colour, i.e. the previous release.
+# That colour's container is stopped but its image stays until the next swap rebuilds it. Same hand-over as a swap
+# and the same automatic reversal if the checks fail. The database is never touched: the previous release runs on
+# the newer schema only while migrations are expand-only (docs/10-migrations.md).
+do_rollback_bluegreen() {
+  local c why="" body ocommit
+  BG_LIVE="$(live_colour)" || { bg_fail failed "No usable $INCLUDE."; return 1; }
+  BG_IDLE="$(other_colour "$BG_LIVE")"
+  BG_PREV="$(g rev-parse HEAD)"
+  for c in proxy "server-$BG_LIVE"; do
+    [[ -n $(compose ps -q "$c" 2>/dev/null) ]] || { bg_fail failed "The $c container is not running; nothing was changed."; return 1; }
+  done
+  docker image inspect "boss-man-server:$BG_IDLE" >/dev/null 2>&1 || { bg_fail failed "There is no image boss-man-server:$BG_IDLE, so there is nothing to go back to. Nothing was changed."; return 1; }
+  if ((DRY)); then log "[dry-run] would back up, start $BG_IDLE as a standby, hand over from $BG_LIVE, flip the proxy, verify, stop $BG_LIVE"; return 0; fi
+  rm -f "$STATE/soak"
+  log "Rollback: $BG_LIVE is live; going back to $BG_IDLE."
+  backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
+  # Not recreated: the stopped container keeps its old image.
+  compose up -d --no-deps "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
+  wait_ready "server-$BG_IDLE" standby "" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby within ${BG_READY_SECONDS}s."; return 1; }
+  body="$(probe "server-$BG_IDLE" 3100 /api/ready 2>/dev/null)" || body=""
+  ocommit="$(jfield commit <<<"$body")"
+  [[ $(probe "server-$BG_IDLE" 3100 /api/setup 2>/dev/null | jfield needsSetup) == False ]] || { pre_fail "The smoke test on $BG_IDLE failed (GET /api/setup)."; return 1; }
+  log "Smoke test passed. Handing over: demote $BG_LIVE, promote $BG_IDLE (code ${ocommit:0:8})."
+  compose kill -s USR1 "server-$BG_LIVE" >>"$LOG" 2>&1 || { pre_fail "Could not signal $BG_LIVE."; return 1; }
+  wait_ready "server-$BG_LIVE" standby "" "$BG_HANDOVER_SECONDS" || why="$BG_LIVE did not step down."
+  [[ -n $why ]] || compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || why="Could not signal $BG_IDLE."
+  [[ -n $why ]] || wait_ready "server-$BG_IDLE" leader "$ocommit" "$BG_HANDOVER_SECONDS" || why="$BG_IDLE did not become the leader."
+  [[ -n $why ]] || flip_proxy "$BG_IDLE" || why="The proxy did not accept the switch to $BG_IDLE."
+  [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="The checks through the proxy failed."
+  if [[ -n $why ]]; then
+    if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
+    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the NAS now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    return 1
+  fi
+  # The bad release stays stopped (not removed); the checkout follows what runs.
+  compose stop "server-$BG_LIVE" >>"$LOG" 2>&1 || log "Could not stop server-$BG_LIVE."
+  if [[ -n $ocommit ]] && g cat-file -e "$ocommit^{commit}" 2>/dev/null; then g reset --quiet --hard "$ocommit" || log "Could not move the checkout to ${ocommit:0:8}."; fi
+  BG_RESULT=rolled_back
+  BG_MSG="Rolled back to ${ocommit:0:8}: $BG_IDLE is live; $BG_LIVE is stopped. The database was not changed. Backup: $BG_BACKUP"
+}
+
 # Reads a field of scripts/deploy.sh's own status file.
 deploy_status_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" "$1" 2>/dev/null || true; }
 
 main() {
   local req="$INBOX/request.json"
+  if ((ROLLBACK)); then
+    bluegreen_enabled || { echo "ERROR: this install does not use blue/green; use scripts/deploy.sh --rollback." >&2; exit 1; }
+    local rrc=0
+    REQ_ID="rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$(g rev-parse HEAD)" COMMIT="$FROM"
+    do_rollback_bluegreen || rrc=$?
+    ((!DRY)) || exit "$rrc"
+    COMMIT="$(g rev-parse HEAD)"
+    log "${BG_RESULT:-failed}: ${BG_MSG:-Rollback stopped with an error.}"
+    write_status "${BG_RESULT:-failed}" "${BG_MSG:-Rollback stopped with an error. See $LOG on the NAS.}" "$BG_BACKUP"
+    post_webhook "${BG_RESULT:-failed}" "${BG_MSG:-Rollback failed.}"
+    exit "$rrc"
+  fi
   if bluegreen_enabled; then soak_tick; fi
   if [[ ! -e $req && ! -L $req ]]; then refresh_available; exit 0; fi
 
