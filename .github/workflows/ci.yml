@@ -74,6 +74,14 @@ jobs:
           mkdir -p secrets && touch secrets/master.key secrets/runner-app-co.token
           POSTGRES_PASSWORD=ci docker compose --profile runners config -q
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm docker compose --profile launcher config -q
+      - name: Penpot overlay validates as its own project, registration and prepl stay off
+        run: |
+          export PENPOT_BIND=127.0.0.1 PENPOT_PUBLIC_URI=http://127.0.0.1:9001 PENPOT_SECRET_KEY=x PENPOT_DB_PASSWORD=x
+          docker compose -p boss-man-penpot -f deploy/penpot.yml --profile penpot config -q
+          docker compose -p boss-man-penpot -f deploy/penpot.yml --profile penpot config > "$RUNNER_TEMP/merged-penpot.yml"
+          grep -q "disable-registration" "$RUNNER_TEMP/merged-penpot.yml"
+          if grep -q "enable-prepl-server" "$RUNNER_TEMP/merged-penpot.yml"; then echo "prepl must stay off"; exit 1; fi
+          if grep -q "admin-console" "$RUNNER_TEMP/merged-penpot.yml"; then echo "admin console must stay off"; exit 1; fi
       - name: Launcher - a new company's runner starts and connects by itself (R55)
         run: |
           docker tag boss-man-server:ci boss-man-server:latest
