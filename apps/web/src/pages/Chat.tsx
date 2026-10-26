@@ -7,6 +7,7 @@ import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
+import { useImageAttach, withImage } from "../components/ImageAttach";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
@@ -17,10 +18,21 @@ export function linked(text: string, wikiCompanyId?: string): ReactNode {
   const out: ReactNode[] = [];
   let at = 0;
   // [[slug]] and [[slug#Section]] link to the company's wiki page when the company is known.
-  for (const m of text.matchAll(/\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
-    if (m[4] && !wikiCompanyId) continue;
-    const href = m[4] ? `#/wiki/${wikiCompanyId}/${m[4].trim()}` : (m[2] ?? m[3])!;
-    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[4] ? `${m[4].trim()}${m[5] ?? ""}` : (m[1] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2)))}</a>);
+  for (const m of text.matchAll(/!\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)|\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
+    // A pasted image shows as a thumbnail that opens full size.
+    if (m[2]) {
+      out.push(
+        <Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>,
+        <a key={`i${m.index}`} href={m[2]} target="_blank" rel="noreferrer" className="msg-img">
+          <img src={m[2]} alt={m[1] || "image"} loading="lazy" />
+        </a>,
+      );
+      at = m.index + m[0].length;
+      continue;
+    }
+    if (m[6] && !wikiCompanyId) continue;
+    const href = m[6] ? `#/wiki/${wikiCompanyId}/${m[6].trim()}` : (m[4] ?? m[5])!;
+    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[6] ? `${m[6].trim()}${m[7] ?? ""}` : (m[3] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2)))}</a>);
     at = m.index + m[0].length;
   }
   out.push(<Fragment key="end">{text.slice(at)}</Fragment>);
@@ -69,6 +81,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
     `${company?.id ?? "none"}/${current?.id ?? "none"}`,
   );
   const [text, setText] = useState("");
+  const img = useImageAttach(company?.id, (md) => setText((t) => withImage(t, md)));
   const [error, setError] = useState<string | null>(null);
   const [seen, setSeen] = useState(readSeen);
   const end = useRef<HTMLDivElement>(null);
@@ -185,16 +198,22 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                 <label htmlFor="chat-text" className="sr-only">
                   Message to {current.name}
                 </label>
-                <textarea id="chat-text" rows={2} maxLength={4000} placeholder={`Message ${current.name}. Enter sends, Shift+Enter adds a line.`} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey} />
+                <textarea id="chat-text" rows={2} maxLength={4000} placeholder={`Message ${current.name}. Enter sends, Shift+Enter adds a line.`} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKey} onPaste={img.onPaste} />
+                {img.button}
                 {current.duty === "assistant" && ceo && (
                   <button className="btn" type="button" disabled={!text.trim()} onClick={() => send(undefined, ceo)}>
                     Ask the CEO
                   </button>
                 )}
-                <button className="btn primary" type="submit" disabled={!text.trim()}>
+                <button className="btn primary" type="submit" disabled={!text.trim() || img.busy}>
                   Send
                 </button>
               </form>
+              {img.error && (
+                <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
+                  {img.error}
+                </p>
+              )}
               {error && (
                 <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
                   {error}

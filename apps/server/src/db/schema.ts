@@ -1179,7 +1179,8 @@ export const ticketImages = pgTable(
   {
     id: id(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
-    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** Null for an image the owner pasted into a chat or a new task's description before it existed. */
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     /** The file name it was saved under, e.g. issue-003-step-2.png. */
     name: text("name").notNull(),
     caption: text("caption"),

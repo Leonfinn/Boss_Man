@@ -88,7 +88,7 @@ describe("the CEO's PA (R87)", () => {
   it("has read tools and the two PA tools, and no way to write", async () => {
     const c = await setup();
     const { client } = await c.ask("What's open?");
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["board", "decisions", "list_my_work", "pa_escalate", "pa_reply", "tickets", "whats_new", "wiki"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["board", "decisions", "list_my_work", "pa_escalate", "pa_reply", "tickets", "view_image", "whats_new", "wiki"]);
     for (const name of ["create_ticket", "set_ticket_state", "raise_decision", "notify_owner", "deploy", "nudge", "propose_hire", "update_instructions", "link_tickets", "pa_verdict"]) {
       expect(await refused(client.callTool({ name, arguments: {} })), name).toBe(true);
     }

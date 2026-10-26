@@ -445,6 +445,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   );
 
   registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
+  registerViewImage(server, images, scope);
 
   server.registerTool(
     "ticket_reply",
@@ -973,6 +974,22 @@ function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?
  * Tools every run has, chat included (R69, R71, R77): the wiki, the skill library, and reading
  * the company's tickets, so an agent can look things up instead of saying it can't see them.
  */
+/** Looking at an image the owner pasted or an agent attached, in every kind of run. */
+function registerViewImage(server: McpServer, images: Services["images"], scope: Scope) {
+  server.registerTool(
+    "view_image",
+    {
+      description: "Look at an image. Pictures the owner pastes into a task, a message or the chat appear in the text as ![name](/api/ticket-images/<id>); look at each one with this tool (pass the id) before you act on what it shows.",
+      inputSchema: { imageId: z.string().uuid() },
+    },
+    async ({ imageId }) => {
+      const img = await images.forCompany(imageId, scope.companyId);
+      if (!img) return fail("No image with that id in your company.");
+      return { content: [{ type: "image" as const, data: Buffer.from(img.bytes).toString("base64"), mimeType: img.type }, { type: "text" as const, text: img.caption ? `${img.name}: ${img.caption}` : img.name }] };
+    },
+  );
+}
+
 function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, review, agents: team }: Pick<Services, "notes" | "wiki" | "skills" | "review" | "agents">, scope: Scope) {
   server.registerTool(
     "tickets",
@@ -1416,10 +1433,11 @@ function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTo
 }
 
 /** The PA's server: the read tools plus pa_reply and pa_escalate, and nothing that writes (R87). */
-function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa }: Services, scope: Scope) {
+function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa, images }: Services, scope: Scope) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   const reads = readOnly(server, scope.runId);
   registerSharedTools(reads as McpServer, db, { notes, wiki, skills, review, agents: team }, scope);
+  registerViewImage(server, images, scope);
   registerBoard(reads, db, scope);
   registerListMyWork(reads, db, scope);
   reads.registerTool(
@@ -1465,9 +1483,10 @@ const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().opti
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team }: Services, scope: Scope, hooks: McpHooks) {
+function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team, images }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
+  registerViewImage(server, images, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
   const workFail = (err: unknown) => {
     if (err instanceof WorkError) return fail(err.message);

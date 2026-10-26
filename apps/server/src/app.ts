@@ -45,7 +45,7 @@ import { OBJECTIVE_STATUSES, planningService } from "./services/planning.js";
 import { chaptersService } from "./services/chapters.js";
 import { FeedbackError, feedbackService } from "./services/feedback.js";
 import { portalRoutes, sendLogo, type PortalLimits } from "./portal.js";
-import { ticketImagesService } from "./services/ticket-images.js";
+import { TicketImageError, ticketImagesService } from "./services/ticket-images.js";
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
@@ -1204,6 +1204,17 @@ export async function buildApp(opts: AppOptions) {
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
     owner.get("/api/tickets/:id/images", async (req) => images.list(IdParam.parse(req.params).id));
+    // The owner pastes or picks an image (a task's description, a ticket message, a chat); it's put in the text as Markdown.
+    owner.post("/api/companies/:id/images", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ data: z.string().min(1), name: z.string().max(200).optional(), ticketId: Uuid.optional() }).parse(req.body);
+      try {
+        return reply.code(201).send(await images.upload(id, { ticketId: b.ticketId, name: b.name, base64: b.data }));
+      } catch (err) {
+        if (err instanceof TicketImageError) return reply.code(422).send({ error: "rejected", message: err.message });
+        throw err;
+      }
+    });
     owner.get("/api/ticket-images/:id", async (req, reply) => {
       const img = await images.get(IdParam.parse(req.params).id);
       return img ? sendLogo(reply, img) : reply.code(404).send({ error: "not_found" });
