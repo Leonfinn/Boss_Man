@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { projects, tickets } from "../src/db/schema.js";
+import { decisions, projects, ticketDependencies, tickets, workflowColumns } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -74,8 +74,28 @@ describe("ticket versions (R81)", () => {
     await c.close();
   });
 
+  it("refuses blocked with nothing open holding the ticket, and points to raise_decision", async () => {
+    const c = await agent();
+    const res = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "blocked", summary: "Waiting on the owner to run X." } });
+    expect(res.isError).toBe(true);
+    expect(textOf(res)).toMatch(/raise_decision with blocksTicketId/);
+    expect((await row()).systemState).toBe("in_progress");
+    await c.close();
+  });
+
+  it("shows an open owner sign-off on the owner lane even when the ticket is not in review", async () => {
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.co.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", dedupeKey: "k1", context: { type: "risk_review", ticketId: ctx.ticketId, reviewer: "Senior Developer" } }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: ctx.ticketId, blockerDecisionId: d!.id });
+    const projectId = (await row()).projectId;
+    await ctx.db.insert(workflowColumns).values({ projectId, name: "In progress", systemState: "in_progress", position: 0 });
+    const board = await ctx.work.board(projectId);
+    expect(board.columns.flatMap((c) => c.tickets).find((x) => x.id === ctx.ticketId)?.waitingOnOwner).toBe(true);
+  });
+
   it("still works without expected_version, and agents are shown the version", async () => {
     const c = await agent();
+    const [blocker] = await ctx.db.insert(tickets).values({ companyId: ctx.co.company.id, projectId: (await row()).projectId, title: "Other", systemState: "in_progress" }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: ctx.ticketId, blockerTicketId: blocker!.id });
     expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "blocked", summary: "Waiting on a key." } }))).toMatch(/now blocked/);
     expect((await row()).version).toBe(2);
     expect(textOf(await c.callTool({ name: "tickets", arguments: { action: "read", ticketId: ctx.ticketId } }))).toContain("Version: 2");

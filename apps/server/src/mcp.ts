@@ -11,7 +11,7 @@ import { z } from "zod";
 import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
@@ -329,7 +329,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "ticket_reply",
     {
-      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. Ask the owner only after you have tried every way to do it yourself. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
       inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000) },
     },
     async ({ ticketId, text: body }) => {
@@ -1275,7 +1275,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
     },
     async ({ ticketId, state, outcome, expected_version, summary }) => {
@@ -1311,6 +1311,10 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
       // tickets are marked "no code" and are not held to this.
       if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
+      // A ticket waiting on the owner has to show in their Your review lane, which it only does through an open decision.
+      if (state === "blocked" && !(await hasOpenBlocker(db, ticketId))) {
+        return fail("A blocked ticket must be waiting on something the board can see. If you need the owner (to run something, answer or sign off), call raise_decision with blocksTicketId set to this ticket: it blocks the ticket and puts the ask in their Your review lane. A note in the summary or ticket_reply does not reach them. If you are waiting on another ticket, make this one a sub-task of it; for CI or an outside service, use schedule_check instead.");
+      }
       // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
       const [col] = await db
         .select({ id: workflowColumns.id })
@@ -1346,6 +1350,23 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     },
   );
 
+}
+
+/** True when something open holds the ticket: an unanswered decision, an unfinished blocker ticket or an engagement. */
+async function hasOpenBlocker(db: Db, ticketId: string) {
+  const deps = await db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, ticketId));
+  for (const d of deps) {
+    if (d.blockerEngagementId) return true;
+    if (d.blockerDecisionId) {
+      const [x] = await db.select({ s: decisionsTable.status }).from(decisionsTable).where(eq(decisionsTable.id, d.blockerDecisionId));
+      if (x?.s === "open") return true;
+    }
+    if (d.blockerTicketId) {
+      const [x] = await db.select({ s: tickets.systemState }).from(tickets).where(eq(tickets.id, d.blockerTicketId));
+      if (x && x.s !== "done") return true;
+    }
+  }
+  return false;
 }
 
 async function managerIn(db: Db, scope: Scope) {
