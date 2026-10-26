@@ -16,7 +16,7 @@ export { TREE_REASON };
 import { record } from "./activity.js";
 import { monthStartUtc, projectSpendMicros } from "./project-spend.js";
 import { effectivePolicy } from "./review-policy.js";
-import { REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
+import { handOverReviews, REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
@@ -49,6 +49,10 @@ export type Limits = {
    */
   answerBatchMs: number;
   answerBatchMaxMs: number;
+  /** How long a review request waits for more reviews for the same reviewer. Short: they are already combined when requested. */
+  reviewBatchMs: number;
+  /** How long a review may wait behind its busy reviewer before another qualified reviewer can take it. */
+  reviewHandoverMs: number;
   /** The shorter wait for "unblocked" and "assigned" notices (R86). */
   quickBatchMs: number;
   /** Nudges one agent may send another in ten minutes (R86). */
@@ -81,7 +85,7 @@ const LOOP_EXCHANGES = 4;
 export const CARRY_ON_MS = 15 * 60_000;
 const CARRY_ON_NOTE = "Carry on where your last run stopped: the ticket is still in progress and you set no check";
 
-export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, nudgesPerPairPer10Min: 3 };
+export const DEFAULT_LIMITS: Limits = { instance: 8, company: 4, agent: 1, maxDepth: 8, selfWakesPer10Min: 5, ticketlessPerHour: 6, wikiBatchMs: 15 * 60_000, quotaHoldAt: 0.95, highPriority: 3, answerBatchMs: 2 * 60_000, answerBatchMaxMs: 5 * 60_000, quickBatchMs: 10_000, reviewBatchMs: 10_000, reviewHandoverMs: 10 * 60_000, nudgesPerPairPer10Min: 3 };
 
 export type WakeInput = {
   agentId: string;
@@ -754,7 +758,7 @@ export function schedulerService(
         if (live) return this.wake({ ...input, agentId, steerRunId: live.id });
       }
       // How long a reason waits for more of itself; 0 still joins a wake that is already waiting.
-      const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.answerBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs, [WIKI_REASON]: limits.wikiBatchMs } as Record<string, number>)[input.reason] ?? 0;
+      const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.reviewBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs, [WIKI_REASON]: limits.wikiBatchMs } as Record<string, number>)[input.reason] ?? 0;
       const [waiting] = await db
         .select()
         .from(wakes)
@@ -955,6 +959,16 @@ export function schedulerService(
         }
         const isChat = w.reason === CHAT_REASON;
         if (total >= limits.instance || (byCompany.get(w.companyId) ?? 0) >= limits.company || (isChat ? chatting.has(w.agentId) : (byAgent.get(w.agentId) ?? 0) >= limits.agent)) {
+          // A review stuck behind its busy reviewer goes to another qualified reviewer who is free.
+          const waited = t.getTime() - w.createdAt.getTime();
+          if (w.reason === REVIEW_REASON && (byAgent.get(w.agentId) ?? 0) >= limits.agent && waited >= limits.reviewHandoverMs) {
+            const left = await handOverReviews(db, w, (id) => (byAgent.get(id) ?? 0) >= limits.agent, (id, i) => self.notify(id, i), waited);
+            if (left === null) {
+              await db.update(wakes).set({ status: "dropped", statusReason: "handed to another reviewer" }).where(eq(wakes.id, w.id));
+              continue;
+            }
+            if (left !== w.note) await db.update(wakes).set({ note: left }).where(eq(wakes.id, w.id));
+          }
           await wait("at a concurrency limit");
           continue;
         }

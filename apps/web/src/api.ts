@@ -130,6 +130,8 @@ export type Ticket = {
   waitingDecisionId?: string | null;
   /** In review with no agent able to review it, so the owner approves it on the ticket. */
   noReviewer?: boolean;
+  /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */
+  reviewWait?: string | null;
   /** An open owner decision this ticket waits on, outside review sign-off. */
   ownerQuestion?: string | null;
   approvedBy?: string | null;

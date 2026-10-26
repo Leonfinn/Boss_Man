@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNull, or, ne } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { reviewWaits } from "./review-kinds.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export class WorkError extends Error {
@@ -183,6 +184,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
             .innerJoin(agents, eq(agents.id, runs.agentId))
             .where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
         : [];
+      const waits = await reviewWaits(db, inReview);
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
@@ -192,6 +194,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         waitingOnOwner: !!waitingDecisionId || unreviewed.has(t.id) || !!askedId,
         ownerQuestion: askedId ? questions.get(askedId)! : null,
         noReviewer: unreviewed.has(t.id),
+        reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,
         approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : null,
         featureTitle: t.featureId ? (featureTitle.get(t.featureId) ?? null) : null,
