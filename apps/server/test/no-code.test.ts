@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, tickets } from "../src/db/schema.js";
+import { activity, agents, reviewRequests, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { NOTHING_CHANGED } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
@@ -190,5 +190,37 @@ describe("a ticket that changed nothing", () => {
     await ctx.db.update(tickets).set({ systemState: "in_progress", assigneeAgentId: ctx.dev.id, branch: "bossman/x" }).where(eq(tickets.id, id));
     expect(await toReview(id)).not.toBe(NOTHING_CHANGED);
     expect((await row(id)).systemState).toBe("review");
+  });
+});
+
+describe("a no-code ticket in review", () => {
+  const toDone = async (id: string) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "QA check passed." } }));
+
+  it("the CEO or a manager can close it as done", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
+    ctx.diff.current = REAL;
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    await toDone(t.id);
+    expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
+  });
+
+  it("a worker is still told to ask the CEO or a manager", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
+    expect(await toDone(t.id)).toMatch(/ask your CEO or manager/);
+    expect((await row(t.id)).systemState).toBe("review");
+  });
+
+  it("gets a review requested when it moves to review", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true });
+    expect(await toReview(t.id)).toContain("is now review");
+    const rows = await ctx.db.select().from(reviewRequests).where(eq(reviewRequests.ticketId, t.id));
+    expect(rows.filter((r) => r.status === "pending")).toHaveLength(1);
+  });
+
+  it("shows in the owner's Your review lane when it has no open review", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
+    const board = (await ctx.req("GET", `/api/projects/${ctx.withRepo.id}/board`)).json() as { columns: Array<{ tickets: Array<{ id: string; waitingOnOwner?: boolean }> }> };
+    const card = board.columns.flatMap((c) => c.tickets).find((c) => c.id === t.id);
+    expect(card?.waitingOnOwner).toBe(true);
   });
 });

@@ -175,6 +175,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const unreviewed = new Set(
         (inReview.length ? await db.select({ ticketId: reviewRequests.ticketId }).from(reviewRequests).where(and(inArray(reviewRequests.ticketId, inReview), eq(reviewRequests.status, "pending"), isNull(reviewRequests.reviewerAgentId))) : []).map((r) => r.ticketId),
       );
+      // A ticket in review with no open review at all (none pending, no sign-off decision) has nobody to approve it, so it is the owner's too.
+      const pendingAny = new Set(
+        (inReview.length ? await db.select({ ticketId: reviewRequests.ticketId }).from(reviewRequests).where(and(inArray(reviewRequests.ticketId, inReview), eq(reviewRequests.status, "pending"))) : []).map((r) => r.ticketId),
+      );
+      for (const id of inReview) if (!pendingAny.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
       // Who is running on each ticket right now, so a card can show live work (chat runs don't count).
       const ids = rows.map((r) => r.t.id);
       const live = ids.length
