@@ -38,11 +38,11 @@ export const HIRE = "Hire";
 export const DONT_HIRE = "Don't hire";
 export const APPLY = "Apply the change";
 export const KEEP = "Keep them as they are";
-export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string };
+export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string; /** Tickets waiting for this hire; they go to the new agent once hired. */ forTickets?: string[] };
 
 type Notify = (n: { companyId: string; agentId: string | null; level: "note" | "flag"; title: string; body: string | null; link: string }) => Promise<unknown>;
 
-export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify } = {}) {
+export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify; assignPlanned?: (companyId: string, hired: AgentRow, ticketIds: string[]) => Promise<unknown> } = {}) {
   const now = opts.now ?? (() => new Date());
   const notify: Notify = opts.notify ?? (async () => undefined);
 
@@ -81,6 +81,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
       const job = p.title ?? tpl?.title ?? "agent";
       if ((await approvals(companyId)) === "nothing") {
         const hired = await this.hire(companyId, p, ceoId);
+        await opts.assignPlanned?.(companyId, hired, p.forTickets ?? []);
         await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO hired ${hired.name} (${job})`, body: p.reason ?? null, link: "#/agents" });
         return { hired };
       }
@@ -182,7 +183,11 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify 
     /** The owner's answer to a hire or instructions decision. */
     async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }, companyId: string, approved: boolean) {
       if (!approved) return null;
-      if (ctx.type === "hire") return this.hire(companyId, ctx.proposal, ctx.byAgentId);
+      if (ctx.type === "hire") {
+        const hired = await this.hire(companyId, ctx.proposal, ctx.byAgentId);
+        await opts.assignPlanned?.(companyId, hired, ctx.proposal.forTickets ?? []);
+        return hired;
+      }
       return this.update(ctx.agentId, { instructions: ctx.instructions }, ctx.byAgentId);
     },
 

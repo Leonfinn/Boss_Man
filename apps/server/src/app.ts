@@ -174,7 +174,18 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
-  const agentsSvc = agentsService(db, { now: opts.now, notify: (n) => notes.notify(n) });
+  const agentsSvc = agentsService(db, {
+    now: opts.now,
+    notify: (n) => notes.notify(n),
+    // Tickets the CEO planned for a hire go to them once hired; one already taken or finished is left alone.
+    assignPlanned: async (companyId, hired, ticketIds) => {
+      for (const id of ticketIds) {
+        const [t] = await db.select({ assignee: tickets.assigneeAgentId, state: tickets.systemState }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
+        if (!t || t.assignee || t.state === "done") continue;
+        await work.updateTicket(id, { assigneeAgentId: hired.id, stateNote: `Assigned to ${hired.name}: the hire was approved.` }).catch(() => undefined);
+      }
+    },
+  });
   const models = modelsService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const launch = launcherService(db, { runners, options: opts.launcher, fetch: opts.fetch });
   const rules = policyRulesService(db);
