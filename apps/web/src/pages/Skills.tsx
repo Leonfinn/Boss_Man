@@ -321,7 +321,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
           })}
         </div>
         <p className="muted" style={{ fontSize: 13, marginTop: 6 }}>
-          A skill that needs an add-on is left out of runs while the runner doesn't have it working, and you're told once. See Settings → Runner.
+          A skill that needs an add-on is left out of runs while the runner doesn't have it working, and you're told once. See Settings → Server and runner.
         </p>
       </fieldset>
 
