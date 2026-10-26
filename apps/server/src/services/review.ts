@@ -89,6 +89,8 @@ export function reviewService(
     gitHosts?: ReturnType<typeof gitHostService>;
     gitToken?: (companyId: string) => Promise<string | undefined>;
     notes?: Pick<ReturnType<typeof notificationsService>, "notify">;
+    /** False on a standby copy (blue/green): a merge cut off by the hand-over is left to the leader's sweep. */
+    isLeader?: () => boolean;
   },
 ) {
   let wake: NotifyHook | null = null;
@@ -396,6 +398,11 @@ export function reviewService(
         // The approval is already recorded, so nothing else would move the ticket: say so on it and ask the owner as well.
         const [t] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
         if (!t) throw err;
+        // Handed over mid-merge (a deploy swapped the server copies): the copy now in charge tries again by itself.
+        if (deps.isLeader && !deps.isLeader()) {
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `The merge was cut off when the server handed over (${err.message}); the server now in charge will try again.` });
+          throw err;
+        }
         await record(db, { companyId: t.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't run: ${err.message}` });
         await raiseMergeStuck(db, t, err.message);
         // Whoever approved still hears why, as before.

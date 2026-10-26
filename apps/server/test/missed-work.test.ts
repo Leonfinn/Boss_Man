@@ -3,8 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, eq, like } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, companies, decisions, objectives, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, companies, decisions, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { MISSED_REASON, REVIEW_REASON } from "../src/services/scheduler.js";
+import type { Leader } from "../src/leader.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -13,11 +14,11 @@ afterEach(async () => {
   await ctx.close();
 });
 
-async function setup() {
+async function setup(leader?: Leader) {
   const { db, close } = await openPglite();
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, workspaceRoot: "/ws", now: clock, leader });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -206,25 +207,50 @@ describe("stalled review sweep", () => {
 });
 
 describe("unmerged approvals sweep", () => {
-  it("asks the owner once about a ticket approved but never merged, and leaves one waiting on sign-off", async () => {
+  it("tries an interrupted merge once by itself, asks the owner once if that fails too, and leaves one waiting on sign-off", async () => {
     ctx = await setup();
-    const id = await ctx.forgotten("Ship it", { systemState: "review" });
-    await ctx.db.insert(reviewRequests).values({ ticketId: id, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved" });
+    const approve = (ticketId: string) => ctx.db.insert(reviewRequests).values({ ticketId, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved" });
+    // No repo: trying again simply closes it.
+    const plain = await ctx.forgotten("Ship it", { systemState: "review" });
+    await approve(plain);
+    // A repo, but the company's runner is offline: the retry fails, so the owner is asked.
+    const repo = await ctx.forgotten("Ship the API", { systemState: "review" });
+    const p2 = (await ctx.req("POST", `/api/companies/${ctx.company.id}/projects`, { name: "API" })).json() as { id: string };
+    await ctx.db.update(projects).set({ repoUrl: "https://github.com/Leonfinn/api.git" }).where(eq(projects.id, p2.id));
+    await ctx.db.update(tickets).set({ projectId: p2.id }).where(eq(tickets.id, repo));
+    await approve(repo);
     // Still pending somewhere: not this sweep's business.
     const waiting = await ctx.forgotten("Still reviewing", { systemState: "review" });
     await ctx.db.insert(reviewRequests).values({ ticketId: waiting, kind: "code", reviewerAgentId: ctx.worker.id, round: 1 });
     // Approved but waiting on the owner's sign-off.
     const signoff = await ctx.forgotten("Needs sign-off", { systemState: "review" });
-    await ctx.db.insert(reviewRequests).values({ ticketId: signoff, kind: "code", reviewerAgentId: ctx.worker.id, round: 1, status: "approved" });
+    await approve(signoff);
     const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", question: "Merge?", options: ["Approve and merge"], recommendedOption: "Approve and merge", context: { type: "risk_review", ticketId: signoff, reviewer: "x" } }).returning();
     await ctx.db.insert(ticketDependencies).values({ blockedTicketId: signoff, blockerDecisionId: d!.id });
 
-    expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 2 });
+    // The retry runs in the background.
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, plain)))[0]!.systemState).toBe("done");
     const asked = await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"));
     expect(asked).toHaveLength(1);
-    expect(asked[0]).toMatchObject({ dedupeKey: `merge-stuck:${id}`, options: ["Run the check again", "Send it back to the agent"] });
-    expect(asked[0]!.question).toContain('"Ship it" was approved, but its merge didn\'t finish');
-    // Asked once, not every pass.
+    expect(asked[0]).toMatchObject({ dedupeKey: `merge-stuck:${repo}`, options: ["Run the check again", "Send it back to the agent"] });
+    expect(asked[0]!.question).toContain('"Ship the API" was approved, but its merge didn\'t finish');
+    // Asked once, not every pass, and not retried again.
     expect(await ctx.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
   });
+
+  it("a server that handed over mid-merge leaves it to the one now in charge, without asking the owner", async () => {
+    let leading = true;
+    const leader: Leader = { role: () => (leading ? "leader" : "standby") as never, isLeader: () => leading, onPromote: () => {}, onDemote: () => {}, start: async () => {}, stop: async () => {}, demote: async () => {}, promote: async () => {} };
+    ctx = await setup(leader);
+    const id = await ctx.forgotten("Ship the API", { systemState: "review" });
+    const p2 = (await ctx.req("POST", `/api/companies/${ctx.company.id}/projects`, { name: "API" })).json() as { id: string };
+    await ctx.db.update(projects).set({ repoUrl: "https://github.com/Leonfinn/api.git" }).where(eq(projects.id, p2.id));
+    await ctx.db.update(tickets).set({ projectId: p2.id }).where(eq(tickets.id, id));
+    leading = false;
+    await expect(ctx.review.land(id, "Reviewer")).rejects.toThrow();
+    expect(await ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "merge-stuck:%"))).toHaveLength(0);
+  });
 });
+
