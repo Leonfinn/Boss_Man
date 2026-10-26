@@ -48,6 +48,11 @@ grep -q "compose up -d" "$FAKE_LOG" || { echo "FAIL: did not restart"; exit 1; }
 git reset -q --hard "$three"
 if PATH="$t/bin:$PATH" scripts/deploy.sh --no-runner --commit "$two" >/dev/null 2>&1; then echo "FAIL: went backwards"; exit 1; fi
 if scripts/deploy.sh --commit abc >/dev/null 2>&1; then echo "FAIL: short hash accepted"; exit 1; fi
+# With no BOSSMAN_BACKUP_DIR, backups and the status go to the install folder: the one holding the checkout.
+git reset -q --hard "$one"
+(unset BOSSMAN_BACKUP_DIR; PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null)
+grep -q "\"to_commit\":\"$two\"" "$t/deploy-status.json" || { echo "FAIL: default backup folder is not the install folder"; exit 1; }
+ls "$t"/bossman-*.sql.gz >/dev/null || { echo "FAIL: no backup in the install folder"; exit 1; }
 # A blue/green install is not deployed by this script.
 git reset -q --hard "$one"; : >"$FAKE_LOG"
 if COMPOSE_FILE=docker-compose.yml:deploy/truenas-bluegreen.yml PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >"$t/bg.out" 2>&1; then echo "FAIL: deploy.sh ran on a blue/green install"; exit 1; fi

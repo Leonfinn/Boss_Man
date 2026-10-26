@@ -33,12 +33,13 @@ In a second terminal, start the web UI. It opens on http://localhost:5173 and se
 pnpm dev:web
 ```
 
-Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite) under `apps/server/data/`. For a real install, use `docker compose up -d`: the server image includes the built UI on port 3100. Compose needs `POSTGRES_PASSWORD` in `.env`, the master key at `secrets/master.key` and a runner token file, which `docs/06-install-truenas.md` walks through. Runners are added with `--profile runners`, or started by the launcher with `--profile launcher`. On TrueNAS SCALE, follow [docs/06-install-truenas.md](docs/06-install-truenas.md).
+Without `DATABASE_URL` the server keeps its data in an embedded Postgres (PGlite) under `apps/server/data/`. For a real install, use `docker compose up -d`: the server image includes the built UI on port 3100. Compose needs `POSTGRES_PASSWORD` in `.env`, the master key at `secrets/master.key` and a runner token file, which `docs/06-install-truenas.md` walks through. Runners are added with `--profile runners`, or started by the launcher with `--profile launcher`. To install from scratch, follow [docs/00-first-time-install.md](docs/00-first-time-install.md); [docs/06-install-truenas.md](docs/06-install-truenas.md) is a fuller worked example on TrueNAS SCALE.
 
 ## Documents
 
 | Doc | What's in it |
 |---|---|
+| [docs/00-first-time-install.md](docs/00-first-time-install.md) | **Start here to install:** from an empty Linux host (or TrueNAS SCALE) to a company with an agent working its first ticket |
 | [docs/01-scope.md](docs/01-scope.md) | The problem, goals, non-goals and requirements, plus the v1, v1.1 and later scope |
 | [docs/02-architecture.md](docs/02-architecture.md) | Components, the runner model, the data model, the decision queue, engagements, budgets and secrets |
 | [docs/03-phased-plan.md](docs/03-phased-plan.md) | Spikes first, then the build phases to v1, and the plan for Boss Man to build itself |

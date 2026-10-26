@@ -12,7 +12,7 @@
 #   scripts/deploy.sh --rollback    put the previous commit back (code only, never the database)
 #
 # Settings (environment variables):
-#   BOSSMAN_BACKUP_DIR      where backups go            (/mnt/NVME_Apps/Container_files/boss-man)
+#   BOSSMAN_BACKUP_DIR      where backups go            (the install folder: the one holding this checkout)
 #   BOSSMAN_BACKUP_KEEP     how many backups to keep    (14)
 #   BOSSMAN_DEPLOY_STATUS   status file                 ($BOSSMAN_BACKUP_DIR/deploy-status.json)
 #   BOSSMAN_HEALTH_TIMEOUT  seconds to wait for health  (120)
@@ -21,7 +21,7 @@
 # image has none, so rollback uses the recorded commit (and a rebuild), not an image tag.
 set -euo pipefail
 
-BACKUP_DIR="${BOSSMAN_BACKUP_DIR:-/mnt/NVME_Apps/Container_files/boss-man}"
+BACKUP_DIR="${BOSSMAN_BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 KEEP="${BOSSMAN_BACKUP_KEEP:-14}"
 STATUS_FILE="${BOSSMAN_DEPLOY_STATUS:-$BACKUP_DIR/deploy-status.json}"
 PREV_FILE="${STATUS_FILE%.json}.previous-commit"

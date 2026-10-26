@@ -11,8 +11,10 @@
 #   scripts/rebuild-live.sh green      name it yourself
 set -euo pipefail
 cd "$(dirname "$0")/.."
-D="${BOSSMAN_DEPLOYER:-/mnt/NVME_Apps/Container_files/boss-man/deployer}"
-BACKUP_DIR="${BOSSMAN_BACKUP_DIR:-/mnt/NVME_Apps/Container_files/boss-man}"
+# Defaults follow the install layout: <install folder>/src (this checkout) and <install folder>/deployer.
+INSTALL_DIR="$(cd .. && pwd)"
+D="${BOSSMAN_DEPLOYER:-$INSTALL_DIR/deployer}"
+BACKUP_DIR="${BOSSMAN_BACKUP_DIR:-$INSTALL_DIR}"
 WAIT_SECONDS="${REBUILD_WAIT_SECONDS:-180}" POLL_SECONDS="${REBUILD_POLL_SECONDS:-3}"
 export BOSSMAN_DEPLOYER="$D"
 step() { printf '\n== %s\n' "$*"; }

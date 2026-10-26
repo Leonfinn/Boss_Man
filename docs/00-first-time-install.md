@@ -20,7 +20,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
-- **The address of Boss Man's git repo**, written `<repo-url>` below.
+- **Access to Boss Man's code** at [github.com/Leonfinn/Boss_Man](https://github.com/Leonfinn/Boss_Man). The repo is private, so ask its owner to add your host's deploy key (step 2).
 
 ## A note on commands
 
@@ -46,13 +46,7 @@ Set a shell variable for it. Replace the path if you chose another.
 B=/opt/boss-man
 ```
 
-Three of the repo's scripts have a built-in default folder that belongs to the author's own server. So tell them where yours is. Run this too:
-
-```sh
-export BOSSMAN_BACKUP_DIR=$B BOSSMAN_DEPLOYER=$B/deployer
-```
-
-**Run both lines again in every new shell**, before any `scripts/...` command. If you skip them, a script may try to write backups to a folder that doesn't exist on your host.
+Keep this layout: the code goes in `<install-dir>/src`, backups in `<install-dir>`, and the optional host deployer in `<install-dir>/deployer`. The update scripts work these folders out from where they sit, so you don't set any paths for them. If you open a new shell, set `B` again before using it in a command.
 
 Make the folder:
 
@@ -70,21 +64,7 @@ You should see the folder listed.
 
 ## 2. Get the code onto the host
 
-Clone it into `<install-dir>/src`:
-
-```sh
-git clone <repo-url> $B/src
-```
-
-Check it worked:
-
-```sh
-git -C $B/src log --oneline -1
-```
-
-You should see one commit line.
-
-**If the repo is private** (optional): GitHub doesn't accept account passwords for git, so use a **deploy key**: an SSH key for this one repo, read-only. It has no passphrase, so updates can run unattended. Use the SSH form of the address as `<repo-url>` (for GitHub, `git@github.com:<owner>/<repo>.git`).
+Boss Man's repo is private. The host reads it with a **deploy key**: an SSH key for this one repo, read-only. It has no passphrase, so updates can run unattended.
 
 Make the key:
 
@@ -98,12 +78,12 @@ Show the public half. It's safe to copy. Never copy the file without `.pub`.
 cat $B/deploy_key.pub
 ```
 
-In your repo's settings on GitHub, open Deploy keys, choose **Add deploy key**, paste the line, and leave **Allow write access** unticked.
+Send that line to the repo's owner. They add it at [github.com/Leonfinn/Boss_Man/settings/keys](https://github.com/Leonfinn/Boss_Man/settings/keys) with **Add deploy key**, leaving **Allow write access** unticked. (If you are the owner, do it yourself.)
 
-Clone with that key instead of the plain clone above:
+Clone it into `<install-dir>/src` with that key:
 
 ```sh
-GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" git clone <repo-url> $B/src
+GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" git clone git@github.com:Leonfinn/Boss_Man.git $B/src
 ```
 
 The first time, ssh asks whether to trust the host. Type `yes` only if the fingerprint matches the one the host publishes (for GitHub, its [SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) page).
@@ -113,6 +93,14 @@ Make later updates use the same key:
 ```sh
 git -C $B/src config core.sshCommand "ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts"
 ```
+
+Check it worked:
+
+```sh
+git -C $B/src log --oneline -1
+```
+
+You should see one commit line.
 
 If the clone hangs, outbound port 22 may be blocked on your network. The full version of this is [docs/06, step 2](06-install-truenas.md#2-get-the-code).
 
@@ -174,6 +162,7 @@ POSTGRES_PASSWORD=$(openssl rand -hex 24)
 BOSSMAN_BIND=<host-ip>
 BOSSMAN_HOST_PORT=3100
 BOSSMAN_INSECURE_COOKIES=1
+BOSSMAN_DEPLOYER=$B/deployer
 EOF
 ```
 
@@ -192,6 +181,7 @@ What the settings mean:
 - `BOSSMAN_BIND` publishes the web page on that address only. The default is `127.0.0.1`, which only the host itself can reach.
 - `BOSSMAN_HOST_PORT` is the port you type in the browser. The compose file's default is 3100. If something else uses it, pick another free port (see Troubleshooting).
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://` on your home network. Without it, login needs HTTPS.
+- `BOSSMAN_DEPLOYER` is the optional host deployer's folder (step 14). The runner update script and the deployer's compose files read it from here.
 
 Check the file:
 
@@ -342,7 +332,7 @@ Check it worked: a run appears under **Runs** within a minute or two and the tic
 
 ## 14. Updating later
 
-Run these in a shell where you have run the two lines from step 1 (`B=...` and the `export` line). The scripts read `BOSSMAN_BACKUP_DIR` and `BOSSMAN_DEPLOYER` from your shell.
+Set `B` first if this is a new shell (step 1).
 
 **The server and web page.** The deploy script backs up the database to `<install-dir>`, pulls the code, rebuilds, restarts, waits for the server to be healthy, and updates runners only if their code changed:
 
@@ -360,9 +350,9 @@ cd $B/src && scripts/update-runner.sh
 
 Follow it under **Settings > Server and runner**, in **Runner update**, which also has **Cancel the update**. The script asks Boss Man to drain through the folder in `BOSSMAN_DEPLOYER`. If that folder has no `inbox` (you haven't set up the host deployer), it tells you to start the swap in Boss Man with **Update runners (finish runs first)**. To undo, run `scripts/update-runner.sh --rollback`.
 
-**Deploy latest** is optional. It needs the host deployer, a root script run by a one-minute cron job. [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional) is a worked example, and its paths are the TrueNAS ones: use `<install-dir>/deployer` in their place. Make sure `BOSSMAN_DEPLOYER` and `BOSSMAN_BACKUP_DIR` are set for the cron job too, because `scripts/host-deployer.sh` has the same built-in default folder. Once it works, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates > Deploy latest** asks on demand. The **Updates** section only appears once the deployer is set up. The deployer refuses changes to files like `scripts/`, `deploy/`, compose files and Dockerfiles. Apply those by hand with `scripts/deploy.sh`.
+**Deploy latest** is optional. It needs the host deployer, a root script run by a one-minute cron job. [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional) is a worked example, and its paths are the TrueNAS ones: use `<install-dir>/deployer` in their place. Install the deployer's copy in `<install-dir>/deployer`: it uses the folder it sits in, and finds the code in `<install-dir>/src` beside it. Once it works, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates > Deploy latest** asks on demand. The **Updates** section only appears once the deployer is set up. The deployer refuses changes to files like `scripts/`, `deploy/`, compose files and Dockerfiles. Apply those by hand with `scripts/deploy.sh`.
 
-**The infra rebuild script.** `scripts/rebuild-live.sh` is only for the optional blue/green setup ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)), which needs Docker Compose 2.24 or newer. It rebuilds the live copy in place after a change the deployer refuses, and the page is down for about 20 to 30 seconds. It reads `BOSSMAN_DEPLOYER` and `BOSSMAN_BACKUP_DIR` too. On a plain install, use `scripts/deploy.sh` instead. How it all fits together: [docs/09-self-deploy.md](09-self-deploy.md).
+**The infra rebuild script.** `scripts/rebuild-live.sh` is only for the optional blue/green setup ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)), which needs Docker Compose 2.24 or newer. It rebuilds the live copy in place after a change the deployer refuses, and the page is down for about 20 to 30 seconds. On a plain install, use `scripts/deploy.sh` instead. How it all fits together: [docs/09-self-deploy.md](09-self-deploy.md).
 
 ## Troubleshooting
 

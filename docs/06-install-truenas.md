@@ -322,7 +322,7 @@ docker compose logs --tail 100 server
 scripts/deploy.sh
 ```
 
-It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to `/mnt/NVME_Apps/Container_files/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
+It stops if the working tree has uncommitted changes, if you are not on the default branch, or if there is nothing new (add `--force` to rebuild anyway). Backups go to the folder above the checkout, here `/mnt/NVME_Apps/Container_files/boss-man/bossman-YYYY-MM-DD-HHMM.sql.gz` (the newest 14 are kept; set `BOSSMAN_BACKUP_DIR` or `BOSSMAN_BACKUP_KEEP` to change that). The result of the last run is in `deploy-status.json` next to them. Useful options:
 
 - `--dry-run` shows the steps without running anything.
 - `--runner` / `--no-runner` force or skip the runner update. Updating runners builds the image and asks Boss Man to drain first (runs in progress finish); without the launcher it restarts them at once and cuts runs off. The script asks first (`--yes` skips the question).
