@@ -124,8 +124,14 @@ req server "$c3"
 host
 has "$D/outbox/status.json" "deployment files (docker-compose.yml)"
 [[ $(calls) == 1 ]] || fail "infra change was deployed"
-for p in deploy/x.yml scripts/deploy.sh apps/server/Dockerfile .github/workflows/ci.yml .env.example; do
-  echo "$p" | grep -Eq "$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='//; s/'\$//")" || fail "$p should count as infra"
+infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='//; s/'\$//")"
+not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
+for p in deploy/x.yml scripts/deploy.sh apps/server/Dockerfile .env.example; do
+  echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re" || fail "$p should count as infra"
+done
+# CI files and the Penpot add-on don't touch Boss Man's containers.
+for p in .github/workflows/ci.yml deploy/penpot.yml; do
+  echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re" && fail "$p should not count as infra"
 done
 
 # 7. Bad files: garbage, shell syntax in a field, a symlink, an oversized file. None run anything.

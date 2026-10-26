@@ -42,6 +42,12 @@ describe("explainCommand", () => {
     expect(explainCommand(write)).toMatchObject({ effect: "changes", summary: "Changes files (skills/penpot/scripts, skills/penpot/scripts/penpot.sh)." });
     expect(explainCommand("bash <<EOF\nrm -rf /\nEOF").summary).toBe("Runs a script written into the command (bash).");
     expect(explainCommand("if [ -f a ]; then frob a; else blat; fi").summary).toBe("Runs programs Boss Man doesn't recognise (frob, blat). Reads information.");
+    // A real QA command: x=$(cmd) names cmd, and a stray & ends a command (2>/usr/bin/&1 is "2>/usr/bin/ &" then "1").
+    const qa = `/usr/bin/sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" skills/penpot/scripts/penpot.test.sh > /tmp/opencode/pd2.sh && cd /tmp/opencode && /usr/bin/bash pd2.sh; rc=$?; dt=$(ls -dt /tmp/tmp.* | /usr/bin/head -1); echo rc=$rc; /usr/bin/cat "$dt/err" 2>/usr/bin/&1; /usr/bin/tail -4 "$dt/curl.log"`;
+    expect(explainCommand(qa).summary).toBe("Changes files (/tmp/opencode/pd2.sh, /usr/bin/). Runs programs Boss Man doesn't recognise (bash, 1). Reads information (/tmp/opencode, /tmp/tmp.*, $dt/curl.log).");
+    expect(explainCommand("x=$(rm -rf a)").effect).toBe("deletes");
+    expect(explainCommand("ls $(whoami)").effect).toBe("unknown");
+    expect(explainCommand("make 2>&1 && ls &>/dev/null").summary).toBe("Runs a program Boss Man doesn't recognise (make). Reads information.");
     expect(explainCommand("a; b; c; d; e; f").summary).toBe("Runs programs Boss Man doesn't recognise (a, b, c, d and 2 more).");
   });
 });

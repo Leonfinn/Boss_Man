@@ -42,7 +42,9 @@ if [[ -e $CONF ]]; then
   source "$CONF"
 fi
 INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/|\.github/|\.gitea/|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+# Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
+NOT_INFRA='^deploy/penpot\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
 RUNNER_PATHS='^(apps/runner/|apps/launcher/|packages/shared/|pnpm-lock\.yaml$)'
 
@@ -109,13 +111,13 @@ refresh_available() {
       tip="" # main is not a fast-forward of what runs: nothing can be offered
     fi
   fi
-  python3 -I - "$head" "$tip" "$commits" "$paths" "$INFRA" "$RUNNER_PATHS" "$(now)" >"$f.tmp" <<'PY'
+  python3 -I - "$head" "$tip" "$commits" "$paths" "$INFRA" "$NOT_INFRA" "$RUNNER_PATHS" "$(now)" >"$f.tmp" <<'PY'
 import json, re, sys
-head, tip, cf, pf, infra, runner, at = sys.argv[1:]
+head, tip, cf, pf, infra, notinfra, runner, at = sys.argv[1:]
 commits = [dict(zip(("sha", "subject"), l.rstrip("\n").split(" ", 1))) for l in open(cf) if l.strip()]
 paths = [l.rstrip("\n") for l in open(pf) if l.strip()]
 print(json.dumps({"version": 1, "checkedAt": at, "deployed": head, "tip": tip, "commits": commits,
-                  "paths": paths[:300], "infraPaths": [p for p in paths if re.search(infra, p)][:50],
+                  "paths": paths[:300], "infraPaths": [p for p in paths if re.search(infra, p) and not re.search(notinfra, p)][:50],
                   "runnerChanged": any(re.search(runner, p) for p in paths)}))
 PY
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
@@ -374,7 +376,7 @@ PY
     g cat-file -e "$COMMIT^{commit}" 2>/dev/null || finish rejected "Rejected: commit ${COMMIT:0:8} is not in the repository after fetching."
     g merge-base --is-ancestor "$head" "$COMMIT" || finish rejected "Rejected: ${COMMIT:0:8} is not a fast-forward of the deployed ${head:0:8}."
     local infra
-    infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | head -5 | paste -sd, - || true)"
+    infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } | head -5 | paste -sd, - || true)"
     [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand at the NAS: scripts/deploy.sh"
   fi
 
