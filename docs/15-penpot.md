@@ -13,7 +13,7 @@ root as its own Compose project with
 TrueNAS `-f` files). Never add `deploy/penpot.yml` to `COMPOSE_FILE`: its required variables
 would make every compose command on the host, including the deployer, fail. Registration is
 always off. To create the first accounts, do it straight away (while it is on, anyone on the
-LAN can sign up with any email): add `PENPOT_EXTRA_FLAGS=enable-registration` to `.env`, re-run
+LAN can sign up with any email): add `PENPOT_REGISTRATION=enable` to `.env`, re-run
 the command, register, then **delete that line** (do not set it to another value) and re-run so
 registration is off again. The admin console and the backend REPL are not deployed. The
 air-gapped setting is on, so there is no Google Fonts picker and no templates gallery, and the
