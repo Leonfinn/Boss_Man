@@ -7,7 +7,7 @@ import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
-import { useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
@@ -18,21 +18,27 @@ export function linked(text: string, wikiCompanyId?: string): ReactNode {
   const out: ReactNode[] = [];
   let at = 0;
   // [[slug]] and [[slug#Section]] link to the company's wiki page when the company is known.
-  for (const m of text.matchAll(/!\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)|\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
+  for (const m of text.matchAll(/(!?)\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)|\[([^\]]+)\]\((#\/[a-z]+\/[0-9a-f-]{36})\)|`?(#\/[a-z]+(?:\/[0-9a-f-]{36})?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
     // A pasted image shows as a thumbnail that opens full size.
-    if (m[2]) {
+    if (m[3]) {
       out.push(
         <Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>,
-        <a key={`i${m.index}`} href={m[2]} target="_blank" rel="noreferrer" className="msg-img">
-          <img src={m[2]} alt={m[1] || "image"} loading="lazy" />
-        </a>,
+        m[1] ? (
+          <a key={`i${m.index}`} href={m[3]} target="_blank" rel="noreferrer" className="msg-img">
+            <img src={m[3]} alt={m[2] || "image"} loading="lazy" />
+          </a>
+        ) : (
+          <a key={`f${m.index}`} href={m[3]} download className="file-chip">
+            {m[2]}
+          </a>
+        ),
       );
       at = m.index + m[0].length;
       continue;
     }
-    if (m[6] && !wikiCompanyId) continue;
-    const href = m[6] ? `#/wiki/${wikiCompanyId}/${m[6].trim()}` : (m[4] ?? m[5])!;
-    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[6] ? `${m[6].trim()}${m[7] ?? ""}` : (m[3] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2)))}</a>);
+    if (m[7] && !wikiCompanyId) continue;
+    const href = m[7] ? `#/wiki/${wikiCompanyId}/${m[7].trim()}` : (m[5] ?? m[6])!;
+    out.push(<Fragment key={`t${at}`}>{text.slice(at, m.index)}</Fragment>, <a key={`a${m.index}`} href={href}>{m[7] ? `${m[7].trim()}${m[8] ?? ""}` : (m[4] ?? (href.startsWith("#/tickets/") ? "task" : href.slice(2)))}</a>);
     at = m.index + m[0].length;
   }
   out.push(<Fragment key="end">{text.slice(at)}</Fragment>);
@@ -209,6 +215,9 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                   Send
                 </button>
               </form>
+              <div style={{ padding: "0 20px" }}>
+                <ImagePreviews text={text} onChange={setText} />
+              </div>
               {img.error && (
                 <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>
                   {img.error}

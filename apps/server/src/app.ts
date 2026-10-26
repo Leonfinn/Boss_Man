@@ -1204,8 +1204,8 @@ export async function buildApp(opts: AppOptions) {
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
     owner.get("/api/tickets/:id/images", async (req) => images.list(IdParam.parse(req.params).id));
-    // The owner pastes or picks an image (a task's description, a ticket message, a chat); it's put in the text as Markdown.
-    owner.post("/api/companies/:id/images", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
+    // The owner pastes or picks an image or file (a task's description, a ticket message, a chat); it's put in the text as Markdown.
+    owner.post("/api/companies/:id/images", { bodyLimit: 15 * 1024 * 1024 }, async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z.object({ data: z.string().min(1), name: z.string().max(200).optional(), ticketId: Uuid.optional() }).parse(req.body);
       try {
@@ -1217,7 +1217,11 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/ticket-images/:id", async (req, reply) => {
       const img = await images.get(IdParam.parse(req.params).id);
-      return img ? sendLogo(reply, img) : reply.code(404).send({ error: "not_found" });
+      if (!img) return reply.code(404).send({ error: "not_found" });
+      if (img.type.startsWith("image/")) return sendLogo(reply, img);
+      // Anything else is only ever downloaded, never shown in the page, so an uploaded HTML or SVG file can't run here.
+      const safe = img.name.replace(/[^\w.\- ]/g, "_");
+      return reply.type("application/octet-stream").header("x-content-type-options", "nosniff").header("content-disposition", `attachment; filename="${safe}"`).header("cache-control", "private, no-cache").send(img.bytes);
     });
 
     // The reviews a ticket needs, every round, newest first (review kinds).

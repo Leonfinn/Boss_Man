@@ -7,7 +7,7 @@ import { systemAuthor } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
-import { useImageAttach, withImage } from "./ImageAttach";
+import { ImagePreviews, useImageAttach, withImage } from "./ImageAttach";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
@@ -229,6 +229,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           onKeyDown={onKey}
           onPaste={img.onPaste}
         />
+        <ImagePreviews text={text} onChange={setText} />
         <div className="compose-actions">
           {img.button}
           <button className="btn primary" type="submit" disabled={!text.trim() || img.busy}>
