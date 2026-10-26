@@ -284,7 +284,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const longBody = (t.body?.split("\n").length ?? 0) > 8 || (t.body?.length ?? 0) > 800;
   // Plan first only matters before anyone starts; once work has begun it's history (R76).
   // Agent reviews still open (older rounds are settled), and what approving does, from the project's real landing setup.
-  const open = (reviews ?? []).filter((r) => r.status === "pending");
+  // A review with no reviewer is the owner's own (no agent could take it), so the page asks them directly.
+  const open = (reviews ?? []).filter((r) => r.status === "pending" && r.reviewer);
   const who = names(open);
   const repo = t.repoUrl?.replace(/\.git$/, "").split(/[/:]/).slice(-2).join("/");
   const approves = !t.repoUrl
