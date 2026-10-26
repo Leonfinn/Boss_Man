@@ -60,6 +60,13 @@ describe("acceptance criteria", () => {
     expect(rows).toEqual([{ criterion: "Migration is expand-only", verdict: "fail" }]);
   });
 
+  it("numbered verdicts are read in criteria order, mixed with worded ones, and out-of-range numbers are ignored", () => {
+    expect(readVerdicts(CRITERIA, "1 pass; 2 pass; 3 pass").map((r) => r.verdict)).toEqual(["pass", "pass", "pass"]);
+    expect(readVerdicts(CRITERIA, "C1 pass, C2 pass, C3 fail: leaks a token, but the rest is green").map((r) => r.verdict)).toEqual(["pass", "pass", "fail"]);
+    expect(readVerdicts(CRITERIA, "1 pass; Migration is expand-only: fail; Secrets are never logged: pass").map((r) => r.verdict)).toEqual(["pass", "fail", "pass"]);
+    expect(readVerdicts(CRITERIA, "0 pass; 4 pass; 99 fail; 2 fail").map((r) => r.verdict)).toEqual([null, "fail", null]);
+  });
+
   it("create_ticket accepts 1 to 10 criteria and refuses 11; the tickets tool shows them", async () => {
     const c = await agent(ctx.dev.id);
     const ten = Array.from({ length: 10 }, (_, i) => `criterion ${i + 1}`);
