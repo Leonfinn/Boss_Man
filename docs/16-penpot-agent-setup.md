@@ -12,3 +12,5 @@ You do this once, after Penpot is running (see [15-penpot.md](15-penpot.md)). No
 7. **Try it.** Make a ticket for one of those agents: "List the files in Penpot and attach a PNG of the first board." If the agent says it isn't set up, check steps 4 and 5. If export fails, check that the email and password secrets are right.
 
 **When the token expires or leaks:** in Penpot, delete the token under Your account > Access tokens, make a new one, and replace the secret's value in Boss Man.
+
+**If `PENPOT_PASSWORD` leaks:** in Penpot, signed in as the agent account, change its password (Your account > Password), then replace the secret's value in Boss Man. The password must be unique to that account and used nowhere else. Keep the account Viewer-only: unlike a token, a password gives control of the whole account.

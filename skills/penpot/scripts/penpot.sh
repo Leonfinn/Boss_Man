@@ -65,8 +65,8 @@ case "${1:-}" in
       case "$id" in ""|*[!0-9a-fA-F-]*) die "ids must be UUIDs, as printed by the boards command." ;; esac
     done
     hdr="$(mktemp)"; tmp="$(mktemp)"; trap 'rm -f "$hdr" "$tmp"' EXIT
-    code="$(jq -nc --arg e "$PENPOT_EMAIL" --arg p "$PENPOT_PASSWORD" '{email:$e,password:$p}' |
-      curl -sS -m 60 -D "$hdr" -o "$tmp" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' --data @- "$base/api/main/methods/login-with-password" 2>/dev/null)" || die "can't reach Penpot at $base."
+    code="$(jq -nc '{email:env.PENPOT_EMAIL,password:env.PENPOT_PASSWORD}' |
+      curl -sS -m 60 -D "$hdr" -o "$tmp" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' --data @- "$base/api/rpc/command/login-with-password" 2>/dev/null)" || die "can't reach Penpot at $base."
     [ "$code" = 200 ] || die "Penpot refused the agent account's email and password (HTTP $code). Ask the owner to check PENPOT_EMAIL and PENPOT_PASSWORD."
     session="$(tr -d '\r' <"$hdr" | sed -n 's/^[Ss]et-[Cc]ookie: auth-token=\([^;]*\).*/\1/p' | head -n1)"
     pid="$(jq -r '.id // empty' "$tmp")"
@@ -76,12 +76,17 @@ case "${1:-}" in
     code="$(cookie_curl -o "$tmp" -w '%{http_code}' -X POST -H 'Content-Type: application/transit+json' -H 'Accept: application/transit+json' --data "$body" "$base/api/export")" || die "can't reach Penpot's export service."
     [ "$code" = 200 ] || die "Penpot's export failed (HTTP $code): $(head -c 300 "$tmp"). Check the ids; tell the owner if it keeps failing."
     uri="$(jq -r '.["~:uri"]["~#uri"] // empty' "$tmp" 2>/dev/null)"
-    [ -n "$uri" ] || die "the export call worked but gave no image link. Tell the owner and use the fallback in SKILL.md."
-    case "$uri" in
-      "$base"/*) ;;
-      *) die "the export link points at another host; not sending the session there." ;;
+    [ -n "$uri" ] || die "the export call worked but gave no image link. Tell the owner."
+    # Take only the /assets/... path and fetch it from our own base, so a different spelling of Penpot's
+    # public address (hostname vs IP) still works and the session is never sent to another host.
+    path="/${uri#*://*/}"
+    case "$path" in
+      /assets/*) ;;
+      *) die "the export link is not a Penpot asset link; not sending the session there." ;;
     esac
-    cookie_curl -f -o "$out" "$uri" || { rm -f "$out"; die "could not download the exported image."; }
+    cookie_curl -f -o "$out" "$base$path" || { rm -f "$out"; die "could not download the exported image."; }
+    # Log out so the session doesn't stay alive in Penpot; a failure here doesn't matter.
+    cookie_curl -o /dev/null -X POST -H 'Content-Type: application/json' --data '{}' "$base/api/rpc/command/logout" || true
     [ "$(head -c 8 "$out" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ] || { rm -f "$out"; die "what came back was not a PNG."; }
     size="$(wc -c <"$out")"
     [ "$size" -le 5242880 ] || { rm -f "$out"; die "the PNG is over 5 MB, too big to attach. Export a smaller board."; }
