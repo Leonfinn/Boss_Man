@@ -106,6 +106,7 @@ refresh_available() {
   local head tip commits="$STATE/avail.commits" paths="$STATE/avail.paths"
   head="$(g rev-parse HEAD)"; tip="$(remote_tip)"
   [[ -n $tip ]] || { log "Could not read main from origin; will try again."; return 0; }
+  [[ $tip != "$(cat "$STATE/hold" 2>/dev/null)" ]] || tip="$head" # held after a manual rollback until main moves on
   : >"$commits"; : >"$paths"
   if [[ $tip != "$head" ]]; then
     g fetch --quiet origin main || { log "git fetch failed; will try again."; return 0; }
@@ -292,6 +293,9 @@ do_deploy_bluegreen() {
   fi
 
   printf 'old=%s new=%s deadline=%s commit=%s prev=%s\n' "$BG_LIVE" "$BG_IDLE" "$(($(date +%s) + SOAK_SECONDS))" "$COMMIT" "$BG_PREV" >"$STATE/soak"
+  # Kept after the soak ends: the only release a manual --rollback may go back to (colour, commit).
+  printf '%s %s\n' "$BG_LIVE" "$BG_PREV" >"$STATE/previous"
+  rm -f "$STATE/hold"
   BG_RESULT=deployed
   BG_MSG="Deployed ${BG_PREV:0:8} to ${COMMIT:0:8}: $BG_IDLE is live; $BG_LIVE stays up as a standby for $((SOAK_SECONDS / 60)) minutes, and the deployer switches back by itself if the checks fail."
 }
@@ -343,6 +347,10 @@ do_rollback_bluegreen() {
   wait_ready "server-$BG_IDLE" standby "" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby within ${BG_READY_SECONDS}s."; return 1; }
   body="$(probe "server-$BG_IDLE" 3100 /api/ready 2>/dev/null)" || body=""
   ocommit="$(jfield commit <<<"$body")"
+  [[ $ocommit =~ ^[0-9a-f]{40}$ ]] || ocommit=""
+  # The stopped colour holds the previous release only if the last swap that went live said so. A deploy that failed
+  # after its build leaves a rejected build in that image, and going "back" to it would be going forward to it.
+  [[ -n $ocommit && $(cat "$STATE/previous" 2>/dev/null) == "$BG_IDLE $ocommit" ]] || { pre_fail "$BG_IDLE does not hold the previous release (it reports '${ocommit:0:8}', expected the one recorded at the last successful swap). Nothing was changed."; return 1; }
   [[ $(probe "server-$BG_IDLE" 3100 /api/setup 2>/dev/null | jfield needsSetup) == False ]] || { pre_fail "The smoke test on $BG_IDLE failed (GET /api/setup)."; return 1; }
   log "Smoke test passed. Handing over: demote $BG_LIVE, promote $BG_IDLE (code ${ocommit:0:8})."
   compose kill -s USR1 "server-$BG_LIVE" >>"$LOG" 2>&1 || { pre_fail "Could not signal $BG_LIVE."; return 1; }
@@ -358,6 +366,8 @@ do_rollback_bluegreen() {
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.
   compose stop "server-$BG_LIVE" >>"$LOG" 2>&1 || log "Could not stop server-$BG_LIVE."
+  printf '%s\n' "$BG_PREV" >"$STATE/hold" # the release just rejected: refresh_available must not offer it again
+  rm -f "$STATE/previous"
   if [[ -n $ocommit ]] && g cat-file -e "$ocommit^{commit}" 2>/dev/null; then g reset --quiet --hard "$ocommit" || log "Could not move the checkout to ${ocommit:0:8}."; fi
   BG_RESULT=rolled_back
   BG_MSG="Rolled back to ${ocommit:0:8}: $BG_IDLE is live; $BG_LIVE is stopped. The database was not changed. Backup: $BG_BACKUP"

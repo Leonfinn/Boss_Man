@@ -9,10 +9,12 @@
 #   scripts/restore-test.sh --fresh-backup  take a new backup first (same command as deploy.sh), then test that one
 #
 # Settings: BOSSMAN_BACKUP_DIR (the install folder, the one holding this checkout).
-# Extra disk: the throwaway is a full copy of the data inside the same Postgres volume; the script prints its size.
+# Extra disk: the throwaway is a full copy of the data inside the same Postgres volume; the script refuses to start unless
+# the volume has at least twice the live database size free. It competes with the live app for disk I/O: run it at a quiet time.
 set -euo pipefail
 
 BACKUP_DIR="${BOSSMAN_BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+[[ -f docker-compose.yml ]] || { echo "ERROR: run this from the checkout (the folder with docker-compose.yml)." >&2; exit 1; }
 TEST_DB=bossman_restore_test # fixed: the only database this script ever creates or drops
 KEEP=0 FRESH=0 FILE=""
 for a in "$@"; do
@@ -29,7 +31,8 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 psql_db() { docker compose exec -T db psql -v ON_ERROR_STOP=1 -U bossman -d "$1" -tA "${@:2}"; }
 
 if ((FRESH)); then
-  FILE="$BACKUP_DIR/bossman-$(date +%F-%H%M%S)-restoretest.sql.gz"
+  # Named outside bossman-*.sql.gz on purpose: deploy backups are pruned to the newest 14 by that name, and a test must not push one out.
+  FILE="$BACKUP_DIR/restore-test-$(date +%F-%H%M%S).sql.gz"
   docker compose exec -T db pg_dump -U bossman bossman | gzip >"$FILE.partial" || { rm -f "$FILE.partial"; die "The backup failed."; }
   mv "$FILE.partial" "$FILE"
 fi
@@ -47,6 +50,11 @@ count() { psql_db "$1" -c "SELECT count(*) FROM $2" 2>/dev/null || echo "missing
 cleanup() { if ((!KEEP)); then psql_db postgres -c "DROP DATABASE IF EXISTS $TEST_DB" >/dev/null 2>&1 || say "Could not drop $TEST_DB; drop it by hand (see the wiki)."; fi; }
 trap cleanup EXIT
 
+# The throwaway is a full copy inside the live Postgres volume: refuse unless there is room for at least twice the live size.
+live_bytes="$(psql_db bossman -c "SELECT pg_database_size('bossman')")"
+free_bytes="$(docker compose exec -T db df -Pk /var/lib/postgresql/data | awk 'NR==2 { print $4 * 1024 }')"
+[[ $live_bytes =~ ^[0-9]+$ && $free_bytes =~ ^[0-9]+$ ]] || die "Could not read the database size or the free disk space; nothing was changed."
+((free_bytes >= 2 * live_bytes)) || die "Not enough free disk space on the database volume: $((free_bytes / 1048576)) MB free, need at least $((2 * live_bytes / 1048576)) MB (twice the live database). Nothing was changed."
 psql_db postgres -c "DROP DATABASE IF EXISTS $TEST_DB" -c "CREATE DATABASE $TEST_DB OWNER bossman" >/dev/null
 start=$SECONDS
 gunzip -c "$FILE" | docker compose exec -T db psql -v ON_ERROR_STOP=1 -q -U bossman -d "$TEST_DB" >/dev/null || die "The restore FAILED. The live database was not touched."

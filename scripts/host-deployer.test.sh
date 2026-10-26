@@ -248,7 +248,7 @@ order() { # log-file pattern...: each pattern must appear after the previous one
 reset_world() {  # live colour = $1, leading at commit $2
   local idle=green; [[ $1 == green ]] && idle=blue
   rm -rf "$W"; mkdir -p "$W"; touch "$W/running.proxy" "$W/running.$1"; echo leader >"$W/role.$1"; echo "$2" >"$W/commit.$1"
-  rm -rf "$D/proxy" "$D/state/soak"; mkdir -p "$D/proxy"; chmod 755 "$D/proxy"
+  rm -rf "$D/proxy" "$D/state/soak" "$D/state/previous" "$D/state/hold"; mkdir -p "$D/proxy"; chmod 755 "$D/proxy"
   printf '# x\n# Written by host-deployer.sh. Live colour: %s\n(active) {\n\treverse_proxy server-%s:{args[0]} {\n\t}\n}\n' "$1" "$1" >"$D/proxy/active.caddy"
   : >"$DL"; : >"$T/hook.out"; : >"$D/deployer.log"; echo "$idle" >/dev/null
 }
@@ -368,13 +368,27 @@ hasnt "$DL" "build"; hasnt "$DL" "migrate"; hasnt "$DL" "force-recreate"
 live_is blue; [[ $(cat "$W/role.blue") == leader && ! -e $W/running.green ]] || fail "world after manual rollback"
 [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not moved to the running code"
 has "$T/hook.out" '"result": "rolled_back"'
+# The rejected release is held (not offered again); a newer commit lifts the hold.
+[[ $(cat "$D/state/hold") == "$b6" && ! -e $D/state/previous ]] || fail "hold / previous not recorded after rollback"
+touch "$D/inbox/check"; bg
+[[ -z $(jget "$D/outbox/available.json" tip) ]] || fail "offered the rolled-back release again"
+b7="$(push apps/server/bg7)"; touch "$D/inbox/check"; bg
+[[ $(jget "$D/outbox/available.json" tip) == "$b7" ]] || fail "a newer commit was not offered"
 # No image to go back to: nothing is touched.
 reset_world green "$cur"; : >"$DL"; FAKE_NO_IMAGE=1 "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without an image should fail"
 hasnt "$DL" "signal"; hasnt "$DL" "pg_dump"; live_is green
 # The other colour fails the checks after the flip: reversed, still live on the original colour.
-reset_world green "$cur"; : >"$DL"; echo old >"$W/commit.blue"
+reset_world green "$cur"; : >"$DL"; echo "blue $cur" >"$D/state/previous"; echo "$cur" >"$W/commit.blue"
 FAKE_VERIFY_FAIL=blue BG_POLL_SECONDS=0 BG_READY_SECONDS=1 BG_HANDOVER_SECONDS=1 "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "a rollback whose checks fail must exit non-zero"
 live_is green; [[ $(cat "$W/role.green") == leader ]] || fail "original colour not restored"
+# A deploy that failed after its build left a different build in the stopped colour: refused, live untouched.
+reset_world green "$cur"; echo "blue $cur" >"$D/state/previous"; echo "$b6" >"$W/commit.blue"; : >"$DL"
+"$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback to an unrecorded build should fail"
+hasnt "$DL" "signal"; live_is green; [[ $(cat "$W/role.green") == leader ]] || fail "live colour touched by a refused rollback"
+# No record of a previous release at all: refused.
+reset_world green "$cur"; echo "$cur" >"$W/commit.blue"; : >"$DL"
+"$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without a recorded previous release should fail"
+hasnt "$DL" "signal"; live_is green
 # Not blue/green: refused.
 unset COMPOSE_FILE; "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without blue/green should fail"; has "$T/out" "does not use blue/green"
 export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
