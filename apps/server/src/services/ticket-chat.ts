@@ -2,6 +2,7 @@
 // hears: straight into its live run if there is one, otherwise as a new run on the ticket.
 // Agents answer with the ticket_reply tool, and each run's last message lands here too.
 import { and, asc, desc, eq, isNull, ne, or } from "drizzle-orm";
+import { systemAuthor } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, runs, ticketMessages, tickets } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
@@ -125,11 +126,11 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
 /** The ticket's recent conversation, oldest first, as lines for a run's prompt. */
 export async function conversationLines(db: Db, ticketId: string) {
   const rows = await db
-    .select({ author: ticketMessages.author, agent: agents.name, text: ticketMessages.text })
+    .select({ author: ticketMessages.author, agent: agents.name, text: ticketMessages.text, delivery: ticketMessages.delivery })
     .from(ticketMessages)
     .leftJoin(agents, eq(agents.id, ticketMessages.agentId))
     .where(eq(ticketMessages.ticketId, ticketId))
     .orderBy(desc(ticketMessages.createdAt))
     .limit(PROMPT_HISTORY);
-  return rows.reverse().map((m) => `${m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : "Boss Man"}: ${m.text.length > 1500 ? `${m.text.slice(0, 1500)}…` : m.text}`);
+  return rows.reverse().map((m) => `${m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : systemAuthor(m.delivery)}: ${m.text.length > 1500 ? `${m.text.slice(0, 1500)}…` : m.text}`);
 }

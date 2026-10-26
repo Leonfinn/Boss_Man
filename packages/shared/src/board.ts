@@ -52,3 +52,8 @@ export const TICKET_PREFIX = /^[A-Z0-9]{1,10}$/;
 export const defaultTicketPrefix = (name: string) => name.replace(/[^A-Za-z0-9]/g, "").slice(0, 3).toUpperCase() || "TKT";
 /** How a ticket is referred to, e.g. HOL-12; null for one without a number yet. */
 export const ticketRef = (prefix: string | null | undefined, number: number | null | undefined) => (number ? `${prefix || "T"}-${number}` : null);
+
+/** Who a system note on a ticket is from: Boss Man, or the tool it was imported from (delivery "from:<tool>"). */
+export function systemAuthor(delivery: string | null | undefined): string {
+  return delivery?.startsWith("from:") ? `${delivery.slice(5)} (imported)` : "Boss Man";
+}

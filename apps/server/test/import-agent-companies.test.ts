@@ -118,6 +118,8 @@ describe("Paperclip issues (docs/11, step 5)", () => {
     const by = (t: string) => tickets.find((x) => x.title === t);
     expect(by("Launch the site")).toMatchObject({ state: "in_progress", project: "site", body: "Ship it.\n\nImported from ACM-1" });
     expect(by("Launch the site").conversation.map((m: { author: string; agent: string | null; text: string }) => [m.author, m.agent, m.text])).toEqual([["agent", "boss", "On it."], ["owner", null, "Thanks."], ["system", null, "Status changed."]]);
+    // Paperclip's own notes keep saying where they came from, through export and back.
+    expect(by("Launch the site").conversation.map((m: { from?: string }) => m.from ?? null)).toEqual([null, null, "Paperclip"]);
     expect(by("Write the copy")).toMatchObject({ state: "done", outcome: "Cancelled in Paperclip.", parent: by("Launch the site").ref });
     expect(by("Loose idea")).toMatchObject({ state: "ready", project: "imported-tickets" });
     // Paperclip's numbers and prefix carry on, so ACM-2 still means the same ticket; new ones follow on.

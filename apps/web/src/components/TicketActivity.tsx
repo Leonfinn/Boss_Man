@@ -3,6 +3,7 @@
 // happens; finished runs fold their steps away. The box at the bottom talks to the agent: into
 // its live run (after the current turn, or interrupting it), or as a new run.
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { systemAuthor } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
@@ -32,7 +33,7 @@ export function splitDetails(text: string): { summary: string; details: string |
 function byline(m: Message) {
   if (m.author === "owner") return `You${m.agent ? ` to ${m.agent}` : ""}${m.delivery && DELIVERY[m.delivery] ? ` · ${DELIVERY[m.delivery]}` : ""}`;
   if (m.author === "agent") return `${m.agent ?? "An agent"}${m.delivery === "end_of_run" ? " · end of run" : ""}`;
-  return "Boss Man";
+  return systemAuthor(m.delivery);
 }
 
 /** A run's working: the agent's interim messages, tool calls, notes and errors. */
