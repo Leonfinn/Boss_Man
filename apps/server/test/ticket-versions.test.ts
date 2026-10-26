@@ -92,6 +92,18 @@ describe("ticket versions (R81)", () => {
     expect(board.columns.flatMap((c) => c.tickets).find((x) => x.id === ctx.ticketId)?.waitingOnOwner).toBe(true);
   });
 
+  it("lets a manager close a ticket in review whose branch is already merged, and refuses it when unmerged", async () => {
+    const c = await agent();
+    await ctx.db.update(projects).set({ repoUrl: "https://example.com/r.git" }).where(eq(projects.id, (await row()).projectId));
+    await ctx.db.update(tickets).set({ systemState: "review", branch: "bossman/x" }).where(eq(tickets.id, ctx.ticketId));
+    const args = { ticketId: ctx.ticketId, state: "done", summary: "Owner said close it; merged and approved." };
+    expect((await c.callTool({ name: "set_ticket_state", arguments: args })).isError).toBe(true);
+    await ctx.db.update(tickets).set({ mergeCommit: "fc350c8e" }).where(eq(tickets.id, ctx.ticketId));
+    expect((await c.callTool({ name: "set_ticket_state", arguments: args })).isError).toBeFalsy();
+    expect((await row()).systemState).toBe("done");
+    await c.close();
+  });
+
   it("still works without expected_version, and agents are shown the version", async () => {
     const c = await agent();
     const [blocker] = await ctx.db.insert(tickets).values({ companyId: ctx.co.company.id, projectId: (await row()).projectId, title: "Other", systemState: "in_progress" }).returning();

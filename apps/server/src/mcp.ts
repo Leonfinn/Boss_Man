@@ -1284,12 +1284,14 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
       if (state === "done") {
         const [t] = await db
-          .select({ repoUrl: projects.repoUrl })
+          .select({ repoUrl: projects.repoUrl, mergeCommit: tickets.mergeCommit })
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        // A ticket whose branch is already merged but stayed in review (e.g. waiting on the owner's yes) can be closed by a manager.
+        const merged = !!t?.mergeCommit && (await managerIn(db, scope));
         // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
-        if (t?.repoUrl && outcome !== "cancelled") {
+        if (t?.repoUrl && outcome !== "cancelled" && !merged) {
           const nothingOwn = await review.needsChanges(ticketId, scope.companyId).catch(() => false);
           if (!nothingOwn) return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
           if (!(await managerIn(db, scope))) return fail("This ticket has no changes of its own, so it can't be merged. If its change shipped on another ticket, ask your CEO or manager to close it (set_ticket_state done, naming that ticket in the summary).");
