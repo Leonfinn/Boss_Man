@@ -39,8 +39,8 @@ async function setup() {
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runner!, { seq: ++seq, at: new Date().toISOString(), event });
   const settle = () => new Promise((r) => setTimeout(r, 50));
-  const mcp = async (runId: string) => {
-    const token = await issueRunToken(db, { companyId: company.id, agentId: ceo.id, runId });
+  const mcp = async (runId: string, agentId: string = ceo.id) => {
+    const token = await issueRunToken(db, { companyId: company.id, agentId, runId });
     const c = new Client({ name: "test", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
@@ -77,6 +77,8 @@ describe("owner chat", () => {
     expect(start.prompt).toContain("Owner: Add rate limiting to the login API before the beta.\nOwner: And make it wait on the auth refactor.");
     // A substantial answer is filed in the wiki, so it outlives the chat.
     expect(start.prompt).toContain("also save it as a wiki page (Product/Analysis");
+    // Work it can't do here is offered as a ticket, not left at "I can't".
+    expect(start.prompt).toContain("don't stop at saying you can't. Offer to create the ticket that does it");
     expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ purpose: "chat", chapterId: null });
     // Only the CEO's own run made a chapter.
     expect((await c.db.select().from(ceoChapters)).length).toBe(1);
@@ -93,7 +95,7 @@ describe("owner chat", () => {
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_feature", "create_ticket", "features", "link_tickets", "log_feedback", "nudge", "propose_hire", "propose_rule", "propose_team", "roadmap", "set_milestone", "skills", "tickets", "update_instructions", "view_image", "whats_new", "wiki"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_feature", "create_ticket", "features", "link_tickets", "log_feedback", "nudge", "propose_hire", "propose_rule", "propose_team", "roadmap", "set_milestone", "set_ticket_state", "skills", "tickets", "update_instructions", "update_ticket", "view_image", "whats_new", "wiki"]);
     // The CEO can build the roadmap from chat too.
     expect(textOf(await client.callTool({ name: "roadmap", arguments: { action: "add_objective", title: "Grow search traffic", reason: "Owner asked in chat." } }))).toMatch(/^Added the objective "Grow search traffic"/);
     // It asks a colleague itself, rather than asking the owner to pass a message on.
@@ -116,6 +118,12 @@ describe("owner chat", () => {
     expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, rateId))).toEqual([expect.objectContaining({ blockerTicketId: authId })]);
     expect((await client.callTool({ name: "create_ticket", arguments: { title: "x", assignee: "Nobody" } })).isError).toBe(true);
     expect((await client.callTool({ name: "link_tickets", arguments: { ticketId: authId, waitsOnTicketId: rateId } })).isError).toBe(true);
+    // The CEO closes and reorganises tickets from chat; a worker asked in chat is told to offer a ticket instead.
+    expect(textOf(await client.callTool({ name: "update_ticket", arguments: { ticketId: rateId, title: "Rate-limit the login API", reason: "Owner asked in chat." } }))).toMatch(/updated/);
+    expect(textOf(await client.callTool({ name: "set_ticket_state", arguments: { ticketId: authId, state: "done", summary: "Shipped with the login work." } }))).toBe(`Ticket ${authId} is now done.`);
+    const asWorker = await c.mcp(start.runId, c.worker.id);
+    expect(textOf(await asWorker.callTool({ name: "set_ticket_state", arguments: { ticketId: rateId, state: "done", summary: "x" } }))).toMatch(/only your CEO or a manager can move tickets\. Offer the owner to create a ticket/);
+    await asWorker.close();
     await client.close();
 
     await c.emit({ type: "run.update", runId: start.runId, update: { kind: "agent_message", text: `Done: #/tickets/${rateId} "Rate-limit login", waiting on #/tickets/${authId}.` } });

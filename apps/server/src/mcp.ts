@@ -97,21 +97,8 @@ type Services = {
 function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
 
-  async function resolveProject(project?: string) {
-    const rows = await db.select().from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt)));
-    if (project) return rows.find((p) => p.id === project || p.name.toLowerCase() === project.toLowerCase()) ?? null;
-    return rows.length === 1 ? rows[0]! : null;
-  }
-
-  // A run woken with "tree stopped" may act only on the watched ticket and its sub-tasks; returns the refusal text, or null.
-  async function outsideTree(ticketId: string | undefined): Promise<string | null> {
-    const [w] = await db.select({ note: wakes.note }).from(wakes).where(and(eq(wakes.runId, scope.runId), eq(wakes.reason, TREE_REASON)));
-    if (!w) return null;
-    // Wakes for several trees of one watcher can merge, so the note may name more than one root.
-    const roots = [...(w.note ?? "").matchAll(TREE_ROOT_LINE)].map((m) => m[1]!);
-    const inside = roots.length && ticketId ? await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), or(inArray(tickets.id, roots), inArray(tickets.parentTicketId, roots)))) : [];
-    return inside.length ? null : "Refused: this run was woken to watch one task and its sub-tasks, and may only change those. That ticket is outside the tree.";
-  }
+  const resolveProject = (project?: string) => findProject(db, scope, project);
+  const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
 
   async function isManager() {
     const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
@@ -185,43 +172,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
 
   registerRoadmap(server, db, work, scope);
 
-  server.registerTool(
-    "update_ticket",
-    {
-      description:
-        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), or fix its title or description. Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
-      inputSchema: {
-        ticketId: z.string().uuid(),
-        project: z.string().min(1).optional(),
-        featureId: z.string().uuid().nullable().optional(),
-        parentTicketId: z.string().uuid().nullable().optional(),
-        title: z.string().trim().min(1).max(200).optional(),
-        body: z.string().max(10_000).optional(),
-        reason: z.string().trim().min(1).max(240),
-        expected_version: z.number().int().optional(),
-      },
-    },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, reason, expected_version }) => {
-      if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
-      const out = await outsideTree(ticketId);
-      if (out) return fail(out);
-      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title or body.");
-      const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-      if (!t) return fail("No ticket with that ID in your company.");
-      if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
-      const p = project !== undefined ? await resolveProject(project) : null;
-      if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
-      try {
-        const u = await work.updateTicket(ticketId, { ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}) });
-        const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it: ${reason}` });
-        return text(`Ticket ${ticketId} updated (version ${u.version}).`);
-      } catch (err) {
-        if (err instanceof WorkError) return fail(err.message);
-        throw err;
-      }
-    },
-  );
+  registerTicketMoves(server, db, { review, work, feedback }, scope, hooks, false);
 
   server.registerTool(
     "create_ticket",
@@ -309,78 +260,6 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id });
       return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
-    },
-  );
-
-  server.registerTool(
-    "set_ticket_state",
-    {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
-      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
-    },
-    async ({ ticketId, state, outcome, expected_version, summary }) => {
-      // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
-      if (state === "done") {
-        const [t] = await db
-          .select({ repoUrl: projects.repoUrl })
-          .from(tickets)
-          .innerJoin(projects, eq(projects.id, tickets.projectId))
-          .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-        // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
-        if (t?.repoUrl && outcome !== "cancelled") {
-          const nothingOwn = await review.needsChanges(ticketId, scope.companyId).catch(() => false);
-          if (!nothingOwn) return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
-          if (!(await managerIn(db, scope))) return fail("This ticket has no changes of its own, so it can't be merged. If its change shipped on another ticket, ask your CEO or manager to close it (set_ticket_state done, naming that ticket in the summary).");
-        }
-      }
-      if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
-      // With criteria on the ticket, moving to review is only allowed once the state note reports
-      // pass or fail for each of them; the refusal names the ones it can't find.
-      const [withCriteria] = await db
-        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote })
-        .from(tickets)
-        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-      if (!withCriteria) return fail("No ticket with that ID in your company.");
-      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
-      if (missing.length)
-        return fail(
-          `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again.`,
-        );
-      // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
-      // tickets are marked "no code" and are not held to this.
-      if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
-      // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
-      const [col] = await db
-        .select({ id: workflowColumns.id })
-        .from(workflowColumns)
-        .innerJoin(tickets, eq(tickets.projectId, workflowColumns.projectId))
-        .where(and(eq(tickets.id, ticketId), eq(workflowColumns.systemState, state)))
-        .orderBy(asc(workflowColumns.position))
-        .limit(1);
-      const at = new Date();
-      const rows = await db
-        .update(tickets)
-        // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
-        // The version is checked in the same statement, so a change between read and write can't slip through (R81).
-        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
-        .returning({ id: tickets.id });
-      if (!rows.length) {
-        const [now] = await db
-          .select({ state: tickets.systemState, version: tickets.version, changed: tickets.lastActivityAt, assignee: agents.name })
-          .from(tickets)
-          .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
-          .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-        if (!now) return fail("No ticket with that ID in your company.");
-        return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
-      }
-      await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}`, at });
-      const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
-      await feedback.syncFeature(moved?.featureId);
-      // Work that waited on this ticket can start; the wake carries this run's chain depth.
-      if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
-      if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
-      return text(`Ticket ${ticketId} is now ${state}.`);
     },
   );
 
@@ -1307,6 +1186,147 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
 }
 
 /** CEOs and managers: whether the run's agent is one. */
+async function findProject(db: Db, scope: Scope, project?: string) {
+  const rows = await db.select().from(projects).where(and(eq(projects.companyId, scope.companyId), isNull(projects.archivedAt)));
+  if (project) return rows.find((p) => p.id === project || p.name.toLowerCase() === project.toLowerCase()) ?? null;
+  return rows.length === 1 ? rows[0]! : null;
+}
+
+// A run woken with "tree stopped" may act only on the watched ticket and its sub-tasks; returns the refusal text, or null.
+async function treeRefusal(db: Db, scope: Scope, ticketId: string | undefined): Promise<string | null> {
+  const [w] = await db.select({ note: wakes.note }).from(wakes).where(and(eq(wakes.runId, scope.runId), eq(wakes.reason, TREE_REASON)));
+  if (!w) return null;
+  // Wakes for several trees of one watcher can merge, so the note may name more than one root.
+  const roots = [...(w.note ?? "").matchAll(TREE_ROOT_LINE)].map((m) => m[1]!);
+  const inside = roots.length && ticketId ? await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), or(inArray(tickets.id, roots), inArray(tickets.parentTicketId, roots)))) : [];
+  return inside.length ? null : "Refused: this run was woken to watch one task and its sub-tasks, and may only change those. That ticket is outside the tree.";
+}
+
+/**
+ * Moving and reorganising tickets, in ticket runs and the owner chat. In chat only the CEO and
+ * managers may: the owner asks them there to close or tidy work, and workers move their own
+ * tickets from the ticket's run.
+ */
+function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback }: Pick<Services, "review" | "work" | "feedback">, scope: Scope, hooks: McpHooks, chat: boolean) {
+  const isManager = () => managerIn(db, scope);
+  const resolveProject = (project?: string) => findProject(db, scope, project);
+  const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
+  const chatRefusal = async () => (chat && !(await isManager()) ? "In chat only your CEO or a manager can move tickets. Offer the owner to create a ticket for the work, or nudge your CEO." : null);
+
+  server.registerTool(
+    "update_ticket",
+    {
+      description:
+        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), or fix its title or description. Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
+      inputSchema: {
+        ticketId: z.string().uuid(),
+        project: z.string().min(1).optional(),
+        featureId: z.string().uuid().nullable().optional(),
+        parentTicketId: z.string().uuid().nullable().optional(),
+        title: z.string().trim().min(1).max(200).optional(),
+        body: z.string().max(10_000).optional(),
+        reason: z.string().trim().min(1).max(240),
+        expected_version: z.number().int().optional(),
+      },
+    },
+    async ({ ticketId, project, featureId, parentTicketId, title, body, reason, expected_version }) => {
+      if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
+      const out = await outsideTree(ticketId);
+      if (out) return fail(out);
+      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title or body.");
+      const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!t) return fail("No ticket with that ID in your company.");
+      if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
+      const p = project !== undefined ? await resolveProject(project) : null;
+      if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
+      try {
+        const u = await work.updateTicket(ticketId, { ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}) });
+        const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it: ${reason}` });
+        return text(`Ticket ${ticketId} updated (version ${u.version}).`);
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_ticket_state",
+    {
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
+    },
+    async ({ ticketId, state, outcome, expected_version, summary }) => {
+      const no = await chatRefusal();
+      if (no) return fail(no);
+      // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
+      if (state === "done") {
+        const [t] = await db
+          .select({ repoUrl: projects.repoUrl })
+          .from(tickets)
+          .innerJoin(projects, eq(projects.id, tickets.projectId))
+          .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
+        if (t?.repoUrl && outcome !== "cancelled") {
+          const nothingOwn = await review.needsChanges(ticketId, scope.companyId).catch(() => false);
+          if (!nothingOwn) return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
+          if (!(await managerIn(db, scope))) return fail("This ticket has no changes of its own, so it can't be merged. If its change shipped on another ticket, ask your CEO or manager to close it (set_ticket_state done, naming that ticket in the summary).");
+        }
+      }
+      if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
+      // With criteria on the ticket, moving to review is only allowed once the state note reports
+      // pass or fail for each of them; the refusal names the ones it can't find.
+      const [withCriteria] = await db
+        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote })
+        .from(tickets)
+        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+      if (!withCriteria) return fail("No ticket with that ID in your company.");
+      const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
+      if (missing.length)
+        return fail(
+          `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again.`,
+        );
+      // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
+      // tickets are marked "no code" and are not held to this.
+      if (state === "review" && (await review.needsChanges(ticketId, scope.companyId).catch(() => false))) return fail(NOTHING_CHANGED);
+      // The card moves to the project's first column for a new state, so the board matches; a note alone leaves it where it is.
+      const [col] = await db
+        .select({ id: workflowColumns.id })
+        .from(workflowColumns)
+        .innerJoin(tickets, eq(tickets.projectId, workflowColumns.projectId))
+        .where(and(eq(tickets.id, ticketId), eq(workflowColumns.systemState, state)))
+        .orderBy(asc(workflowColumns.position))
+        .limit(1);
+      const at = new Date();
+      const rows = await db
+        .update(tickets)
+        // One timestamp for both, so a fresh note isn't called out of date.
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
+        // The version is checked in the same statement, so a change between read and write can't slip through (R81).
+        .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
+        .returning({ id: tickets.id });
+      if (!rows.length) {
+        const [now] = await db
+          .select({ state: tickets.systemState, version: tickets.version, changed: tickets.lastActivityAt, assignee: agents.name })
+          .from(tickets)
+          .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+          .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        if (!now) return fail("No ticket with that ID in your company.");
+        return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
+      }
+      await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}`, at });
+      const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
+      await feedback.syncFeature(moved?.featureId);
+      // Work that waited on this ticket can start; the wake carries this run's chain depth.
+      if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
+      if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
+      return text(`Ticket ${ticketId} is now ${state}.`);
+    },
+  );
+
+}
+
 async function managerIn(db: Db, scope: Scope) {
   const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
   return me?.role === "ceo" || me?.role === "manager";
@@ -1495,8 +1515,9 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
 
   registerBoard(server, db, scope);
   registerRoadmap(server, db, work, scope);
+  registerTicketMoves(server, db, { review, work, feedback }, scope, hooks, true);
 
-  // So an agent asked in chat for something it can't do here (a ticket's state, say) asks the colleague who can, instead of the owner.
+  // So an agent asked in chat for something it can't do here asks the colleague who can, instead of the owner.
   server.registerTool("nudge", { description: NUDGE_DESCRIPTION, inputSchema: NUDGE_INPUT }, async ({ agent, ticketId, why }) => {
     if (!scope.agentId || !hooks.nudge) return fail("Only an agent's run can nudge.");
     const r = await hooks.nudge({ runId: scope.runId, fromAgentId: scope.agentId, to: agent, ticketId, why });
