@@ -11,10 +11,10 @@ import { z } from "zod";
 import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
-import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, tickets, wakes, workflowColumns } from "./db/schema.js";
+import { agents, companies, decisions as decisionsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
 import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
-import { TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
+import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
@@ -267,7 +267,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "attach_image",
     {
       description:
-        "Attach an image you saved while working, such as a test screenshot, to a ticket so the owner sees it on the ticket. Save it where you work (e.g. agent-browser screenshot shots/step-2.png) and give that path; PNG, JPEG or WebP up to 5 MB. The ticket can be its id or its reference (e.g. HOL-12). Add a caption saying what it shows. Don't commit screenshots to the repo.",
+        "Attach an image you saved while working, such as a test screenshot, to a ticket so the owner sees it on the ticket. Save it where you work (e.g. agent-browser screenshot shots/step-2.png) and give that path; PNG, JPEG or WebP up to 5 MB. The ticket can be its id or its reference (e.g. HOL-12). Add a caption saying what it shows. The reply gives the image's Markdown, ![caption](/api/ticket-images/ID): paste it into a wiki page (wiki write) and the owner sees the picture inline, so put a report's images in the page. Any ticket image can be used this way again, without re-uploading. Never commit images to the repo.",
       inputSchema: { ticketId: z.string().max(40), path: z.string().min(1).max(500), caption: z.string().max(500).optional() },
     },
     async ({ ticketId: given, path, caption }) => {
@@ -275,8 +275,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const ticketId = byRef ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), eq(tickets.number, Number(byRef[1])))))[0]?.id : given;
       if (!ticketId || !z.string().uuid().safeParse(ticketId).success) return fail(`No ticket ${given} in your company.`);
       try {
-        await images.attach(scope.companyId, { ticketId, path, caption, agentId: scope.agentId });
-        return text(`Attached ${path} to the ticket.`);
+        const id = await images.attach(scope.companyId, { ticketId, path, caption, agentId: scope.agentId });
+        return text(`Attached ${path} to the ticket. To show it in a wiki page, write: ${imageMarkdown(caption?.replace(/[\][()\n\r]/g, "") || path, id)}`);
       } catch (err) {
         if (err instanceof TicketImageError) return fail(err.message);
         throw err;
@@ -922,6 +922,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
       if (!row) return fail("No ticket with that ID in your company.");
       const made = await wiki.artifacts(ticketId);
       const talk = await conversationLines(db, ticketId);
+      const pics = await db.select({ id: ticketImages.id, name: ticketImages.name, caption: ticketImages.caption }).from(ticketImages).where(and(eq(ticketImages.ticketId, ticketId), eq(ticketImages.companyId, scope.companyId), sql`${ticketImages.type} like 'image/%'`)).orderBy(asc(ticketImages.createdAt));
       const t = row.t;
       const note = stateNoteLine(t, new Date());
       return text(
@@ -945,6 +946,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
           "## What it produced",
           ...(made.length ? made.map((m) => (m.kind === "wiki_page" ? `- wiki page ${m.slug} (read it with wiki read)` : m.kind === "url" ? `- link ${m.url}` : `- repo file ${m.path}${m.ref ? ` at ${m.ref}` : ""} (read it with tickets file)`)) : ["(nothing attached)"]),
           "",
+          ...(pics.length ? ["## Images (put one in a wiki page with the Markdown shown)", ...pics.map((i) => `- ${imageMarkdown((i.caption || i.name).replace(/[\][()\n\r]/g, ""), i.id)}`), ""] : []),
           "## Recent conversation",
           ...(talk.length ? talk : ["(none)"]),
         ].join("\n"),
@@ -1122,7 +1124,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     "wiki",
     {
       description:
-        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
+        "The company wiki: Markdown pages in nested folders, shared by the owner and agents. list (optional q to search; with q it returns the best matching sections with snippets, otherwise each page's slug and folder), read (slug; a page over 8000 characters comes back as an outline, then read one part with section=\"Heading\" or \"Parent > Heading\", or the text in parts with offset; offset=0 gives the whole text), write (title, body, folder such as \"Research/Competitors\" to file it, optional slug to update a page — a different folder moves it — and optional ticketId when it's a ticket's output) and attach (link a repo file — path and branch or commit as ref — or a web url to a ticket as its output). Put documents you produce (research, specs, reports, how-tos) in the wiki with the ticket's id, so the owner can read them from the ticket. A page shows pictures inline: attach each one to the ticket with attach_image (which gives the Markdown), or reuse one already on a ticket (tickets read lists its image ids), and put ![caption](/api/ticket-images/ID) in the page. Never commit images to the repo. Writing to an existing slug updates it; older versions are kept. Link pages with [[slug]] or [[slug#Section heading]]; reads show a page's links and what links to it.",
       inputSchema: {
         action: z.enum(["list", "read", "write", "attach"]),
         q: z.string().max(200).optional(),
