@@ -9,7 +9,7 @@ cat >"$t/bin/docker" <<'FAKE'
 echo "docker $*" >>"$FAKE_LOG"
 case "$1" in
   ps) [[ ${FAKE_RUNNING:-1} == 1 ]] && echo cid123 || true ;;
-  exec) echo "-- dump" ;;
+  exec) [[ ${2:-} == -* ]] && { echo "unknown flag $2" >&2; exit 125; }; echo "-- dump" ;;
   volume) exit 0 ;;
   inspect) echo postgres:15 ;;
   run) tar -C "$FAKE_VOL" -czf - . ;;

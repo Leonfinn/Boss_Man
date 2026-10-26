@@ -47,7 +47,7 @@ main() {
   work="$(mktemp -d "$BACKUP_DIR/.penpot-backup.XXXXXX")"
   trap '[[ -z $work ]] || rm -rf "$work"' EXIT
 
-  docker exec -T "$pg" pg_dump -U penpot penpot | gzip >"$work/penpot-db.sql.gz" || die "The database dump failed. Nothing was saved."
+  docker exec "$pg" pg_dump -U penpot penpot | gzip >"$work/penpot-db.sql.gz" || die "The database dump failed. Nothing was saved."
   { [[ -s $work/penpot-db.sql.gz ]] && gzip -t "$work/penpot-db.sql.gz"; } || die "The database dump is empty or damaged. Nothing was saved."
 
   # Read the assets through a throwaway container of the image Postgres already runs (it has

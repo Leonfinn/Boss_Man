@@ -51,7 +51,7 @@ Make a copy of `.env` called `.env.test` with `PENPOT_HOST_PORT=9101`, then:
 
 1. `export P=pp-test C="docker compose -p pp-test --env-file .env.test -f deploy/penpot.yml --profile penpot"`
 2. Unpack: `mkdir /tmp/pp && tar -C /tmp/pp -xf <backup folder>/penpot-<date>.tar`
-3. Start only the database: `$C up -d penpot-postgres`
+3. Create the volumes, then start only the database: `$C create && $C up -d penpot-postgres`
 4. Load it: `gunzip -c /tmp/pp/penpot-db.sql.gz | $C exec -T penpot-postgres psql -U penpot penpot`
 5. Load the files: `docker run --rm -v ${P}_penpot_assets:/assets -v /tmp/pp:/in:ro --entrypoint tar postgres:15 -C /assets -xzf /in/penpot-assets.tar.gz`
 6. Start the rest: `$C up -d`. Open `http://<PENPOT_BIND>:9101`, log in with an existing account and open a file.
