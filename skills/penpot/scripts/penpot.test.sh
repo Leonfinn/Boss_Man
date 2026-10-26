@@ -1,41 +1,42 @@
 #!/usr/bin/env bash
-# Checks penpot.sh with fake curl and jq: the ungranted-agent message, the missing-tools
-# message, and that the token never lands on a command line, in output or in the saved file.
+# Checks penpot.sh with a fake curl (and the real jq): the ungranted-agent message, the missing-tools
+# message, that the export logs in and sends a Transit body with the session cookie, and that the
+# token, password and session never land on a command line, in output or in the saved file.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 mkdir "$t/bin"
-cat >"$t/bin/jq" <<'FAKE'
-#!/usr/bin/env bash
-# Stand-in jq: -r '.uri // empty' prints the fake export result; -nc builds bodies (unused).
-[[ $1 == -r && $2 == *uri* ]] && { [[ ${FAKE_NO_URI:-} == 1 ]] || echo "$FAKE_EXPORT_URI"; }
-exit 0
-FAKE
 cat >"$t/bin/curl" <<'FAKE'
 #!/usr/bin/env bash
 echo "curl $*" >>"$FAKE_CURL_LOG"
-if [[ "$*" == *" -K -"* ]]; then # -K - reads the auth config from stdin; capture it to prove no argv token
-  echo "stdin: $(cat)" >>"$FAKE_CURL_LOG"
-fi
+stdin=""
+if [[ "$*" == *" -K -"* || "$*" == *"--data @-"* ]]; then stdin="$(cat)"; echo "stdin: $stdin" >>"$FAKE_CURL_LOG"; fi
 if [[ ${FAKE_HTTP_FAIL:-0} == 1 ]]; then exit 7; fi
-# Honour -o FILE and -w '%{http_code}' the way the script relies on.
-out=""; wc=""
+out=""; wc=""; dump=""
 a=("$@")
 for i in "${!a[@]}"; do
   [[ ${a[i]} == -o ]] && out="${a[i+1]:-}"
   [[ ${a[i]} == -w ]] && wc="${a[i+1]:-}"
+  [[ ${a[i]} == -D ]] && dump="${a[i+1]:-}"
 done
-body=""
-if [[ "$*" == *"/api/export"* ]]; then
-  [[ ${FAKE_NO_URI:-} == 1 ]] || body="$(printf '{"uri":"%s"}' "$FAKE_EXPORT_URI")"
+code=200; body=""
+if [[ "$*" == *"login-with-password"* ]]; then
+  [[ ${FAKE_LOGIN_FAIL:-} == 1 ]] && code=400
+  body='{"id":"11111111-1111-1111-1111-111111111111"}'
+  [[ -n $dump ]] && printf 'HTTP/1.1 200 OK\r\nSet-Cookie: auth-token=SESSIONVALUE9; Path=/; HttpOnly\r\n\r\n' >"$dump"
+elif [[ "$*" == *"/api/export"* ]]; then
+  [[ ${FAKE_NO_URI:-} == 1 ]] || body="$(printf '{"~:uri":{"~#uri":"%s"}}' "$FAKE_EXPORT_URI")"
+elif [[ "$*" == *"/api/rpc/command/"* ]]; then
+  body='{"fullname":"Agent"}'
 else
   body="$(printf '%b' "$FAKE_FILE_BYTES")"
 fi
 if [[ -n $out ]]; then printf '%s' "$body" >"$out"; else printf '%s' "$body"; fi
-if [[ -n $wc ]]; then printf '%s' 200; fi
+if [[ -n $wc ]]; then printf '%s' "$code"; fi
 FAKE
-chmod +x "$t/bin/jq" "$t/bin/curl"
-export PATH="$t/bin:$PATH" FAKE_CURL_LOG="$t/curl.log" FAKE_EXPORT_URI="$t/board.png" FAKE_FILE_BYTES=''
+chmod +x "$t/bin/curl"
+U="7dcd82a7-396d-80be-8008-d9d70fcdf1df"
+export PATH="$t/bin:$PATH" FAKE_CURL_LOG="$t/curl.log" FAKE_FILE_BYTES=''
 fail() { echo "FAIL: $*"; exit 1; }
 run() { bash "$here/penpot.sh" "$@" 2>"$t/err"; }
 
@@ -52,38 +53,55 @@ PATH="$t/empty" "$system_bash" "$here/penpot.sh" check >"$t/inner.out" 2>"$t/inn
 "$system_grep" -q "not installed here" "$t/inner.err" || fail "missing-tools case unclear"
 PATH="$oldPATH"
 
-# Granted: a token set but only ever used via stdin; it appears in no output or argv.
-export PENPOT_URL="http://10.9.9.9:9001" PENPOT_TOKEN="SUPERSECRET123" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'
-run export F P B "$t/board.png" >/dev/null
-[[ "$(grep -c 'header = "Authorization: Token SUPERSECRET123"' "$t/curl.log")" -ge 1 ]] || fail "no auth header reached curl"
-if grep -rqs 'SUPERSECRET123' "$t/err"; then fail "token printed in stderr"; fi
-# The token must not be visible in the process arguments: curl is called with -K -, no token on argv.
-if grep -q 'SUPERSECRET123' <(grep '^curl ' "$t/curl.log"); then fail "token on curl's command line"; fi
+# Token only ever goes in via stdin.
+export PENPOT_URL="http://10.9.9.9:9001" PENPOT_TOKEN="SUPERSECRET123"
+run check >/dev/null
+grep -q 'header = "Authorization: Token SUPERSECRET123"' "$t/curl.log" || fail "no auth header reached curl"
 
-# The saved file passes the PNG magic check.
+# Export without the login secrets: a plain message, no curl.
+: >"$t/curl.log"
+if run export $U $U $U "$t/board.png" >/dev/null; then fail "exported without a login"; fi
+grep -q "PENPOT_EMAIL and PENPOT_PASSWORD" "$t/err" || fail "no message about the login secrets"
+[[ ! -s $t/curl.log ]] || fail "called curl without a login"
+
+# Granted export: logs in, sends Transit with the session cookie, saves a PNG.
+export PENPOT_EMAIL="agent@penpot.local" PENPOT_PASSWORD="PWSECRET456" FAKE_EXPORT_URI="http://10.9.9.9:9001/assets/by-id/x" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'
+: >"$t/curl.log"
+run export $U $U $U "$t/board.png" >"$t/out"
+grep -q 'application/transit+json' "$t/curl.log" || fail "export not sent as Transit"
+grep -q '~:export-shapes' "$t/curl.log" || fail "no export-shapes command"
+grep -q 'header = "Cookie: auth-token=SESSIONVALUE9"' "$t/curl.log" || fail "session cookie not sent"
 [[ "$(head -c 8 "$t/board.png" | od -An -tx1 | tr -d ' \n')" == "89504e470d0a1a0a" ]] || fail "PNG magic not written"
+for s in SUPERSECRET123 PWSECRET456 SESSIONVALUE9; do
+  if grep -q "$s" <(grep '^curl ' "$t/curl.log"); then fail "$s on curl's command line"; fi
+  if grep -q "$s" "$t/err" "$t/out"; then fail "$s printed"; fi
+done
+
+# Wrong password.
+FAKE_LOGIN_FAIL=1 run export $U $U $U "$t/board.png" >/dev/null && fail "accepted a failed login"
+grep -q "refused the agent account" "$t/err" || fail "login failure unexplained"
+
+# Ids must be UUID-looking (they go into the Transit body).
+if run export 'x"y' $U $U "$t/board.png" >/dev/null; then fail "accepted a bad id"; fi
 
 # Not a PNG: the file is removed and the failure is explained.
 export FAKE_FILE_BYTES='\x00\x01\x02'
-if run export F P B "$t/board.png" >/dev/null; then fail "accepted a non-PNG"; fi
+if run export $U $U $U "$t/board.png" >/dev/null; then fail "accepted a non-PNG"; fi
 [[ ! -e $t/board.png ]] || fail "left the non-PNG file"
 
-# Exporter gave no uri: the fallback message for the owner.
+# Exporter gave no uri.
 export FAKE_NO_URI=1
-if run export F P B "$t/board.png" >/dev/null; then fail "accepted a missing uri"; fi
-grep -q "Per-board PNG export is not confirmed" "$t/err" || fail "no fallback message"
+if run export $U $U $U "$t/board.png" >/dev/null; then fail "accepted a missing uri"; fi
+grep -q "gave no image link" "$t/err" || fail "no fallback message"
+
+# Export link on another host: the session is never sent there.
+export FAKE_NO_URI=0 FAKE_EXPORT_URI="http://other.example/x.png" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'
+if run export $U $U $U "$t/board.png" >/dev/null; then fail "followed a foreign link"; fi
 
 # Unreachable Penpot: a plain error, no token leaked.
 export FAKE_HTTP_FAIL=1
 if run check >/dev/null; then fail "should fail when Penpot is down"; fi
 grep -q "can't reach Penpot" "$t/err" || fail "unreachable case not explained"
-if grep -rqs 'SUPERSECRET123' "$t/err"; then fail "token leaked when unreachable"; fi
-
-# The export uri points at another host: the download must go without the token.
-export FAKE_HTTP_FAIL=0 FAKE_NO_URI=0 PENPOT_URL="http://10.9.9.9:9001" FAKE_EXPORT_URI="http://other.example/x.png" FAKE_FILE_BYTES='\x89PNG\r\n\x1a\n12345'
-: >"$t/curl.log"
-run export F P B "$t/board.png" >/dev/null
-# Two calls (the export, then the download); only the export to our base carries the auth header.
-[[ "$(grep -c 'header = "Authorization: Token SUPERSECRET123"' "$t/curl.log")" == 1 ]] || fail "token sent to a foreign host on the download"
+if grep -q 'SUPERSECRET123' "$t/err"; then fail "token leaked when unreachable"; fi
 
 echo "penpot.test.sh: ok"
