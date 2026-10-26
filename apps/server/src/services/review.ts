@@ -42,6 +42,9 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
 }
 
 /** What the author hears when a ticket that needs code changes has none. */
+/** How long the server waits for the runner to merge or push an approved branch. */
+export const MERGE_WAIT_MS = 10 * 60_000;
+
 export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or mark the ticket as not needing code and say why.";
 
 /** The plain-words outcome of landing, for a non-developer. */
@@ -471,9 +474,12 @@ export function reviewService(
 
       // A pull request: the host must be known and reachable before anything is pushed (R59).
       const pr = landing === "pull_request" ? await prTarget(t.companyId, repoUrl, gitHost, gitApiBase) : null;
+      // The runner does one git job per repo at a time, so a merge can queue behind other agents' fetches and
+      // worktree set-ups before its own fetch and push; two minutes wasn't enough on a busy project. A merge
+      // that finishes after this is still safe: trying again finds the branch already merged.
       const m: MergeResult | PushResult = pr
-        ? await ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), 2 * 60_000)
-        : await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }), 2 * 60_000);
+        ? await ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS)
+        : await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }), MERGE_WAIT_MS);
       if (m.status === "uncommitted") {
         const tpl = (await templates(t.companyId)).commit;
         const delivered = await sendBack(`The review was approved, but these files aren't committed: ${m.files.join(", ")}. ${renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title })} Then move the ticket back to review.`, "commit");
