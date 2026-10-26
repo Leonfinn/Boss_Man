@@ -853,18 +853,24 @@ function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?
  * Tools every run has, chat included (R69, R71, R77): the wiki, the skill library, and reading
  * the company's tickets, so an agent can look things up instead of saying it can't see them.
  */
-/** Looking at an image the owner pasted or an agent attached, in every kind of run. */
+/** Opening a picture or file the owner attached, or a screenshot an agent attached, in every kind of run. */
 function registerViewImage(server: McpServer, images: Services["images"], scope: Scope) {
   server.registerTool(
-    "view_image",
+    "open_attachment",
     {
-      description: "Look at an image. Pictures the owner pastes into a task, a message or the chat appear in the text as ![name](/api/ticket-images/<id>); look at each one with this tool (pass the id) before you act on what it shows.",
-      inputSchema: { imageId: z.string().uuid() },
+      description: "Open something the owner attached. In a task, a message or the chat, a picture appears as ![name](/api/ticket-images/<id>) and a file as [📎 name](/api/ticket-images/<id>); open each one with this tool (pass the id) before you act on it. Pictures come back as images, text files as text, PDFs as a document.",
+      inputSchema: { id: z.string().uuid() },
     },
-    async ({ imageId }) => {
-      const img = await images.forCompany(imageId, scope.companyId);
-      if (!img) return fail("No image with that id in your company.");
-      return { content: [{ type: "image" as const, data: Buffer.from(img.bytes).toString("base64"), mimeType: img.type }, { type: "text" as const, text: img.caption ? `${img.name}: ${img.caption}` : img.name }] };
+    async ({ id }) => {
+      const a = await images.forCompany(id, scope.companyId);
+      if (!a) return fail("No attachment with that id in your company.");
+      const bytes = Buffer.from(a.bytes);
+      const label = a.caption ? `${a.name}: ${a.caption}` : a.name;
+      if (a.type.startsWith("image/")) return { content: [{ type: "image" as const, data: bytes.toString("base64"), mimeType: a.type }, { type: "text" as const, text: label }] };
+      // shortcut: long text is cut at 200,000 characters; page through it if owners attach bigger files.
+      if (a.type === "text/plain") return text(`${label}\n\n${bytes.toString("utf8").slice(0, 200_000)}`);
+      if (a.type === "application/pdf") return { content: [{ type: "resource" as const, resource: { uri: `bossman:attachment/${id}`, mimeType: a.type, blob: bytes.toString("base64") } }, { type: "text" as const, text: `${label} (PDF)` }] };
+      return text(`${label} is a ${a.type} file of ${bytes.length} bytes that can't be shown as text or a picture. Ask the owner what's in it, or for a PDF or text copy.`);
     },
   );
 }

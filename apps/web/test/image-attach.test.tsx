@@ -36,7 +36,7 @@ describe("pasting images", () => {
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("/api/companies/c1/images");
     expect(JSON.parse(String(init.body))).toMatchObject({ name: "image.png", ticketId: "t1", data: "iVBORw==" });
-    expect(screen.getByRole("button", { name: "Attach image" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeTruthy();
   });
 
   it("shows a thumbnail of each attached image under the box, and Remove takes it out of the text", () => {
@@ -47,6 +47,20 @@ describe("pasting images", () => {
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     expect(box.value).toBe("Look:\nThanks");
     expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  it("shows an attached file by name with Remove, and as a download link in a message", () => {
+    render(<Box />);
+    const box = screen.getByLabelText("text") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: `Spec:\n[📎 spec.pdf](/api/ticket-images/${ID})\n` } });
+    expect(screen.getByText("📎 spec.pdf")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(box.value).toBe("Spec:\n");
+    cleanup();
+    render(<p>{linked(`See [📎 spec.pdf](/api/ticket-images/${ID}).`)}</p>);
+    const link = screen.getByRole("link", { name: "📎 spec.pdf" });
+    expect(link.getAttribute("href")).toBe(`/api/ticket-images/${ID}`);
+    expect(link.hasAttribute("download")).toBe(true);
   });
 
   it("shows an image in a message as a thumbnail that opens full size", () => {
