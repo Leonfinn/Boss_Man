@@ -35,3 +35,7 @@ the backend and the databases are internal.
 data volumes), then delete `deploy/penpot.yml` and the `PENPOT_*` lines in `.env`. To also
 delete Penpot's data (irreversible): add `-v` to `down`, only after a backup. This only touches
 the `boss-man-penpot` project's containers and volumes; Boss Man is not affected. Backups: see the Penpot backup ticket (`scripts/backup-penpot.sh`, not yet built).
+
+## Agent access
+
+Agents read files and attach PNG exports of boards through the `penpot` skill (`skills/penpot`), using an access token kept as a Boss Man secret. Owner setup steps: [16-penpot-agent-setup.md](16-penpot-agent-setup.md).
