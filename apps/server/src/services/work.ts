@@ -163,6 +163,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           .filter((d) => (d.context as { type?: string }).type === "risk_review")
           .map((d) => [d.id, (d.context as { reviewer?: string }).reviewer ?? null] as const),
       );
+      // Any other open question for the owner that a ticket waits on (raise_decision with blocksTicketId, loop alerts).
+      const questions = new Map(
+        (decisionIds.length ? await db.select({ id: decisions.id, question: decisions.question }).from(decisions).where(and(inArray(decisions.id, decisionIds), eq(decisions.status, "open"), eq(decisions.tier, "owner"))) : [])
+          .filter((d) => !signoffs.has(d.id))
+          .map((d) => [d.id, d.question] as const),
+      );
       // A review no agent could take (the CEO did the work and nobody else can review it) waits on the owner too.
       const inReview = rows.filter((r) => r.t.systemState === "review").map((r) => r.t.id);
       const unreviewed = new Set(
@@ -180,9 +186,11 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
+        const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && questions.has(d.blockerDecisionId))?.blockerDecisionId ?? null);
         return {
         ...t,
-        waitingOnOwner: !!waitingDecisionId || unreviewed.has(t.id),
+        waitingOnOwner: !!waitingDecisionId || unreviewed.has(t.id) || !!askedId,
+        ownerQuestion: askedId ? questions.get(askedId)! : null,
         noReviewer: unreviewed.has(t.id),
         waitingDecisionId,
         approvedBy: waitingDecisionId ? signoffs.get(waitingDecisionId) ?? null : null,

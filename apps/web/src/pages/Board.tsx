@@ -375,14 +375,13 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     });
   const featureList = feats.data?.features ?? [];
   const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
-  // The review column is two lanes: agent review, and the tickets whose next step is the owner's sign-off.
+  // The review column is two lanes: agent review, and every ticket, from any column, whose next step is the owner's.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
-  const lanes = (board.data?.columns ?? []).flatMap((col) =>
-    col.systemState === "review"
-      ? [{ col, tickets: col.tickets.filter((t) => !t.waitingOnOwner), mine: false }, { col, tickets: col.tickets.filter((t) => t.waitingOnOwner), mine: true }]
-      : [{ col, tickets: col.tickets, mine: false }],
-  );
   const waiting = (board.data?.columns ?? []).flatMap((c) => c.tickets.filter((t) => t.waitingOnOwner));
+  const lanes = (board.data?.columns ?? []).flatMap((col) => {
+    const lane = { col, tickets: col.tickets.filter((t) => !t.waitingOnOwner), mine: false };
+    return col.systemState === "review" ? [lane, { col, tickets: waiting, mine: true }] : [lane];
+  });
   const rename = async (columnId: string, name: string) => {
     // The columns endpoint takes the whole list, so send every column with only this one renamed.
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
@@ -669,10 +668,10 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       <h3>
                         <a href={`#/tickets/${t.id}`}>{t.title}</a>
                       </h3>
-                      {mine && <span className="note">{t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`}</span>}
+                      {mine && <span className="note">{t.ownerQuestion ? `Waiting on your decision: ${t.ownerQuestion}` : t.noReviewer ? "No agent can review this. Open it to approve or send it back." : `${t.approvedBy ? `${t.approvedBy} approved.` : "Approved."} Needs your sign-off to merge.`}</span>}
                       {mine && (
-                        <a className="btn primary small" href={`#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
-                          Review and approve
+                        <a className="btn primary small" href={t.ownerQuestion ? "#/decisions" : `#/tickets/${t.id}`} style={{ justifyContent: "center" }}>
+                          {t.ownerQuestion ? "Answer in Decisions" : "Review and approve"}
                         </a>
                       )}
                       {t.planFirst && !t.planApprovedAt && <span className="tag blue" style={{ alignSelf: "flex-start" }}>{t.plan ? "Plan waiting" : "Planning"}</span>}

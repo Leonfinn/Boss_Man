@@ -134,7 +134,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "assign_ticket",
     {
       description:
-        "For CEOs and managers: hand one of your company's tickets to a colleague by name (ticketId, agent, note up to 240 characters saying why and what you expect). The colleague is woken to work on it and reads your note on the ticket. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
+        "For CEOs and managers: hand one of your company's tickets to a colleague by name (ticketId, agent, note up to 240 characters saying why and what you expect). The colleague is woken to work on it and reads your note on the ticket. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. In a project with a repo, a ticket becomes done by review and merge; the CEO or a manager can also set done on one with no changes of its own, when its change shipped on another ticket (name that ticket in the summary).",
       inputSchema: { ticketId: z.string().uuid(), agent: z.string().min(1), note: z.string().min(1).max(240), expected_version: z.number().int().optional() },
     },
     async ({ ticketId, agent, note, expected_version }) => {
@@ -326,7 +326,12 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
-        if (t?.repoUrl && outcome !== "cancelled") return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
+        // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
+        if (t?.repoUrl && outcome !== "cancelled") {
+          const nothingOwn = await review.needsChanges(ticketId, scope.companyId).catch(() => false);
+          if (!nothingOwn) return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
+          if (!(await managerIn(db, scope))) return fail("This ticket has no changes of its own, so it can't be merged. If its change shipped on another ticket, ask your CEO or manager to close it (set_ticket_state done, naming that ticket in the summary).");
+        }
       }
       if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
       // With criteria on the ticket, moving to review is only allowed once the state note reports
@@ -444,7 +449,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "ticket_reply",
     {
-      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For a decision you need from them, use raise_decision instead. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
+      description: "Write on a ticket's conversation, where the owner talks to the agents working it. Use it to answer the owner's messages there, or to tell them something about the ticket. Name a wiki page as [[slug]] so the owner can open it with one click. For anything you need the owner to decide or do (including closing a ticket you can't), use raise_decision with blocksTicketId instead: a reply doesn't reach their queue or the Your review lane on the board. The owner is not a developer: start with 1 to 3 plain sentences (what changed for them and whether they need to do anything), then a line \"Details:\" followed by the technical report (files, commits, tests).",
       inputSchema: { ticketId: z.string().uuid(), text: z.string().min(1).max(8000) },
     },
     async ({ ticketId, text: body }) => {

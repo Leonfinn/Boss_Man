@@ -103,6 +103,24 @@ describe("tickets waiting on the owner", () => {
     await req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Send it back" });
     expect(((await cards()) as typeof by).find((x) => x.title === "Needs you")?.waitingOnOwner).toBe(false);
   });
+
+  it("flags a ticket in any column that waits on an owner question, but not one the CEO is asked", async () => {
+    const { company: c } = await company("Ask Co");
+    const p = (await req("POST", `/api/companies/${c.id}/projects`, { name: "Site" })).json();
+    const asked = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "Close me", state: "blocked" })).json();
+    const ceoAsked = (await req("POST", `/api/projects/${p.id}/tickets`, { title: "CEO question", state: "blocked" })).json();
+    const [mine, theirs] = await t.db
+      .insert(decisions)
+      .values([
+        { companyId: c.id, kind: "approval", question: "Set HOL-182 to done?", options: ["Yes", "No"], recommendedOption: "Yes", tier: "owner" },
+        { companyId: c.id, kind: "approval", question: "Which first?", options: ["A", "B"], recommendedOption: "A", tier: "ceo" },
+      ])
+      .returning();
+    await t.db.insert(ticketDependencies).values([{ blockedTicketId: asked.id, blockerDecisionId: mine!.id }, { blockedTicketId: ceoAsked.id, blockerDecisionId: theirs!.id }]);
+    const cards = (await req("GET", `/api/projects/${p.id}/board`)).json().columns.flatMap((x: { tickets: unknown[] }) => x.tickets) as Array<{ title: string; waitingOnOwner: boolean; ownerQuestion: string | null }>;
+    expect(cards.find((x) => x.title === "Close me")).toMatchObject({ waitingOnOwner: true, ownerQuestion: "Set HOL-182 to done?" });
+    expect(cards.find((x) => x.title === "CEO question")).toMatchObject({ waitingOnOwner: false, ownerQuestion: null });
+  });
 });
 
 describe("objectives, milestones and due dates (R16)", () => {

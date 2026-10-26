@@ -130,6 +130,8 @@ export type Ticket = {
   waitingDecisionId?: string | null;
   /** In review with no agent able to review it, so the owner approves it on the ticket. */
   noReviewer?: boolean;
+  /** An open owner decision this ticket waits on, outside review sign-off. */
+  ownerQuestion?: string | null;
   approvedBy?: string | null;
 };
 export type TicketDetail = Ticket & { ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: string[]; noCode: boolean; stateNote: string | null };

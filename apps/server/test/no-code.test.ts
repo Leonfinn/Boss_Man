@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { tickets } from "../src/db/schema.js";
+import { agents, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { NOTHING_CHANGED } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
@@ -62,6 +62,29 @@ async function agent() {
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
 const row = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
 const toReview = async (id: string) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "review", summary: "Built it." } }));
+
+describe("a ticket whose change shipped on another ticket", () => {
+  const toDone = async (id: string) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "done", summary: "Shipped on HOL-375; live since 23 Oct." } }));
+
+  it("the CEO or a manager can close it; a worker is told to ask them", async () => {
+    const t = await ctx.ticket(ctx.withRepo.id);
+    expect(await toDone(t.id)).toMatch(/ask your CEO or manager to close it/);
+    expect((await row(t.id)).systemState).toBe("in_progress");
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    await toDone(t.id);
+    expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
+  });
+
+  it("not when the ticket has changes of its own, or the runner can't say", async () => {
+    await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
+    ctx.diff.current = REAL;
+    const t = await ctx.ticket(ctx.withRepo.id);
+    expect(await toDone(t.id)).toMatch(/move the ticket to "review" instead/);
+    ctx.diff.failing = true;
+    expect(await toDone(t.id)).toMatch(/move the ticket to "review" instead/);
+    expect((await row(t.id)).systemState).toBe("in_progress");
+  });
+});
 
 describe("a ticket that changed nothing", () => {
   it("a code ticket with an empty branch cannot reach review", async () => {
