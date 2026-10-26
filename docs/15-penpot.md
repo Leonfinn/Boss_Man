@@ -34,4 +34,29 @@ the backend and the databases are internal.
 `docker compose -p boss-man-penpot --env-file .env -f deploy/penpot.yml --profile penpot down` (keeps the
 data volumes), then delete `deploy/penpot.yml` and the `PENPOT_*` lines in `.env`. To also
 delete Penpot's data (irreversible): add `-v` to `down`, only after a backup. This only touches
-the `boss-man-penpot` project's containers and volumes; Boss Man is not affected. Backups: see the Penpot backup ticket (`scripts/backup-penpot.sh`, not yet built).
+the `boss-man-penpot` project's containers and volumes; Boss Man is not affected.
+
+## Back up and restore
+
+`scripts/backup-penpot.sh` (run as root on the host, e.g. from cron) writes
+`penpot-YYYY-MM-DD-HHMM.tar` into the same folder as Boss Man's `bossman-*.sql.gz` backups
+(`BOSSMAN_BACKUP_DIR`) and keeps the newest `BOSSMAN_BACKUP_KEEP` (14) of its own; it never
+deletes Boss Man's files. It holds `penpot-db.sql.gz` (Penpot's database) and
+`penpot-assets.tar.gz` (uploaded images and files). If Penpot isn't running it says so and
+exits 0. A second run in the same minute does nothing. `.env` is not in the archive: keep a
+private copy of `PENPOT_SECRET_KEY` and `PENPOT_DB_PASSWORD`.
+
+Restore to a throwaway copy first (another project name and port, so the live one is untouched).
+Make a copy of `.env` called `.env.test` with `PENPOT_HOST_PORT=9101`, then:
+
+1. `export P=pp-test C="docker compose -p pp-test --env-file .env.test -f deploy/penpot.yml --profile penpot"`
+2. Unpack: `mkdir /tmp/pp && tar -C /tmp/pp -xf <backup folder>/penpot-<date>.tar`
+3. Create the volumes, then start only the database: `$C create && $C up -d penpot-postgres`
+4. Load it: `gunzip -c /tmp/pp/penpot-db.sql.gz | $C exec -T penpot-postgres psql -U penpot penpot`
+5. Load the files: `docker run --rm -v ${P}_penpot_assets:/assets -v /tmp/pp:/in:ro --entrypoint tar postgres:15 -C /assets -xzf /in/penpot-assets.tar.gz`
+6. Start the rest: `$C up -d`. Open `http://<PENPOT_BIND>:9101`, log in with an existing account and open a file.
+7. Remove the copy: `$C down -v`, then `rm -r /tmp/pp .env.test`.
+
+To restore over the live Penpot: `down` (without `-v`), remove the `boss-man-penpot_penpot_postgres_v15`
+volume (only after the backup is confirmed good), then follow steps 2 to 6 with the real project
+name and `.env`.
