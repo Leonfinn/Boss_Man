@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef } from "@boss-man/shared";
+import { useImageAttach, withImage } from "../components/ImageAttach";
 import { art } from "../brand";
 import { RiskHelp, useRiskTiers, type RiskTiers } from "../components/RiskHelp";
 import { State } from "../components/State";
@@ -131,10 +132,11 @@ type NewFeatureInput = { title: string; description: string | null; planWithCeo:
 type Adding = { mode: "feature" | "task"; featureId: string };
 
 /** Add form: a new feature (the top-level card) or a new task, optionally part of a feature. */
-function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
+function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, onAddTask, onAddFeature, onGrill, onClose }: { companyId: string; initial: Adding; agents: Company["agents"]; features: Feature[]; goals: Tree; tiers: RiskTiers; hasCeo: boolean; onAddTask: (t: NewTicketInput) => Promise<unknown>; onAddFeature: (f: NewFeatureInput) => Promise<unknown>; onGrill: (d: { kind: "task" | "feature"; title: string; description: string | null }) => Promise<unknown>; onClose: () => void }) {
   const blank = { title: "", body: "", risk: "none" as Risk | "none", assignee: "", feature: initial.featureId, plan: hasCeo, goal: { objectiveId: null, milestoneId: null } as GoalLink, criteria: "" };
   const [mode, setMode] = useState(initial.mode);
   const [form, setForm] = useState(blank);
+  const img = useImageAttach(companyId, (md) => setForm((f) => ({ ...f, body: withImage(f.body, md) })));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const isFeature = mode === "feature";
@@ -207,8 +209,18 @@ function AddForm({ initial, agents, features, goals, tiers, hasCeo, onAddTask, o
           placeholder={isFeature ? "" : "What should be done, and what counts as finished."}
           value={form.body}
           onChange={(e) => setForm({ ...form, body: e.target.value })}
+          onPaste={img.onPaste}
           style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
         />
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {img.button}
+          <small className="muted">Or paste a screenshot into the description.</small>
+        </div>
+        {img.error && (
+          <p className="error" role="alert">
+            {img.error}
+          </p>
+        )}
       </div>
       {!isFeature && (
         <div className="field">
@@ -482,6 +494,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       {current && adding && (
         <AddForm
           key={adding.n}
+          companyId={current.companyId}
           initial={adding}
           agents={company?.agents ?? []}
           features={(feats.data?.features ?? []).filter((f) => f.status !== "declined")}

@@ -1,0 +1,1 @@
+ALTER TABLE "ticket_images" ALTER COLUMN "ticket_id" DROP NOT NULL;

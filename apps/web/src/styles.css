@@ -665,3 +665,7 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 0; font-size: 14px; align-items: baseline; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; overflow-wrap: anywhere; }
+
+/* Pasted images in messages and descriptions. */
+.msg-img { display: block; width: fit-content; margin: 6px 0; }
+.msg-img img, .md img { display: block; max-width: min(100%, 360px); max-height: 260px; border-radius: 6px; border: 1px solid var(--line); }

@@ -7,6 +7,7 @@ import { systemAuthor } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
+import { useImageAttach, withImage } from "./ImageAttach";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
@@ -115,6 +116,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
   const [text, setText] = useState("");
+  const img = useImageAttach(companyId, (md) => setText((t) => withImage(t, md)), ticketId);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   // "" is whoever is working the ticket; another agent (e.g. the CEO) can be asked about it instead.
   const [to, setTo] = useState("");
@@ -225,9 +227,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
+          onPaste={img.onPaste}
         />
         <div className="compose-actions">
-          <button className="btn primary" type="submit" disabled={!text.trim()}>
+          {img.button}
+          <button className="btn primary" type="submit" disabled={!text.trim() || img.busy}>
             Send
           </button>
           {live && (
@@ -242,6 +246,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           )}
         </div>
       </form>
+      {img.error && (
+        <p className="error" role="alert" style={{ padding: "0 18px 14px" }}>
+          {img.error}
+        </p>
+      )}
       {note && (
         <p className={note.ok ? "muted" : "error"} role={note.ok ? "status" : "alert"} style={{ padding: "0 18px 14px" }}>
           {note.text}

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
+import { useImageAttach, withImage } from "../components/ImageAttach";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
@@ -167,6 +168,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
+  const img = useImageAttach(t?.companyId, (md) => setDraft((d) => withImage(d ?? "", md)), id);
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
   const patch = async (body: Record<string, unknown>) => {
@@ -377,9 +379,16 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   placeholder="What should be done, and what counts as finished."
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
+                  onPaste={img.onPaste}
                   style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
                 />
+                {img.error && (
+                  <p className="error" role="alert">
+                    {img.error}
+                  </p>
+                )}
                 <div style={{ display: "flex", gap: 8 }}>
+                  {img.button}
                   <button type="button" className="btn primary" disabled={draft === (t.body ?? "")} onClick={() => void saveDraft()}>
                     Save description
                   </button>
