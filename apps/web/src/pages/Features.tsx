@@ -43,6 +43,81 @@ function Bar({ value, max, label }: { value: number; max: number; label: string 
   );
 }
 
+// Scores used only to illustrate the sum with the company's own weights.
+const EXAMPLE_SCORES = [4, 2, 5, 3, 1];
+const num = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
+
+/** The prioritisation sum in plain words, worked through with the company's own weights. */
+export function ScoreExplainer({ demandWeight, drivers }: { demandWeight: number; drivers: Array<{ name: string; weight: number }> }) {
+  const rows = [{ name: "Demand (no feedback yet)", weight: demandWeight, score: 0 }, ...drivers.filter((x) => x.weight > 0).map((x, i) => ({ name: x.name, weight: x.weight, score: EXAMPLE_SCORES[i % EXAMPLE_SCORES.length]! }))].filter((r) => r.weight > 0);
+  const top = rows.reduce((sum, r) => sum + r.score * r.weight, 0);
+  const bottom = rows.reduce((sum, r) => sum + r.weight, 0);
+  const value = bottom ? top / bottom : 0;
+  return (
+    <details className="explain" style={{ fontSize: 14 }}>
+      <summary style={{ cursor: "pointer", fontWeight: 600 }}>How the score is worked out</summary>
+      <ol style={{ margin: "8px 0", paddingLeft: 20, display: "flex", flexDirection: "column", gap: 6 }}>
+        <li>
+          <strong>Scores, each 0 to 5.</strong> Demand comes from the feedback linked to a feature (nice to have 1, important 2, critical 3; each customer counts once), scaled so your most wanted feature scores 5. Each criterion is scored 0 to 5 by you, the CEO or the product manager.
+        </li>
+        <li>
+          <strong>Value is a weighted average.</strong> Multiply each score by its weight, add those up, then divide by the total of the weights. Only the weights' sizes compared with each other matter: a weight of 4 counts twice as much as a weight of 2.
+        </li>
+        <li>
+          <strong>Priority is value for effort:</strong> value × 3 ÷ effort, where effort is 1 (tiny) to 5 (huge) and unsized counts as 3. Small work rises, big work sinks; priority runs from 0 to 15.
+        </li>
+      </ol>
+      {rows.length > 0 && (
+        <>
+          <p style={{ margin: "8px 0 4px" }}>An example with your weights, for a feature with no feedback yet:</p>
+          <div className="md-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Score for</th>
+                  <th>Score</th>
+                  <th>Weight</th>
+                  <th>Score × weight</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.name}>
+                    <td>{r.name}</td>
+                    <td>{r.score}</td>
+                    <td>{r.weight}</td>
+                    <td>{r.score * r.weight}</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td>
+                    <strong>Total</strong>
+                  </td>
+                  <td />
+                  <td>
+                    <strong>{bottom}</strong>
+                  </td>
+                  <td>
+                    <strong>{top}</strong>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p style={{ margin: "6px 0" }}>
+            Value = {top} ÷ {bottom} = <strong>{num(value)}</strong>. Sized as effort 2: priority = {num(value)} × 3 ÷ 2 = <strong>{num((value * 3) / 2)}</strong>. Unsized (effort 3): priority = <strong>{num(value)}</strong>.
+          </p>
+        </>
+      )}
+      <ul style={{ margin: "6px 0", paddingLeft: 20, display: "flex", flexDirection: "column", gap: 4 }}>
+        <li>A criterion that hasn't been scored on a feature is left out of both totals, so a missing score doesn't count as 0.</li>
+        <li>Demand always counts. With no feedback it adds 0 to the top but its weight to the bottom, which pulls value down; set its weight to 0 if you don't use feedback.</li>
+        <li>Each feature's page shows its own sum under its scores.</li>
+      </ul>
+    </details>
+  );
+}
+
 /** Criteria, demand weight, areas and CEO triage for a company. */
 function PrioritySettings({ companyId, onChanged }: { companyId: string; onChanged: () => void }) {
   const s = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `fs-${companyId}`);
@@ -60,6 +135,7 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
       <p className="muted" style={{ fontSize: 14 }}>
         Value is the weighted average of demand (the most wanted feature scores 5) and each criterion a feature has been scored on (0 to 5). Priority is value × 3 ÷ effort, so small work rises and big work sinks; unsized work counts as medium.
       </p>
+      <ScoreExplainer demandWeight={d.demandWeight} drivers={d.drivers} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
         <div className="field">
           <label htmlFor="demand-weight">Weight of demand</label>
@@ -126,6 +202,9 @@ function PrioritySettings({ companyId, onChanged }: { companyId: string; onChang
       </div>
       <div>
         <p className="label">Areas</p>
+        <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+          Labels for grouping features on this page, such as Calculators or Content. They don't change any score.
+        </p>
         <ul className="link-list">
           {d.areas.map((a) => (
             <li key={a.id}>
