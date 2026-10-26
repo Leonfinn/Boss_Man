@@ -70,6 +70,7 @@ case "${1:-}" in
     [ "$code" = 200 ] || die "Penpot refused the agent account's email and password (HTTP $code). Ask the owner to check PENPOT_EMAIL and PENPOT_PASSWORD."
     session="$(tr -d '\r' <"$hdr" | sed -n 's/^[Ss]et-[Cc]ookie: auth-token=\([^;]*\).*/\1/p' | head -n1)"
     pid="$(jq -r '.id // empty' "$tmp")"
+    case "$pid" in ""|*[!0-9a-fA-F-]*) die "logged in, but Penpot gave no usable profile id. Tell the owner." ;; esac
     [ -n "$session" ] && [ -n "$pid" ] || die "logged in, but Penpot gave no session. Tell the owner."
     cookie_curl() { printf 'header = "Cookie: auth-token=%s"\n' "$session" | curl -sS -K - -m 120 "$@" 2>/dev/null; }
     # End the session on every exit path (failures included); a failure here doesn't matter.

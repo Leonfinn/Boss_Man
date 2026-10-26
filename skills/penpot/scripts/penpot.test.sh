@@ -99,6 +99,7 @@ if run export $U $U $U "$t/board.png" >/dev/null; then fail "accepted a non-PNG"
 [[ ! -e $t/board.png ]] || fail "left the non-PNG file"
 
 # Exporter gave no uri.
+: >"$t/curl.log"
 export FAKE_NO_URI=1
 if run export $U $U $U "$t/board.png" >/dev/null; then fail "accepted a missing uri"; fi
 grep -q "gave no image link" "$t/err" || fail "no fallback message"
