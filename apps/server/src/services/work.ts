@@ -188,11 +188,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
-        const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && questions.has(d.blockerDecisionId))?.blockerDecisionId ?? null);
+        // A sign-off still open on a ticket no longer in review (moved, blocked) must not vanish from the owner's lane.
+        const askedId = t.systemState === "done" ? null : (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && (questions.has(d.blockerDecisionId) || (t.systemState !== "review" && signoffs.has(d.blockerDecisionId))))?.blockerDecisionId ?? null);
         return {
         ...t,
         waitingOnOwner: !!waitingDecisionId || unreviewed.has(t.id) || !!askedId,
-        ownerQuestion: askedId ? questions.get(askedId)! : null,
+        ownerQuestion: askedId ? (questions.get(askedId) ?? "Waiting for your sign-off.") : null,
         noReviewer: unreviewed.has(t.id),
         reviewWait: waits.get(t.id) ?? null,
         waitingDecisionId,
