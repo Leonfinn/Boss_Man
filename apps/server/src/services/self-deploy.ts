@@ -169,6 +169,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
     },
 
+    /** The "Build and update runners" button: rebuilds the runner image from what is deployed, e.g. after a deploy by hand. */
+    async updateRunners() {
+      if (!dir) return { error: "Self-deploy is not set up on this install." } as const;
+      const a = await available();
+      if (!a?.deployed) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
+      const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
+      const d = open ?? (await raise("runner", a.deployed, a.deployed, null, true));
+      return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
+    },
+
     /** What Settings shows. */
     async overview() {
       return { enabled: !!dir, status: await status(), available: await available(), pending: await pending() };

@@ -162,6 +162,19 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(await readdir(path.join(c.dir, "inbox"))).toContain("check");
   });
 
+  it("builds the runners from what is deployed, on request", async () => {
+    const c = (ctx = await setup());
+    await c.available({ deployed: B });
+    const r = await c.req("POST", "/api/self-deploy/update-runners");
+    expect(r.statusCode).toBe(200);
+    const [d] = await c.open();
+    expect(d).toMatchObject({ options: ["Update runners", "Not now"], context: { target: "runner", commit: B } });
+    // Pressing it again reuses the open question.
+    expect((await c.req("POST", "/api/self-deploy/update-runners")).json()).toEqual({ decisionId: d!.id });
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
+    expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
+  });
+
   it("is off without a deployer folder, and refuses a Deploy answer", async () => {
     const c = (ctx = await setup({ deployer: false }));
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: false, status: null });

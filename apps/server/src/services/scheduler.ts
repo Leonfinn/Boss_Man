@@ -495,6 +495,7 @@ export function schedulerService(
       "",
       "Look things up before saying you can't: tickets finds and reads any ticket in your company (what it produced, and files from its branch), and wiki reads the company's pages. If you can resolve something with your tools, do it rather than leaving a follow-up note.",
       "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it; a move to review, done or blocked needs a summary of up to 240 characters, which stays on the ticket for whoever reads it next); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help; nudge (a colleague by name, why, and the ticket if it's about one) to hand something to a colleague or ask them a question. Routine updates are not nudges: put them in ticket_reply or the ticket's state note.",
+      "Changes to the runner image (new tools in apps/runner/Dockerfile) go live when the owner clicks Settings → Server and runner → Updates → Build and update runners; ask them for that, not for commands on the host.",
       "Ending your turn does not move the ticket.",
       UNTRUSTED_NOTE,
     );

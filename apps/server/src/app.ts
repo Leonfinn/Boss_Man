@@ -1831,6 +1831,11 @@ export async function buildApp(opts: AppOptions) {
       return "error" in r ? reply.code(409).send({ error: "nothing_to_deploy", message: r.error }) : r;
     });
 
+    owner.post("/api/self-deploy/update-runners", async (_req, reply) => {
+      const r = await selfDeploy.updateRunners();
+      return "error" in r ? reply.code(409).send({ error: "cannot_update_runners", message: r.error }) : r;
+    });
+
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
 

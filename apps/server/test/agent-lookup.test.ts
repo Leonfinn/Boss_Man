@@ -68,10 +68,12 @@ describe("ticket images", () => {
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Test the calculator", assigneeAgentId: c.worker.id })).json() as { id: string };
     await c.scheduler.tick();
     const client = await c.mcp(c.starts()[0]!.runId);
-    expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: "APP-1", path: "shots/step-2.png", caption: "Leap year shows 28.1 days" } }))).toBe("Attached shots/step-2.png to the ticket.");
+    expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: "APP-1", path: "shots/step-2.png", caption: "Leap year shows 28.1 days" } }))).toMatch(/^Attached shots\/step-2\.png to the ticket\. To show it in a wiki page, write: !\[Leap year shows 28\.1 days\]\(\/api\/ticket-images\/[0-9a-f-]{36}\)$/);
     expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: t.id, path: "shots/fake.png" } }))).toBe("shots/fake.png isn't a PNG, JPEG or WebP image.");
     expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: t.id, path: "shots/missing.png" } }))).toContain("There's no shots/missing.png");
     expect(textOf(await client.callTool({ name: "attach_image", arguments: { ticketId: "APP-9", path: "shots/step-2.png" } }))).toBe("No ticket APP-9 in your company.");
+    // tickets read lists the image with the Markdown a wiki page uses.
+    expect(textOf(await client.callTool({ name: "tickets", arguments: { action: "read", ticketId: t.id } }))).toMatch(/## Images[^\n]*\n- !\[Leap year shows 28\.1 days\]\(\/api\/ticket-images\/[0-9a-f-]{36}\)/);
     await client.close();
 
     const list = (await c.req("GET", `/api/tickets/${t.id}/images`)).json() as Array<{ id: string; name: string; caption: string; size: number }>;
