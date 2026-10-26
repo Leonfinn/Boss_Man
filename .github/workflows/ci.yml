@@ -115,11 +115,13 @@ jobs:
           mkdir -p active
           printf '(active) {\n\treverse_proxy server-blue:{args[0]} {\n\t\thealth_uri {args[1]}\n\t}\n}\n' > active/active.caddy
           docker run --rm -v "$PWD/deploy/caddy:/etc/caddy:ro" -v "$PWD/active:/etc/caddy-active:ro" caddy:2.11.7 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-      - name: Shell script tests (deploy.sh and the host deployer)
+      - name: Shell script tests (deploy.sh, the host deployer, backup and Penpot)
         run: |
           sudo apt-get install -y shellcheck >/dev/null
-          shellcheck scripts/deploy.sh scripts/deploy.test.sh scripts/host-deployer.sh scripts/host-deployer.test.sh scripts/update-runner.sh scripts/update-runner.test.sh scripts/rebuild-live.sh scripts/rebuild-live.test.sh
+          shellcheck scripts/deploy.sh scripts/deploy.test.sh scripts/host-deployer.sh scripts/host-deployer.test.sh scripts/update-runner.sh scripts/update-runner.test.sh scripts/rebuild-live.sh scripts/rebuild-live.test.sh scripts/backup-penpot.sh scripts/backup-penpot.test.sh skills/penpot/scripts/penpot.sh skills/penpot/scripts/penpot.test.sh
           scripts/deploy.test.sh
           scripts/host-deployer.test.sh
           scripts/update-runner.test.sh
           scripts/rebuild-live.test.sh
+          scripts/backup-penpot.test.sh
+          skills/penpot/scripts/penpot.test.sh
