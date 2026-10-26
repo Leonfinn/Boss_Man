@@ -60,7 +60,8 @@ services:
     environment:
       <<: [*flags, *uri]
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
-    mem_limit: ${PENPOT_MEM_FRONTEND:-256m}
+    # nginx starts one worker per CPU thread; at 256m they were killed (signal 9) on a 16-thread host, which used ~450m.
+    mem_limit: ${PENPOT_MEM_FRONTEND:-1g}
 
   penpot-backend:
     <<: *common
