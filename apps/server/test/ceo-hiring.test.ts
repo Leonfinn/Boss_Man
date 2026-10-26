@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, notifications } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, projects, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -103,6 +103,66 @@ describe("the CEO builds the team (R62)", () => {
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Apply the change" });
     expect((await c.db.select().from(agents).where(eq(agents.id, c.worker.id)))[0]!.instructions).toBe("Pair with QA.");
     expect(await client.callTool({ name: "update_instructions", arguments: { agent: "Nobody", instructions: "x", reason: "y" } })).toMatchObject({ isError: true });
+    await client.close();
+  });
+});
+
+describe("the CEO assigns tickets, including to a planned hire", () => {
+  const make = async (c: Awaited<ReturnType<typeof setup>>, title: string, assigneeAgentId?: string) => {
+    const [pr] = await c.db.select().from(projects).where(eq(projects.companyId, c.company.id));
+    const p = pr ?? (await c.db.insert(projects).values({ companyId: c.company.id, name: "App" }).returning())[0]!;
+    await c.db.insert(tickets).values({ companyId: c.company.id, projectId: p.id, title, systemState: "ready", assigneeAgentId: assigneeAgentId ?? null });
+  };
+  const ticketOf = async (c: Awaited<ReturnType<typeof setup>>, title: string) => {
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.title, title));
+    return t!;
+  };
+
+  it("sets and clears a ticket's assignee with a reason in the activity log, for managers only", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    await make(c, "Fix login");
+    const t = await ticketOf(c, "Fix login");
+    expect(t.assigneeAgentId).toBeNull();
+
+    const set = await client.callTool({ name: "update_ticket", arguments: { ticketId: t.id, assignee: "Engineer", reason: "Engineer owns the login code" } });
+    expect(set).not.toHaveProperty("isError", true);
+    expect((await ticketOf(c, "Fix login")).assigneeAgentId).toBe(c.worker.id);
+    let log = (await c.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary);
+    expect(log).toContain("Assigned to Engineer");
+    expect(log.some((s) => s.includes("Engineer owns the login code"))).toBe(true);
+
+    expect(await client.callTool({ name: "update_ticket", arguments: { ticketId: t.id, assignee: "Nobody Here", reason: "r" } })).toMatchObject({ isError: true });
+
+    await client.callTool({ name: "update_ticket", arguments: { ticketId: t.id, assignee: null, reason: "Reassigning later" } });
+    expect((await ticketOf(c, "Fix login")).assigneeAgentId).toBeNull();
+    log = (await c.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary);
+    expect(log).toContain("Assigned to nobody");
+
+    const other = await c.mcp(c.worker.id);
+    expect(await other.callTool({ name: "update_ticket", arguments: { ticketId: t.id, assignee: "Engineer", reason: "r" } })).toMatchObject({ isError: true });
+    await other.close();
+    await client.close();
+  });
+
+  it("assigns tickets planned for a hire when the owner approves it, and leaves taken ones alone", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    await make(c, "Design the filter bar");
+    await make(c, "Already taken", c.worker.id);
+    const planned = await ticketOf(c, "Design the filter bar");
+    const taken = await ticketOf(c, "Already taken");
+
+    expect(await client.callTool({ name: "propose_hire", arguments: { name: "Dee", template: "scrum-master", reason: "r", forTickets: [randomUUID()] } })).toMatchObject({ isError: true });
+    const r = await client.callTool({ name: "propose_hire", arguments: { name: "Dee", template: "scrum-master", reason: "Needs a designer", forTickets: [planned.id, taken.id] } });
+    expect(textOf(r)).toMatch(/waiting for the owner's approval/);
+    expect((await ticketOf(c, "Design the filter bar")).assigneeAgentId).toBeNull();
+
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire" })).statusCode).toBeLessThan(300);
+    const [dee] = await c.db.select().from(agents).where(eq(agents.name, "Dee"));
+    expect((await ticketOf(c, "Design the filter bar")).assigneeAgentId).toBe(dee!.id);
+    expect((await ticketOf(c, "Already taken")).assigneeAgentId).toBe(c.worker.id);
     await client.close();
   });
 });

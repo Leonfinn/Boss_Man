@@ -997,7 +997,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
   server.registerTool(
     "propose_hire",
     {
-      description: `Hire a new agent for the company (CEO only). Start from a template (${AGENT_TEMPLATES.map((t) => `${t.id}: ${t.summary}`).join("; ")}), give it a name, and tailor its title and instructions to the company. Say why you're hiring. Unless the owner has said otherwise, the hire waits for their approval in Decisions. Use board to see who there is first.`,
+      description: `Hire a new agent for the company (CEO only). Start from a template (${AGENT_TEMPLATES.map((t) => `${t.id}: ${t.summary}`).join("; ")}), give it a name, and tailor its title and instructions to the company. Say why you're hiring. Pass forTickets (ticket ids) for tickets waiting for this person: they are assigned to them once the hire is approved. Unless the owner has said otherwise, the hire waits for their approval in Decisions. Use board to see who there is first.`,
       inputSchema: {
         name: z.string().trim().min(1).max(80),
         template: z.string().max(40).optional(),
@@ -1005,12 +1005,17 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
         instructions: z.string().trim().max(20_000).optional(),
         model: z.string().max(200).optional(),
         fundingSourceId: z.string().uuid().optional(),
+        forTickets: z.array(z.string().uuid()).max(20).optional(),
         reason: z.string().trim().min(1).max(2000),
       },
     },
     async (input) => {
       const ceo = await ceoOnly();
       if (!ceo) return fail("Only your company's CEO can hire.");
+      if (input.forTickets?.length) {
+        const found = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), inArray(tickets.id, input.forTickets)));
+        if (found.length !== new Set(input.forTickets).size) return fail("One of forTickets is not a ticket in your company.");
+      }
       try {
         const r = await team.proposeHire(scope.companyId, ceo, input);
         return text("hired" in r ? `${r.hired.name} is hired (agent ${r.hired.id}); give them work with create_ticket.` : `The hire is waiting for the owner's approval (decision ${r.decisionId}).`);
@@ -1223,7 +1228,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     "update_ticket",
     {
       description:
-        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), or fix its title or description. Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
+        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
       inputSchema: {
         ticketId: z.string().uuid(),
         project: z.string().min(1).optional(),
@@ -1231,22 +1236,31 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         parentTicketId: z.string().uuid().nullable().optional(),
         title: z.string().trim().min(1).max(200).optional(),
         body: z.string().max(10_000).optional(),
+        assignee: z.string().min(1).nullable().optional(),
         reason: z.string().trim().min(1).max(240),
         expected_version: z.number().int().optional(),
       },
     },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, reason, expected_version }) => {
+    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, reason, expected_version }) => {
       if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
-      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title or body.");
+      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body or assignee.");
       const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
       const p = project !== undefined ? await resolveProject(project) : null;
       if (project !== undefined && !p) return fail(`No open project called ${project} in your company.`);
+      let assigneeId: string | null | undefined;
+      if (assignee) {
+        const team_ = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, scope.companyId), isNull(agents.retiredAt), sql`${agents.duty} is distinct from 'assistant'`));
+        const a = team_.find((x) => x.name.toLowerCase() === assignee.trim().toLowerCase());
+        if (!a) return fail(`No active agent called ${assignee} in your company. Valid names: ${team_.map((x) => x.name).join(", ")}.`);
+        if (a.paused) return fail(`${a.name} is paused, so they would not pick it up. Pick someone else.`);
+        assigneeId = a.id;
+      } else if (assignee === null) assigneeId = null;
       try {
-        const u = await work.updateTicket(ticketId, { ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}) });
+        const u = await work.updateTicket(ticketId, { ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it: ${reason}` });
         return text(`Ticket ${ticketId} updated (version ${u.version}).`);

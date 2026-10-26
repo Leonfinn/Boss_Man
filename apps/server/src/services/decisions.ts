@@ -56,7 +56,7 @@ export type DecisionContext =
   /** The lesson is approved but the project's Lessons section is full: pick which line it replaces. */
   | { type: "lesson_replace"; projectId: string; projectName: string; lesson: string }
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
-  | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string }; byAgentId: string }
+  | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string; forTickets?: string[] }; byAgentId: string }
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
