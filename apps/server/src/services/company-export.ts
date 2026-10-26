@@ -146,7 +146,7 @@ export async function exportCompany(db: Db, companyId: string, opts: ExportOptio
             branch: t.branch,
             waitsOn: deps.filter((d) => d.blockedTicketId === t.id && d.blockerTicketId).map((d) => d.blockerTicketId),
             createdAt: t.createdAt,
-            conversation: msgs.filter((m) => m.ticketId === t.id).map((m) => ({ author: m.author, agent: m.agentId ? (agentSlug.get(m.agentId) ?? null) : null, text: m.text, at: m.createdAt })),
+            conversation: msgs.filter((m) => m.ticketId === t.id).map((m) => ({ author: m.author, agent: m.agentId ? (agentSlug.get(m.agentId) ?? null) : null, text: m.text, at: m.createdAt, ...(m.author === "system" && m.delivery?.startsWith("from:") ? { from: m.delivery.slice(5) } : {}) })),
           }),
         )
         .join("\n") + (rows.length ? "\n" : ""),

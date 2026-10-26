@@ -99,7 +99,7 @@ const Ticket = z.object({
   branch: opt(300),
   waitsOn: z.array(str(100)).max(100).default([]),
   createdAt: z.string().max(40).optional(),
-  conversation: z.array(z.object({ author: z.enum(["owner", "agent", "system"]), agent: opt(120), text: z.string().max(100_000), at: z.string().max(40).optional() })).max(5000).default([]),
+  conversation: z.array(z.object({ author: z.enum(["owner", "agent", "system"]), agent: opt(120), from: opt(60), text: z.string().max(100_000), at: z.string().max(40).optional() })).max(5000).default([]),
 });
 
 export type Package = {
@@ -399,7 +399,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       if (blockers.length) await tx.insert(ticketDependencies).values(blockers.map((b) => ({ blockedTicketId: id, blockerTicketId: b })));
       if (t.conversation.length)
         await tx.insert(ticketMessages).values(
-          t.conversation.map((m) => ({ companyId, ticketId: id, author: m.author, agentId: (m.agent && agentId.get(m.agent)) || null, text: m.text, ...(m.at && !Number.isNaN(Date.parse(m.at)) ? { createdAt: new Date(m.at) } : {}) })),
+          t.conversation.map((m) => ({ companyId, ticketId: id, author: m.author, agentId: (m.agent && agentId.get(m.agent)) || null, text: m.text, ...(m.author === "system" && m.from ? { delivery: `from:${m.from}` } : {}), ...(m.at && !Number.isNaN(Date.parse(m.at)) ? { createdAt: new Date(m.at) } : {}) })),
         );
     }
 

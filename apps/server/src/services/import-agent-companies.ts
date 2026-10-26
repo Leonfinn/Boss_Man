@@ -196,7 +196,7 @@ function issues(files: Files, out: Files, notes: string[], projectSlug: Record<s
       const agent = agentSlug.get(by);
       // A comment with no agent is the owner's, unless Paperclip wrote it itself.
       const author = agent ? "agent" : by === "system" || by === "Summarizer" ? "system" : "owner";
-      return [{ author, agent: agent ?? null, text: body, at: str(c.at) ?? undefined }];
+      return [{ author, agent: agent ?? null, text: body, at: str(c.at) ?? undefined, ...(author === "system" ? { from: "Paperclip" } : {}) }];
     });
     lines.push(
       JSON.stringify({
