@@ -43,7 +43,7 @@ the `boss-man-penpot` project's containers and volumes; Boss Man is not affected
 (`BOSSMAN_BACKUP_DIR`) and keeps the newest `BOSSMAN_BACKUP_KEEP` (14) of its own; it never
 deletes Boss Man's files. It holds `penpot-db.sql.gz` (Penpot's database) and
 `penpot-assets.tar.gz` (uploaded images and files). If Penpot isn't running it says so and
-exits 0. A second run in the same minute does nothing. `.env` is not in the archive: keep a
+exits 0. The archive is readable by its owner only (mode 600). A second run in the same minute does nothing. `.env` is not in the archive: keep a
 private copy of `PENPOT_SECRET_KEY` and `PENPOT_DB_PASSWORD`.
 
 Restore to a throwaway copy first (another project name and port, so the live one is untouched).

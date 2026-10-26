@@ -27,6 +27,7 @@ if grep -q 'docker exec' "$t/log"; then fail "dumped while Penpot is off"; fi
 # Running: one archive with both parts; the asset part restores the file.
 "$here/backup-penpot.sh" >/dev/null
 set -- "$t"/backups/penpot-*.tar; [[ $# -eq 1 && -s $1 ]] || fail "expected one archive"
+[[ "$(stat -c %a "$1")" == 600 ]] || fail "archive is not mode 600"
 [[ "$(tar -tf "$1" | sort | tr '\n' ' ')" == "penpot-assets.tar.gz penpot-db.sql.gz " ]] || fail "archive parts wrong"
 mkdir "$t/x"; tar -C "$t/x" -xf "$1"; gzip -t "$t/x/penpot-db.sql.gz"
 mkdir "$t/r"; tar -C "$t/r" -xzf "$t/x/penpot-assets.tar.gz"; [[ "$(cat "$t/r/file1")" == asset1 ]] || fail "asset not restored"
