@@ -198,7 +198,7 @@ describe("a no-code ticket in review", () => {
 
   it("the CEO or a manager can close it as done", async () => {
     const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
-    ctx.diff.current = REAL;
+    ctx.diff.current = REAL; // no code wins even when the branch has a real diff
     await ctx.db.update(agents).set({ role: "manager" }).where(eq(agents.id, ctx.dev.id));
     await toDone(t.id);
     expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
@@ -215,6 +215,19 @@ describe("a no-code ticket in review", () => {
     expect(await toReview(t.id)).toContain("is now review");
     const rows = await ctx.db.select().from(reviewRequests).where(eq(reviewRequests.ticketId, t.id));
     expect(rows.filter((r) => r.status === "pending")).toHaveLength(1);
+    expect(rows.find((r) => r.status === "pending")?.reviewerAgentId).not.toBeNull();
+    expect((await approveAndWait(ctx.req, t.id)).json()).toMatchObject({ verdict: "approved", outcome: "done" });
+    expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
+  });
+
+  it("does not show a ticket that is already approved and landing, or has a pull request", async () => {
+    const landing = await ctx.ticket(ctx.withRepo.id, { systemState: "review" });
+    await ctx.db.insert(reviewRequests).values({ ticketId: landing.id, kind: "code", round: 1, status: "approved" });
+    const pr = await ctx.ticket(ctx.withRepo.id, { systemState: "review", pullRequestUrl: "https://github.com/Leonfinn/customer-app/pull/1" });
+    const board = (await ctx.req("GET", `/api/projects/${ctx.withRepo.id}/board`)).json() as { columns: Array<{ tickets: Array<{ id: string; waitingOnOwner?: boolean }> }> };
+    const cards = board.columns.flatMap((c) => c.tickets);
+    expect(cards.find((c) => c.id === landing.id)?.waitingOnOwner).toBeFalsy();
+    expect(cards.find((c) => c.id === pr.id)?.waitingOnOwner).toBeFalsy();
   });
 
   it("shows in the owner's Your review lane when it has no open review", async () => {
