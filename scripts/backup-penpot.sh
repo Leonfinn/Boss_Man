@@ -13,6 +13,7 @@
 # archive holds every file the dump refers to. Not included: .env (PENPOT_SECRET_KEY and
 # PENPOT_DB_PASSWORD); keep your own copy of it, it is needed to run the restored data.
 set -euo pipefail
+umask 077 # the archive holds the whole database: owner-only, work files too
 
 work=""
 BACKUP_DIR="${BOSSMAN_BACKUP_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
