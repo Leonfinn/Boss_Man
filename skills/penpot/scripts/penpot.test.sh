@@ -9,6 +9,7 @@ t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 mkdir "$t/bin"
 # Wrapper that logs jq's arguments, then runs the real jq.
 realjq="$(command -v jq)"
+# shellcheck disable=SC2016 # the fake jq's own $* and $FAKE_JQ_LOG, expanded when it runs
 printf '#!/usr/bin/env bash\necho "jq $*" >>"$FAKE_JQ_LOG"\nexec %s "$@"\n' "$realjq" >"$t/bin/jq"
 chmod +x "$t/bin/jq"
 cat >"$t/bin/curl" <<'FAKE'

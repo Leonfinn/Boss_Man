@@ -2,6 +2,8 @@
 
 This is the short path from nothing to a working Boss Man on a Linux host with Docker. For a worked example on TrueNAS SCALE, with backups, the host deployer and more, see [docs/06-install-truenas.md](06-install-truenas.md).
 
+> **Verification:** every file name, setting and button label in this guide was checked against the code. The full install was **not** re-run on a fresh machine for this edit, so treat the exact command output as unverified.
+
 ## What you'll end up with
 
 - Boss Man running on a machine you own, with its web page open on your home network.
@@ -20,7 +22,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
-- **Access to Boss Man's code** at [github.com/Leonfinn/Boss_Man](https://github.com/Leonfinn/Boss_Man). The repo is private, so ask its owner to add your host's deploy key (step 2).
+- **Internet access from the host** to [github.com/Leonfinn/Boss_Man](https://github.com/Leonfinn/Boss_Man), where the code is (step 2).
 
 ## A note on commands
 
@@ -64,34 +66,10 @@ You should see the folder listed.
 
 ## 2. Get the code onto the host
 
-Boss Man's repo is private. The host reads it with a **deploy key**: an SSH key for this one repo, read-only. It has no passphrase, so updates can run unattended.
-
-Make the key:
+The code is public on GitHub, so you need no account or key to read it. Clone it into `<install-dir>/src`:
 
 ```sh
-ssh-keygen -t ed25519 -N "" -C "boss-man-host" -f $B/deploy_key
-```
-
-Show the public half. It's safe to copy. Never copy the file without `.pub`.
-
-```sh
-cat $B/deploy_key.pub
-```
-
-Send that line to the repo's owner. They add it at [github.com/Leonfinn/Boss_Man/settings/keys](https://github.com/Leonfinn/Boss_Man/settings/keys) with **Add deploy key**, leaving **Allow write access** unticked. (If you are the owner, do it yourself.)
-
-Clone it into `<install-dir>/src` with that key:
-
-```sh
-GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" git clone git@github.com:Leonfinn/Boss_Man.git $B/src
-```
-
-The first time, ssh asks whether to trust the host. Type `yes` only if the fingerprint matches the one the host publishes (for GitHub, its [SSH key fingerprints](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints) page).
-
-Make later updates use the same key:
-
-```sh
-git -C $B/src config core.sshCommand "ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts"
+git clone https://github.com/Leonfinn/Boss_Man.git $B/src
 ```
 
 Check it worked:
@@ -102,7 +80,9 @@ git -C $B/src log --oneline -1
 
 You should see one commit line.
 
-If the clone hangs, outbound port 22 may be blocked on your network. The full version of this is [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
+
+**Is the repo still private?** (Only before the public launch.) Clone with a read-only deploy key instead: [docs/06, step 2](06-install-truenas.md#2-get-the-code).
 
 ## 3. Make the folders, the master key and the token file
 
@@ -150,7 +130,7 @@ Boss Man reads a file called `.env` in the repo folder. This one:
 - turns on the **launcher**, which starts each company's runner for you (details in [docs/06, step 7b](06-install-truenas.md#7b-let-the-launcher-run-the-runners-recommended));
 - opens the web page on your host's LAN address only.
 
-Replace `<host-ip>` below with your host's address on your home network. The command reads the Docker socket's group number for you.
+Before you run the command, replace `<host-ip>` (the `BOSSMAN_BIND` line) with your host's address on your home network, for example `192.168.1.20`. The command reads the Docker socket's group number for you.
 
 ```sh
 cat > $B/src/.env <<EOF

@@ -6,6 +6,7 @@ import { and, count, eq, gt } from "drizzle-orm";
 import { failureSignature, findingFingerprint, type ReviewComment } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { decisions, failureSignatures, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
+import type { AlertInput } from "./alert-ladder.js";
 
 export type LoopLimits = { repeatedFinding: number; maxRounds: number; circularFailures: number; circularWindowMs: number };
 export const DEFAULT_LOOP_LIMITS: LoopLimits = { repeatedFinding: 3, maxRounds: 3, circularFailures: 3, circularWindowMs: 2 * 3_600_000 };
@@ -13,7 +14,12 @@ export const DEFAULT_LOOP_LIMITS: LoopLimits = { repeatedFinding: 3, maxRounds: 
 export const SEND_BACK = "Send it back anyway";
 export const STOP_WORK = "Stop work on it";
 
-export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: () => Date } = {}) {
+/**
+ * With `alert`, the guards' decisions go up the alert ladder (BOS-64) instead of straight to the
+ * owner: a stuck review to the CEO first (stopping work is beyond the Scrum Master), a circular
+ * failure to the Scrum Master first.
+ */
+export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: () => Date; alert?: (input: AlertInput) => Promise<{ id: string } | null> } = {}) {
   const limits = { ...DEFAULT_LOOP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -39,17 +45,19 @@ export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: (
         repeatedIdx !== -1
           ? `the same comment has now come back ${seen.get(fingerprints[repeatedIdx]!)} times: "${input.comments[repeatedIdx]!.path}: ${input.comments[repeatedIdx]!.body.slice(0, 200)}"`
           : `it has been sent back ${rounds.length} times`;
-      const [d] = await db
-        .insert(decisions)
-        .values({
-          companyId: t!.companyId,
-          kind: "approval",
-          question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?`,
-          options: [SEND_BACK, STOP_WORK],
-          recommendedOption: STOP_WORK,
-          context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer },
-        })
-        .returning({ id: decisions.id });
+      const ask = {
+        companyId: t!.companyId,
+        kind: "approval" as const,
+        question: `Review of "${t!.title}" looks stuck: ${why}. Send the review back again, or stop work on the ticket?`,
+        options: [SEND_BACK, STOP_WORK],
+        context: { type: "review_loop", ticketId: input.ticketId, message: input.message, reviewer: input.reviewer },
+      };
+      const [d] = opts.alert
+        ? [await opts.alert({ ...ask, recommended: STOP_WORK, ticketId: input.ticketId, from: "ceo" })]
+        : await db
+            .insert(decisions)
+            .values({ ...ask, recommendedOption: STOP_WORK })
+            .returning({ id: decisions.id });
       await db.insert(ticketDependencies).values({ blockedTicketId: input.ticketId, blockerDecisionId: d!.id });
       await db.update(tickets).set({ systemState: "blocked", lastActivityAt: now() }).where(eq(tickets.id, input.ticketId));
       return { round: rounds.length, escalated: d!.id };
@@ -73,18 +81,13 @@ export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: (
       const n = Number(row?.n ?? 0);
       if (n < limits.circularFailures) return { count: n, circular: false };
       const [t] = input.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, input.ticketId)) : [];
-      await db
-        .insert(decisions)
-        .values({
-          companyId: input.companyId,
-          kind: "question",
-          question: `${input.what} has hit the same failure ${n} times in ${Math.round(limits.circularWindowMs / 3_600_000)} hours${t ? ` on "${t.title}"` : ""}. It has been told to try a different approach. Last output: ${input.text.slice(-300)}`,
-          options: ["Got it"],
-          recommendedOption: "Got it",
-          dedupeKey: `circular:${input.ticketId ?? input.agentId}:${signature}`,
-          context: { type: "question" },
-        })
-        .onConflictDoNothing();
+      const ask = {
+        companyId: input.companyId,
+        question: `${input.what} has hit the same failure ${n} times in ${Math.round(limits.circularWindowMs / 3_600_000)} hours${t ? ` on "${t.title}"` : ""}. It has been told to try a different approach. Last output: ${input.text.slice(-300)}`,
+        dedupeKey: `circular:${input.ticketId ?? input.agentId}:${signature}`,
+      };
+      if (opts.alert) await opts.alert({ ...ask, ticketId: input.ticketId, about: [input.agentId] });
+      else await db.insert(decisions).values({ ...ask, kind: "question", options: ["Got it"], recommendedOption: "Got it", context: { type: "question" } }).onConflictDoNothing();
       return { count: n, circular: true };
     },
   };

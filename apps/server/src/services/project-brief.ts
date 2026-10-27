@@ -6,7 +6,7 @@ import type { Db } from "../db/client.js";
 import { agents, projects, settings, tickets, wikiPages, wikiRevisions } from "../db/schema.js";
 import type { gitHostService } from "./git-hosts.js";
 import type { workService } from "./work.js";
-import { LESSONS_HEADING, addLesson, lessonLine, removeLessonLine, splitSections } from "./wiki.js";
+import { LESSONS_CAP, LESSONS_HEADING, addLesson, lessonLine, lessonsFrom, removeLessonLine, splitSections } from "./wiki.js";
 
 // The lessons helpers and their decision answers live in wiki.ts beside the section parsing
 // (the brief-write guard needs them there); re-exported so callers find them at the brief.
@@ -142,4 +142,11 @@ export async function refreshBriefs(
       deps.log(`brief upkeep for project ${p.id}: ${(err as Error).message}`);
     }
   }
+}
+
+/** The brief's Lessons section as numbered lines, for the CEO to judge a new lesson against (BOS-105). */
+export async function lessonsForCeo(db: Db, companyId: string, projectId: string) {
+  const page = await lessonsPageRow(db, companyId, projectId);
+  const lines = page ? lessonsFrom(page.body) : [];
+  return `Current Lessons section (${lines.length} of ${LESSONS_CAP}):\n${lines.length ? lines.map((l, i) => `${i + 1}. ${l}`).join("\n") : "(empty)"}`;
 }

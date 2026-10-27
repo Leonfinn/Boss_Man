@@ -6,6 +6,7 @@ import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAtt
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
+import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { readVerdicts } from "@boss-man/shared";
 import { usePoll } from "../hooks";
@@ -151,8 +152,26 @@ const WATCH_EVERY: Array<[number, string]> = [
 const inText = (ms: number) => (ms <= 0 ? "Due now" : ms < 3_600_000 ? `In ${Math.ceil(ms / 60_000)}m` : `In ${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m`);
 const localInput = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 
+const PROPS_KEY = "bossman.ticket.workCollapsed";
+/** The remembered choice; with none, narrow tablets (just above the stacking width) start collapsed. */
+const readPropsCollapsed = () => {
+  try {
+    const saved = localStorage.getItem(PROPS_KEY);
+    if (saved !== null) return saved === "1";
+  } catch {}
+  return window.innerWidth > 900 && window.innerWidth < 1100;
+};
+
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
   const ticket = usePoll((signal) => api<TicketDetail>(`/api/tickets/${id}`, { signal }), 15_000, id);
+  const [propsCollapsed, setPropsCollapsed] = useState(readPropsCollapsed);
+  const togglePanel = () => {
+    const next = !propsCollapsed;
+    setPropsCollapsed(next);
+    try {
+      localStorage.setItem(PROPS_KEY, next ? "1" : "0");
+    } catch {}
+  };
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
@@ -179,7 +198,20 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  const [blocking, setBlocking] = useState<{ until: string; reason: string } | null>(null);
+  const block = async () => {
+    if (!blocking) return;
+    try {
+      const until = blocking.until ? new Date(blocking.until).toISOString() : undefined;
+      await api(`/api/tickets/${id}/state`, { method: "POST", body: { state: "blocked", ...(until ? { blockedUntil: until, ...(blocking.reason.trim() ? { blockedUntilReason: blocking.reason.trim() } : {}) } : {}) } });
+      setBlocking(null);
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   const moveTo = async (state: string) => {
+    if (state === "blocked") return setBlocking({ until: "", reason: "" });
     if (state === "done" && !window.confirm("Mark done without merging? Any unmerged work on its branch stays on the branch.")) return;
     try {
       await api(`/api/tickets/${id}/state`, { method: "POST", body: { state } });
@@ -340,7 +372,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
-      <div className="ticket-layout">
+      <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
@@ -542,11 +574,18 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </p>
           )}
 
+          <ScrumMasterLog companyId={t.companyId} ticketId={t.id} heading="Scrum Master" />
           <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
-          <h2 className="section-label">Work</h2>
+          <div className="props-head">
+            <h2 className="section-label">Work</h2>
+            <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
+              {propsCollapsed ? "Show" : "Hide"}
+            </button>
+          </div>
+          <div id="ticket-props-body" hidden={propsCollapsed}>
           <dl>
             <dt>Status</dt>
             <dd>
@@ -559,6 +598,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </option>
                 ))}
               </select>
+              {blocking && (
+                <div>
+                  <label htmlFor="t-blocked-until">Blocked until (optional)</label>
+                  <input id="t-blocked-until" type="datetime-local" value={blocking.until} onChange={(e) => setBlocking({ ...blocking, until: e.target.value })} />
+                  <label htmlFor="t-blocked-reason">Why (one line)</label>
+                  <input id="t-blocked-reason" maxLength={240} value={blocking.reason} disabled={!blocking.until} placeholder="e.g. waiting on the Friday deployment" onChange={(e) => setBlocking({ ...blocking, reason: e.target.value })} />
+                  <small className="muted" style={{ display: "block" }}>With a time, the Scrum Master watchdog leaves it alone until then plus a grace period. Without one, the normal blocked limit applies.</small>
+                  <button type="button" onClick={() => void block()}>Block</button> <button type="button" onClick={() => setBlocking(null)}>Cancel</button>
+                </div>
+              )}
+              {t.systemState === "blocked" && t.blockedUntil && (
+                <small className="muted" style={{ display: "block" }}>Blocked until {new Date(t.blockedUntil).toLocaleString()}{t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.</small>
+              )}
               <small className="muted" style={{ display: "block" }}>Done closes it without merging. In review asks the reviewers; Ready and In progress wake the assignee.</small>
             </dd>
             <dt>
@@ -682,6 +734,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dt>Last activity</dt>
             <dd>{when(t.lastActivityAt)}</dd>
           </dl>
+          </div>
         </aside>
       </div>
     </>

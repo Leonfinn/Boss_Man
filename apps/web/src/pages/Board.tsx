@@ -9,6 +9,7 @@ import { usePoll } from "../hooks";
 import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
+import { WatchdogHealth } from "../components/WatchdogHealth";
 import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
 import { Avatar } from "../components/Avatar";
 
@@ -447,6 +448,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
         </div>
+        {current && <WatchdogHealth companyId={current.companyId} />}
         {current && (
           <StarButton
             agent={current}
