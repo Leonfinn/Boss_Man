@@ -110,13 +110,15 @@ describe("temp-file cleanup (BOS-111)", () => {
   const route = (c: string) => evaluatePermission(exec(c), []);
   it("sends deletes of entries directly in /tmp to the CEO, recommended Allow", () => {
     for (const c of [
-      "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1",
+      "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1",
+      "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86 2>&1",
       "rm -rf /tmp/a /tmp/b.log 2>/dev/null",
       "rm -rf -- /tmp/.hidden-dir",
       "rm -rf /tmp/rv86 &>/dev/null; git worktree prune",
-      "rm -rf /tmp/wt && git worktree add -b bos-111 /tmp/wt origin/main 2>&1 && mkdir -p /tmp/wt-logs/a",
+      "rm -rf /tmp/wt /tmp/wt-logs && git worktree add -b bos-111 /tmp/wt origin/main 2>&1 && mkdir -p /tmp/wt-logs",
       "rm -rf /tmp/wt; git worktree prune; git worktree list",
-      "rm -rf /tmp/x && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
+      "rm -rf /tmp/x2 /tmp/x2.log && mkdir /tmp/x2 && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
+      "rm -rf /tmp/a; rm -f /tmp/b && echo x > /tmp/b",
     ]) {
       expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
@@ -227,6 +229,28 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/a; mkdir /tmp/a/../../home/x",
       "rm -rf /tmp/a; mkdir -m 777 /tmp/b",
       "rm -rf /tmp/a\r\nrm -rf /home/node",
+      // Writes must go to a /tmp entry this command has just deleted: any other could be a shortcut link (BOS-111 adversarial review).
+      "rm -rf /tmp/a && git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/a && cd /tmp/lnk && pnpm install",
+      "rm -rf /tmp/a && mkdir -p /tmp/lnk/sub",
+      "rm -rf /tmp/a && mkdir -p /tmp/a/sub",
+      "rm -rf /tmp/a && echo x > /tmp/lnk",
+      "rm -rf /tmp/a && echo x >> /tmp/a/b",
+      // The delete may have failed, or runs alongside, so the name may still be a link.
+      "rm -rf /tmp/lnk; git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk || git worktree add -b x /tmp/lnk",
+      "false || rm -rf /tmp/lnk && git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk & git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk | git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk\ngit worktree add -b x /tmp/lnk",
+      "rm -ri /tmp/lnk && git worktree add -b x /tmp/lnk",
+      "rm --interactive=always -rf /tmp/lnk && cd /tmp/lnk && pnpm install",
+      // If the cd fails, the install runs in the project.
+      "rm -rf /tmp/a && cd /tmp/a; pnpm install",
+      "rm -rf /tmp/a && cd /tmp/a || pnpm install",
+      "rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && true || pnpm install",
+      // The cleared name is only cleared until the chain breaks.
+      "rm -rf /tmp/a; true; cd /tmp/a && pnpm install",
     ]) {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
       expect(tempCleanup(c), c).toBe(false);

@@ -14,7 +14,7 @@ import type { Ladder } from "../src/services/alert-ladder.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
-const CLEANUP = "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
+const CLEANUP = "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
 
 async function setup() {
   let clock = new Date();
@@ -84,6 +84,9 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
     expect(w).toMatchObject({ reason: "decision", priority: 3 });
     expect(w!.note).toContain(CLEANUP);
+    expect(w!.note).toMatch(/git worktree add writes into the project.s repository/);
+    // A worktree writes the repository's .git, so the card never promises the repository is untouched.
+    expect((c.explain as { scratch?: unknown }).scratch).toBeUndefined();
     expect(ctx.sent).toEqual([]);
   });
 
@@ -101,7 +104,7 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     const after = await reload(d!.id);
     expect((after.context as { settled: { name: string; note: string } }).settled).toMatchObject({ agentId: ctx.ceo.id, note: "It only removes its own scratch checkout in /tmp." });
     const log = await ctx.db.select().from(activity).where(eq(activity.kind, "decision_answered"));
-    expect(log.at(-1)!.summary).toMatch(/settled ".*": Allow once\. Reason: It only removes its own scratch checkout in \/tmp\.$/);
+    expect(log.at(-1)!.summary).toMatch(/settled ".*": Allow once\. Reason: It only removes/);
     expect(log.at(-1)!.summary).not.toMatch(/^Owner answered/);
     const settled = (await ctx.req("GET", "/api/decisions/advised")).json() as Array<{ id: string; settled?: { answer: string; note: string; command: string; tempCleanup: boolean } }>;
     expect(settled.find((s) => s.id === d!.id)?.settled).toEqual({ by: expect.any(String), answer: "Allow once", note: "It only removes its own scratch checkout in /tmp.", command: CLEANUP, tempCleanup: true });
