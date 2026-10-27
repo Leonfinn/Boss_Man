@@ -67,7 +67,7 @@ export type PermissionExplanation = { title: string; summary: string; effect: "r
 
 /** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
-export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string };
+export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string; originalQuestion?: string };
 export type AdvisedDecision = { id: string; companyId: string; question: string; advice: Advice };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 

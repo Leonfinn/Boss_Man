@@ -344,7 +344,17 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         CEO is looking at this{advice.note ? <span className="muted" style={{ fontWeight: 400 }}> · you asked: {advice.note}</span> : null}. You can still answer it yourself.
                       </p>
                     )}
-                    {advice?.state === "clarified" && <p className="muted">Rewritten by the CEO with more detail, after you asked for advice.</p>}
+                    {advice?.state === "clarified" && (
+                      <>
+                        <p className="muted">Rewritten by the CEO with more detail, after you asked for advice.</p>
+                        {advice.originalQuestion && (
+                          <details>
+                            <summary>Original question (before the CEO rewrote it)</summary>
+                            <p style={{ fontSize: 14 }}>{advice.originalQuestion}</p>
+                          </details>
+                        )}
+                      </>
+                    )}
                     {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>

@@ -71,4 +71,10 @@ describe("ask the CEO for advice", () => {
     expect(screen.getByText(/replaced by a clearer decision/)).toBeTruthy();
     expect(screen.getByRole("link", { name: /See the new one/ })).toBeTruthy();
   });
+
+  it("shows the original question on a rewritten card", () => {
+    render(<Decisions decisions={[decision({ question: "New wording?", context: { advice: { state: "clarified", originalQuestion: "Old wording?" } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("Original question (before the CEO rewrote it)")).toBeTruthy();
+    expect(screen.getByText("Old wording?")).toBeTruthy();
+  });
 });

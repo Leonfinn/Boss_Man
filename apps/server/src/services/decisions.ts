@@ -161,6 +161,8 @@ export type Advice = {
   replaces?: string;
   /** handled: what the CEO did. */
   summary?: string;
+  /** clarified: the first wording, before the CEO rewrote it. */
+  originalQuestion?: string;
 };
 export const adviceOf = (context: unknown): Advice | undefined => (context as { advice?: Advice } | null)?.advice;
 export const ADVICE_DEFAULT_MINUTES = 120;
@@ -751,7 +753,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (d.kind === "permission") throw new AnswerError("A permission request holds a live run, so it can't be put to the CEO. Answer it, or deny it.");
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo || !wake) throw new AnswerError("This company has no CEO to ask.");
-      const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}) };
+      const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}), ...(adviceOf(d.context)?.originalQuestion ? { originalQuestion: adviceOf(d.context)!.originalQuestion } : {}) };
       const [claimed] = await db
         .update(decisions)
         .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify(advice)}::jsonb)` })
@@ -798,7 +800,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (!(d.kind === "question" && ctx.type === "question")) {
           // An approval, plan, hire, deploy and the like keep their id, kind, options and context, so what resumes on
           // them still works: the CEO only rewrites the question and adds what was tried and the steps.
-          const clarified = { ...(d.context as object), triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), advice: { ...advice, state: "clarified", at } };
+          const clarified = { ...(d.context as object), triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), advice: { ...advice, state: "clarified", at, originalQuestion: advice.originalQuestion ?? d.question } };
           const [done] = await db
             .update(decisions)
             .set({ question: input.question, context: clarified })

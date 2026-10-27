@@ -161,7 +161,7 @@ describe("ask the CEO for advice", () => {
     expect(after.status).toBe("open");
     expect(after.question).toBe(reissue.question);
     expect(after.options).toEqual(["Approve", "Decline"]);
-    expect(after.context).toMatchObject({ type: "hire", marker: 1, advice: { state: "clarified" } });
+    expect(after.context).toMatchObject({ type: "hire", marker: 1, advice: { state: "clarified", originalQuestion: "Hire a designer?" } });
     // Once clarified, the CEO can't act on it again.
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, ...reissue } }))).toBe(true);
   });
