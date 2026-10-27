@@ -1,12 +1,12 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, notifications, nudges, runners, runs, wakes, watchdogActions } from "../src/db/schema.js";
+import { agents, decisions, notifications, nudges, reviewRequests, runners, runs, tickets, wakes, watchdogActions } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import type { Ladder } from "../src/services/alert-ladder.js";
 
@@ -65,7 +65,7 @@ async function setup() {
     return r!;
   };
   await db.delete(wakes);
-  return { ...built, db, close, base, req, companyId, dev, sm, ceo: ceo!, project, ticket, sent, ask, plan, quietRun, advance: (m: number) => (clock = new Date(clock.getTime() + m * 60_000)) };
+  return { ...built, db, close, base, req, companyId, dev, sm, ceo: ceo!, project, ticket, sent, ask, plan, quietRun, now: () => clock, advance: (m: number) => (clock = new Date(clock.getTime() + m * 60_000)) };
 }
 
 beforeEach(async () => {
@@ -196,6 +196,43 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(owner).toMatchObject({ tier: "owner", status: "open" });
     expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/service credentials/);
     expect(await queueIds()).toContain(d!.id);
+  });
+
+  it("a stuck review goes to the CEO first, and the owner only sees it if the CEO doesn't settle it", async () => {
+    await ctx.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, ctx.ticket.id));
+    const review = async (round = 1) => {
+      const [r] = await ctx.db.insert(reviewRequests).values({ ticketId: ctx.ticket.id, kind: "code", reviewerAgentId: ctx.dev.id, round, createdAt: new Date(ctx.now().getTime() - 2 * 3_600_000) }).returning();
+      for (const hours of [3, 2, 1]) {
+        await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: ctx.ticket.id, reason: "review requested", status: "launched", note: `- ${ctx.ticket.id} "Restart the API": still waiting for your code review`, createdAt: new Date(ctx.now().getTime() - hours * 3_600_000) });
+      }
+      return r!;
+    };
+    const stalled = () => ctx.db.select().from(decisions).where(like(decisions.dedupeKey, "review-stall:%"));
+
+    const first = await review();
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
+    const [a] = await stalled();
+    expect(a).toMatchObject({ tier: "ceo", forAgentId: null, status: "open" });
+    expect((a!.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo" });
+    expect(await queueIds()).not.toContain(a!.id);
+    expect(await teamIds()).toContain(a!.id);
+    expect(await ownerNotified(a!.id)).toEqual([]);
+    // The CEO settles it: the owner never hears about it.
+    expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Got it" } }))).toBe(false);
+    expect(await ownerNotified(a!.id)).toEqual([]);
+
+    // A second stuck review the CEO leaves alone reaches the owner with what was tried.
+    await ctx.db.update(reviewRequests).set({ status: "approved" }).where(eq(reviewRequests.id, first.id));
+    await review(2);
+    expect((await ctx.sweeps.run()).stalledReviews.gaveUp).toBe(1);
+    const open = (await stalled()).find((d) => d.id !== a!.id)!;
+    ctx.advance(31);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    const owner = await reload(open.id);
+    expect(owner.tier).toBe("owner");
+    expect((owner.context as { triedFirst?: string }).triedFirst).toMatch(/the CEO/);
+    expect(await queueIds()).toContain(open.id);
+    expect((await ownerNotified(open.id)).length).toBe(1);
   });
 
   it("without a Scrum Master it starts at the CEO", async () => {

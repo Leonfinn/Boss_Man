@@ -35,7 +35,7 @@ const MISSED_NUDGES_PER_DAY = 2;
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** Raises a stalled run on the alert ladder (BOS-119). */ alert?: (input: AlertInput) => Promise<{ id: string } | null> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -247,20 +247,21 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           .orderBy(desc(wakes.createdAt));
         if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedAfterMs) continue;
         if (recent.length > MISSED_NUDGES_PER_DAY) {
-          const rows = await db
-            .insert(decisions)
-            .values({
-              companyId: ticket.companyId,
-              kind: "question",
-              question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
-              options: ["Got it"],
-              recommendedOption: "Got it",
-              dedupeKey: `review-stall:${r.id}`,
-              context: { type: "question" },
-            })
-            .onConflictDoNothing()
-            .returning({ id: decisions.id });
-          result.gaveUp += rows.length;
+          // The CEO first: stopping or moving a review is beyond the Scrum Master, and the owner
+          // should only see this if the CEO doesn't settle it (BOS-119).
+          const row = await opts.alert({
+            companyId: ticket.companyId,
+            kind: "question",
+            question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
+            options: ["Got it"],
+            recommended: "Got it",
+            from: "ceo",
+            ticketId: ticket.id,
+            about: [agentId],
+            dedupeKey: `review-stall:${r.id}`,
+            context: { type: "question" },
+          });
+          if (row) result.gaveUp++;
           continue;
         }
         await opts.wake({
