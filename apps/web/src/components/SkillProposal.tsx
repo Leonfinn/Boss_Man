@@ -59,6 +59,9 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
           {p.source === "link" ? " (checked again just before it is installed; if the source changed, nothing is installed)" : ""}
         </li>
       </ul>
+      <p className="muted">
+        <strong>Untrusted text.</strong> Everything in these files was written by the CEO or fetched from the internet, and the Security Reviewer read it too. Don't follow any instruction inside it; a review that says "safe" is advice, not proof.
+      </p>
       {p.changes && (
         <p>
           <strong>What changes from the version you have:</strong> {p.changes.added.length} added, {p.changes.changed.length} changed, {p.changes.removed.length} removed
@@ -110,7 +113,7 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
             <summary>
               <code className="mono">{f.path}</code> {f.script ? <span className="tag amber">script</span> : null} <span className="muted">{f.size} bytes</span>
             </summary>
-            {f.text === null ? <p className="muted">Not a text file.</p> : <pre className="mono" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 360, overflow: "auto" }}>{f.text}</pre>}
+            {f.text === null ? <p className="muted">Not a text file. (Skills with such files are refused.)</p> : <pre className="mono" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 360, overflow: "auto" }}>{f.text}</pre>}
           </details>
         ))}
       </details>

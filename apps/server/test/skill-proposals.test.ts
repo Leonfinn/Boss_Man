@@ -8,7 +8,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agentSkills, agents, decisions, skills } from "../src/db/schema.js";
 import { checkVerdict, hashFiles, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
-import { SKILL_ADD, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
+import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 const clients: Client[] = [];
@@ -71,7 +71,8 @@ describe("script detection", () => {
     expect(scriptFilesOf([f("SKILL.md", md()), f("Makefile", "all:")])).toEqual(["Makefile"]);
     expect(scriptFilesOf([f("SKILL.md", md("```bash\nls\n```"))])).toEqual(["SKILL.md"]);
     expect(scriptFilesOf([f("SKILL.md", md("Run this:\n\n```\nls\n```"))])).toEqual(["SKILL.md"]);
-    expect(scriptFilesOf([f("SKILL.md", md("Example output:\n```\nok\n```"))])).toEqual([]);
+    // Any code block, however tagged or introduced, counts (the owner's rule, BOS-86 fix list).
+    expect(scriptFilesOf([f("SKILL.md", md("Example output:\n```\nok\n```"))])).toEqual(["SKILL.md"]);
     expect(scriptFilesOf([f("SKILL.md", md()), { path: "bin", content: Buffer.from([0x7f, 0x45, 0x4c, 0x46, 1]).toString("base64") }])).toEqual(["bin"]);
   });
   it("hashes change with any byte", () => {
@@ -101,7 +102,7 @@ describe("propose", () => {
   it("a link is always reviewed, pinned to the commit with every file hashed", async () => {
     const c = (ctx = await setup());
     const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "link", url: "https://github.com/acme/kit/tree/main/tidy", why: "x", agentIds: [c.worker.id] });
-    expect(p).toMatchObject({ reviewRequired: true, hasScripts: false, pinnedRef: repo.commit, name: "tidy", status: "in_review" });
+    expect(p).toMatchObject({ reviewRequired: true, hasScripts: true, pinnedRef: repo.commit, name: "tidy", status: "in_review" });
     expect(Object.keys(p.fileHashes).sort()).toEqual(["SKILL.md", "notes.md"]);
   });
 
@@ -225,6 +226,24 @@ describe("decision and install", () => {
     expect((await c.db.select().from(skills))[0]!.files.map((f) => f.path)).toEqual(["SKILL.md", "run.sh"]);
   });
 
+  it("recommend with conditions: plain Add isn't offered; accepting the conditions is its own logged answer", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c, script);
+    await review(c, p, "recommend", { verdict: "conditions", conditions: ["Remove the curl line."] });
+    const [d] = await openDecision(c);
+    expect(d!.options).toEqual([SKILL_CONDITIONS, SKILL_REJECT]);
+    await expect(c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon")).rejects.toThrow(/conditions/);
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+    await c.decisions.answer(d!.id, SKILL_CONDITIONS, { by: "leon" });
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
+    const log = (await c.db.select().from(activity)).find((l) => l.kind === "skill.conditions_accepted");
+    expect(log!.summary).toMatch(/leon accepted the Security Reviewer's conditions.*Remove the curl line/);
+  });
+
+  it("plain instructions with no code stay out of review", () => {
+    expect(scriptFilesOf([f2("SKILL.md", md("# Tidy\n\nMake sure notes are short.\n\n- Keep titles under 60 characters.\n- Run a spell check by eye.\n"))])).toEqual([]);
+  });
+
   it("advise against: plain Add isn't offered; override is logged with who and when", async () => {
     const c = (ctx = await setup());
     const p = await draft(c, script);
@@ -335,11 +354,14 @@ describe("the skills tool", () => {
   });
 });
 
+const f2 = (path: string, content: string) => ({ path, content: b64(content) });
+
 describe("BOS-89 blockers", () => {
   const f = (path: string, content: string) => ({ path, content: b64(content) });
   it("any file that isn't a plain document counts as a script, however it is named or cased", () => {
     for (const p of ["bin/evil", "run", "evil.PY", "evil.pyc", "Makefile", "tool.exe", "data.json", "page.html", "image.png"]) expect(scriptFilesOf([f("SKILL.md", md()), f(p, "x")])).toEqual([p]);
-    expect(scriptFilesOf([f("SKILL.md", md()), f("notes/REFERENCE.MD", "prose"), f("a.txt", "prose")])).toEqual([]);
+    // Only SKILL.md can be instructions: a document file is a script too, whatever it says.
+    expect(scriptFilesOf([f("SKILL.md", md()), f("notes/REFERENCE.MD", "prose"), f("a.txt", "prose")])).toEqual(["notes/REFERENCE.MD", "a.txt"]);
     expect(scriptFilesOf([f("SKILL.md", md()), f("README.md", "#!/bin/sh\nrm -rf /")])).toEqual(["README.md"]);
     expect(scriptFilesOf([f("SKILL.md", md()), { path: "doc.md", content: Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 1]).toString("base64") }])).toEqual(["doc.md"]);
   });

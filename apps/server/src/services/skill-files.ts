@@ -17,38 +17,45 @@ export function hashFiles(files: SkillFile[]) {
   return { fileHashes, bundleHash };
 }
 
-// What "contains a script" means (BOS-87 standard, section 1). The system decides, not the CEO.
-const TEXT_DOC = /\.(md|markdown|txt)$/i;
-// A fenced block in the instructions in a language an agent can run.
-const RUN_LANG = /^(sh|bash|zsh|shell|console|terminal|cmd|bat|powershell|ps1|pwsh|python|python3|py|js|javascript|node|ts|typescript|ruby|rb|perl|php)$/i;
-const RUN_CUE = /\b(run|runs|running|execute|executes|executing|invoke|call|launch|exec)\b/i;
+// What "contains a script" means (BOS-87 standard, section 1), decided by content, never by a name. The system decides, not the CEO.
+// Only SKILL.md can be instructions; every other file counts as a script, whatever it is called. SKILL.md counts too
+// when it holds anything an agent could run. When unsure, review.
+const SHELL_CMD = /^\s*(?:[$>#]\s+)?(?:sudo\s+)?(?:curl|wget|sh|bash|zsh|fish|ksh|dash|npx|npm|pnpm|yarn|pip3?|pipx|uv|uvx|python[\d.]*|node|deno|bun|ruby|perl|php|lua|awk|sed|powershell|pwsh|cmd|eval|exec|chmod|chown|rm|nc|ncat|git\s+clone|docker|kubectl|ssh|scp|source|\.\/\S+)\b(?=\s|$)/i;
+const MAKE_CMD = /^\s*(?:[$>]\s+)?make(?:\s+[\w.-]+)?\s*$/i;
+const INLINE_RUN = /\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b|\$\(|`[^`\n]*\b(?:curl|wget)\s[^`\n]*`|\b(?:curl|wget)\s+(?:-\S+\s+)*https?:\/\//i;
 
-/** The files that make a skill "contain a script": executable or interpreted files, and instruction files with a code block the agent is told to run. */
+/** Does this instructions text hold a code block, a #! line, or a line an agent could run? */
+function runnableText(text: string): boolean {
+  if (text.startsWith("#!")) return true;
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
+    if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
+    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line)) return true;
+  }
+  return false;
+}
+
+/** The files that make a skill "contain a script". */
 export function scriptFilesOf(files: SkillFile[]): string[] {
   const found: string[] = [];
   for (const f of files) {
     const bytes = Buffer.from(f.content, "base64");
-    // Only plain documents (.md, .markdown, .txt) can be instructions; every other file, whatever it is called or however it is cased, counts as a script.
-    if (!TEXT_DOC.test(f.path) || bytes.includes(0) || bytes.subarray(0, 2).toString("latin1") === "#!") {
-      found.push(f.path);
-      continue;
-    }
-    const lines = bytes.toString("utf8").split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const m = /^\s*(```+|~~~+)\s*([\w+-]*)/.exec(lines[i]!);
-      if (!m) continue;
-      // Only an opening fence: skip to the closing one afterwards.
-      const tagged = m[2]!;
-      const before = lines.slice(Math.max(0, i - 3), i).join(" ");
-      if ((tagged && RUN_LANG.test(tagged)) || (!tagged && RUN_CUE.test(before))) {
-        found.push(f.path);
-        break;
-      }
-      const close = lines.findIndex((l, k) => k > i && l.trim().startsWith(m[1]!));
-      if (close < 0) break;
-      i = close;
-    }
+    if (f.path !== "SKILL.md" || bytes.includes(0) || runnableText(bytes.toString("utf8"))) found.push(f.path);
   }
   return found;
 }
 
+/** The first file that isn't readable text (a NUL byte, or bytes that aren't valid UTF-8): such a file can't be reviewed or shown, so a proposal with one is refused. */
+export function unreadableFile(files: SkillFile[]): string | null {
+  const dec = new TextDecoder("utf-8", { fatal: true });
+  for (const f of files) {
+    const bytes = Buffer.from(f.content, "base64");
+    if (bytes.includes(0)) return f.path;
+    try {
+      dec.decode(bytes);
+    } catch {
+      return f.path;
+    }
+  }
+  return null;
+}

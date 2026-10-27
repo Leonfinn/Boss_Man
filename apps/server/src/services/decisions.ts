@@ -145,6 +145,7 @@ export type AnswerExtra = {
 
 export const SKILL_ADD = "Add the skill";
 export const SKILL_REJECT = "Don't add it";
+export const SKILL_CONDITIONS = "Add it, accepting the reviewer's conditions";
 export const SKILL_OVERRIDE = "Add it anyway, against the advice";
 
 const ALLOW = "Allow once";

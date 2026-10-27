@@ -10,7 +10,7 @@ import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
 import { Section, useAction } from "./Settings";
 
-type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
+type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
 type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; sha256?: string; text: string | null }>; requiresAddons: string[] | null };
 type Upload = { path: string; content: string };
 type Elsewhere = { id: string; name: string; description: string; companyName: string; requiresAddons: string[] | null; fileCount: number; hasScripts: boolean };
@@ -549,7 +549,7 @@ export function Skills({ company }: { company: Company | undefined }) {
       <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), pick(s.id))}>
         <span className="mono">{s.name}</span>
         <small>
-          {SOURCE[s.source]} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
+          {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
         </small>
       </a>
     </li>

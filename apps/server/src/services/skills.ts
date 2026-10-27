@@ -7,7 +7,7 @@ import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scriptFilesOf, sha256 } from "./skill-files.js";
-import { agentSkills, agents, companies, skills } from "../db/schema.js";
+import { agentSkills, agents, companies, skillProposals, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
 // Skills may ship many example assets (e.g. cathrynlavery/diagram-design has 200+), so the caps are generous.
@@ -230,7 +230,9 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
             .innerJoin(agents, eq(agents.id, agentSkills.agentId))
             .where(inArray(agentSkills.skillId, rows.map((r) => r.id)))
         : [];
-      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, hasScripts: scriptFilesOf(files).length > 0, agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
+      // A skill that came through a proposal was reviewed as the owner's rule requires; any other was added by the owner directly.
+      const viaProposal = rows.length ? new Set((await db.select({ id: skillProposals.installedSkillId }).from(skillProposals).where(inArray(skillProposals.installedSkillId, rows.map((r) => r.id)))).map((r) => r.id)) : new Set<string | null>();
+      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, hasScripts: scriptFilesOf(files).length > 0, addedByOwner: !viaProposal.has(r.id), agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
     },
 
     /** Skills of the owner's other companies, to add here instead of importing again. */

@@ -1336,6 +1336,8 @@ export async function buildApp(opts: AppOptions) {
         .parse(req.body);
       try {
         const added = b.from === "link" ? await skillsSvc.fromLink(id, b.url) : b.from === "written" ? [await skillsSvc.write(id, b)] : [await skillsSvc.upload(id, b.files, b.name)];
+        // The owner's own add is their call, but it skips the review: say so in the log.
+        for (const x of added) await record(db, { companyId: id, kind: "skill.added_by_owner", summary: `The owner added the skill ${x.name} directly (${b.from === "link" ? `from ${b.url}` : b.from}). Added by the owner, not security-reviewed.` });
         return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name, sourceRef: s.sourceRef })));
       } catch (err) {
         return skillErrors(reply)(err);
