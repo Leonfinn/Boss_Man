@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
@@ -339,6 +339,13 @@ describe("the Scrum Master's actions (BOS-58)", () => {
     expect((await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.dev.id)))[0]!.note).toContain("crashed");
     expect(textOf(await call({ action: "rewake", ticketId: t.id, reason: "And again." }))).toContain("already used rewake");
 
+    // One action per problem: the decision needs a fresh hand-off.
+    const handOff = async () => {
+      ctx.advance(1);
+      await ctx.db.update(watchdogFlags).set({ lastFlaggedAt: ctx.now() }).where(eq(watchdogFlags.ticketId, t.id));
+    };
+    expect(textOf(await call({ action: "raise_decision", ticketId: t.id, question: "Grant more memory to the runner?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Re-woke the run; memory is a host setting agents can't change.", reason: "Only the owner can change the host." }))).toContain("one action per problem");
+    await handOff();
     const ask = await call({ action: "raise_decision", ticketId: t.id, question: "Grant more memory to the runner?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Re-woke the run; memory is a host setting agents can't change.", reason: "Only the owner can change the host." });
     expect(isError(ask)).toBe(false);
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("blocked");
@@ -348,6 +355,7 @@ describe("the Scrum Master's actions (BOS-58)", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
     expect((await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary)).toContain("blocked -> in_progress");
 
+    await handOff();
     expect(isError(await call({ action: "escalate", ticketId: t.id, reason: "Crashed; needs a decision on approach." }))).toBe(false);
     expect((await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id)))[0]!.note).toContain("escalated");
     // Escalated: it's the CEO's now, so the Scrum Master's actions on it stop.
@@ -473,5 +481,156 @@ describe("the read API and backtest (BOS-58)", () => {
     expect(bt.flags.some((f: { ticketId: string; rule: string }) => f.ticketId === t.id && f.rule === "unassigned")).toBe(true);
     expect(bt.scrumMasterWakes).toBeGreaterThan(0);
     expect(bt.caveats.length).toBeGreaterThan(0);
+  });
+});
+
+describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
+  const handed = async (patch: Partial<typeof tickets.$inferInsert> = {}) => {
+    const t = await ctx.ticket({ stateChangedAt: ctx.ago(130), ...patch });
+    await ctx.watchdog.run();
+    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+    return t;
+  };
+
+  it("F1: a busy board is one run per sweep, lists every problem, and does not trip the cap", async () => {
+    await ctx.switchOn();
+    for (let i = 0; i < 40; i++) await ctx.ticket({ title: `Loose ${i}`, assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
+    for (let i = 0; i < 6; i++) {
+      await ctx.watchdog.run();
+      await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+      ctx.advance(5);
+    }
+    const ws = await ctx.smWakes();
+    // Sweeps at 0, 5, 10, 15, 20 and 25 minutes: one wake with all 40, then the next one when the 15-minute limit passes.
+    expect(ws).toHaveLength(2);
+    expect(ws[0]!.note).toContain("40 ticket problems");
+    expect(ws[0]!.note).toContain('"Loose 39"');
+    expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).toBeNull();
+  });
+
+  it("F1: when the cap does trip, the owner is told how many problems were due and from which rule", async () => {
+    await ctx.switchOn({ maxSmRunsPerHour: 1, unassignedMinutes: 1 });
+    for (let i = 0; i < 3; i++) await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
+    await ctx.watchdog.run();
+    ctx.advance(2);
+    await ctx.watchdog.run();
+    expect((await ctx.watchdog.status(ctx.companyId)).trippedReason).toContain("3 problems were due: 3 nobody is assigned");
+  });
+
+  it("F1: the backtest counts a sweep as one wake and reports when the cap would trip", async () => {
+    for (let i = 0; i < 40; i++) await ctx.ticket({ title: `Loose ${i}`, assigneeAgentId: null, stateChangedAt: ctx.ago(120), createdAt: ctx.ago(120) });
+    const quiet = await ctx.watchdog.backtest(ctx.companyId, 1);
+    expect(quiet.wouldTripCap).toBe(false);
+    expect(quiet.tripAt).toBeNull();
+    await ctx.watchdog.update(ctx.companyId, { maxSmRunsPerHour: 1, unassignedMinutes: 15 });
+    const tight = await ctx.watchdog.backtest(ctx.companyId, 1);
+    expect(tight.wouldTripCap).toBe(true);
+    expect(tight.tripAt).not.toBeNull();
+  });
+
+  it("F3: a stuck ticket with a queued wake is flagged when its assignee is paused, and not when the wake will happen", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ stateChangedAt: ctx.ago(600) });
+    await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, reason: "message", status: "queued", priority: 2, causationDepth: 0 });
+    await ctx.watchdog.run();
+    expect(await ctx.db.select().from(watchdogFlags)).toHaveLength(0);
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.dev.id));
+    await ctx.db.update(wakes).set({ statusReason: "agent paused" }).where(eq(wakes.agentId, ctx.dev.id));
+    await ctx.watchdog.run();
+    expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
+  });
+
+  it("F4: one action per problem, whichever kind: a snooze closes the nudge, and a nudge closes the snooze", async () => {
+    await ctx.switchOn();
+    const a = await handed();
+    const [fa] = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, a.id));
+    expect(isError(await call({ action: "snooze", flagId: fa!.id, hours: 2, reason: "Waiting on CI, fine." }))).toBe(false);
+    expect(textOf(await call({ action: "nudge", ticketId: a.id, reason: "Nudging as well." }))).toContain("one action per problem");
+    expect(textOf(await call({ action: "escalate", ticketId: a.id, reason: "And escalating too." }))).toContain("one action per problem");
+    const b = await handed({ title: "Other" });
+    const [fb] = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, b.id));
+    expect(isError(await call({ action: "nudge", ticketId: b.id, reason: "Please pick it up." }))).toBe(false);
+    expect(textOf(await call({ action: "snooze", flagId: fb!.id, hours: 2, reason: "Snoozing after the nudge." }))).toContain("one action per problem");
+    expect(await ctx.db.select().from(watchdogActions).where(inArray(watchdogActions.kind, ["nudge", "snooze", "escalate"]))).toHaveLength(2);
+  });
+
+  it("F5: a pile of tickets waiting on the owner is one notification, not one each", async () => {
+    await ctx.switchOn();
+    for (let i = 0; i < 25; i++) {
+      const t = await ctx.ticket({ title: `Wait ${i}`, systemState: "blocked", stateChangedAt: ctx.ago(600) });
+      const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: `Q${i}?`, options: ["Done", "Not yet"], recommendedOption: "Done", createdAt: ctx.ago(479) }).returning();
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
+    }
+    ctx.advance(2);
+    await ctx.watchdog.run();
+    expect(await ctx.db.select().from(notifications).where(sql`${notifications.title} like '%waiting for your decision'`)).toHaveLength(1);
+    expect(await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "owner_reminder"))).toHaveLength(25);
+    // And not again for the same tickets.
+    ctx.advance(25 * 60);
+    await ctx.watchdog.run();
+    expect(await ctx.db.select().from(notifications).where(sql`${notifications.title} like '%waiting for your decision'`)).toHaveLength(1);
+  });
+
+  it("F6: a dropped sweep wake leaves the flags due and is not counted toward the cap", async () => {
+    await ctx.switchOn({ maxSmRunsPerHour: 1 });
+    const t = await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
+    const real = ctx.scheduler.notify.bind(ctx.scheduler);
+    const spy = vi.spyOn(ctx.scheduler, "notify").mockImplementationOnce(async (agentId, input) => ({ ...(await real(agentId, input)), status: "dropped", statusReason: "company paused" }));
+    await ctx.watchdog.run();
+    spy.mockRestore();
+    const [f] = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id));
+    expect(f!.lastFlaggedAt).toBeNull();
+    expect(f!.dueAt.getTime()).toBeLessThan(ctx.now().getTime() + 20 * 60_000);
+    ctx.advance(16);
+    await ctx.watchdog.run();
+    expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).toBeNull();
+    expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id)))[0]!.lastFlaggedAt).not.toBeNull();
+  });
+
+  it("escalate takes only the flag it was given, and the owner can undo an automatic escalation", async () => {
+    await ctx.switchOn();
+    const t = await handed({ stateChangedAt: ctx.ago(600) });
+    await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: t.id, rule: "review_loop", dueAt: ctx.now(), lastFlaggedAt: ctx.now(), detail: { bounces: 5 } });
+    const [stale] = await ctx.db.select().from(watchdogFlags).where(and(eq(watchdogFlags.ticketId, t.id), eq(watchdogFlags.rule, "stale_in_progress")));
+    expect(isError(await call({ action: "escalate", ticketId: t.id, reason: "Stuck for ten hours." }))).toBe(false);
+    const flags = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id));
+    expect(flags.filter((f) => f.escalatedAt)).toHaveLength(1);
+
+    const auto = await handed({ title: "Twice snoozed" });
+    await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, auto.id));
+    await ctx.watchdog.run();
+    const [act] = await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "auto_escalate"));
+    const r = await ctx.req("POST", `/api/watchdog-actions/${act!.id}/undo`);
+    expect(r.statusCode).toBe(200);
+    expect(stale).toBeTruthy();
+    expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, auto.id)))[0]).toMatchObject({ escalatedAt: null, snoozeCount: 0 });
+  });
+  const undo = (r: unknown) => ctx.req("POST", `/api/watchdog-actions/${actionId(r)}/undo`, { reason: "Not needed after all." });
+
+  it("a trip on the nudge cap during the sweep ends the sweep: no Scrum Master wake after the watchdog switches itself off", async () => {
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    const a = await handed({ title: "Twice snoozed" });
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "nudge", ticketId: a.id, reason: "used the hour's allowance" });
+    await ctx.ticket({ title: "Another due one", stateChangedAt: ctx.ago(130) });
+    await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, a.id));
+    const before = (await ctx.smWakes()).length;
+    await ctx.watchdog.run();
+    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
+    expect(await ctx.smWakes()).toHaveLength(before);
+  });
+
+  it("undoing a raised decision still puts the ticket back when its old column is full", async () => {
+    await ctx.switchOn();
+    const t = await handed({ stateChangedAt: ctx.ago(300) });
+    await ctx.db.update(watchdogFlags).set({ lastFlaggedAt: ctx.now() }).where(eq(watchdogFlags.ticketId, t.id));
+    const ask = await call({ action: "raise_decision", ticketId: t.id, question: "Grant more memory?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Looked at it; it is a host setting.", reason: "Only the owner can change the host." });
+    expect(isError(ask)).toBe(false);
+    const { workflowColumns } = await import("../src/db/schema.js");
+    const [col] = await ctx.db.select().from(workflowColumns).where(and(eq(workflowColumns.projectId, ctx.project.id), eq(workflowColumns.systemState, "in_progress")));
+    await ctx.ticket({ title: "Fills the column", columnId: col!.id });
+    await ctx.db.update(workflowColumns).set({ wipLimit: 1 }).where(eq(workflowColumns.id, col!.id));
+    expect((await undo(ask)).statusCode).toBe(200);
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
   });
 });

@@ -1095,6 +1095,8 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "reviewBounces", label: "Review loop after more than", unit: "send-backs" },
   { key: "maxSmRunsPerHour", label: "Most Scrum Master runs per hour", unit: "runs" },
   { key: "maxNudgesPerHour", label: "Most Scrum Master actions per hour", unit: "actions" },
+  { key: "alertMinutes", label: "Move an alert up a level after", unit: "minutes" },
+  { key: "maxCeoAlertsPerHour", label: "Most alerts sent to the CEO per hour", unit: "alerts" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
@@ -1240,6 +1242,40 @@ function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => 
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { goalCheckDays: n } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+/** The company's hourly nudge limit (BOS-73). */
+function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
+  const act = useAction();
+  const n = Number(cap);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 1000;
+  return (
+    <Section id="nudge-cap-h" title="Nudges">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Agents nudge each other to hand over work or ask a question, and each nudge wakes the colleague. Past this many in an hour, they write on the ticket instead. The Scrum Master's nudges have their own limit under Watchdog.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="nudge-cap">Nudges per hour</label>
+        <input id="nudge-cap" type="number" min={1} max={1000} value={cap} onChange={(e) => setCap(e.target.value)} style={{ width: 80 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { nudgesPerHour: n } });
               onChanged();
               return "Saved.";
             })
@@ -1776,6 +1812,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             </Section>
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
+            <NudgeCap company={company} onChanged={onChanged} />
             <Watchdog company={company} />
             <Chapters company={company} />
           </div>

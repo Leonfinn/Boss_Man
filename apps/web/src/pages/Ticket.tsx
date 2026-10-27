@@ -179,7 +179,20 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  const [blocking, setBlocking] = useState<{ until: string; reason: string } | null>(null);
+  const block = async () => {
+    if (!blocking) return;
+    try {
+      const until = blocking.until ? new Date(blocking.until).toISOString() : undefined;
+      await api(`/api/tickets/${id}/state`, { method: "POST", body: { state: "blocked", ...(until ? { blockedUntil: until, ...(blocking.reason.trim() ? { blockedUntilReason: blocking.reason.trim() } : {}) } : {}) } });
+      setBlocking(null);
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    }
+  };
   const moveTo = async (state: string) => {
+    if (state === "blocked") return setBlocking({ until: "", reason: "" });
     if (state === "done" && !window.confirm("Mark done without merging? Any unmerged work on its branch stays on the branch.")) return;
     try {
       await api(`/api/tickets/${id}/state`, { method: "POST", body: { state } });
@@ -559,6 +572,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   </option>
                 ))}
               </select>
+              {blocking && (
+                <div>
+                  <label htmlFor="t-blocked-until">Blocked until (optional)</label>
+                  <input id="t-blocked-until" type="datetime-local" value={blocking.until} onChange={(e) => setBlocking({ ...blocking, until: e.target.value })} />
+                  <label htmlFor="t-blocked-reason">Why (one line)</label>
+                  <input id="t-blocked-reason" maxLength={240} value={blocking.reason} disabled={!blocking.until} placeholder="e.g. waiting on the Friday deployment" onChange={(e) => setBlocking({ ...blocking, reason: e.target.value })} />
+                  <small className="muted" style={{ display: "block" }}>With a time, the Scrum Master watchdog leaves it alone until then plus a grace period. Without one, the normal blocked limit applies.</small>
+                  <button type="button" onClick={() => void block()}>Block</button> <button type="button" onClick={() => setBlocking(null)}>Cancel</button>
+                </div>
+              )}
+              {t.systemState === "blocked" && t.blockedUntil && (
+                <small className="muted" style={{ display: "block" }}>Blocked until {new Date(t.blockedUntil).toLocaleString()}{t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.</small>
+              )}
               <small className="muted" style={{ display: "block" }}>Done closes it without merging. In review asks the reviewers; Ready and In progress wake the assignee.</small>
             </dd>
             <dt>

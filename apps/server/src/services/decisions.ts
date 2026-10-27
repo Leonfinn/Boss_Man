@@ -586,6 +586,20 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return db.select().from(decisions).where(eq(decisions.status, "open")).orderBy(asc(decisions.createdAt));
     },
 
+    /** Boss Man's alerts the team is still handling (BOS-64), for the owner's collapsed "being handled" line. */
+    async withTeam() {
+      const rows = await db
+        .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context, holder: agents.name })
+        .from(decisions)
+        .leftJoin(agents, eq(agents.id, decisions.forAgentId))
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->'ladder'->>'rung' in ('scrum_master', 'ceo')`))
+        .orderBy(asc(decisions.createdAt));
+      return rows.map((r) => {
+        const l = (r.context as { ladder: { rung: string; since: string } }).ladder;
+        return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), holder: l.rung === "ceo" ? "the CEO" : (r.holder ?? "the Scrum Master"), since: l.since };
+      });
+    },
+
     /**
      * The owner's queue (R20): every open decision with what it holds up, down the chain,
      * ranked by an explainable score.
@@ -597,7 +611,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .from(decisions)
         .innerJoin(companies, eq(companies.id, decisions.companyId))
         .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
-        .where(eq(decisions.status, "open"));
+        // Boss Man's alerts still with the Scrum Master or the CEO aren't the owner's yet (BOS-64); withTeam lists them.
+        .where(and(eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`));
       if (!open.length) return [];
       const forIds = [...new Set(open.map((o) => o.d.forAgentId).filter((x): x is string => !!x))];
       const forNames = new Map(forIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, forIds))).map((a) => [a.id, a.name]) : []);
@@ -716,8 +731,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
       await db
         .update(decisions)
-        // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again.
-        .set({ status: "answered", answer, answeredAt: now(), ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" ? { dedupeKey: null } : {}) })
+        // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again; so does a
+        // loop alert (alert-ladder.ts), whose key only stops a repeat while it is open.
+        .set({ status: "answered", answer, answeredAt: now(), ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}) })
         .where(eq(decisions.id, id));
 
       let delivered: boolean | null = null;
