@@ -6,7 +6,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, decisions, wakes, wikiRevisions, wikiPages } from "../src/db/schema.js";
-import { briefCommitLine, briefSlug, LESSON_DONT_ADD, LESSON_REPLACE_PREFIX, lessonsFrom } from "../src/services/project-brief.js";
+import { briefCommitLine, briefSlug, LESSON_DONT_ADD, lessonsFrom } from "../src/services/project-brief.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -143,8 +143,8 @@ describe("lessons learned from sent-back reviews", () => {
     const [replace] = (await c.open()).filter((d) => (d.context as { type: string }).type === "lesson_replace");
     expect(replace).toMatchObject({ tier: "ceo" });
     expect(replace!.question).toContain("is full (20)");
-    expect(replace!.options).toEqual([...Array.from({ length: 20 }, (_, i) => `${LESSON_REPLACE_PREFIX}Lesson ${i + 1}`), LESSON_DONT_ADD]);
-    await c.answer(replace!.id, `${LESSON_REPLACE_PREFIX}Lesson 3`);
+    expect(replace!.options).toEqual([...Array.from({ length: 20 }, (_, i) => `Replace #${i + 1}: Lesson ${i + 1}`), LESSON_DONT_ADD]);
+    await c.answer(replace!.id, "Replace #3");
     const body = (await c.brief())!.body;
     expect(body).toContain("- Lesson 21");
     expect(body).not.toContain("- Lesson 3\n");
@@ -155,6 +155,25 @@ describe("lessons learned from sent-back reviews", () => {
     const [replace2] = (await c.open()).filter((d) => (d.context as { type: string }).type === "lesson_replace");
     await c.answer(replace2!.id, LESSON_DONT_ADD);
     expect((await c.brief())!.body).not.toContain("- Lesson 22");
+  });
+
+  it("drop-one decisions take a number, and stop offering a lesson another one removed (BOS-108)", async () => {
+    const long = "L".repeat(300);
+    const c = (ctx = await setup());
+    const lines = [`- ${long}`, ...Array.from({ length: 19 }, (_, i) => `- Lesson ${i + 2}`)].join("\n");
+    await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Lessons\n\n${lines}\n`);
+    for (const l of ["New A", "New B"]) {
+      await c.sendBack(l);
+      await c.answer((await sendBackDecision())!.id, "Add");
+    }
+    const [a, b] = (await c.open()).filter((d) => (d.context as { type: string }).type === "lesson_replace");
+    // The 300-character lesson is chosen by its number.
+    expect((await c.answer(a!.id, "Replace #1")).statusCode).toBe(200);
+    expect((await c.brief())!.body).not.toContain(long);
+    const [left] = (await c.open()).filter((d) => d.id === b!.id);
+    expect(left!.options).not.toContain(`Replace #1: ${long}`);
+    expect((await c.answer(b!.id, `Replace #1: ${long}`)).statusCode).toBe(422);
+    expect((await c.answer(b!.id, "Replace #1")).statusCode).toBe(422);
   });
 
   it("the Wiki Maintainer's rewrite of the brief can't touch the Lessons section", async () => {
@@ -234,7 +253,7 @@ describe("lessons learned: QA edge cases", () => {
     expect(follow!.question).toContain("raise the cap to 25");
     const w = (await c.db.select().from(wakes)).filter((x) => x.agentId === c.ceo.id);
     expect(JSON.stringify(w)).toContain(follow!.question.slice(0, 40));
-    const done = await c.answer(follow!.id, "Replace: Lesson 3");
+    const done = await c.answer(follow!.id, "Replace #3");
     expect(done.statusCode).toBe(200);
     const kept = lessonsFrom((await c.brief())!.body);
     expect(kept).toContain("Lesson 21");
@@ -253,7 +272,7 @@ describe("lesson decisions go to the CEO (BOS-105)", () => {
     const [replace] = (await c.open()).filter((x) => (x.context as { type: string }).type === "lesson_replace");
     expect(replace).toMatchObject({ tier: "ceo" });
     expect(JSON.stringify(await c.db.select().from(wakes))).toContain("is full (20)");
-    await c.answer(replace!.id, `${LESSON_REPLACE_PREFIX}Lesson 3`, "Overlaps lesson 4.");
+    await c.answer(replace!.id, "Replace #3", "Overlaps lesson 4.");
     const feed = (await c.db.select().from(activity)).filter((a) => a.kind === "lesson_outcome").map((a) => a.summary);
     expect(feed.some((s) => s.includes('added "Lesson 21" and dropped "Lesson 3"') && s.includes("Overlaps lesson 4."))).toBe(true);
   });
