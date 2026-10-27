@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -34,6 +34,8 @@ import { AgentError, type agentsService } from "./services/agents.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
+import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
+import type { alertLadder } from "./services/alert-ladder.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -92,10 +94,34 @@ type Services = {
   agents: ReturnType<typeof agentsService>;
   pa: ReturnType<typeof paService>;
   images: ReturnType<typeof ticketImagesService>;
+  watchdog: ReturnType<typeof watchdogService>;
+  alerts: ReturnType<typeof alertLadder>;
 };
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images }: Services, scope: Scope, hooks: McpHooks) {
+/**
+ * The Scrum Master's tools (BOS-58): reads, ticket_reply, and the watchdog tool with its few
+ * actions. Nothing that changes a ticket's state, risk, priority or work is ever registered, so
+ * the Scrum Master can't close, cancel or re-rate a ticket however it is asked to.
+ */
+const SCRUM_MASTER_TOOLS: ReadonlySet<string> = new Set(["tickets", "wiki", "whats_new", "list_my_work", "board", "ticket_reply", "open_attachment", "watchdog"]);
+
+/** Registers only the named tools on this server; the wiki among them is read-only. */
+function restrictTo(server: McpServer, only: ReadonlySet<string>) {
+  const register = server.registerTool.bind(server);
+  server.registerTool = ((name: string, config: never, cb: (input: { action?: string }, extra: never) => Promise<unknown>) => {
+    if (!only.has(name)) return undefined;
+    if (name !== "wiki") return register(name, config, cb as never);
+    return register(name, config, (async (input: { action?: string }, extra: never) => (input.action === "list" || input.action === "read" ? cb(input, extra) : fail("You can only read the wiki."))) as never);
+  }) as never;
+}
+
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images, watchdog, alerts }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  if (only) restrictTo(server, only);
+  if (only === SCRUM_MASTER_TOOLS) {
+    registerBoard(server, db, scope);
+    registerWatchdog(server, watchdog, alerts, scope);
+  }
 
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
@@ -712,12 +738,15 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "decisions",
     {
       description:
-        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). The owner sees the same queue and may answer first. You can't answer your own requests.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert only the owner can settle (a secret, host access, sign-off, an owner-only choice): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests.",
       inputSchema: {
-        action: z.enum(["list", "answer"]),
+        action: z.enum(["list", "answer", "escalate"]),
         id: z.string().uuid().optional(),
         answer: z.string().max(200).optional(),
         note: z.string().max(2000).optional(),
+        triedFirst: z.string().max(1000).optional(),
+        ownerMustDo: z.boolean().optional(),
+        steps: z.array(z.string().min(1).max(500)).max(12).optional(),
       },
     },
     async (input) => {
@@ -732,7 +761,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
             .from(decisionsTable)
             .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), eq(decisionsTable.tier, "ceo")))
             .orderBy(decisionsTable.createdAt)
-        ).filter(mine);
+        )
+          .filter(mine)
+          // Alerts still with the Scrum Master aren't the CEO's yet (BOS-64).
+          .filter((d) => (d.context as { ladder?: { rung: string } }).ladder?.rung !== "scrum_master");
         if (!open.length) return text("No decisions are waiting for you.");
         return text(
           open
@@ -742,6 +774,17 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
             })
             .join("\n\n"),
         );
+      }
+      if (input.action === "escalate") {
+        if (!input.id || !input.triedFirst) return fail("Give the alert's id and triedFirst: what you and the team tried.");
+        if (!isCeo || !scope.agentId) return fail("Only the CEO passes alerts to the owner.");
+        try {
+          await alerts.escalate(scope.companyId, scope.agentId, { alertId: input.id, triedFirst: input.triedFirst, steps: input.steps, ownerMustDo: input.ownerMustDo });
+          return text("Passed to the owner, with what you tried.");
+        } catch (err) {
+          if (err instanceof WatchdogError) return fail(err.message);
+          throw err;
+        }
       }
       if (!input.id || !input.answer) return fail("Give the decision's id and your answer.");
       const [d] = await db.select().from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
@@ -935,6 +978,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
           `# ${t.title}`,
           `Ticket ${ref(t).ref ?? ""} (id ${t.id}) in project "${row.project}". State: ${t.systemState}${t.outcome ? ` (${t.outcome})` : ""}. Version: ${t.version}. Assigned to: ${row.assignee ?? (t.assignedToOwner ? "the owner" : "nobody")}. Risk: ${t.risk ?? "medium"}.`,
           ...(note ? [note] : []),
+          ...(t.systemState === "blocked" && t.blockedUntil ? [`Blocked until ${t.blockedUntil.toISOString().slice(0, 16).replace("T", " ")} UTC${t.blockedUntilReason ? `: ${t.blockedUntilReason}` : ""}.`] : []),
           t.branch ? `Branch: ${t.branch}${row.repoUrl ? ` in ${row.repoUrl}` : ""}${t.mergeCommit ? `, merged as ${t.mergeCommit}` : ", not merged"}.` : "No branch yet.",
           "",
           "## Description",
@@ -1282,16 +1326,18 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since.",
-      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional() },
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
+      inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional() },
     },
-    async ({ ticketId, state, outcome, expected_version, summary }) => {
+    async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason }) => {
       const no = await chatRefusal();
       if (no) return fail(no);
+      const notMine = await moveRefusal(db, scope, ticketId, state === "done" && outcome === "cancelled");
+      if (notMine) return fail(notMine);
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
       if (state === "done") {
         const [t] = await db
-          .select({ repoUrl: projects.repoUrl, mergeCommit: tickets.mergeCommit })
+          .select({ repoUrl: projects.repoUrl, mergeCommit: tickets.mergeCommit, noCode: tickets.noCode })
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
@@ -1299,11 +1345,18 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         const merged = !!t?.mergeCommit && (await managerIn(db, scope));
         // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
         if (t?.repoUrl && outcome !== "cancelled" && !merged) {
-          const nothingOwn = await review.needsChanges(ticketId, scope.companyId).catch(() => false);
+          // A no-code ticket has nothing to merge by definition.
+          const nothingOwn = t.noCode || (await review.needsChanges(ticketId, scope.companyId).catch(() => false));
           if (!nothingOwn) return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
           if (!(await managerIn(db, scope))) return fail("This ticket has no changes of its own, so it can't be merged. If its change shipped on another ticket, ask your CEO or manager to close it (set_ticket_state done, naming that ticket in the summary).");
         }
       }
+      if ((blocked_until || blocked_reason) && state !== "blocked") return fail("blocked_until and blocked_reason only go with state blocked.");
+      if (blocked_reason && !blocked_until) return fail("blocked_reason goes with blocked_until: give the date and time you are waiting for.");
+      if (blocked_reason && /[\r\n]/.test(blocked_reason.trim())) return fail("blocked_reason must be one line.");
+      const until = blocked_until ? new Date(blocked_until) : null;
+      if (until && until.getTime() <= Date.now()) return fail("blocked_until must be in the future.");
+      if (until && until.getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) return fail(`blocked_until can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead. For a longer wait, block without a time and raise a decision for the owner.`);
       if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
       // With criteria on the ticket, moving to review is only allowed once the state note reports
       // pass or fail for each of them; the refusal names the ones it can't find.
@@ -1315,7 +1368,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
       if (missing.length)
         return fail(
-          `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again.`,
+          `This ticket has acceptance criteria, and the summary must give pass or fail for each of them. Not reported: ${missing.map((m) => `"${m}"`).join(", ")}. Say whether each one passes or fails, then move it again. Numbered verdicts in criteria order work too and are shorter, e.g. "1 pass; 2 pass; 3 fail: reason".`,
         );
       // A code ticket with nothing changed in the repository can't be reviewed; research and wiki
       // tickets are marked "no code" and are not held to this.
@@ -1336,7 +1389,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
@@ -1349,7 +1402,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         if (!now) return fail("No ticket with that ID in your company.");
         return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
       }
-      await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}`, at });
+      await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
@@ -1379,6 +1432,22 @@ async function hasOpenBlocker(db: Db, ticketId: string) {
     }
   }
   return false;
+}
+
+/**
+ * A worker moves only its own tickets (BOS-73): assigned to it, a sub-task of one assigned to it, or one it
+ * created that nobody holds yet. Cancelling skips review and merge, so only the CEO or a manager may.
+ */
+async function moveRefusal(db: Db, scope: Scope, ticketId: string, cancelling: boolean): Promise<string | null> {
+  if (await managerIn(db, scope)) return null;
+  if (cancelling) return "Only your CEO or a manager can cancel a ticket. If it should be dropped, nudge them with the reason.";
+  const [t] = await db.select({ assignee: tickets.assigneeAgentId, createdBy: tickets.createdByAgentId, parentId: tickets.parentTicketId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+  if (!t) return "No ticket with that ID in your company.";
+  const me = scope.agentId;
+  if (me && (t.assignee === me || (!t.assignee && t.createdBy === me))) return null;
+  const [parent] = me && t.parentId ? await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, t.parentId)) : [];
+  if (me && parent?.assignee === me) return null;
+  return "That ticket isn't yours: you can move only tickets assigned to you and sub-tasks of them. If it needs to move, tell its assignee or your CEO (ticket_reply on it, or nudge them).";
 }
 
 async function managerIn(db: Db, scope: Scope) {
@@ -1549,8 +1618,90 @@ function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa, 
   return server;
 }
 
+/** The Scrum Master's watchdog actions (BOS-58). Each needs a one-line reason, is logged and can be undone. */
+function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], alerts: Services["alerts"], scope: Scope) {
+  server.registerTool(
+    "watchdog",
+    {
+      description:
+        "Your only way to act on the problems the watchdog hands you. Every action needs reason: one line saying why. list: the open flags. nudge (ticketId): ask the assignee to pick it up or say why it's stuck. assign (ticketId, to): an unassigned ticket only, to the obvious colleague by name, or \"ceo\" if none is obvious. rewake (ticketId): wake the assignee again after their run crashed or ended without moving the ticket. chase_review (ticketId): wake the pending reviewers. snooze (flagId, hours up to 48): the flag is fine for now; a third snooze in a row is refused and the ticket goes to the CEO. escalate (ticketId): hand it to the CEO. raise_decision (ticketId, question, options, recommended, triedFirst, ownerMustDo, steps): when only the owner can unblock it. Boss Man's own alerts (a wake chain that looks like a loop, two agents nudging each other) come to you first: alerts lists yours; resolve_alert (alertId, optional rewake: true to wake the dropped agent again with a fresh chain) once you've dealt with it; pass_alert (alertId) when it needs the CEO. Act only on the problems the watchdog handed you, each action at most once per problem until it is handed to you again. The owner can undo any of your actions. You can't do the work, change risk or priority, or close or cancel tickets. Actions are capped per hour; past the cap the watchdog switches off and the owner is told.",
+      inputSchema: {
+        action: z.enum(["list", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "alerts", "resolve_alert", "pass_alert"]),
+        alertId: z.string().uuid().optional(),
+        rewake: z.boolean().optional(),
+        reason: z.string().max(400).optional(),
+        ticketId: z.string().uuid().optional(),
+        flagId: z.string().uuid().optional(),
+        to: z.string().min(1).max(100).optional(),
+        hours: z.number().positive().max(48).optional(),
+        question: z.string().min(1).max(1000).optional(),
+        options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
+        recommended: z.string().optional(),
+        triedFirst: z.string().max(1000).optional(),
+        ownerMustDo: z.boolean().optional(),
+        steps: z.array(z.string().min(1).max(500)).max(12).optional(),
+      },
+    },
+    async (input) => {
+      if (!scope.agentId) return fail("Only the Scrum Master's run can use the watchdog.");
+      const { companyId, agentId, runId } = { companyId: scope.companyId, agentId: scope.agentId, runId: scope.runId };
+      const need = <K extends keyof typeof input>(...keys: K[]) => {
+        const missing = keys.filter((k) => input[k] === undefined);
+        if (missing.length) throw new WatchdogError(422, `${input.action} needs ${missing.join(", ")}.`);
+      };
+      const reason = input.reason ?? "";
+      const done = (a: { id: string }) => text(`Done and logged as action ${a.id}.`);
+      try {
+        switch (input.action) {
+          case "list": {
+            const open = await watchdog.flags(companyId, { status: "open", limit: 50 });
+            return text(open.length ? JSON.stringify(open.map((f) => ({ flagId: f.id, ticketId: f.ticketId, title: f.ticketTitle, rule: f.rule, openedAt: f.openedAt, snoozedUntil: f.snoozedUntil, snoozeCount: f.snoozeCount, escalatedAt: f.escalatedAt, detail: f.detail }))) : "No open flags.");
+          }
+          case "nudge":
+            need("ticketId");
+            return done(await watchdog.nudge(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
+          case "assign":
+            need("ticketId", "to");
+            return done(await watchdog.assign(companyId, agentId, runId, { ticketId: input.ticketId!, to: input.to!, reason }));
+          case "rewake":
+            need("ticketId");
+            return done(await watchdog.rewake(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
+          case "chase_review":
+            need("ticketId");
+            return done(await watchdog.chaseReview(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
+          case "snooze":
+            need("flagId", "hours");
+            return done(await watchdog.snooze(companyId, agentId, runId, { flagId: input.flagId!, hours: input.hours!, reason }));
+          case "escalate":
+            need("ticketId");
+            return done(await watchdog.escalate(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
+          case "raise_decision":
+            need("ticketId", "question", "options", "recommended", "triedFirst");
+            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason }));
+          case "alerts": {
+            const mine = await alerts.mine(companyId, agentId);
+            return text(mine.length ? JSON.stringify(mine) : "No alerts are waiting for you.");
+          }
+          case "resolve_alert":
+            need("alertId");
+            await alerts.resolve(companyId, agentId, { alertId: input.alertId!, reason, rewake: input.rewake });
+            return text(`Settled and logged${input.rewake ? ", and the agent was woken again" : ""}.`);
+          case "pass_alert": {
+            need("alertId");
+            const r = await alerts.pass(companyId, agentId, { alertId: input.alertId!, reason });
+            return text(`Passed on: it's with ${r.to === "ceo" ? "the CEO" : "the owner"} now.`);
+          }
+        }
+      } catch (err) {
+        if (err instanceof WatchdogError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+}
+
 const NUDGE_DESCRIPTION =
-  "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, and none back and forth about the same ticket.";
+  "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
 
 /**
@@ -1705,7 +1856,15 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
     const [run] = await db.select({ purpose: runsTable.purpose }).from(runsTable).where(eq(runsTable.id, scope.runId));
     // A PA gets its read-only server whatever woke it (R87).
     const [me] = scope.agentId ? await db.select({ duty: agents.duty }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-    const server = me?.duty === "assistant" ? buildPaServer(db, services, scope) : run?.purpose === "chat" ? buildChatServer(db, services, scope, hooks) : buildServer(db, services, scope, hooks);
+    // The Scrum Master gets its restricted server for its own runs (BOS-58); the owner's chat with it keeps the chat tools.
+    const server =
+      me?.duty === "assistant"
+        ? buildPaServer(db, services, scope)
+        : run?.purpose === "chat"
+          ? buildChatServer(db, services, scope, hooks)
+          : me?.duty === SCRUM_MASTER_DUTY
+            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS)
+            : buildServer(db, services, scope, hooks);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {

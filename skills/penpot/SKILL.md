@@ -48,6 +48,10 @@ In the steps below, `<skill dir>` is this skill's base directory (shown when the
 - Shape x/y are relative to their board. Types: `rect`, `ellipse`, `text`, `group`. Optional: `fill`, `stroke`, `strokeWidth`, `radius`, `name`. Text: `text`, `size`, `font` (default `sourcesanspro`; a Google font name like `Inter` also works), `weight` (`bold`), `align`; give `w` for wrapped text. Colours are `#rrggbb`.
 - Images are not supported yet.
 
+## If export fails
+
+`export` logs in as the agent account (PENPOT_EMAIL and PENPOT_PASSWORD, granted like the token) because Penpot's export service needs a session, not a token. If it says those are missing or refused, tell the owner on the ticket; they can fix the secrets. Don't try other ways around it.
+
 ## Limits
 
 - Per-board PNG export is broken on the server (BOS-55). Don't try to export; give the owner the link instead. `export FILE_ID PAGE_ID BOARD_ID OUT.png` still exists for when it is fixed (attach with `attach_image`; PNG only, max 5 MB).

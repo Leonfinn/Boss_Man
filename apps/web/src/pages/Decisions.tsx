@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { api, type Company, type Decision, type StallEvidence } from "../api";
+import { api, type Company, type Decision, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { describe, useTranscript } from "../transcript";
@@ -113,7 +113,7 @@ function why(d: { score: number; parts: { blocking: number; liveRun: number; urg
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[] }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -180,6 +180,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         )}
       </header>
       {banner}
+      {withTeam.length > 0 && (
+        // Alerts the Scrum Master or CEO still hold: listed so nothing is hidden, but not the owner's to answer yet.
+        <details className="sub">
+          <summary>Being handled by the team ({withTeam.length})</summary>
+          <ul>
+            {withTeam.map((a) => (
+              <li key={a.id}>
+                {a.question} <span className="muted">· with {a.holder} since {when(a.since)}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
       {loaded && shown.length === 0 ? (
         agentsWorking > 0 ? (

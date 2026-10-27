@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { RUNNER_ADDONS, type AddonReport } from "@boss-man/shared";
+import { RUNNER_ADDONS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
@@ -1074,6 +1074,153 @@ function TicketPrefix({ company, onChanged }: { company: Company; onChanged: () 
   );
 }
 
+type WatchdogStatus = {
+  settings: WatchdogSettings;
+  scrumMaster: { id: string; name: string; paused: boolean } | null;
+  lastSweepAt: string | null;
+  trippedAt: string | null;
+  trippedReason: string | null;
+  openFlags: number;
+};
+type Backtest = { from: string; to: string; flags: Array<{ ticketId: string; ref: string; title: string; rule: WatchdogRule; firstAt: string; handOffs: number; verdict: string }>; scrumMasterWakes: number; busiestHourWakes: number; wouldTripCap: boolean; caveats: string[] };
+
+/** The limits the owner edits, with their labels and units. */
+const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit: string }> = [
+  { key: "inProgressHours", label: "No movement in progress", unit: "hours" },
+  { key: "reviewHours", label: "No movement in review", unit: "hours" },
+  { key: "blockedHours", label: "Blocked with no movement", unit: "hours" },
+  { key: "unassignedMinutes", label: "Unassigned work", unit: "minutes" },
+  { key: "blockedUntilGraceHours", label: "Grace after 'blocked until'", unit: "hours" },
+  { key: "ownerDecisionHours", label: "Remind me about a decision after", unit: "hours" },
+  { key: "reviewBounces", label: "Review loop after more than", unit: "send-backs" },
+  { key: "maxSmRunsPerHour", label: "Most Scrum Master runs per hour", unit: "runs" },
+  { key: "maxNudgesPerHour", label: "Most Scrum Master actions per hour", unit: "actions" },
+  { key: "alertMinutes", label: "Move an alert up a level after", unit: "minutes" },
+  { key: "maxCeoAlertsPerHour", label: "Most alerts sent to the CEO per hour", unit: "alerts" },
+];
+
+/** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
+export function Watchdog({ company }: { company: Company }) {
+  const [status, setStatus] = useState<WatchdogStatus | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [sm, setSm] = useState("");
+  const [bt, setBt] = useState<Backtest | null>(null);
+  const act = useAction();
+  const test = useAction();
+  const load = async () => {
+    const s = await api<WatchdogStatus>(`/api/companies/${company.id}/watchdog`);
+    setStatus(s);
+    setDraft(Object.fromEntries(WATCHDOG_LIMITS.map((l) => [l.key, String(s.settings[l.key])])));
+    setSm(s.scrumMaster?.id ?? "");
+  };
+  useEffect(() => {
+    void load().catch(() => setStatus(null));
+  }, [company.id]);
+  if (!status) return null;
+  const candidates = company.agents.filter((a) => a.role !== "ceo" && (!a.duty || a.duty === "scrum_master"));
+  const save = (extra: Record<string, unknown>) =>
+    act.run(async () => {
+      const limits = Object.fromEntries(WATCHDOG_LIMITS.map((l) => [l.key, Number(draft[l.key])]));
+      await api(`/api/companies/${company.id}/watchdog`, { method: "PATCH", body: { ...limits, scrumMasterAgentId: sm || null, ...extra } });
+      await load();
+      return "Saved.";
+    });
+  const on = status.settings.enabled;
+  return (
+    <Section id="watchdog-h" title="Watchdog">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Every few minutes Boss Man checks the board with simple rules (no AI, no cost) and wakes the Scrum Master only when something looks stuck. The Scrum Master can only nudge, assign unassigned work, re-wake, chase a review, snooze, escalate to the CEO or ask you; every action is logged and can be undone.
+      </p>
+      <p role="status" style={{ fontSize: 14 }}>
+        {status.trippedAt
+          ? `Switched itself off ${when(status.trippedAt)}: ${status.trippedReason}. Look at its recent actions, then switch it back on.`
+          : on
+            ? `On. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
+            : "Off."}
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label htmlFor="wd-sm">Scrum Master</label>
+        <select id="wd-sm" value={sm} onChange={(e) => setSm(e.target.value)}>
+          <option value="">Nobody</option>
+          {candidates.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "max-content 90px max-content", gap: "8px 10px", alignItems: "center" }}>
+        {WATCHDOG_LIMITS.map((l) => (
+          <div key={l.key} style={{ display: "contents" }}>
+            <label htmlFor={`wd-${l.key}`}>{l.label}</label>
+            <input id={`wd-${l.key}`} type="number" min={0} value={draft[l.key] ?? ""} onChange={(e) => setDraft({ ...draft, [l.key]: e.target.value })} />
+            <span className="muted">{l.unit}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button type="button" className="btn" disabled={act.busy} onClick={() => void save({})}>
+          Save
+        </button>
+        <button type="button" className="btn" disabled={act.busy || (!on && !sm)} onClick={() => void save({ enabled: !on || !!status.trippedAt })}>
+          {on && !status.trippedAt ? "Switch off" : status.trippedAt ? "Switch back on" : "Switch on"}
+        </button>
+        <button
+          type="button"
+          className="btn"
+          disabled={test.busy}
+          onClick={() =>
+            void test.run(async () => {
+              setBt(await api<Backtest>(`/api/companies/${company.id}/watchdog/backtest?days=14`));
+            })
+          }
+        >
+          Test on the past 14 days
+        </button>
+      </div>
+      {act.view}
+      {test.view}
+      {bt && (
+        <div style={{ fontSize: 14 }}>
+          <p>
+            It would have raised {bt.flags.length} flag{bt.flags.length === 1 ? "" : "s"} and woken the Scrum Master {bt.scrumMasterWakes} time{bt.scrumMasterWakes === 1 ? "" : "s"} (at most {bt.busiestHourWakes} in one hour{bt.wouldTripCap ? ", which would have tripped the safety cap" : ""}).{" "}
+            {bt.flags.filter((f) => f.verdict === "cleared within 30 min").length} cleared by themselves within 30 minutes, so may not have needed it.
+          </p>
+          {bt.flags.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>Ticket</th>
+                  <th>Problem</th>
+                  <th>First seen</th>
+                  <th>Outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bt.flags.map((f) => (
+                  <tr key={`${f.ticketId}-${f.rule}-${f.firstAt}`}>
+                    <td>
+                      <a href={`#/tickets/${f.ticketId}`}>{f.ref}</a> {f.title}
+                    </td>
+                    <td>{WATCHDOG_RULE_LABEL[f.rule]}</td>
+                    <td>{when(f.firstAt)}</td>
+                    <td>{f.verdict}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <ul className="muted">
+            {bt.caveats.map((c) => (
+              <li key={c}>{c}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 /** CEO continuity: the CEO's current chapter, and the handoffs between chapters. */
 function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [days, setDays] = useState(String(company.goalCheckDays ?? 14));
@@ -1095,6 +1242,40 @@ function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => 
           onClick={() =>
             void act.run(async () => {
               await api(`/api/companies/${company.id}`, { method: "PATCH", body: { goalCheckDays: n } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+/** The company's hourly nudge limit (BOS-73). */
+function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
+  const act = useAction();
+  const n = Number(cap);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 1000;
+  return (
+    <Section id="nudge-cap-h" title="Nudges">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Agents nudge each other to hand over work or ask a question, and each nudge wakes the colleague. Past this many in an hour, they write on the ticket instead. The Scrum Master's nudges have their own limit under Watchdog.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="nudge-cap">Nudges per hour</label>
+        <input id="nudge-cap" type="number" min={1} max={1000} value={cap} onChange={(e) => setCap(e.target.value)} style={{ width: 80 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { nudgesPerHour: n } });
               onChanged();
               return "Saved.";
             })
@@ -1631,6 +1812,8 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             </Section>
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
+            <NudgeCap company={company} onChanged={onChanged} />
+            <Watchdog company={company} />
             <Chapters company={company} />
           </div>
         )}

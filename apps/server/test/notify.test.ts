@@ -5,7 +5,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, runs, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, nudges, runs, wakes } from "../src/db/schema.js";
+import { SCRUM_MASTER_DUTY } from "../src/services/watchdog.js";
 import { eq } from "drizzle-orm";
 import { issueRunToken } from "../src/mcp.js";
 import type { Limits } from "../src/services/scheduler.js";
@@ -226,6 +227,33 @@ describe("nudge (R86)", () => {
     expect(await client.callTool({ name: "nudge", arguments: { agent: "Bob", why: "x".repeat(501) } })).toMatchObject({ isError: true });
     expect(await client.callTool({ name: "nudge", arguments: { agent: c.other.ceo.id, why: "hi" } })).toMatchObject({ isError: true });
     await client.close();
+  });
+
+  it("stops at the company's hourly cap with a pointer to the ticket, and the Scrum Master is outside it (BOS-73)", async () => {
+    const c = (ctx = await setup());
+    expect((await c.req("PATCH", `/api/companies/${c.company.id}`, { nudgesPerHour: 2 })).statusCode).toBe(200);
+    const run = await c.liveRun(c.alice.id, null);
+    // Older than an hour, or dropped as a loop: neither counts.
+    await c.db.insert(nudges).values([
+      { companyId: c.company.id, fromAgentId: c.alice.id, toAgentId: c.bob.id, createdAt: new Date(Date.now() - 61 * 60_000) },
+      { companyId: c.company.id, fromAgentId: c.alice.id, toAgentId: c.bob.id, dropped: true },
+    ]);
+    expect(await nudge(c, c.alice.id, run.id, "Bob", "One", c.ticket.id)).toMatchObject({ ok: true });
+    expect(await nudge(c, c.bob.id, run.id, c.ceo.id, "Two")).toMatchObject({ ok: true });
+    const over = await nudge(c, c.alice.id, run.id, c.ceo.id, "Three", c.ticket.id);
+    expect(over).toMatchObject({ ok: false, error: expect.stringContaining("limit of 2 nudges in the last hour") });
+    expect(over).toMatchObject({ error: expect.stringContaining("ticket_reply") });
+    expect((await c.db.select().from(nudges).where(eq(nudges.why, "Three")))).toHaveLength(0);
+    // The watchdog's nudges have their own cap, so a busy team can't silence it.
+    await c.db.update(agents).set({ duty: SCRUM_MASTER_DUTY }).where(eq(agents.id, c.ceo.id));
+    expect(await nudge(c, c.ceo.id, run.id, "Bob", "Stuck for 3 hours?", c.ticket.id)).toMatchObject({ ok: true });
+  });
+
+  it("puts each nudge on the ticket's timeline (BOS-73)", async () => {
+    const c = (ctx = await setup());
+    const run = await c.liveRun(c.alice.id, null);
+    expect(await nudge(c, c.alice.id, run.id, "Bob", "Can you take the 429 test?", c.ticket.id)).toMatchObject({ ok: true });
+    expect(await c.db.select().from(activity).where(eq(activity.kind, "nudge"))).toEqual([expect.objectContaining({ agentId: c.alice.id, ticketId: c.ticket.id, summary: "Alice nudged Bob: Can you take the 429 test?" })]);
   });
 
   it("steers straight into a colleague's run on that ticket", async () => {
