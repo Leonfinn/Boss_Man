@@ -359,6 +359,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
+                      <span>Raised <time dateTime={d.createdAt}>{when(d.createdAt)}</time></span>
                       {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
                       {d.reasons.map((r) => (
