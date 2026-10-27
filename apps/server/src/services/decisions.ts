@@ -113,12 +113,12 @@ export const CANCEL_UPDATE = "Cancel the update";
 
 export class AnswerError extends Error {}
 
-/** Why an agent's ask is refused, or null: it must say what was tried first, and give steps when the owner has to act. */
 /** The option for dropping a line: numbered, so a long lesson can be chosen by its number. */
 const replaceOption = (i: number, lesson: string) => `Replace #${i + 1}: ${lesson}`;
 /** The lesson a drop answer names, in the numbered or the older "Replace: " form. */
 const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec(answer)?.[1];
 
+/** Why an agent's ask is refused, or null: it must say what was tried first, and give steps when the owner has to act. */
 export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[] }): string | null {
   const t = a.triedFirst.trim();
   if (t.length < 20 || t.split(/\s+/).length < 4 || /^(n\/?a|none|nothing|no|nil|-+)\W*$/i.test(t)) {
@@ -316,7 +316,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (dropped !== undefined) {
         const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
         const current = page ? lessonsFrom(page.body) : [];
-        if (!current.includes(dropped)) throw new AnswerError(`That lesson is no longer in the Lessons section (it may have been dropped by another decision). Current lessons: ${current.map((l, i) => `#${i + 1} ${l}`).join(" | ") || "none"}. Answer "${LESSON_DONT_ADD}" or ask for a fresh decision.`);
+        if (!current.includes(dropped)) throw new AnswerError(`That lesson is no longer in the Lessons section (it may have been dropped by another decision). Options still valid: ${(d.options as string[]).filter((o) => { const l = replacedLesson(o); return l !== undefined && current.includes(l); }).join(" | ") || "none"}. Answer "${LESSON_DONT_ADD}" or ask for a fresh decision.`);
       }
     }
   }

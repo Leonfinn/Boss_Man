@@ -176,6 +176,29 @@ describe("lessons learned from sent-back reviews", () => {
     expect((await c.answer(b!.id, "Replace #1")).statusCode).toBe(422);
   });
 
+  it("after a hand edit, the refusal lists the decision's own numbers, so following it drops the lesson meant (BOS-108)", async () => {
+    const c = (ctx = await setup());
+    const lines = Array.from({ length: 20 }, (_, i) => `- Lesson ${i + 1}`).join("\n");
+    await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Lessons\n\n${lines}\n`);
+    await c.sendBack("New A");
+    await c.answer((await sendBackDecision())!.id, "Add");
+    const [rep] = (await c.open()).filter((d) => (d.context as { type: string }).type === "lesson_replace");
+    // The owner edits Lesson 1 out of the brief by hand.
+    const cur = (await c.brief())!;
+    await c.db.update(wikiPages).set({ body: cur.body.replace("- Lesson 1\n", "") }).where(eq(wikiPages.id, cur.id));
+    const refused = await c.answer(rep!.id, "Replace #1");
+    expect(refused.statusCode).toBe(422);
+    const msg = refused.body;
+    expect(msg).toContain("Replace #3: Lesson 3");
+    expect(msg).not.toContain("Replace #1: Lesson 1 ");
+    expect(msg).not.toMatch(/Replace #2: Lesson 3/);
+    expect((await c.answer(rep!.id, "Replace #3")).statusCode).toBe(200);
+    const body = (await c.brief())!.body;
+    expect(body).not.toContain("- Lesson 3\n");
+    expect(body).toContain("- Lesson 2\n");
+    expect(body).toContain("- New A");
+  });
+
   it("the Wiki Maintainer's rewrite of the brief can't touch the Lessons section", async () => {
     const c = (ctx = await setup());
     await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Gotchas\nBeware.\n\n## Lessons\n\n- Read the config from the environment.\n`);
