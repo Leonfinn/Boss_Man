@@ -3,7 +3,8 @@
 # "Before merging" command. CI still runs leader.test.ts (real Postgres) and the image job
 # on pushes that touch those areas, every night, and on every pull request.
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+cd "$(dirname "$self")/.."
 
 # The shared runner caps processes (pids.max 1024) and other agents use most of them, so a step can die
 # with "spawn EAGAIN" / "Cannot fork" through no fault of the code. Run the checks in a child and re-run
@@ -14,9 +15,9 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   trap 'rm -f "$log"' EXIT
   for ((n = 1; n <= attempts; n++)); do
     rc=0
-    BOSSMAN_CHECK_CHILD=1 bash "${BASH_SOURCE[0]}" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+    BOSSMAN_CHECK_CHILD=1 bash "$self" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
     [ "$rc" -eq 0 ] && exit 0
-    if [ "$n" -lt "$attempts" ] && grep -qE 'spawn [^ ]* ?EAGAIN|EAGAIN|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
+    if [ "$n" -lt "$attempts" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${BOSSMAN_CHECK_RETRY_SECONDS:-30}s" >&2
       sleep "${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
     else
@@ -24,6 +25,9 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     fi
   done
 fi
+
+# BOSSMAN_CHECK_BODY replaces the checks below with a stub command (for check-all.test.sh).
+if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; fi
 
 pnpm install --frozen-lockfile --prefer-offline >/dev/null
 node --test scripts/*.test.mjs
