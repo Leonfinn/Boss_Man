@@ -33,14 +33,13 @@ describe("Scrum Master activity (BOS-60)", () => {
         calls.push(`${init?.method ?? "GET"} ${url}`);
         const body = init?.method === "POST" ? {} : [
           { id: "a1", kind: "nudge", ticketId: "t1", reason: "No movement for 3 h", actorName: "Scrum Master", createdAt: "2026-10-27T09:00:00Z", undoable: true, undoneAt: null, after: null },
-          { id: "a2", kind: "sweep_wake", ticketId: null, reason: "2 problems found", actorName: "Boss Man", createdAt: "2026-10-27T08:59:00Z", undoable: false, undoneAt: null, after: null },
         ];
         return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
       }),
     );
     render(<ScrumMasterLog companyId="c1" />);
     expect(await screen.findByText("No movement for 3 h")).toBeTruthy();
-    expect(screen.queryByText("2 problems found")).toBeNull();
+    expect(calls[0]).toContain("excludeKind=sweep_wake");
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     await vi.waitFor(() => expect(calls).toContain("POST /api/watchdog-actions/a1/undo"));
   });
