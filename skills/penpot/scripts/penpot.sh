@@ -8,7 +8,7 @@
 # Write: penpot.sh agent-project TEAM_ID | create-file PROJECT_ID NAME | rename-file FILE_ID NAME | delete-file FILE_ID
 #        penpot.sh apply FILE_ID LAYOUT.json | modify FILE_ID PAGE_ID SHAPE_ID key=value... | remove-shape FILE_ID PAGE_ID SHAPE_ID
 # Writes are only allowed in a file inside the agent project (PENPOT_AGENT_PROJECT, default "Agent designs") or in a
-# file this helper created (ids kept in a temp list). PENPOT_ALLOW_OWNER_FILE=1 lifts that; use it only when a ticket says so.
+# file this helper created (ids kept in a temp list). There is no override.
 set -u -o pipefail
 set +x
 
@@ -38,7 +38,7 @@ call() { # call PATH [JSON_BODY]: prints the body, or a plain error
   rm -f "$bf"
   case "$code" in
     2??) cat "$tmp"; rm -f "$tmp" ;;
-    401|403) rm -f "$tmp"; die "Penpot refused the token (HTTP $code). It may be expired or the agent account may lack access (editing needs the Editor role on the project). Ask the owner." ;;
+    401|403) rm -f "$tmp"; die "Penpot refused the token (HTTP $code). It may be expired or the agent account may lack access (drawing needs the Editor role in the agent team). Ask the owner." ;;
     404) rm -f "$tmp"; die "Penpot says not found (HTTP 404): check the id, or this call doesn't exist in this Penpot version." ;;
     *) hint="$(jq -r '.hint // .message // empty' "$tmp" 2>/dev/null | head -c 300)"; rm -f "$tmp"; die "Penpot answered HTTP $code for $path.${hint:+ $hint}" ;;
   esac
@@ -53,18 +53,18 @@ need() { [ -n "${2:-}" ] || die "usage: $1"; }
 get_file() { rpc get-file "$(jq -nc --arg f "$1" '{"id":$f}')" | jq -c 'walk(if type == "object" then with_entries(.key |= gsub("(?<u>[A-Z])"; "-\(.u | ascii_downcase)")) else . end)'; }
 
 # --- ownership guard -------------------------------------------------------------------------------------------
-# A write is allowed when the file was created by this helper, or sits in the agent project.
+# A write is allowed when the file was created by this helper, or sits in the agent project of a team the agent account owns.
+# This is a convenience check, not the security boundary: that is the agent account being only a Viewer in the owner's team.
 guard() { # guard FILE_ID
-  local f="$1" pid name t p
-  [ "${PENPOT_ALLOW_OWNER_FILE:-}" = 1 ] && return 0
+  local f="$1" pid name t
   grep -qsx "$f" "$ledger" && return 0
   pid="$(get_file "$f" | jq -r '.["project-id"] // empty')" || exit 1
   [ -n "$pid" ] || die "can't tell which project file $f is in, so I won't change it."
-  for t in $(rpc get-teams | jq -r '.[].id'); do
+  for t in $(rpc get-teams | jq -r '.[] | select(.permissions.isOwner // .permissions["is-owner"] // false) | .id'); do
     name="$(rpc get-projects "$(jq -nc --arg t "$t" '{"team-id":$t}')" | jq -r --arg p "$pid" '.[] | select(.id==$p) | .name')"
     [ "$name" = "$agent_project" ] && return 0
   done
-  die "refusing: file $f is not one I created and is not in the \"$agent_project\" project. Agents only change their own files. If a ticket explicitly says to edit this one, set PENPOT_ALLOW_OWNER_FILE=1 for that command."
+  die "refusing: file $f is not one I created and is not in the \"$agent_project\" project. Agents only change their own files. Ask the owner to make the change or to give you your own copy."
 }
 
 # --- update-file -----------------------------------------------------------------------------------------------
@@ -232,7 +232,7 @@ case "${1:-}" in
       | if $geo then
           (($kv.x // $sh.x) | tonumber) as $x | (($kv.y // $sh.y) | tonumber) as $y
           | (($kv.w // $sh.width) | tonumber) as $w | (($kv.h // $sh.height) | tonumber) as $h
-          | ($sh + {x:$x,y:$y,width:$w,height:$h,
+          | ($sh + {x:$x,y:$y,width:$w,height:$h,"position-data":null,
               selrect:{x:$x,y:$y,width:$w,height:$h,x1:$x,y1:$y,x2:($x+$w),y2:($y+$h)},
               points:[{x:$x,y:$y},{x:($x+$w),y:$y},{x:($x+$w),y:($y+$h)},{x:$x,y:($y+$h)}]}
               + (if $kv.name then {name:$kv.name} else {} end)

@@ -20,7 +20,7 @@ done
 case "$url" in
   */update-file) cp "$data" "$FAKE_DIR/update-file.json"; body='{}' ;;
   */get-file) body='{"id":"FILE1","projectId":"PROJ1","teamId":"T1","revn":3,"vern":0,"data":{"pagesIndex":{"PAGE1":{"id":"PAGE1","name":"Page 1","objects":{"00000000-0000-0000-0000-000000000000":{"id":"00000000-0000-0000-0000-000000000000","parentId":"00000000-0000-0000-0000-000000000000","type":"frame","x":0,"y":0,"width":0.01}}}}}}' ;;
-  */get-teams) body='[{"id":"T1","name":"Team"}]' ;;
+  */get-teams) body='[{"id":"T1","name":"Team","permissions":{"isOwner":true}}]' ;;
   */get-projects) body="[{\"id\":\"PROJ1\",\"name\":\"${FAKE_PROJECT_NAME}\"}]" ;;
   */create-file) body='{"id":"NEWFILE"}' ;;
   *) body='{}' ;;
@@ -73,8 +73,8 @@ run create-file PROJX "My design" >/dev/null || fail "create-file failed"
 run remove-shape NEWFILE PAGE1 SHAPE1 >/dev/null || { cat "$t/err"; fail "could not edit own file"; }
 jq -e '.changes[0].type == "del-obj"' "$u" >/dev/null || fail "remove-shape sent the wrong change"
 
-# The explicit override works.
-PENPOT_ALLOW_OWNER_FILE=1 run remove-shape FILE1 PAGE1 SHAPE1 >/dev/null || fail "override ignored"
+# There is no override: an agent cannot unlock an owner file by setting a variable.
+FAKE_PROJECT_NAME="Other" PENPOT_ALLOW_OWNER_FILE=1 run remove-shape FILE1 PAGE1 SHAPE1 >/dev/null 2>&1 && fail "override still works"
 
 # Link has no token; the token reached curl only through stdin.
 run link FILE1 >"$t/link"

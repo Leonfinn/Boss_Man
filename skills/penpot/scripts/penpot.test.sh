@@ -2,6 +2,7 @@
 # Checks penpot.sh with fake curl and jq: the ungranted-agent message, the missing-tools
 # message, and that the token never lands on a command line, in output or in the saved file.
 set -euo pipefail
+unset PENPOT_URL PENPOT_TOKEN
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 mkdir "$t/bin"
