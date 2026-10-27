@@ -599,7 +599,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .ticket-props select { width: 100%; min-height: 36px; }
 .props-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .props-head .section-label { margin: 0; }
-.ticket-props dl[hidden] { display: none; }
+#ticket-props-body { display: flex; flex-direction: column; gap: 8px; }
+#ticket-props-body[hidden] { display: none; }
 .props-toggle { min-height: 32px; padding: 0 10px; font-size: 13px; }
 .ticket-layout.props-collapsed { grid-template-columns: minmax(0, 1fr) auto; }
 .ticket-props small { font-size: 12px; }

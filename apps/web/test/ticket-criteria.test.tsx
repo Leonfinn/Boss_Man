@@ -80,14 +80,15 @@ describe("the collapsible Work panel", () => {
     vi.stubGlobal("innerWidth", 1440);
     const first = render(<Ticket id="t1" companies={[company]} />);
     const hide = await screen.findByRole("button", { name: "Hide" });
-    expect(first.container.querySelector(".ticket-props dl")!.hasAttribute("hidden")).toBe(false);
+    expect(first.container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(false);
     fireEvent.click(hide);
     expect(first.container.querySelector(".ticket-layout")!.classList.contains("props-collapsed")).toBe(true);
-    expect(first.container.querySelector(".ticket-props dl")!.hasAttribute("hidden")).toBe(true);
+    expect(first.container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(true);
+    expect(first.container.querySelector("#ticket-props-body")!.contains(screen.getByText("Last activity"))).toBe(true);
     first.unmount();
     const second = render(<Ticket id="t1" companies={[company]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Show" }));
-    expect(second.container.querySelector(".ticket-props dl")!.hasAttribute("hidden")).toBe(false);
+    expect(second.container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(false);
     expect(localStorage.getItem("bossman.ticket.workCollapsed")).toBe("0");
   });
 

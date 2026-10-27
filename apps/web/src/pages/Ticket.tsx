@@ -581,11 +581,12 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         <aside className="card ticket-props" aria-label="Properties">
           <div className="props-head">
             <h2 className="section-label">Work</h2>
-            <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} onClick={togglePanel}>
+            <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
               {propsCollapsed ? "Show" : "Hide"}
             </button>
           </div>
-          <dl hidden={propsCollapsed}>
+          <div id="ticket-props-body" hidden={propsCollapsed}>
+          <dl>
             <dt>Status</dt>
             <dd>
               <span className={`tag ${STATE_TONE[t.systemState] ?? ""}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>
@@ -733,6 +734,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dt>Last activity</dt>
             <dd>{when(t.lastActivityAt)}</dd>
           </dl>
+          </div>
         </aside>
       </div>
     </>
