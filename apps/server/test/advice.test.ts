@@ -52,6 +52,20 @@ const isError = (r: unknown) => (r as { isError?: boolean }).isError === true;
 const row = async (c: NonNullable<typeof ctx>, id: string) => (await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!;
 const reissue = { outcome: "reissue", question: "Which payment provider: Stripe or Mollie?", options: ["Stripe", "Mollie"], recommended: "Stripe", triedFirst: "Compared fees and checked that neither needs a secret from us" };
 
+describe("lessons the CEO raised itself", () => {
+  it("the CEO can answer a lesson decision from its own review, but not its other own requests", async () => {
+    const c = (ctx = await setup());
+    const ceo = await c.mcp(c.ceo.id);
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "Add this lesson?", options: ["Add", "Edit", "Drop"], recommendedOption: "Add", tier: "ceo", raisedByAgentId: c.ceo.id, context: { type: "lesson", ticketId: randomUUID(), projectId: randomUUID(), projectName: "Customer app", lesson: "Keep tests fast." } })
+      .returning();
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Drop", note: "Too vague." } });
+    expect(isError(r)).toBe(false);
+    expect((await row(c, d!.id)).status).toBe("answered");
+  });
+});
+
 describe("ask the CEO for advice", () => {
   it("keeps the decision open and answerable, and wakes the CEO with the note", async () => {
     const c = (ctx = await setup());
