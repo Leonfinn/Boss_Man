@@ -23,6 +23,7 @@ import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
+import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
@@ -429,7 +430,10 @@ export function schedulerService(
 
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date) {
     const me = agentIdentity(agent, companyName);
-    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
+    // The CEO's notes and waiting note requests (BOS-85) go in this wake prompt, which every run gets,
+    // rather than the chapter's frozen directive, so a note saved mid-chapter shows on the next run.
+    const notes = agent.role === "ceo" ? await ceoNotesLines(db, agent.companyId, agent.id) : [];
+    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
     const toolServers = await toolServersFor(agent);
     if (toolServers.length)
       lines.push(
