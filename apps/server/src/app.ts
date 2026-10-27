@@ -1336,7 +1336,7 @@ export async function buildApp(opts: AppOptions) {
         .parse(req.body);
       try {
         const added = b.from === "link" ? await skillsSvc.fromLink(id, b.url) : b.from === "written" ? [await skillsSvc.write(id, b)] : [await skillsSvc.upload(id, b.files, b.name)];
-        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name })));
+        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name, sourceRef: s.sourceRef })));
       } catch (err) {
         return skillErrors(reply)(err);
       }
@@ -1363,7 +1363,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
-      return skillsSvc.refresh(id, skillId).then((r) => ({ changed: r.changed, sourceRef: r.skill.sourceRef }), skillErrors(reply));
+      return skillProposals.proposeRefresh(id, skillId).then((p) => ({ changed: !!p, proposalId: p?.id ?? null, status: p?.status ?? null }), skillErrors(reply));
     });
     owner.delete("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
@@ -1380,7 +1380,7 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/skill-packs/refresh", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { pack } = z.object({ pack: PackName }).parse(req.body);
-      return skillsSvc.refreshPack(id, pack).catch(skillErrors(reply));
+      return skillProposals.proposeRefreshPack(id, pack).catch(skillErrors(reply));
     });
     owner.delete("/api/companies/:id/skill-packs", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

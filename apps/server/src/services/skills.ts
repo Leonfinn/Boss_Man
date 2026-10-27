@@ -6,6 +6,7 @@
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import { scriptFilesOf, sha256 } from "./skill-files.js";
 import { agentSkills, agents, companies, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
@@ -229,7 +230,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
             .innerJoin(agents, eq(agents.id, agentSkills.agentId))
             .where(inArray(agentSkills.skillId, rows.map((r) => r.id)))
         : [];
-      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
+      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, hasScripts: scriptFilesOf(files).length > 0, agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
     },
 
     /** Skills of the owner's other companies, to add here instead of importing again. */
@@ -273,10 +274,11 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
       return {
         ...s,
         agents: held,
+        hasScripts: scriptFilesOf(s.files).length > 0,
         files: s.files.map((f) => {
           const bytes = unb64(f.content);
           const text = bytes.includes(0) ? null : bytes.toString("utf8");
-          return { path: f.path, size: bytes.length, text };
+          return { path: f.path, size: bytes.length, sha256: sha256(bytes), text };
         }),
       };
     },
@@ -321,23 +323,11 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
       }
       // Anything else must be a single SKILL.md file.
       const bytes = (await fetchOk(url, "bytes")) as Buffer;
-      return [await save(companyId, { files: [{ path: "SKILL.md", content: bytes.toString("base64") }], source: "link", sourceUrl: url })];
+      // Nothing versions a plain link, so it is pinned by its content: a later check can tell if it changed.
+      return [await save(companyId, { files: [{ path: "SKILL.md", content: bytes.toString("base64") }], source: "link", sourceUrl: url, sourceRef: `sha256:${sha256(bytes)}` })];
     },
 
-    /** Reads a linked skill again at its link's latest commit. */
-    async refresh(companyId: string, id: string) {
-      const [s] = await db.select().from(skills).where(and(eq(skills.id, id), eq(skills.companyId, companyId)));
-      if (!s?.sourceUrl) throw new SkillError(409, "Only a skill added from a link can be checked for updates.");
-      const gh = await readGitHub(s.sourceUrl);
-      if (!gh) {
-        const bytes = (await fetchOk(s.sourceUrl, "bytes")) as Buffer;
-        return { skill: await save(companyId, { files: [{ path: "SKILL.md", content: bytes.toString("base64") }], source: "link", sourceUrl: s.sourceUrl, name: s.name, replaceId: s.id }), changed: true };
-      }
-      if (gh.commit === s.sourceRef) return { skill: s, changed: false };
-      const f = gh.found.length === 1 ? gh.found[0]! : gh.found.find((x) => x.folder === s.name);
-      if (!f) throw new SkillError(404, "The skill is no longer at its link.");
-      return { skill: await save(companyId, { files: f.files, source: "link", sourceUrl: s.sourceUrl, sourceRef: gh.commit, name: s.name, replaceId: s.id }), changed: true };
-    },
+    // No refresh here: a new version of a skill goes through a proposal (services/skill-proposals.ts), so it is reviewed and the owner decides.
 
     async remove(companyId: string, id: string) {
       const rows = await db.delete(skills).where(and(eq(skills.id, id), eq(skills.companyId, companyId))).returning({ id: skills.id });
@@ -345,29 +335,6 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     },
 
     /** Sets exactly which agents of the company have a skill. */
-    /** Reads a pack's link again: changed skills are updated, new ones added; gone ones are listed. */
-    async refreshPack(companyId: string, pack: string) {
-      const rows = await db.select().from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack)));
-      const url = rows.find((r) => r.packUrl)?.packUrl;
-      if (!url) throw new SkillError(404, "No such pack.");
-      const gh = await readGitHub(url);
-      if (!gh) throw new SkillError(409, "That pack's link no longer points at GitHub.");
-      if (rows.every((r) => r.sourceRef === gh.commit)) return { changed: 0, added: [] as string[], gone: [] as string[] };
-      const byName = new Map(rows.map((r) => [r.name, r]));
-      let changed = 0;
-      const added: string[] = [];
-      for (const f of gh.found) {
-        const name = skillNameOf(f);
-        const had = byName.get(name);
-        const before = had ? JSON.stringify(had.files) : null;
-        const saved = await save(companyId, { files: f.files, source: "link", sourceUrl: f.url, sourceRef: gh.commit, name, replaceId: had?.id ?? null, pack, packUrl: url });
-        if (!had) added.push(saved.name);
-        else if (JSON.stringify(saved.files) !== before) changed++;
-      }
-      const found = new Set(gh.found.map(skillNameOf));
-      return { changed, added, gone: rows.filter((r) => !found.has(r.name)).map((r) => r.name) };
-    },
-
     /** Sets exactly which agents have every skill in a pack. */
     async setPackHolders(companyId: string, pack: string, agentIds: string[], by: string | null = null) {
       const rows = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack)));

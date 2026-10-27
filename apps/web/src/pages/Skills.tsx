@@ -11,7 +11,7 @@ import { SaveButton } from "../components/SaveButton";
 import { Section, useAction } from "./Settings";
 
 type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
-type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }>; requiresAddons: string[] | null };
+type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; sha256?: string; text: string | null }>; requiresAddons: string[] | null };
 type Upload = { path: string; content: string };
 type Elsewhere = { id: string; name: string; description: string; companyName: string; requiresAddons: string[] | null; fileCount: number; hasScripts: boolean };
 
@@ -261,7 +261,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
             </button>
           )}
           {s.source === "link" && (
-            <button type="button" className="btn" onClick={() => void run(async () => ((await api<{ changed: boolean }>(`/api/companies/${company.id}/skills/${id}/refresh`, { method: "POST" })).changed ? "Updated to the latest commit." : "Already up to date."))}>
+            <button type="button" className="btn" onClick={() => void run(async () => ((await api<{ changed: boolean }>(`/api/companies/${company.id}/skills/${id}/refresh`, { method: "POST" })).changed ? "A newer version was found. It is not installed: it goes to the Security Reviewer, then to Decisions for you." : "Already up to date."))}>
               Check for updates
             </button>
           )}
@@ -375,7 +375,10 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
                   ) : (
                     <span className="mono">{f.path}</span>
                   )}
-                  <small className="muted">{f.text === null ? `binary, ${kb(f.size)}` : kb(f.size)}</small>
+                  <small className="muted">
+                    {f.text === null ? `binary, ${kb(f.size)}` : kb(f.size)}
+                    {f.sha256 ? <span title={f.sha256}> · sha256 <span className="mono">{f.sha256.slice(0, 16)}</span></span> : null}
+                  </small>
                 </span>
                 {open === f.path && f.text !== null && <pre className="skill-file">{f.text}</pre>}
               </li>
@@ -430,8 +433,8 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
             className="btn"
             onClick={() =>
               void run(async () => {
-                const r = await api<{ changed: number; added: string[]; gone: string[] }>(`/api/companies/${company.id}/skill-packs/refresh`, { method: "POST", body: { pack } });
-                const parts = [r.changed ? `${r.changed} updated` : null, r.added.length ? `added ${r.added.join(", ")}` : null, r.gone.length ? `no longer in the link: ${r.gone.join(", ")}` : null].filter(Boolean);
+                const r = await api<{ proposed: string[]; unchanged: number; problems: string[] }>(`/api/companies/${company.id}/skill-packs/refresh`, { method: "POST", body: { pack } });
+                const parts = [r.proposed.length ? `newer versions of ${r.proposed.join(", ")} are waiting for review and your decision (nothing is installed yet)` : null, r.problems.length ? r.problems.join("; ") : null].filter(Boolean);
                 return parts.length ? `${parts.join("; ")}.` : "Already up to date.";
               })
             }

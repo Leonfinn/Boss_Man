@@ -1,12 +1,12 @@
 // Skill proposals (BOS-86): the CEO proposes a skill (its own draft, or an internet link); the
 // Security Reviewer checks it where the owner's rule requires; the owner decides every one.
 // Nothing here writes to `skills`: only the install step (below, once decided) does.
-import { createHash } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agents, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
+import { agentSkills, agents, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
 import { SKILL_ADD, SKILL_OVERRIDE, SKILL_REJECT } from "./decisions.js";
+import { hashFiles, scriptFilesOf, sha256 } from "./skill-files.js";
 import { normalise, parseSkillMd, skillName, skillNameOf, SkillError, type SkillFile, type skillsService } from "./skills.js";
 
 type SkillsSvc = ReturnType<typeof skillsService>;
@@ -81,73 +81,18 @@ export function checkVerdict(p: Pick<Proposal, "files" | "bundleHash">, v: Verdi
   if (!v.summary.trim()) throw new SkillError(400, "Give a short summary the owner can read.");
 }
 
-const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
-
-/** sha256 of each file's bytes, and of the whole set (paths and file hashes, sorted by path). */
-export function hashFiles(files: SkillFile[]) {
-  const fileHashes: Record<string, string> = {};
-  for (const f of files) fileHashes[f.path] = sha256(Buffer.from(f.content, "base64"));
-  const bundleHash = sha256(
-    Object.keys(fileHashes)
-      .sort()
-      .map((p) => `${p}\0${fileHashes[p]}\n`)
-      .join(""),
-  );
-  return { fileHashes, bundleHash };
-}
-
-// What "contains a script" means (BOS-87 standard, section 1). The system decides, not the CEO.
-const SCRIPT_EXT = /\.(sh|bash|zsh|py|js|mjs|cjs|ts|rb|ps1|bat|cmd|pl|php)$/i;
-const SCRIPT_NAME = /(^|\/)(Makefile|Dockerfile)$/i;
-const SCRIPT_DIR = /(^|\/)scripts\//i;
-const TEXT_DOC = /\.(md|markdown|txt)$/i;
-// A fenced block in the instructions in a language an agent can run.
-const RUN_LANG = /^(sh|bash|zsh|shell|console|terminal|cmd|bat|powershell|ps1|pwsh|python|python3|py|js|javascript|node|ts|typescript|ruby|rb|perl|php)$/i;
-const RUN_CUE = /\b(run|runs|running|execute|executes|executing|invoke|call|launch|exec)\b/i;
-
-/** Compiled programs (ELF, Mach-O, Windows) count as scripts: they run with the agent's rights too. */
-const isBinaryProgram = (b: Buffer) =>
-  (b.length > 3 && b[0] === 0x7f && b[1] === 0x45 && b[2] === 0x4c && b[3] === 0x46) ||
-  (b.length > 1 && b[0] === 0x4d && b[1] === 0x5a) ||
-  (b.length > 3 && [0xfeedface, 0xfeedfacf, 0xcafebabe, 0xcefaedfe, 0xcffaedfe].includes(b.readUInt32BE(0)));
-
-/** The files that make a skill "contain a script": executable or interpreted files, and instruction files with a code block the agent is told to run. */
-export function scriptFilesOf(files: SkillFile[]): string[] {
-  const found: string[] = [];
-  for (const f of files) {
-    const bytes = Buffer.from(f.content, "base64");
-    if (SCRIPT_EXT.test(f.path) || SCRIPT_NAME.test(f.path) || SCRIPT_DIR.test(f.path) || bytes.subarray(0, 2).toString("latin1") === "#!" || isBinaryProgram(bytes)) {
-      found.push(f.path);
-      continue;
-    }
-    if (!TEXT_DOC.test(f.path) || bytes.includes(0)) continue;
-    const lines = bytes.toString("utf8").split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const m = /^\s*(```+|~~~+)\s*([\w+-]*)/.exec(lines[i]!);
-      if (!m) continue;
-      // Only an opening fence: skip to the closing one afterwards.
-      const tagged = m[2]!;
-      const before = lines.slice(Math.max(0, i - 3), i).join(" ");
-      if ((tagged && RUN_LANG.test(tagged)) || (!tagged && RUN_CUE.test(before))) {
-        found.push(f.path);
-        break;
-      }
-      const close = lines.findIndex((l, k) => k > i && l.trim().startsWith(m[1]!));
-      if (close < 0) break;
-      i = close;
-    }
-  }
-  return found;
-}
-
 /** The owner's rule (2026-10-27): internet skills are always reviewed; a CEO draft only if it has a script. */
 export const reviewRequired = (source: "draft" | "link", hasScripts: boolean) => source === "link" || hasScripts;
+
+export { hashFiles, scriptFilesOf };
 
 export type ProposeInput = {
   companyId: string;
   byAgentId: string | null;
   why: string;
   agentIds: string[];
+  /** The owner pressed "check for updates": the agents are whoever already holds the skill, possibly nobody. */
+  refresh?: boolean;
 } & ({ source: "draft"; files: SkillFile[]; name?: string | null } | { source: "link"; url: string; skill?: string | null });
 
 export type SkillDeps = {
@@ -188,7 +133,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       const why = input.why.trim();
       if (!why) throw new SkillError(400, "Say why you want this skill: the owner reads it when deciding.");
       const agentIds = [...new Set(input.agentIds)];
-      if (!agentIds.length) throw new SkillError(400, "Name the agents who would get this skill.");
+      if (!agentIds.length && !input.refresh) throw new SkillError(400, "Name the agents who would get this skill.");
       const team = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, input.companyId), inArray(agents.id, agentIds)));
       if (team.length !== agentIds.length) throw new SkillError(400, "Every agent must be in this company.");
 
@@ -212,8 +157,9 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
           sourceUrl = picked[0]!.url;
           pinnedRef = gh.commit;
         } else {
-          // A link straight to one SKILL.md file: nothing to pin but the bytes, which are hashed.
+          // A link straight to one SKILL.md file: nothing versions it, so it is pinned by the hash of its bytes.
           const bytes = await skillsSvc.fetchBytes(input.url);
+          pinnedRef = `sha256:${sha256(bytes)}`;
           files = normalise([{ path: "SKILL.md", content: bytes.toString("base64") }]).files;
           name = skillName(parseSkillMd(bytes.toString("utf8")).name ?? "");
           sourceUrl = input.url;
@@ -334,13 +280,17 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (p.source !== "link") return { ok: true };
       let again: SkillFile[] | null = null;
       try {
-        if (p.pinnedRef) {
+        if (p.pinnedRef?.startsWith("sha256:")) {
+          const bytes = await skillsSvc.fetchBytes(p.sourceUrl!);
+          if (`sha256:${sha256(bytes)}` !== p.pinnedRef) return { ok: false, reason: "the file at the link has changed since the review" };
+          again = normalise([{ path: "SKILL.md", content: bytes.toString("base64") }]).files;
+        } else if (p.pinnedRef) {
           if (!/^[0-9a-f]{40}$/.test(p.pinnedRef)) return { ok: false, reason: "the pinned version isn't an exact commit" };
           const gh = await skillsSvc.readGitHub(p.sourceUrl!, p.pinnedRef);
           const f = gh?.found.find((x) => x.url === p.sourceUrl);
           again = f ? normalise(f.files).files : null;
         } else {
-          again = normalise([{ path: "SKILL.md", content: (await skillsSvc.fetchBytes(p.sourceUrl!)).toString("base64") }]).files;
+          return { ok: false, reason: "it has no pinned version to check" };
         }
       } catch (e) {
         // The source is gone, or no longer a skill: that is a change. Anything else (network, rate limit) is not, and can be tried again.
@@ -428,6 +378,41 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
         await record(db, { companyId: p.companyId, ticketId: p.reviewTicketId, kind: "skill.expired", summary: `The proposal for ${p.name} ended after ${EXPIRES_AFTER_DAYS} days with no decision.` });
       }
       return open.length;
+    },
+
+    /**
+     * "Check for updates" on a linked skill. It never changes the library: a newer version becomes a proposal
+     * (reviewed like any internet skill, then the owner decides). Returns null when nothing changed.
+     */
+    async proposeRefresh(companyId: string, skillId: string) {
+      const [s] = await db.select({ id: skills.id, name: skills.name, sourceUrl: skills.sourceUrl }).from(skills).where(and(eq(skills.id, skillId), eq(skills.companyId, companyId)));
+      if (!s) throw new SkillError(404, "No such skill.");
+      if (!s.sourceUrl) throw new SkillError(409, "Only a skill added from a link can be checked for updates.");
+      const holders = await db.select({ id: agentSkills.agentId }).from(agentSkills).where(eq(agentSkills.skillId, s.id));
+      try {
+        return await this.propose({ companyId, byAgentId: null, source: "link", url: s.sourceUrl, skill: s.name, why: "A newer version of this skill was found when the owner checked for updates.", agentIds: holders.map((h) => h.id), refresh: true });
+      } catch (e) {
+        if (e instanceof SkillError && e.status === 409 && /already in the library/.test(e.message)) return null;
+        throw e;
+      }
+    },
+
+    /** The same for every skill of a pack. */
+    async proposeRefreshPack(companyId: string, pack: string) {
+      const rows = await db.select({ id: skills.id, name: skills.name }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack)));
+      if (!rows.length) throw new SkillError(404, "No such pack.");
+      const proposed: string[] = [];
+      const problems: string[] = [];
+      for (const r of rows) {
+        try {
+          const p = await this.proposeRefresh(companyId, r.id);
+          if (p) proposed.push(r.name);
+        } catch (e) {
+          if (!(e instanceof SkillError)) throw e;
+          problems.push(`${r.name}: ${e.message}`);
+        }
+      }
+      return { proposed, unchanged: rows.length - proposed.length - problems.length, problems };
     },
 
     async get(companyId: string, id: string): Promise<Proposal> {
