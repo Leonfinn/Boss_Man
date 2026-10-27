@@ -463,6 +463,13 @@
       "when": 1793180196972,
       "tag": "0065_lessons_to_ceo",
       "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1793119708509,
+      "tag": "0066_watchdog_backoff",
+      "breakpoints": true
     }
   ]
 }
