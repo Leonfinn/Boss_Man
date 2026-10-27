@@ -25,4 +25,30 @@ run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2
 run 3 1 "no retry when another run would blow the budget" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
 run 0 1 "relative path from scripts/" 'echo x >>"$COUNT"' "$here" ./check-all.sh
 run 0 1 "bash check-all.sh from scripts/" 'echo x >>"$COUNT"' "$here" "bash check-all.sh"
+
+# The heavy-phase lock (needs flock). pnpm/node are stubbed and CHECK_ALL_STOP_AFTER_LOCK stops the child once the lock is held.
+if command -v flock >/dev/null; then
+  mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
+  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 "$@" ./scripts/check-all.sh 2>&1); }
+
+  out=$(lock env) || fail "free lock: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "free lock: not acquired"
+
+  # A second caller waits, then gives up with exit 1 after CHECK_ALL_LOCK_WAIT (no retry: not a process-limit error).
+  ( exec 8>"$t/lock"; flock 8; sleep 5 ) & holder=$!
+  sleep 0.5
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 1 ] || fail "busy lock: expected exit 1, got $rc"
+  grep -q "waiting for it" <<<"$out" || fail "busy lock: no waiting message: $out"
+  grep -q "gave up" <<<"$out" || fail "busy lock: messages missing: $out"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+
+  # Once the holder lets go, the waiter gets in.
+  ( exec 8>"$t/lock"; flock 8; sleep 1 ) & holder=$!
+  sleep 0.3
+  out=$(lock env CHECK_ALL_LOCK_WAIT=10) || fail "released lock: expected success, got: $out"
+  wait "$holder"
+else
+  echo "check-all.test.sh: flock missing, lock cases skipped"
+fi
 echo "check-all.test.sh: ok"
