@@ -37,7 +37,9 @@ const ONE_LINER = /\b(?:node|deno|bun|python[\d.]*|ruby|perl|php|lua|powershell|
 /** Does this instructions text hold a code block, a #! line, or a line an agent could run? */
 function runnableText(text: string): boolean {
   if (text.startsWith("#!")) return true;
-  for (const line of text.split(/\r?\n/)) {
+  // Invisible format characters (zero-width, bidi) can hide a command from the patterns below: unsure, so review.
+  if (/\p{Cf}/u.test(text)) return true;
+  for (const line of text.normalize("NFKC").split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
     if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
     if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || WORD_CMD.test(line) || TERMINAL.test(line) || (URL_ACTION.test(line) && ACTION_WORD.test(line)) || ONE_LINER.test(line)) return true;
