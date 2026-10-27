@@ -36,7 +36,9 @@ export function reviewBody(p: Pick<Proposal, "id" | "name" | "source" | "sourceU
       continue;
     }
     used += bytes.length;
-    shown.push(`### ${f.path}${scripts.has(f.path) ? "  [script]" : ""}  (${lineCount(text)} lines, sha256 ${p.fileHashes[f.path]})\n\`\`\`\n${numbered(text)}\n\`\`\``);
+    // A fence longer than any backtick run in the file, so a file can't close it early and pass off its own text as the report's.
+    const fence = "`".repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((m) => m.length + 1)));
+    shown.push(`### ${f.path}${scripts.has(f.path) ? "  [script]" : ""}  (${lineCount(text)} lines, sha256 ${p.fileHashes[f.path]})\n${fence}\n${numbered(text)}\n${fence}`);
   }
   return [
     `Security review of the proposed skill **${p.name}** (proposal ${p.id}). Follow the review standard in the wiki: security/skill-review-standard-bos-87.`,
