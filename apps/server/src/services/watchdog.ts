@@ -397,7 +397,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     // Rule 4: snoozed twice in a row and still tripping goes to the CEO, not back to the Scrum Master.
     for (const f of due.filter((x) => x.rule !== "owner_decision_waiting" && x.snoozeCount >= 2)) {
       const boss = await ceo(c.id);
-      if (!boss || !(await withinCap(c.id, "nudges", s))) continue;
+      if (!boss) continue;
+      if (!(await withinCap(c.id, "nudges", s))) return { flagged: 0 };
       const info = snap.titles.get(f.ticketId);
       const w = await deps.notify(boss.id, {
         ticketId: f.ticketId,

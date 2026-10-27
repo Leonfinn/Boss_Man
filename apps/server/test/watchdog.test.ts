@@ -605,4 +605,32 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     expect(stale).toBeTruthy();
     expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, auto.id)))[0]).toMatchObject({ escalatedAt: null, snoozeCount: 0 });
   });
+  const undo = (r: unknown) => ctx.req("POST", `/api/watchdog-actions/${actionId(r)}/undo`, { reason: "Not needed after all." });
+
+  it("a trip on the nudge cap during the sweep ends the sweep: no Scrum Master wake after the watchdog switches itself off", async () => {
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    const a = await handed({ title: "Twice snoozed" });
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "nudge", ticketId: a.id, reason: "used the hour's allowance" });
+    await ctx.ticket({ title: "Another due one", stateChangedAt: ctx.ago(130) });
+    await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, a.id));
+    const before = (await ctx.smWakes()).length;
+    await ctx.watchdog.run();
+    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
+    expect(await ctx.smWakes()).toHaveLength(before);
+  });
+
+  it("undoing a raised decision still puts the ticket back when its old column is full", async () => {
+    await ctx.switchOn();
+    const t = await handed({ stateChangedAt: ctx.ago(300) });
+    await ctx.db.update(watchdogFlags).set({ lastFlaggedAt: ctx.now() }).where(eq(watchdogFlags.ticketId, t.id));
+    const ask = await call({ action: "raise_decision", ticketId: t.id, question: "Grant more memory?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Looked at it; it is a host setting.", reason: "Only the owner can change the host." });
+    expect(isError(ask)).toBe(false);
+    const { workflowColumns } = await import("../src/db/schema.js");
+    const [col] = await ctx.db.select().from(workflowColumns).where(and(eq(workflowColumns.projectId, ctx.project.id), eq(workflowColumns.systemState, "in_progress")));
+    await ctx.ticket({ title: "Fills the column", columnId: col!.id });
+    await ctx.db.update(workflowColumns).set({ wipLimit: 1 }).where(eq(workflowColumns.id, col!.id));
+    expect((await undo(ask)).statusCode).toBe(200);
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+  });
 });
