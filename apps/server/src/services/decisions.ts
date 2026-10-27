@@ -320,7 +320,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     const text = normalizeLesson(answer === LESSON_EDIT ? (extra.note ?? "") : ctx.lesson);
     if (text.length > LESSON_MAX) throw new AnswerError(`A lesson is one line, up to ${LESSON_MAX} characters.`);
     // An edit with no usable note adds nothing: nothing reaches the brief without words behind it.
-    if (!text) return;
+    if (!text) return lessonOutcome(d, ctx.projectName, `not added: the edited wording was empty ("${ctx.lesson}").`);
     const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
     const existing = page ? lessonsFrom(page.body) : [];
     if (existing.includes(text)) return lessonOutcome(d, ctx.projectName, `not added, it is already there: "${text}".`);
@@ -345,7 +345,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return;
     }
     await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, text);
-    await lessonOutcome(d, ctx.projectName, `added "${text}".`, answer === LESSON_EDIT ? undefined : extra.note);
+    await lessonOutcome(d, ctx.projectName, answer === LESSON_EDIT ? `added, as edited by the CEO: "${text}".` : `added "${text}".`, answer === LESSON_EDIT ? undefined : extra.note);
   }
 
   /** Finishes a replace: the chosen line goes, the new lesson takes its place. */
@@ -680,7 +680,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .innerJoin(companies, eq(companies.id, decisions.companyId))
         .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
         // Boss Man's alerts still with the Scrum Master or the CEO aren't the owner's yet (BOS-64); withTeam lists them.
-        .where(and(eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`));
+        .where(and(eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`, sql`coalesce(${decisions.context}->>'type', '') not in ('lesson', 'lesson_replace')`));
       if (!open.length) return [];
       const forIds = [...new Set(open.map((o) => o.d.forAgentId).filter((x): x is string => !!x))];
       const forNames = new Map(forIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, forIds))).map((a) => [a.id, a.name]) : []);

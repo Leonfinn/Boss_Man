@@ -257,4 +257,18 @@ describe("lesson decisions go to the CEO (BOS-105)", () => {
     const feed = (await c.db.select().from(activity)).filter((a) => a.kind === "lesson_outcome").map((a) => a.summary);
     expect(feed.some((s) => s.includes('added "Lesson 21" and dropped "Lesson 3"') && s.includes("Overlaps lesson 4."))).toBe(true);
   });
+
+  it("lesson decisions are not in the owner's queue, at the cap or not", async () => {
+    const c = (ctx = await setup());
+    const lines = Array.from({ length: 20 }, (_, i) => `- Lesson ${i + 1}`).join("\n");
+    await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Lessons\n\n${lines}\n`);
+    await c.sendBack("Lesson 21");
+    const lessonId = (await sendBackDecision())!.id;
+    const queued = async () => ((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((x) => x.id);
+    expect(await queued()).not.toContain(lessonId);
+    await c.answer(lessonId, "Add");
+    const [replace] = (await c.open()).filter((x) => (x.context as { type: string }).type === "lesson_replace");
+    expect(replace).toBeDefined();
+    expect(await queued()).not.toContain(replace!.id);
+  });
 });
