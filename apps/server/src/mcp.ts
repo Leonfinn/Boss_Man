@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, checkAsk, type decisionsService } from "./services/decisions.js";
+import { AnswerError, adviceOf, checkAsk, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
@@ -743,9 +743,14 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "decisions",
     {
       description:
-        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert only the owner can settle (a secret, host access, sign-off, an owner-only choice): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert only the owner can settle (a secret, host access, sign-off, an owner-only choice): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
       inputSchema: {
-        action: z.enum(["list", "answer", "escalate"]),
+        action: z.enum(["list", "answer", "escalate", "advise"]),
+        outcome: z.enum(["reissue", "handled"]).optional(),
+        question: z.string().min(1).max(1000).optional(),
+        options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
+        recommended: z.string().max(200).optional(),
+        summary: z.string().max(1000).optional(),
         id: z.string().uuid().optional(),
         answer: z.string().max(200).optional(),
         note: z.string().max(2000).optional(),
@@ -770,15 +775,42 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .filter(mine)
           // Alerts still with the Scrum Master aren't the CEO's yet (BOS-64).
           .filter((d) => (d.context as { ladder?: { rung: string } }).ladder?.rung !== "scrum_master");
-        if (!open.length) return text("No decisions are waiting for you.");
+        const asked = (await db.select().from(decisionsTable).where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->'advice'->>'state' = 'asking'`)).orderBy(decisionsTable.createdAt))
+          .filter(() => isCeo)
+          .map((d) => [`${d.id}: ASKED FOR YOUR ADVICE: ${d.question}`, `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption})`, ...(adviceOf(d.context)?.note ? [`What's unclear, per the owner: ${adviceOf(d.context)!.note}`] : []), "Use action advise."].join("\n"));
+        if (!open.length && !asked.length) return text("No decisions are waiting for you.");
+        if (!open.length) return text(asked.join("\n\n"));
         return text(
           open
             .map((d) => {
               const { planText: plan, explain } = d.context as { planText?: string | null; explain?: { command?: string } };
               return [`${d.id}: ${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
             })
+            .concat(asked)
             .join("\n\n"),
         );
+      }
+      if (input.action === "advise") {
+        if (!isCeo || !scope.agentId) return fail("Only the CEO advises on a decision the owner asked about.");
+        if (!input.id || !input.outcome) return fail("Give the decision's id and outcome: reissue or handled.");
+        try {
+          let r;
+          if (input.outcome === "reissue") {
+            if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
+            const bad = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps });
+            if (bad) return fail(bad);
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: input.steps?.length ? input.steps : undefined });
+          } else {
+            if (!input.summary || input.summary.trim().length < 20) return fail("Say in a sentence or two what was done (summary), so the owner can read it.");
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "handled", runId: scope.runId, summary: input.summary, answer: input.answer });
+            if (r) await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title: "The CEO settled a decision for you", body: input.summary.trim(), link: "#/decisions" });
+          }
+          if (!r) return fail("The owner answered it first, so there's nothing more to do.");
+          return text(r.outcome === "reissue" ? ("inPlace" in r && r.inPlace ? `Rewritten in place: decision ${r.id} keeps its id and options, with your new question, what was tried and the steps.` : `Reissued as decision ${r.id}. The original is closed and what it blocked now waits on the new one.`) : "Handled. The owner has been told.");
+        } catch (err) {
+          if (err instanceof AnswerError) return fail(err.message);
+          throw err;
+        }
       }
       if (input.action === "escalate") {
         if (!input.id || !input.triedFirst) return fail("Give the alert's id and triedFirst: what you and the team tried.");

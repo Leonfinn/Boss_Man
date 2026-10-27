@@ -1,6 +1,7 @@
 // Decisions (R19–R22, R32): permission requests the policy engine escalates, questions
 // agents raise, engagement offers, stale blockers and stalled runs. Answering one resumes
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
+import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -137,7 +138,43 @@ export type AnswerExtra = {
   note?: string;
   /** The owner wrote their own answer to an agent's question instead of picking an option. */
   custom?: boolean;
+  /** The CEO settled it ("handled" advice), so the record and the wake say so instead of "the owner". */
+  by?: "ceo";
+  /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
+  handled?: { summary: string; at: string };
 };
+
+/**
+ * "Ask the CEO for advice": where a decision stands with the CEO. Kept in the decision's context so the
+ * decision stays open and answerable by the owner the whole time.
+ */
+export type Advice = {
+  state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement";
+  /** The owner's one-line "what's unclear". */
+  note?: string;
+  askedAt?: string;
+  /** When the CEO acted or the time ran out. */
+  at?: string;
+  /** reissued: the decision that took its place. */
+  replacedBy?: string;
+  /** replacement: the decision it took the place of. */
+  replaces?: string;
+  /** handled: what the CEO did. */
+  summary?: string;
+  /** clarified: the first wording, before the CEO rewrote it. */
+  originalQuestion?: string;
+};
+export const adviceOf = (context: unknown): Advice | undefined => (context as { advice?: Advice } | null)?.advice;
+export const ADVICE_DEFAULT_MINUTES = 120;
+
+/**
+ * An allow-list: the CEO may settle only an agent's plain question (no steps for the owner) that another agent raised.
+ * Everything else (approvals, permissions, budgets, engagements, every special context type, the CEO's own request) can only be reissued.
+ */
+function ceoCanHandle(d: { kind: string; context: unknown; raisedByAgentId: string | null }, raisedByCeo: boolean) {
+  const ctx = d.context as DecisionContext;
+  return d.kind === "question" && ctx.type === "question" && !ctx.steps?.length && !!d.raisedByAgentId && !raisedByCeo;
+}
 
 const ALLOW = "Allow once";
 const DENY = "Deny";
@@ -728,6 +765,155 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return Promise.all(sorted.map(async (r) => ((r.context as DecisionContext).type === "stalled_run" ? { ...r, evidence: await stallEvidence((r.context as { runId: string }).runId) } : r)));
     },
 
+    /** The owner asks the CEO for advice on an open decision. It stays open and answerable. Returns null if it isn't open. */
+    async askAdvice(id: string, note?: string) {
+      const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      if (!d) return null;
+      // Pressing twice is harmless.
+      if (adviceOf(d.context)?.state === "asking") return { id, advice: adviceOf(d.context)! };
+      if (d.kind === "permission") throw new AnswerError("A permission request holds a live run, so it can't be put to the CEO. Answer it, or deny it.");
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (!ceo || !wake) throw new AnswerError("This company has no CEO to ask.");
+      const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}), ...(adviceOf(d.context)?.originalQuestion ? { originalQuestion: adviceOf(d.context)!.originalQuestion } : {}) };
+      const [claimed] = await db
+        .update(decisions)
+        .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify(advice)}::jsonb)` })
+        .where(and(eq(decisions.id, id), eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'advice'->>'state', '') <> 'asking'`))
+        .returning({ id: decisions.id });
+      if (!claimed) return null;
+      const ctx = d.context as DecisionContext;
+      const [held] = await db
+        .select({ ticketId: tickets.id, title: tickets.title })
+        .from(ticketDependencies)
+        .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
+        .where(eq(ticketDependencies.blockerDecisionId, id));
+      const lines = [
+        "The owner asked for your advice on a decision that arrived without enough detail. It stays open and the owner can still answer it.",
+        `Decision ${d.id}: ${d.question}`,
+        `Options: ${(d.options as string[]).join(" | ") || "none"} (recommended: ${d.recommendedOption})`,
+        ...(ctx.type === "question" && ctx.triedFirst ? [`What was tried first: ${ctx.triedFirst}`] : []),
+        ...(ctx.type === "question" && ctx.steps?.length ? [`Steps given: ${ctx.steps.join(" / ")}`] : []),
+        ...(held ? [`It holds up the ticket "${held.title}" (${held.ticketId}).`] : []),
+        note ? `What's unclear, in the owner's words: ${note}` : "The owner didn't say what is unclear.",
+        "Use the decisions tool, action advise. outcome reissue: post a clearer replacement (question, options, recommended, triedFirst, and numbered steps when the owner must act). outcome handled: only if the team can settle it without a secret, host step, sign-off or owner-only choice. If it needs the owner, use reissue: a plain question is replaced by a clearer one; any other kind is rewritten in place (new question, triedFirst, steps; options stay). Do this within the time limit or it returns to the owner as it was.",
+      ];
+      await wake({ agentId: ceo.id, reason: "decision", note: lines.join("\n").slice(0, 4000) });
+      await record(db, { companyId: d.companyId, ticketId: held?.ticketId, kind: "decision_advice_asked", summary: `Owner asked the CEO for advice on "${d.question}"${note ? `: ${note}` : ""}`, at: now() });
+      return { id, advice };
+    },
+
+    /**
+     * The CEO's answer to an advice request. "reissue" posts a clearer replacement, moves what the original
+     * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
+     * Returns null when the owner answered first.
+     */
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[] } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string }) {
+      const via = input.runId ? ` (CEO run ${input.runId})` : "";
+      const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
+      if (!d) throw new AnswerError("No decision with that id.");
+      if (d.status !== "open") return null;
+      const advice = adviceOf(d.context);
+      if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
+      const at = now().toISOString();
+      if (input.outcome === "reissue") {
+        const ctx = d.context as DecisionContext;
+        const asking = sql`${decisions.context}->'advice'->>'state' = 'asking'`;
+        if (!(d.kind === "question" && ctx.type === "question")) {
+          // An approval, plan, hire, deploy and the like keep their id, kind, options and context, so what resumes on
+          // them still works: the CEO only rewrites the question and adds what was tried and the steps.
+          const clarified = { ...(d.context as object), triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), advice: { ...advice, state: "clarified", at, originalQuestion: advice.originalQuestion ?? d.question } };
+          const [done] = await db
+            .update(decisions)
+            .set({ question: input.question, context: clarified })
+            .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), asking))
+            .returning({ id: decisions.id });
+          if (!done) return null;
+          const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
+          await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO rewrote "${d.question}" with more detail${via}`, at: now() });
+          return { outcome: "reissue" as const, id: d.id, inPlace: true };
+        }
+        if (!input.options.includes(input.recommended)) throw new AnswerError("The recommended answer must be one of the options.");
+        const newId = randomUUID();
+        const made = await db.transaction(async (tx) => {
+          const [claimed] = await tx
+            .update(decisions)
+            .set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, context: { ...(d.context as object), advice: { ...advice, state: "reissued", at, replacedBy: newId } } })
+            .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), asking))
+            .returning({ id: decisions.id });
+          if (!claimed) return false;
+          await tx.insert(decisions).values({
+            id: newId,
+            companyId: d.companyId,
+            kind: "question",
+            question: input.question,
+            options: input.options,
+            recommendedOption: input.recommended,
+            raisedByAgentId: d.raisedByAgentId,
+            // The card says the CEO wrote it and points back at the original (advice.replaces).
+            context: { type: "question", triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
+          });
+          await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
+          return true;
+        });
+        if (!made) return null;
+        const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, newId));
+        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO reissued "${d.question}" with more detail${via}`, at: now() });
+        return { outcome: "reissue" as const, id: newId, inPlace: false };
+      }
+      const raiser = d.raisedByAgentId ? (await db.select({ role: agents.role }).from(agents).where(eq(agents.id, d.raisedByAgentId)))[0] : undefined;
+      if (!ceoCanHandle(d, raiser?.role === "ceo" || d.raisedByAgentId === input.agentId)) throw new AnswerError("Only the owner can settle this one: only an agent's plain question can be handled by the CEO, never the CEO's own request, an approval, a permission, or anything with steps for the owner. Rewrite it with reissue instead, or leave it for the owner.");
+      const summary = input.summary.trim();
+      const options = d.options as string[];
+      let r;
+      const handled = { summary, at };
+      if (!input.answer) {
+        // The work settles it and no option says so: a written answer, like the owner's own words.
+        r = await this.answer(d.id, `Handled by the CEO: ${summary}`.slice(0, 4000), { custom: true, by: "ceo", handled });
+      } else {
+        if (!options.includes(input.answer)) throw new AnswerError(`Give answer: one of ${options.join(", ")}.`);
+        r = await this.answer(d.id, input.answer, { by: "ceo", handled });
+      }
+      if (!r) return null;
+      await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_handled", summary: `CEO handled "${d.question}": ${summary}${via}`, at: now() });
+      return { outcome: "handled" as const, id: d.id };
+    },
+
+    /** Decisions the CEO didn't act on in time go back to normal for the owner. Returns how many. */
+    async expireAdvice() {
+      const t = now();
+      const asking = await db
+        .select({ d: decisions, minutes: companies.adviceTimeoutMinutes })
+        .from(decisions)
+        .innerJoin(companies, eq(companies.id, decisions.companyId))
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' = 'asking'`));
+      let expired = 0;
+      for (const { d, minutes } of asking) {
+        const advice = adviceOf(d.context)!;
+        if (new Date(advice.askedAt ?? 0).getTime() + (minutes ?? ADVICE_DEFAULT_MINUTES) * 60_000 > t.getTime()) continue;
+        const [done] = await db
+          .update(decisions)
+          .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify({ ...advice, state: "timed_out", at: t.toISOString() })}::jsonb)` })
+          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' = 'asking'`))
+          .returning({ id: decisions.id });
+        if (!done) continue;
+        expired++;
+        await record(db, { companyId: d.companyId, kind: "decision_advice_timed_out", summary: `The CEO didn't respond to the request for advice on "${d.question}"; it is back with the owner`, at: t });
+      }
+      return expired;
+    },
+
+    /** Decisions the CEO settled or replaced in the last day, so the owner can see where they went. */
+    async recentlyAdvised() {
+      const since = new Date(now().getTime() - 24 * 3_600_000);
+      const rows = await db
+        .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context })
+        .from(decisions)
+        .where(and(ne(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' in ('reissued', 'handled')`, sql`(${decisions.context}->'advice'->>'at')::timestamptz > ${since.toISOString()}::timestamptz`))
+        .orderBy(desc(decisions.createdAt))
+        .limit(20);
+      return rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! }));
+    },
+
     /** Records the answer and resumes what was waiting. Returns null if not open. */
     async answer(id: string, answer: string, extra: AnswerExtra = {}) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
@@ -750,12 +936,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         answer = ALLOW;
       }
       if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
-      await db
+      // Conditional on still being open (and, for the CEO, still asked), so whoever closes it first wins and the loser changes nothing.
+      const [closed] = await db
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again; so does a
         // loop alert (alert-ladder.ts), whose key only stops a repeat while it is open.
-        .set({ status: "answered", answer, answeredAt: now(), ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}) })
-        .where(eq(decisions.id, id));
+        .set({
+          status: "answered",
+          answer,
+          answeredAt: now(),
+          ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
+          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : {}),
+        })
+        .where(and(eq(decisions.id, id), eq(decisions.status, "open"), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
+        .returning({ id: decisions.id });
+      if (!closed) return null;
 
       let delivered: boolean | null = null;
       let endedHere = false;
@@ -854,7 +1049,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: `Owner answered "${d.question}": ${answer}`, at: now() });
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
@@ -867,7 +1062,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // A rule proposal answered with a button needs nothing more from the CEO.
       if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `The owner answered your question "${d.question}": ${answer}` });
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}` });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });

@@ -62,6 +62,8 @@ export const companies = pgTable("companies", {
   goalCheckDays: integer("goal_check_days").notNull().default(14),
   /** Most nudges the company's agents may send each other in an hour (BOS-73); past it they write on the ticket instead. */
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
+  /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
+  adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
