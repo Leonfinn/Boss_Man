@@ -1,0 +1,1 @@
+ALTER TABLE "companies" ADD COLUMN "advice_timeout_minutes" integer DEFAULT 120 NOT NULL;

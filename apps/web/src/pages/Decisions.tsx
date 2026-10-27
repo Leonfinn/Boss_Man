@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { api, type Company, type Decision, type StallEvidence, type TeamAlert } from "../api";
+import { api, type AdvisedDecision, type Company, type Decision, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { describe, useTranscript } from "../transcript";
@@ -113,7 +113,7 @@ function why(d: { score: number; parts: { blocking: number; liveRun: number; urg
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[] }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[] }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -124,6 +124,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
   const [picks, setPicks] = useState<Record<string, number[]>>({});
+  // "Ask the CEO for advice": the optional one-line note being written, absent while not.
+  const [adviceNote, setAdviceNote] = useState<Record<string, string>>({});
+  const askAdvice = async (d: Decision) => {
+    setBusy(d.id);
+    try {
+      const note = adviceNote[d.id]?.trim();
+      await api(`/api/decisions/${d.id}/ask-advice`, { method: "POST", body: note ? { note } : {} });
+      setAdviceNote(({ [d.id]: _, ...rest }) => rest);
+      setErrors(({ [d.id]: _, ...rest }) => rest);
+      onAnswered();
+    } catch (err) {
+      setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
@@ -194,6 +210,28 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         </details>
       )}
 
+      {advised.length > 0 && (
+        <details className="sub">
+          <summary>Settled by the CEO in the last day ({advised.length})</summary>
+          <ul>
+            {advised.map((a) => (
+              <li key={a.id}>
+                {a.question}{" "}
+                <span className="muted">
+                  · {a.advice.state === "reissued" ? "replaced by a clearer decision" : `handled by the CEO: ${a.advice.summary ?? "done"}`}
+                </span>
+                {a.advice.replacedBy && (
+                  <>
+                    {" "}
+                    <a href="#/decisions">See the new one in the list</a>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
       {loaded && shown.length === 0 ? (
         agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
@@ -228,8 +266,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const done = answered[d.id];
               const x = d.context?.explain;
               const rule = d.context?.rule;
+              const advice = d.context?.advice;
+              const asking = advice?.state === "asking";
               return (
-                <li className="decision" key={d.id}>
+                <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
                   <div className="score" title={why(d)}>
                     <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
                       {Math.round(d.score)}
@@ -299,6 +339,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         )}
                       </>
                     )}
+                    {asking && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        CEO is looking at this{advice.note ? <span className="muted" style={{ fontWeight: 400 }}> · you asked: {advice.note}</span> : null}. You can still answer it yourself.
+                      </p>
+                    )}
+                    {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
+                    {advice?.state === "replacement" && advice.replaces && <p className="muted">The CEO rewrote this decision to be clearer.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
                       {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
@@ -421,6 +468,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               </button>
                             </div>
                           </form>
+                        )}
+                        {d.kind !== "stalled_run" && !asking && ownWords[d.id] === undefined && (
+                          <details className="advice">
+                            <summary>Not enough detail?</summary>
+                            <div className="field">
+                              <label htmlFor={`advice-${d.id}`}>What's unclear (optional, one line)</label>
+                              <input id={`advice-${d.id}`} type="text" maxLength={300} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
+                            </div>
+                            <div className="actions">
+                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => void askAdvice(d)}>
+                                Ask the CEO for advice
+                              </button>
+                            </div>
+                          </details>
                         )}
                         {errors[d.id] && (
                           <p className="error" role="alert">

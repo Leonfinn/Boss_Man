@@ -1,5 +1,5 @@
 import { Component, useCallback, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed, type TeamAlert } from "./api";
+import { api, ApiError, type ActiveRun, type Company, type Decision, type NoticeFeed, type TeamAlert, type AdvisedDecision } from "./api";
 import { art } from "./brand";
 import { Sidebar } from "./components/Sidebar";
 import { State } from "./components/State";
@@ -89,6 +89,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
   const page = route[0] ?? "dashboard";
   const companies = usePoll((signal) => api<Company[]>("/api/companies", { signal }), 30_000, "companies");
   const decisions = usePoll((signal) => api<Decision[]>("/api/decisions", { signal }), 10_000, "decisions");
+  const advised = usePoll((signal) => api<AdvisedDecision[]>("/api/decisions/advised", { signal }), 30_000, "decisions-advised");
   const teamAlerts = usePoll((signal) => api<TeamAlert[]>("/api/decisions/with-team", { signal }), 30_000, "decisions-team");
   const runs = usePoll((signal) => api<ActiveRun[]>("/api/runs", { signal }), 15_000, "runs");
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">(notifySupported() ? Notification.permission : "unsupported");
@@ -209,7 +210,7 @@ function Signed({ onLogout }: { onLogout: () => void }) {
         ) : page === "setup" ? (
           <Setup companies={list} go={go} onChanged={companies.reload} />
         ) : page === "decisions" ? (
-          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
+          <Decisions decisions={(decisions.data ?? []).filter((d) => !current || d.companyId === current.id)} elsewhere={list.filter((c) => c.id !== current?.id).map((c) => ({ id: c.id, name: c.name, count: (decisions.data ?? []).filter((d) => d.companyId === c.id).length })).filter((c) => c.count)} onPickCompany={pick} companies={mine} loaded={decisions.data !== null} agentsWorking={runs.data?.length ?? 0} advised={(advised.data ?? []).filter((a) => !current || a.companyId === current.id)} withTeam={(teamAlerts.data ?? []).filter((a) => !current || a.companyId === current.id)} onAnswered={decisions.reload} banner={<SetupChecklist companyId={current?.id} go={go} />} />
         ) : (
           <Dashboard company={current} />
         )}

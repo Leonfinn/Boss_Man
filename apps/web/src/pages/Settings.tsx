@@ -1255,6 +1255,40 @@ function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => 
   );
 }
 
+/** How long the CEO has to act on a decision the owner asked for advice on. */
+function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [minutes, setMinutes] = useState(String(company.adviceTimeoutMinutes ?? 120));
+  const act = useAction();
+  const n = Number(minutes);
+  const valid = Number.isInteger(n) && n >= 5 && n <= 1440;
+  return (
+    <Section id="advice-timeout-h" title="Asking the CEO for advice">
+      <p className="muted" style={{ fontSize: 14 }}>
+        When you press "Ask the CEO for advice" on a decision, the CEO has this long to rewrite or settle it. After that it goes back to you as it was.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="advice-timeout">Minutes the CEO has</label>
+        <input id="advice-timeout" type="number" min={5} max={1440} value={minutes} onChange={(e) => setMinutes(e.target.value)} style={{ width: 80 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { adviceTimeoutMinutes: n } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** The company's hourly nudge limit (BOS-73). */
 function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
@@ -1813,6 +1847,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <AdviceTimeout company={company} onChanged={onChanged} />
             <Watchdog company={company} />
             <Chapters company={company} />
           </div>
