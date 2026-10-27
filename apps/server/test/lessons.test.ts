@@ -223,7 +223,17 @@ describe("lessons learned: QA edge cases", () => {
     const r = await c.req("POST", `/api/decisions/${replace!.id}/answer`, { answer: "Check the document first, raise the cap to 25 if needed.", custom: true });
     expect(r.statusCode).toBe(200);
     expect(lessonsFrom((await c.brief())!.body)).toHaveLength(20);
-    const w = (await c.db.select().from(wakes)).filter((x) => x.agentId === c.ceo.id && x.reason === "decision answered");
-    expect(JSON.stringify(w)).toContain("raise the cap to 25");
+    // The CEO gets a follow-up lesson decision carrying the owner's words, and answers it through the normal path.
+    const [follow] = (await c.open()).filter((x) => (x.context as { type: string }).type === "lesson_replace");
+    expect(follow!.tier).toBe("ceo");
+    expect(follow!.question).toContain("raise the cap to 25");
+    const w = (await c.db.select().from(wakes)).filter((x) => x.agentId === c.ceo.id);
+    expect(JSON.stringify(w)).toContain(follow!.question.slice(0, 40));
+    const done = await c.answer(follow!.id, "Replace: Lesson 3");
+    expect(done.statusCode).toBe(200);
+    const kept = lessonsFrom((await c.brief())!.body);
+    expect(kept).toContain("Lesson 21");
+    expect(kept).not.toContain("Lesson 3");
+    expect(kept).toHaveLength(20);
   });
 });

@@ -305,17 +305,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   /** Finishes a replace: the chosen line goes, the new lesson takes its place. */
   async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string, ownWords: boolean) {
     if (ownWords) {
-      // The owner answered in their own words: the lesson stays pending and the CEO picks the line to drop by following them.
-      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
+      // The owner answered in their own words. The Lessons section only changes through a lesson decision, so the CEO gets a follow-up one carrying those words.
       const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
-      const lines = page ? lessonsFrom(page.body) : [];
-      if (ceo && wake) {
-        await wake({
-          agentId: ceo.id,
-          reason: "decision answered",
-          note: `The Lessons section of ${ctx.projectName}\x27s brief is full (${LESSONS_CAP}) and the owner was asked which line the new lesson should replace. The new lesson is not in the brief yet: "${ctx.lesson}"\n\nThe owner answered in their own words: ${answer}\n\nCurrent lessons:\n${lines.map((l) => `- ${l}`).join("\n")}\n\nFollow the owner\x27s answer: drop the line it points to (or make the change it asks for) and add the new lesson, editing the brief\x27s Lessons section. If the answer is unclear, ask the owner.`,
-        });
-      }
+      const unique = [...new Set(page ? lessonsFrom(page.body) : [])];
+      const [row] = await db
+        .insert(decisions)
+        .values({
+          companyId: d.companyId,
+          kind: "question",
+          question: `The Lessons section of ${ctx.projectName}'s brief is full (${LESSONS_CAP}). The new lesson is "${ctx.lesson}". The owner was asked which line it replaces and answered in their own words: ${answer}\n\nPick the line their words point to, or "${LESSON_DONT_ADD}" if they ask for something else (then ask the owner).`,
+          options: [...unique.map((l) => `${LESSON_REPLACE_PREFIX}${l}`), LESSON_DONT_ADD],
+          recommendedOption: LESSON_DONT_ADD,
+          tier: "ceo",
+          dedupeKey: `lesson-replace-ceo:${d.id}`,
+          context: { type: "lesson_replace", projectId: ctx.projectId, projectName: ctx.projectName, lesson: ctx.lesson } satisfies DecisionContext,
+        })
+        .onConflictDoNothing()
+        .returning({ id: decisions.id, question: decisions.question });
+      if (row) await tellCeo(d.companyId, row.question);
       return;
     }
     if (answer === LESSON_DONT_ADD || !answer.startsWith(LESSON_REPLACE_PREFIX)) return;
@@ -858,7 +865,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
       // A rule proposal answered with a button needs nothing more from the CEO.
-      if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords)) {
+      if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
         await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `The owner answered your question "${d.question}": ${answer}` });
       }
