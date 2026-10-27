@@ -35,7 +35,9 @@ describe("quota card wording", () => {
     expect(await screen.findByText("Fable (this week)")).toBeTruthy();
     expect(screen.getByText(/Fable can use up to 50% of your weekly limit/)).toBeTruthy();
     expect(screen.queryByText(/overage/i)).toBeNull();
-    expect(screen.getByText(/Runs out about \w{3},? .* at /)).toBeTruthy();
+    const day = new Date(soon).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    expect(screen.getByText(new RegExp(`Runs out about ${day} at `))).toBeTruthy();
+    expect(screen.queryByText(/own allowance/)).toBeNull();
   });
 
   it("shows the day and date for a time later today", async () => {
@@ -53,7 +55,8 @@ describe("quota card wording", () => {
   });
 
   it("gives an unknown limit a readable fallback name", () => {
-    expect(windowLabel("some_new_thing").name).toBe("Other limit");
+    expect(windowLabel("some_new_thing").name).toBe("Some new thing limit");
+    expect(windowLabel("seven_day_opus").name).not.toBe(windowLabel("seven_day_sonnet").name);
     expect(windowLabel("90_min").name).toBe("90-minute window");
   });
 });

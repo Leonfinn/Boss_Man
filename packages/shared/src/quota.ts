@@ -119,8 +119,9 @@ export function windowLabel(key: string): { name: string; note?: string } {
   if (key === "five_hour") return { name: "5-hour window" };
   if (key === "seven_day") return { name: "This week" };
   if (/fable|overage_included/.test(key))
-    return { name: "Fable (this week)", note: "Fable can use up to 50% of your weekly limit. The bar shows how much of Fable's own allowance is used." };
+    return { name: "Fable (this week)", note: "Fable can use up to 50% of your weekly limit." };
   const m = /^(\d+)_min$/.exec(key);
   if (m) return { name: `${m[1]}-minute window` };
-  return { name: "Other limit" };
+  const words = key.replace(/_/g, " ").trim();
+  return { name: words ? `${words[0]!.toUpperCase()}${words.slice(1)} limit` : "Other limit" };
 }

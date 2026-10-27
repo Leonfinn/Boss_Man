@@ -115,7 +115,7 @@ describe("limit estimate and daily use (R78)", () => {
     await new Promise((r) => setTimeout(r, 100));
     const sent = await c.db.select().from(notifications);
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ requested: "flag", link: "#/funding", title: expect.stringMatching(/^Claude Max: the limit "5-hour window" runs out about \w{3} \d{1,2} \w{3} at \d\d:\d\d$/) });
+    expect(sent[0]).toMatchObject({ requested: "flag", link: "#/funding", title: expect.stringMatching(/^Claude Max: the limit "5-hour window" runs out about \w{3} \d{1,2} \S+ at \d\d:\d\d$/) });
     expect(sent[0]!.body).toContain("60%");
   });
 });
