@@ -497,6 +497,39 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
+type ProposalRow = { id: string; name: string; source: "draft" | "link"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
+const PROPOSAL_STATUS: Record<string, string> = {
+  proposed: "Waiting",
+  in_review: "With the Security Reviewer",
+  awaiting_owner: "Waiting for your decision",
+  installed: "Added",
+  rejected: "Not added",
+  stale: "Not added: the source changed",
+  expired: "Expired after 14 days",
+};
+
+/** Skills the CEO proposed, and where each one stands. The decision itself is answered in Decisions. */
+function Proposals({ companyId }: { companyId: string }) {
+  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals`, { signal }), 30_000, companyId);
+  const rows = (list.data ?? []).slice(0, 10);
+  if (!rows.length) return null;
+  return (
+    <section className="card" aria-label="Skills the CEO proposed" style={{ marginBottom: 16 }}>
+      <h2>Proposed by the CEO</h2>
+      <ul>
+        {rows.map((p) => (
+          <li key={p.id}>
+            <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
+            {p.reviewRequired ? ` · security review: ${p.verdict ? p.verdict.replace("_", " ") : "pending"}` : " · no review needed"}
+            {p.overridden ? " · added against the reviewer's advice" : ""}
+            {p.status === "awaiting_owner" ? <> · <a href="#/decisions">Decide</a></> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function Skills({ company }: { company: Company | undefined }) {
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
   const [picked, setPicked] = useState<string | null>(null);
@@ -535,6 +568,7 @@ export function Skills({ company }: { company: Company | undefined }) {
           <span>Added {added}. Choose who has it below.</span>
         </p>
       )}
+      <Proposals companyId={company.id} />
       <div className="wiki">
         <nav className="card wiki-list" aria-label="Skills">
           {list.data && rows.length === 0 && <p className="muted">No skills yet.</p>}
