@@ -137,3 +137,48 @@ describe("watchdog hardening", () => {
     expect(u.statusCode).toBe(200);
   });
 });
+
+// BOS-63 (QA): end-to-end checks the per-rule tests don't make.
+describe("QA: nudge storm and active runs (BOS-63)", () => {
+  it("a storm of nudges stops at the default hourly cap, switches the watchdog off and tells the owner once", async () => {
+    await ctx.switchOn();
+    const ts = [];
+    for (let i = 0; i < 30; i++) ts.push(await ctx.ticket({ title: `Stuck ${i}`, stateChangedAt: ctx.ago(130) }));
+    await ctx.watchdog.run();
+    await ctx.launched();
+    const cap = (await ctx.watchdog.status(ctx.companyId)).settings.maxNudgesPerHour;
+    expect(cap).toBe(12);
+    let refused = 0;
+    for (const t of ts) {
+      const r = await call({ action: "nudge", ticketId: t.id, reason: "storm test nudge" });
+      if (isError(r)) refused++;
+    }
+    const nudges = await ctx.db.select().from(watchdogActions).where(and(eq(watchdogActions.companyId, ctx.companyId), eq(watchdogActions.kind, "nudge")));
+    expect(nudges.length).toBeLessThanOrEqual(cap);
+    expect(refused).toBeGreaterThanOrEqual(30 - cap - 1);
+    const st = await ctx.watchdog.status(ctx.companyId);
+    expect(st.settings.enabled).toBe(false);
+    expect(st.trippedAt).not.toBeNull();
+    expect((await ctx.db.select().from(notifications)).filter((n) => n.title === "The watchdog switched itself off")).toHaveLength(1);
+    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
+    // Hours later the sweep still does nothing and nothing more is sent.
+    const before = (await ctx.db.select().from(notifications)).length;
+    for (let h = 0; h < 5; h++) {
+      ctx.advance(60);
+      await ctx.watchdog.run();
+    }
+    expect(await ctx.smWakes()).toHaveLength(1);
+    expect((await ctx.db.select().from(notifications)).length).toBe(before);
+  });
+
+  it("a ticket with a run working on it is not flagged in progress, review or blocked, however long", async () => {
+    await ctx.switchOn();
+    const { runs } = await import("../src/db/schema.js");
+    for (const [i, systemState] of (["in_progress", "review", "blocked"] as const).entries()) {
+      const t = await ctx.ticket({ title: `Busy ${systemState}`, systemState, stateChangedAt: ctx.ago(2000) });
+      await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, startedAt: ctx.ago(5 + i) });
+    }
+    await ctx.watchdog.run();
+    expect(await ctx.db.select().from(watchdogFlags)).toHaveLength(0);
+  });
+});
