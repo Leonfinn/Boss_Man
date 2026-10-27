@@ -21,6 +21,7 @@ import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
+import { ownerActed } from "./stale-requests.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { ceoNotesLines } from "./agent-notes.js";
@@ -508,6 +509,7 @@ export function schedulerService(
       "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it; a move to review, done or blocked needs a summary of up to 240 characters, which stays on the ticket for whoever reads it next); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help; nudge (a colleague by name, why, and the ticket if it's about one) to hand something to a colleague or ask them a question. Routine updates are not nudges: put them in ticket_reply or the ticket's state note.",
       "Changes to the runner image (new tools in apps/runner/Dockerfile) go live when the owner clicks Settings → Server and runner → Updates → Build and update runners; ask them for that, not for commands on the host.",
       "Ending your turn does not move the ticket.",
+      "Before you tell the owner they must do something, check the live state (their recent answers, what's deployed, and whether the linked tickets are done), not just your own earlier note. Don't repeat an old \"waiting on you\" note as fact. When it's done, withdraw the card with withdraw_decision and update the ticket's state note in the same run.",
       UNTRUSTED_NOTE,
     );
     return lines.join("\n");
@@ -1157,6 +1159,8 @@ export function schedulerService(
      */
     async onTicketDone(ticketId: string, causedByRunId?: string | null) {
       await this.releaseWorkspace(ticketId);
+      // A ticket finishing may make "waiting on it" notes and cards out of date (BOS-123).
+      await ownerActed(db, { ticketIds: [ticketId], reason: "a ticket it waited on finished", now: now(), wake: (input) => this.notify(input.agentId, input) });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
       for (const { id } of dependents) {
         const blockers = await db

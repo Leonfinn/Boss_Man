@@ -9,6 +9,7 @@ import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, engagements, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkAsk } from "./decisions.js";
+import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
@@ -55,7 +56,7 @@ type Nudge = (input: { runId: string; fromAgentId: string; to: string; ticketId?
 export type WatchdogDeps = {
   notify: Notify;
   nudge: Nudge;
-  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[] }) => Promise<{ id: string }>;
+  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string }) => Promise<{ id: string }>;
   assign: (ticketId: string, agentId: string | null) => Promise<unknown>;
   /** Puts a ticket back in the state it was in (through the normal ticket update, so it is versioned and logged). */
   restoreState: (ticketId: string, state: SnapTicket["state"]) => Promise<unknown>;
@@ -382,7 +383,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     for (const f of due.filter((x) => x.rule === "owner_decision_waiting")) {
       const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), eq(watchdogActions.kind, "owner_reminder"))).limit(1);
       await db.update(watchdogFlags).set({ dueAt: later(f), lastFlaggedAt: t }).where(eq(watchdogFlags.id, f.id));
-      if (!told) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
+      // The owner may have acted since this flag opened; don't tell them again that they are holding it up (BOS-123).
+      if (!told && !(await recentOwnerAnswer(db, { companyId: c.id, ticketIds: [f.ticketId], since: f.openedAt }))) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
     }
     if (reminders.length > MAX_OWNER_REMINDERS) {
       const oldest = Math.max(...reminders.map((r) => r.idle));
@@ -730,16 +732,27 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       return log({ ...base, before: { flagIds: flags.map((x) => x.id) }, after: { wakeIds: [w.id] }, undoable: true, summary: `${sm.name} escalated it to ${boss.name}: ${reason}` });
     },
 
-    async raiseDecision(companyId: string, agentId: string, runId: string, input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string }) {
+    async raiseDecision(
+      companyId: string,
+      agentId: string,
+      runId: string,
+      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string; stillNeeded?: string },
+    ) {
       const reason = oneLine(input.reason);
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
       const bad = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps });
       if (bad) throw new WatchdogError(422, bad);
+      // Don't ask again what the owner has already answered (BOS-123).
+      if (!input.stillNeeded?.trim()) {
+        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id));
+        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false });
+        if (earlier) throw new WatchdogError(409, `${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
+      }
       const f = await handedFlag(companyId, t.id, "raise_decision");
       await capOrFail(companyId, s);
-      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), steps: input.steps?.length ? input.steps : undefined });
+      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), steps: input.steps?.length ? input.steps : undefined, stillNeeded: input.stillNeeded?.trim() || undefined });
       return log({ companyId, kind: "raise_decision", ticketId: t.id, flagId: f.id, actorAgentId: sm.id, actorRunId: runId, reason, before: { state: t.systemState }, after: { decisionId: d.id }, undoable: true, summary: `${sm.name} asked the owner a question about it: ${reason}` });
     },
 

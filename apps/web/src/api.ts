@@ -81,6 +81,9 @@ export type Decision = {
   recommendedOption: string | null;
   tier: "ceo" | "owner";
   createdAt: string;
+  /** An owner action made this card possibly out of date; the raising agent is checking it (BOS-123). */
+  staleAt?: string | null;
+  staleReason?: string | null;
   companyName: string;
   agentName: string | null;
   /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */

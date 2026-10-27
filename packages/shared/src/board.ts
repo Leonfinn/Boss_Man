@@ -38,12 +38,16 @@ export function effectiveDueDate(ticketDue: string | null, milestoneTarget: stri
   return ticketDue ?? milestoneTarget ?? null;
 }
 
-/** A ticket's state note for an agent, with its age; flagged when the ticket has moved since it was written (R85). */
-export function stateNoteLine(t: { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date }, now: Date): string | null {
+/** A ticket's state note for an agent, with its age; flagged when the ticket has moved or the owner has acted since it was written (R85, BOS-123). */
+export function stateNoteLine(
+  t: { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null },
+  now: Date,
+): string | null {
   if (!t.stateNote || !t.stateNoteAt) return null;
   const m = Math.max(0, Math.round((now.getTime() - t.stateNoteAt.getTime()) / 60_000));
   const age = m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
-  return `State note (${age} ago): ${t.stateNote}${t.stateNoteAt < t.lastActivityAt ? " (may be out of date)" : ""}`;
+  const stale = t.stateNoteStaleAt != null || t.stateNoteAt < t.lastActivityAt;
+  return `State note (${age} ago): ${t.stateNote}${stale ? " (may be out of date)" : ""}`;
 }
 
 /** A company's ticket prefix, as in HOL-12: 1 to 10 capital letters or digits. */
