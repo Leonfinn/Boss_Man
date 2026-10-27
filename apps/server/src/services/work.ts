@@ -24,6 +24,9 @@ type TicketPatch = {
   assigneeAgentId?: string | null;
   /** A note for whoever reads the ticket next. */
   stateNote?: string;
+  /** While blocked: when the wait ends and why (BOS-59); cleared by the database when the ticket leaves blocked. */
+  blockedUntil?: Date | null;
+  blockedUntilReason?: string | null;
   assignedToOwner?: boolean;
   milestoneId?: string | null;
   keyResultId?: string | null;
