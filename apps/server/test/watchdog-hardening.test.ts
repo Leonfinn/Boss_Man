@@ -5,9 +5,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, companies, decisions, notifications, runs, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
+import { agents, decisions, notifications, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
-import { WATCHDOG_ESCALATE_REASON, WATCHDOG_REASON } from "../src/services/watchdog.js";
+import { WATCHDOG_REASON } from "../src/services/watchdog.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
@@ -60,7 +60,6 @@ async function client(agentId: string) {
   clients.push(c);
   return c;
 }
-const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
 const isError = (r: unknown) => !!(r as { isError?: boolean }).isError;
 const call = async (args: Record<string, unknown>) => (await client(ctx.sm.id)).callTool({ name: "watchdog", arguments: args });
 
@@ -107,7 +106,8 @@ describe("watchdog hardening", () => {
       await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
     }
     await ctx.watchdog.run();
-    const notes = await ctx.db.select().from(notifications).where(sql`${notifications.title} like '%waited%for your decision'`);
+    const notes = await ctx.db.select().from(notifications).where(sql`${notifications.title} like '%for your decision'`);
+    expect(notes.length).toBeGreaterThanOrEqual(1);
     expect(notes.length).toBeLessThanOrEqual(3);
   });
 
