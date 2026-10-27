@@ -35,6 +35,7 @@ import { resolveReviewer } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
+import type { alertLadder } from "./services/alert-ladder.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -94,6 +95,7 @@ type Services = {
   pa: ReturnType<typeof paService>;
   images: ReturnType<typeof ticketImagesService>;
   watchdog: ReturnType<typeof watchdogService>;
+  alerts: ReturnType<typeof alertLadder>;
 };
 
 /**
@@ -113,12 +115,12 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   }) as never;
 }
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images, watchdog }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images, watchdog, alerts }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
-    registerWatchdog(server, watchdog, scope);
+    registerWatchdog(server, watchdog, alerts, scope);
   }
 
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -736,12 +738,15 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "decisions",
     {
       description:
-        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). The owner sees the same queue and may answer first. You can't answer your own requests.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert only the owner can settle (a secret, host access, sign-off, an owner-only choice): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests.",
       inputSchema: {
-        action: z.enum(["list", "answer"]),
+        action: z.enum(["list", "answer", "escalate"]),
         id: z.string().uuid().optional(),
         answer: z.string().max(200).optional(),
         note: z.string().max(2000).optional(),
+        triedFirst: z.string().max(1000).optional(),
+        ownerMustDo: z.boolean().optional(),
+        steps: z.array(z.string().min(1).max(500)).max(12).optional(),
       },
     },
     async (input) => {
@@ -756,7 +761,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
             .from(decisionsTable)
             .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), eq(decisionsTable.tier, "ceo")))
             .orderBy(decisionsTable.createdAt)
-        ).filter(mine);
+        )
+          .filter(mine)
+          // Alerts still with the Scrum Master aren't the CEO's yet (BOS-64).
+          .filter((d) => (d.context as { ladder?: { rung: string } }).ladder?.rung !== "scrum_master");
         if (!open.length) return text("No decisions are waiting for you.");
         return text(
           open
@@ -766,6 +774,17 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
             })
             .join("\n\n"),
         );
+      }
+      if (input.action === "escalate") {
+        if (!input.id || !input.triedFirst) return fail("Give the alert's id and triedFirst: what you and the team tried.");
+        if (!isCeo || !scope.agentId) return fail("Only the CEO passes alerts to the owner.");
+        try {
+          await alerts.escalate(scope.companyId, scope.agentId, { alertId: input.id, triedFirst: input.triedFirst, steps: input.steps, ownerMustDo: input.ownerMustDo });
+          return text("Passed to the owner, with what you tried.");
+        } catch (err) {
+          if (err instanceof WatchdogError) return fail(err.message);
+          throw err;
+        }
       }
       if (!input.id || !input.answer) return fail("Give the decision's id and your answer.");
       const [d] = await db.select().from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
@@ -1575,14 +1594,16 @@ function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa, 
 }
 
 /** The Scrum Master's watchdog actions (BOS-58). Each needs a one-line reason, is logged and can be undone. */
-function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], scope: Scope) {
+function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], alerts: Services["alerts"], scope: Scope) {
   server.registerTool(
     "watchdog",
     {
       description:
-        "Your only way to act on the problems the watchdog hands you. Every action needs reason: one line saying why. list: the open flags. nudge (ticketId): ask the assignee to pick it up or say why it's stuck. assign (ticketId, to): an unassigned ticket only, to the obvious colleague by name, or \"ceo\" if none is obvious. rewake (ticketId): wake the assignee again after their run crashed or ended without moving the ticket. chase_review (ticketId): wake the pending reviewers. snooze (flagId, hours up to 48): the flag is fine for now; a third snooze in a row is refused and the ticket goes to the CEO. escalate (ticketId): hand it to the CEO. raise_decision (ticketId, question, options, recommended, triedFirst, ownerMustDo, steps): when only the owner can unblock it. Act only on the problems the watchdog handed you, each action at most once per problem until it is handed to you again. The owner can undo any of your actions. You can't do the work, change risk or priority, or close or cancel tickets. Actions are capped per hour; past the cap the watchdog switches off and the owner is told.",
+        "Your only way to act on the problems the watchdog hands you. Every action needs reason: one line saying why. list: the open flags. nudge (ticketId): ask the assignee to pick it up or say why it's stuck. assign (ticketId, to): an unassigned ticket only, to the obvious colleague by name, or \"ceo\" if none is obvious. rewake (ticketId): wake the assignee again after their run crashed or ended without moving the ticket. chase_review (ticketId): wake the pending reviewers. snooze (flagId, hours up to 48): the flag is fine for now; a third snooze in a row is refused and the ticket goes to the CEO. escalate (ticketId): hand it to the CEO. raise_decision (ticketId, question, options, recommended, triedFirst, ownerMustDo, steps): when only the owner can unblock it. Boss Man's own alerts (a wake chain that looks like a loop, two agents nudging each other) come to you first: alerts lists yours; resolve_alert (alertId, optional rewake: true to wake the dropped agent again with a fresh chain) once you've dealt with it; pass_alert (alertId) when it needs the CEO. Act only on the problems the watchdog handed you, each action at most once per problem until it is handed to you again. The owner can undo any of your actions. You can't do the work, change risk or priority, or close or cancel tickets. Actions are capped per hour; past the cap the watchdog switches off and the owner is told.",
       inputSchema: {
-        action: z.enum(["list", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision"]),
+        action: z.enum(["list", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "alerts", "resolve_alert", "pass_alert"]),
+        alertId: z.string().uuid().optional(),
+        rewake: z.boolean().optional(),
         reason: z.string().max(400).optional(),
         ticketId: z.string().uuid().optional(),
         flagId: z.string().uuid().optional(),
@@ -1632,6 +1653,19 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], sco
           case "raise_decision":
             need("ticketId", "question", "options", "recommended", "triedFirst");
             return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason }));
+          case "alerts": {
+            const mine = await alerts.mine(companyId, agentId);
+            return text(mine.length ? JSON.stringify(mine) : "No alerts are waiting for you.");
+          }
+          case "resolve_alert":
+            need("alertId");
+            await alerts.resolve(companyId, agentId, { alertId: input.alertId!, reason, rewake: input.rewake });
+            return text(`Settled and logged${input.rewake ? ", and the agent was woken again" : ""}.`);
+          case "pass_alert": {
+            need("alertId");
+            const r = await alerts.pass(companyId, agentId, { alertId: input.alertId!, reason });
+            return text(`Passed on: it's with ${r.to === "ceo" ? "the CEO" : "the owner"} now.`);
+          }
         }
       } catch (err) {
         if (err instanceof WatchdogError) return fail(err.message);

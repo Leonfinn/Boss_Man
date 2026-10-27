@@ -16,6 +16,8 @@ import { evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type
 
 /** Why the Scrum Master is woken: the note lists the due flags. */
 export const WATCHDOG_REASON = "watchdog";
+/** Why the Scrum Master or the CEO is woken with one of Boss Man's own alerts (BOS-64, alert-ladder.ts). */
+export const ALERT_REASON = "alert";
 /** The Scrum Master woke an agent again after its run crashed or ended without moving the ticket. */
 export const WATCHDOG_REWAKE_REASON = "watchdog re-wake";
 /** A ticket handed to the CEO: by the Scrum Master, or by Boss Man after two snoozes in a row. */
@@ -448,6 +450,10 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     },
 
     snapshot,
+    // The alert ladder (BOS-64) checks its Scrum Master actions with the same guard and cap.
+    actor,
+    capOrFail,
+    log,
 
     // ---------- The Scrum Master's actions ----------
     // Each acts only on a problem the watchdog handed over (an open flag it was woken about), each

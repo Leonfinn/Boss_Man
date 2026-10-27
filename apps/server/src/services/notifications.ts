@@ -151,7 +151,15 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
         .from(decisions)
         .innerJoin(companies, eq(companies.id, decisions.companyId))
         .leftJoin(notifications, eq(notifications.decisionId, decisions.id))
-        .where(and(eq(decisions.status, "open"), isNull(notifications.id), gt(decisions.createdAt, new Date(now().getTime() - 7 * 86_400_000))))
+        .where(
+          and(
+            eq(decisions.status, "open"),
+            isNull(notifications.id),
+            gt(decisions.createdAt, new Date(now().getTime() - 7 * 86_400_000)),
+            // Boss Man's own alerts (BOS-64) reach the owner only once they climb to them.
+            sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`,
+          ),
+        )
         .orderBy(decisions.createdAt)
         .limit(100);
       for (const { d, company } of open) {

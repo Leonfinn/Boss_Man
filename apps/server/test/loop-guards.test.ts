@@ -46,15 +46,18 @@ describe("bounded review loops (R49)", () => {
     }
     await c.db.delete(wakes);
     const third = (await send()).json();
-    expect(third.delivered).toMatch(/^held for the owner/);
-    expect(await c.db.select().from(wakes)).toHaveLength(0);
+    expect(third.delivered).toMatch(/^held: the review looks stuck/);
+    // Only the CEO is woken, with the alert (BOS-64); the assignee isn't.
+    expect((await c.db.select().from(wakes)).map((w) => [w.agentId, w.reason])).toEqual([[c.ceo.id, "alert"]]);
     expect((await c.state()).systemState).toBe("blocked");
     const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
     expect(d!.question).toMatch(/the same comment has now come back 3 times: "src\/limit\.ts: Read the limit from config\."/);
+    expect(d!.tier).toBe("ceo");
 
+    // The owner can still answer it first from the queue.
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Send it back anyway" });
     expect((await c.state()).systemState).toBe("in_progress");
-    expect((await c.db.select().from(wakes))[0]!.note).toContain("> Read the limit from config.");
+    expect((await c.db.select().from(wakes).where(eq(wakes.agentId, c.worker.id)))[0]!.note).toContain("> Read the limit from config.");
   });
 
   it("caps the number of rounds even when the comments differ, and stopping cancels the ticket", async () => {

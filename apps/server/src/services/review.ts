@@ -318,7 +318,7 @@ export function reviewService(
     /** Changes requested: a review that keeps coming back goes to the owner instead of another round (R49). */
     async sendBackRound(t: typeof tickets.$inferSelect, o: { reviewer: string; comments: ReviewComment[]; text: string; causedByRunId?: string | null }) {
       const round = await deps.loops.reviewRound({ ticketId: t.id, reviewer: o.reviewer, comments: o.comments, message: o.text });
-      if (round.escalated) return { verdict: "changes_requested" as const, outcome: "escalated" as const, delivered: `held for the owner (decision ${round.escalated})`, message: o.text, round: round.round };
+      if (round.escalated) return { verdict: "changes_requested" as const, outcome: "escalated" as const, delivered: `held: the review looks stuck, so the CEO (or the owner, if the CEO can't settle it) decides what happens next (decision ${round.escalated})`, message: o.text, round: round.round };
       const delivered = await this.sendBack(t.id, o.text, o.reviewer, o.causedByRunId);
       return { verdict: "changes_requested" as const, outcome: "sent_back" as const, delivered, message: o.text, round: round.round };
     },
