@@ -76,3 +76,7 @@ export const WATCHDOG_NUDGE_KINDS: readonly WatchdogActionKind[] = ["nudge", "as
 
 /** The "blocked until" reason: one line, at most this long (BOS-59). */
 export const BLOCKED_UNTIL_REASON_MAX = 240;
+
+/** "Blocked until" may be at most this many days ahead, so a ticket can't hide from the watchdog (BOS-77). */
+export const BLOCKED_UNTIL_MAX_DAYS = 30;
+export const BLOCKED_UNTIL_MAX_MS = BLOCKED_UNTIL_MAX_DAYS * 24 * 3_600_000;
