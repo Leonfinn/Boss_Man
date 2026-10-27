@@ -4,14 +4,14 @@ import type { SkillFile } from "./skills.js";
 
 export const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
 
-/** sha256 of each file's bytes, and of the whole set (paths and file hashes, sorted by path). */
+/** sha256 of each file's bytes, and of the whole set (every path and file hash in the list, sorted). */
 export function hashFiles(files: SkillFile[]) {
   const fileHashes: Record<string, string> = {};
   for (const f of files) fileHashes[f.path] = sha256(Buffer.from(f.content, "base64"));
   const bundleHash = sha256(
-    Object.keys(fileHashes)
+    files
+      .map((f) => `${f.path}\0${sha256(Buffer.from(f.content, "base64"))}\n`)
       .sort()
-      .map((p) => `${p}\0${fileHashes[p]}\n`)
       .join(""),
   );
   return { fileHashes, bundleHash };
@@ -25,6 +25,13 @@ const MAKE_CMD = /^\s*(?:[$>]\s+)?make(?:\s+[\w.-]+)?\s*$/i;
 const INLINE_RUN = /\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b|\$\(|`[^`\n]*\b(?:curl|wget)\s[^`\n]*`|\b(?:curl|wget)\s+(?:-\S+\s+)*https?:\/\//i;
 // Inline code, an interpreter one-liner (-e / -c) or eval/exec anywhere in a line: an agent could be told to run it, so review.
 const INLINE_CODE = /`[^`\n]+`/;
+// A command word followed by an argument anywhere in a line, whatever comes before it (a list marker, "run this:", a sentence). Prose
+// that mentions one is reviewed too: when unsure, review. "make" and "source" are left out (everyday words); a line-start "make" is caught above.
+const WORD_CMD = /\b(?:sudo|curl|wget|bash|zsh|ksh|npx|npm|pnpm|yarn|pipx?|pip3|uvx?|python[\d.]*|node|deno|bun|ruby|perl|php|lua|powershell|pwsh|eval|exec|chmod|chown|ssh|scp|docker|kubectl|git\s+clone|run\s+make)\s+[-\w./@:~$"'(]/i;
+// Prose that points at a terminal, or sends/downloads/runs something at an address.
+const TERMINAL = /\b(?:terminal|command[- ]line|command prompt|shell script|powershell|\bcmd\.exe)\b/i;
+const URL_ACTION = /https?:\/\/\S+/i;
+const ACTION_WORD = /\b(?:send|post|upload|submit|transmit|forward|exfiltrate|download|fetch|pipe|run|execute|install|curl|wget|eval)\b/i;
 const ONE_LINER = /\b(?:node|deno|bun|python[\d.]*|ruby|perl|php|lua|powershell|pwsh)\s+(?:-\S+\s+)*-[ecC]\b|\b(?:eval|exec)\s*[(`'"]/i;
 
 /** Does this instructions text hold a code block, a #! line, or a line an agent could run? */
@@ -33,7 +40,7 @@ function runnableText(text: string): boolean {
   for (const line of text.split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
     if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
-    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || ONE_LINER.test(line)) return true;
+    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || WORD_CMD.test(line) || TERMINAL.test(line) || (URL_ACTION.test(line) && ACTION_WORD.test(line)) || ONE_LINER.test(line)) return true;
   }
   return false;
 }

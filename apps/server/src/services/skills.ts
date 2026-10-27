@@ -71,6 +71,8 @@ const unb64 = (s: string) => Buffer.from(s, "base64");
 
 /** A safe relative path inside the skill folder, or null. */
 export function cleanPath(p: string) {
+  // No control characters (a newline in a name would write lines into the review task) and no line-break lookalikes.
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(p)) return null;
   const parts = p.replace(/\\/g, "/").split("/").filter((x) => x && x !== ".");
   if (!parts.length || parts.some((x) => x === ".." || x.includes("\0"))) return null;
   return parts.join("/");
@@ -98,6 +100,12 @@ export function normalise(files: SkillFile[]): { files: SkillFile[]; folder: str
     } else {
       throw new SkillError(400, "A skill needs a SKILL.md at the top of its folder.");
     }
+  }
+  const seen = new Set<string>();
+  for (const f of clean) {
+    const key = f.path.toLowerCase();
+    if (seen.has(key)) throw new SkillError(400, `"${f.path}" appears more than once in the skill. Each file may be listed once.`);
+    seen.add(key);
   }
   const bytes = clean.reduce((n, f) => n + unb64(f.content).length, 0);
   if (bytes > LIMITS.bytes) throw new SkillError(400, `A skill can be at most ${LIMITS.bytes / 1024 / 1024} MB.`);

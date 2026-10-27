@@ -588,7 +588,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     async raiseSkill(input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }) {
       const [row] = await db
         .insert(decisions)
-        .values({ companyId: input.companyId, kind: "skill", question: input.question, options: input.options, recommendedOption: input.recommended, raisedByAgentId: input.agentId, dedupeKey: `skill:${input.proposalId}`, context: { type: "skill", proposalId: input.proposalId } })
+        .values({ companyId: input.companyId, kind: "skill", tier: "owner", question: input.question, options: input.options, recommendedOption: input.recommended, raisedByAgentId: input.agentId, dedupeKey: `skill:${input.proposalId}`, context: { type: "skill", proposalId: input.proposalId } })
         .onConflictDoNothing()
         .returning();
       return row ?? null;
@@ -759,12 +759,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         answer = ALLOW;
       }
       if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
-      await db
+      const claimed = await db
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again; so does a
         // loop alert (alert-ladder.ts), whose key only stops a repeat while it is open.
         .set({ status: "answered", answer, answeredAt: now(), ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}) })
-        .where(eq(decisions.id, id));
+        .where(and(eq(decisions.id, id), eq(decisions.status, "open")))
+        .returning({ id: decisions.id });
+      // Answered at the same moment by someone else: that answer stands, this one does nothing.
+      if (!claimed.length) return null;
 
       let delivered: boolean | null = null;
       let endedHere = false;
