@@ -11,15 +11,20 @@ cd "$(dirname "$self")/.."
 # them, after a pause, only when the failure output shows that kind of error; any other failure is final.
 if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   attempts="${BOSSMAN_CHECK_ATTEMPTS:-3}"
+  budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-1500}"  # Boss Man kills the merge check at 30 min; stay well inside it
+  pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
+  start=$SECONDS
   log="$(mktemp)"
   trap 'rm -f "$log"' EXIT
   for ((n = 1; n <= attempts; n++)); do
-    rc=0
+    rc=0; began=$SECONDS
     BOSSMAN_CHECK_CHILD=1 bash "$self" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
     [ "$rc" -eq 0 ] && exit 0
-    if [ "$n" -lt "$attempts" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
-      echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${BOSSMAN_CHECK_RETRY_SECONDS:-30}s" >&2
-      sleep "${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
+    # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
+    took=$((SECONDS - began))
+    if [ "$n" -lt "$attempts" ] && [ $((SECONDS - start + took + pause)) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
+      echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
+      sleep "$pause"
     else
       exit "$rc"
     fi
