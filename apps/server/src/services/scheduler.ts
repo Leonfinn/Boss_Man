@@ -818,7 +818,7 @@ export function schedulerService(
       await record(db, { companyId: t.companyId, agentId: run.agentId, ticketId: t.id, kind: "monitor", summary: `${name} stopped with this still in progress and no check set, so Boss Man will wake ${name} at ${at.toISOString().slice(11, 16)} UTC to carry on.`, at: now() });
     },
 
-    async nudge(input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }): Promise<{ ok: true; delivered: string } | { ok: false; error: string }> {
+    async nudge(input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }): Promise<{ ok: true; delivered: string; wakeId: string } | { ok: false; error: string }> {
       const [from] = await db.select().from(agents).where(eq(agents.id, input.fromAgentId));
       if (!from) return { ok: false, error: "No such agent." };
       const team = await db.select().from(agents).where(and(eq(agents.companyId, from.companyId), isNull(agents.retiredAt)));
@@ -874,7 +874,7 @@ export function schedulerService(
       }
       await db.insert(nudges).values(row);
       const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });
-      return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it" };
+      return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it", wakeId: w.id };
     },
 
     /**

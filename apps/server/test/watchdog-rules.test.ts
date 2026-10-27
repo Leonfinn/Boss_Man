@@ -1,0 +1,123 @@
+import { describe, expect, it } from "vitest";
+import { DEFAULT_WATCHDOG, readWatchdogSettings } from "@boss-man/shared";
+import { evaluate, isCrash, RUN_ENDED_GRACE_MS, type SnapHold, type SnapRun, type SnapTicket } from "../src/services/watchdog-rules.js";
+
+const NOW = new Date("2026-10-26T12:00:00Z");
+const ago = (min: number) => new Date(NOW.getTime() - min * 60_000);
+const s = { ...DEFAULT_WATCHDOG, enabled: true };
+
+const ticket = (over: Partial<SnapTicket> = {}): SnapTicket => ({
+  id: "t1",
+  state: "in_progress",
+  assigneeAgentId: "dev",
+  assignedToOwner: false,
+  stateChangedAt: ago(10),
+  blockedUntil: null,
+  scheduled: false,
+  awaitingPlan: false,
+  withOwner: false,
+  bounces: 0,
+  ...over,
+});
+const run = (over: Partial<SnapRun> = {}): SnapRun => ({ id: "r1", ticketId: "t1", agentId: "dev", startedAt: ago(60), endedAt: ago(50), outcome: "end_turn", ...over });
+const rules = (tickets: SnapTicket[], runs: SnapRun[] = [], holds: SnapHold[] = []) => evaluate({ tickets, runs, holds }, s, NOW).map((x) => `${x.ticketId}:${x.rule}`);
+
+describe("watchdog rules (BOS-58)", () => {
+  it("flags unassigned ready or in-progress work after the short grace, even while a run works on it (BOS-26)", () => {
+    expect(rules([ticket({ assigneeAgentId: null, stateChangedAt: ago(14) })])).toEqual([]);
+    expect(rules([ticket({ assigneeAgentId: null, stateChangedAt: ago(15) })])).toEqual(["t1:unassigned"]);
+    expect(rules([ticket({ state: "ready", assigneeAgentId: null, stateChangedAt: ago(60) })], [run({ agentId: "designer", endedAt: null })])).toEqual(["t1:unassigned"]);
+    // The owner's own work and the backlog are not the watchdog's business.
+    expect(rules([ticket({ assigneeAgentId: null, assignedToOwner: true, stateChangedAt: ago(60) })])).toEqual([]);
+    expect(rules([ticket({ state: "backlog", assigneeAgentId: null, stateChangedAt: ago(600) })])).toEqual([]);
+  });
+
+  it("flags in progress and review after 2 h and blocked after 8 h, at the limit and not before", () => {
+    expect(rules([ticket({ stateChangedAt: ago(119) })])).toEqual([]);
+    expect(rules([ticket({ stateChangedAt: ago(120) })])).toEqual(["t1:stale_in_progress"]);
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(119) })])).toEqual([]);
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(120) })])).toEqual(["t1:stale_review"]);
+    expect(rules([ticket({ state: "blocked", stateChangedAt: ago(479) })])).toEqual([]);
+    expect(rules([ticket({ state: "blocked", stateChangedAt: ago(480) })])).toEqual(["t1:stale_blocked"]);
+    // Limits come from settings.
+    expect(evaluate({ tickets: [ticket({ stateChangedAt: ago(61) })], runs: [], holds: [] }, { ...s, inProgressHours: 1 }, NOW).map((x) => x.rule)).toEqual(["stale_in_progress"]);
+  });
+
+  it("stops the clock while a run works on the ticket, and pauses rather than resets it", () => {
+    // Running now: never flagged, however long.
+    expect(rules([ticket({ stateChangedAt: ago(600) })], [run({ startedAt: ago(5), endedAt: null })])).toEqual([]);
+    // 3 h in review, of which a run worked for 90 min: 90 min of clock, not flagged.
+    const worked = run({ startedAt: ago(170), endedAt: ago(80), outcome: "end_turn" });
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(180) })], [worked])).toEqual([]);
+    // The same 90 min of running, but 4 h in review: 2.5 h of clock.
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(240) })], [worked])).toEqual(["t1:stale_review"]);
+    // In progress: the run that moved it there counts only from the move; 80 of 180 min ran.
+    const moved = run({ startedAt: ago(190), endedAt: ago(100) });
+    expect(rules([ticket({ stateChangedAt: ago(180) })], [moved])).toEqual([]);
+    expect(rules([ticket({ stateChangedAt: ago(230) })], [{ ...moved, startedAt: ago(240), endedAt: ago(150) }])).toEqual(["t1:stale_in_progress"]);
+    // Someone else's run doesn't stop an in-progress clock.
+    expect(rules([ticket({ stateChangedAt: ago(130) })], [run({ agentId: "other", startedAt: ago(125), endedAt: ago(5) })])).toEqual(["t1:stale_in_progress"]);
+    // A scheduled check is a plan: no "no movement" while one is set.
+    expect(rules([ticket({ stateChangedAt: ago(500), scheduled: true })])).toEqual([]);
+  });
+
+  it("flags a crashed run, and a run that ended without moving the ticket, after the grace and only if nothing is scheduled", () => {
+    const crashed = run({ startedAt: ago(5 + RUN_ENDED_GRACE_MS / 60_000), endedAt: ago(RUN_ENDED_GRACE_MS / 60_000), outcome: "error: Out of memory" });
+    expect(rules([ticket({ stateChangedAt: ago(200) })], [crashed])).toEqual(["t1:run_crashed"]);
+    expect(rules([ticket({ stateChangedAt: ago(200) })], [{ ...crashed, endedAt: ago(RUN_ENDED_GRACE_MS / 60_000 - 1) }])).toEqual([]);
+    expect(rules([ticket({ stateChangedAt: ago(200), scheduled: true })], [crashed])).toEqual([]);
+    const ended = { ...crashed, outcome: "end_turn" };
+    expect(rules([ticket({ stateChangedAt: ago(200) })], [ended])).toEqual(["t1:run_ended_unmoved"]);
+    // The run moved it (the state changed after the run started): not "ended without moving".
+    expect(rules([ticket({ stateChangedAt: ago(RUN_ENDED_GRACE_MS / 60_000 + 1) })], [ended])).toEqual([]);
+    expect(isCrash("lost: runner offline")).toBe(true);
+    expect(isCrash("interrupted")).toBe(true);
+    expect(isCrash("end_turn")).toBe(false);
+    expect(isCrash(null)).toBe(false);
+  });
+
+  it("flags review loops past the bounce limit, whatever the state", () => {
+    expect(rules([ticket({ bounces: 2 })])).toEqual([]);
+    expect(rules([ticket({ bounces: 3 })])).toEqual(["t1:review_loop"]);
+    expect(evaluate({ tickets: [ticket({ bounces: 4 })], runs: [], holds: [] }, s, NOW)[0]!.detail.bounces).toBe(4);
+  });
+
+  it("rule 1: a ticket held by another ticket is not flagged; the holder is, with how many it holds", () => {
+    const blocked = ticket({ id: "b", state: "blocked", stateChangedAt: ago(2000) });
+    const holder = ticket({ id: "h", stateChangedAt: ago(130) });
+    const hold: SnapHold = { blockedTicketId: "b", kind: "ticket", holderTicketId: "h", resolved: false };
+    const trips = evaluate({ tickets: [blocked, holder], runs: [], holds: [hold] }, s, NOW);
+    expect(trips.map((x) => `${x.ticketId}:${x.rule}`)).toEqual(["h:stale_in_progress"]);
+    expect(trips[0]!.detail.holds).toBe(1);
+    // Once the holder is done, the blocked ticket is judged on the normal 8 h.
+    expect(rules([blocked], [], [{ ...hold, resolved: true }])).toEqual(["b:stale_blocked"]);
+    // An engagement holds the same way.
+    expect(rules([blocked], [], [{ blockedTicketId: "b", kind: "engagement", resolved: false }])).toEqual([]);
+  });
+
+  it("rule 2: a ticket waiting on the owner's decision chases nobody, and is flagged for the owner after 8 h", () => {
+    const t = ticket({ state: "blocked", stateChangedAt: ago(2000), bounces: 0 });
+    const d = (min: number): SnapHold => ({ blockedTicketId: "t1", kind: "decision", decisionId: "d1", resolved: false, openedAt: ago(min) });
+    expect(rules([t], [], [d(479)])).toEqual([]);
+    expect(rules([t], [], [d(480)])).toEqual(["t1:owner_decision_waiting"]);
+    // Also for a ticket in review waiting on the owner's sign-off.
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(2000) })], [], [d(500)])).toEqual(["t1:owner_decision_waiting"]);
+  });
+
+  it("rule 3: quiet until 'blocked until' plus 2 h, then flagged; no date means the normal limit", () => {
+    const until = (min: number) => ticket({ state: "blocked", stateChangedAt: ago(5000), blockedUntil: ago(min) });
+    expect(rules([ticket({ state: "blocked", stateChangedAt: ago(5000), blockedUntil: new Date(NOW.getTime() + 3_600_000) })])).toEqual([]);
+    expect(rules([until(119)])).toEqual([]);
+    expect(rules([until(120)])).toEqual(["t1:blocked_until_passed"]);
+  });
+
+  it("leaves alone what is already with the owner, or waiting on a plan approval", () => {
+    expect(rules([ticket({ stateChangedAt: ago(500), withOwner: true })])).toEqual([]);
+    expect(rules([ticket({ stateChangedAt: ago(500), awaitingPlan: true })])).toEqual([]);
+  });
+
+  it("reads stored settings defensively", () => {
+    expect(readWatchdogSettings(null)).toEqual(DEFAULT_WATCHDOG);
+    expect(readWatchdogSettings({ enabled: true, inProgressHours: -3, reviewHours: 4, junk: 1 })).toEqual({ ...DEFAULT_WATCHDOG, enabled: true, reviewHours: 4 });
+  });
+});
