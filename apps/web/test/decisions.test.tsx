@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions } from "../src/pages/Decisions";
+import { when } from "../src/pages/Runs";
 
 afterEach(() => {
   cleanup();
@@ -261,5 +262,19 @@ describe("references in steps and folded text", () => {
     expect(container.querySelector("ol[data-steps] a")?.getAttribute("href")).toBe("#/tickets/t70");
     fireEvent.click(screen.getByRole("button", { name: /Show all/ }));
     expect(Array.from(container.querySelectorAll("a")).filter((a) => a.getAttribute("href") === "#/tickets/t70").length).toBe(2);
+  });
+});
+
+describe("raised time", () => {
+  it("every card kind shows when it was raised, in the notifications format, from the original time", () => {
+    const earlier = "2026-10-20T09:30:00.000Z";
+    const now = new Date().toISOString();
+    const kinds = ["budget", "question", "permission", "approval"];
+    const ds = kinds.map((kind, i) => decision({ id: `d${i}`, kind, createdAt: i === 0 ? earlier : now, question: `Card ${kind}` }));
+    render(<Decisions decisions={ds} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const times = Array.from(document.querySelectorAll("time")).map((t) => t.textContent);
+    expect(times).toHaveLength(4);
+    expect(times[0]).toBe(when(earlier));
+    expect(times[1]).toBe(when(now));
   });
 });

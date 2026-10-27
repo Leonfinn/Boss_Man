@@ -396,6 +396,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           ))}
                         </span>
                       )}
+                      <span>Raised <time dateTime={d.createdAt}>{when(d.createdAt)}</time></span>
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
                       {d.reasons.map((r) => (
                         <span key={r}>{r}</span>

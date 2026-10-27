@@ -952,6 +952,11 @@ export function schedulerService(
       }
 
       const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
+      // The owner's Settings override the instance and company limits when saved (settings.run_limits).
+      const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
+      const stored = lrow?.value as { instance?: number; company?: number } | undefined;
+      const maxTotal = stored?.instance ?? limits.instance;
+      const maxCompany = stored?.company ?? limits.company;
       let total = active.length;
       const byCompany = new Map<string, number>();
       const byAgent = new Map<string, number>();
@@ -993,7 +998,8 @@ export function schedulerService(
           continue;
         }
         const isChat = w.reason === CHAT_REASON;
-        if (total >= limits.instance || (byCompany.get(w.companyId) ?? 0) >= limits.company || (isChat ? chatting.has(w.agentId) : (byAgent.get(w.agentId) ?? 0) >= limits.agent)) {
+        // Chats with the owner are held only by their agent's one chat slot; work wakes face all three limits.
+        if (isChat ? chatting.has(w.agentId) : total >= maxTotal || (byCompany.get(w.companyId) ?? 0) >= maxCompany || (byAgent.get(w.agentId) ?? 0) >= limits.agent) {
           // A review stuck behind its busy reviewer goes to another qualified reviewer who is free.
           const waited = t.getTime() - w.createdAt.getTime();
           if (w.reason === REVIEW_REASON && (byAgent.get(w.agentId) ?? 0) >= limits.agent && waited >= limits.reviewHandoverMs) {

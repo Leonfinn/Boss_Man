@@ -377,6 +377,14 @@ scripts/update-runner.sh --rollback
 docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz
 ```
 
+**Prove the backup restores.** A backup nobody has restored is a hope. This loads the newest backup into a throwaway database beside the live one (the live database is never written to), counts accounts, projects and tickets, prints how long it took and how much would be lost, and drops the throwaway:
+
+```sh
+cd /mnt/NVME_Apps/Container_files/boss-man/src && scripts/restore-test.sh --fresh-backup
+```
+
+The real restore into the live database, with its risks, is in the wiki page "Database restore and blue/green rollback".
+
 **Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps the deploy key and `known_hosts`, so GitHub needs nothing new. Check what's there first:
 
 ```sh
@@ -724,6 +732,15 @@ docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl
 - **The proxy keeps restarting** (`Restarting (255)`, and `docker logs boss-man-proxy-1` says `exec /usr/bin/caddy: operation not permitted`). The `caddy` program in the official image carries a file capability (bind to low ports). With every capability dropped and none added back, Linux refuses to run it at all. The compose file now gives back that one capability (`cap_add: [NET_BIND_SERVICE]`); a checkout from before 23 Oct 2026 lacks it. Bring the checkout up to `main`, then `docker compose up -d --no-deps proxy`.
 - **"Update failed: … blue did not step down. Switched back to blue automatically."** The live colour was built from an image that starts the server through the `tsx` command. That command runs the server as a child process and passes on only SIGINT and SIGTERM, so the hand-over signal (SIGUSR1) never arrives. Images from `5d983a16` on start `node --import tsx` directly. Rebuild the live colour in place (above) once; swaps work after that. The automatic switch-back left the live colour untouched. Any migration the attempt ran was expand-only, so the old code keeps working with it.
 - **Runner shows Offline after the cutover.** Its log (`docker logs -t --since 1h boss-man-runner-<company> 2>&1 | tail`) shows `getaddrinfo ENOTFOUND server` while the proxy is down. It reconnects by itself within 30 seconds of the proxy coming up.
+
+**Go back to the previous release after the 15 minutes** (the old colour has been stopped, its image is still there until the next swap). As root on the NAS, from the deployer folder:
+
+```sh
+$D/host-deployer.sh --rollback --dry-run   # checks only
+$D/host-deployer.sh --rollback             # backs up, starts the old colour, hands over, flips the proxy, checks
+```
+
+It reverses itself if the checks fail. It never touches the database. If the bad release changed the database in a non-expand-only way, see the wiki page "Database restore and blue/green rollback".
 
 **Go back to a single server** (any time, also if step 6 misbehaves):
 
