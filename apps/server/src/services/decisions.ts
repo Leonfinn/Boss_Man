@@ -8,7 +8,9 @@ import {
   evaluatePermission,
   ruleFor,
   rankDecision,
+  ticketRef,
   recommendedVerdict,
+  TEMP_CLEANUP_RULE,
   type BlockedTicket,
   alwaysChoices,
   explainPermission,
@@ -23,6 +25,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
@@ -32,8 +35,45 @@ import { agents, budgetPolicies, companies, decisions, deploys, engagementMessag
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
 
+/** The words on a card that can name a ticket: the question and, for an agent's question, what it tried and its steps. */
+function cardText(d: typeof decisions.$inferSelect): string {
+  const c = d.context as { triedFirst?: unknown; steps?: unknown };
+  return [d.question, typeof c.triedFirst === "string" ? c.triedFirst : "", ...(Array.isArray(c.steps) ? c.steps.filter((x): x is string => typeof x === "string") : [])].join("\n");
+}
+
+/**
+ * Ticket references (BOS-70) written in each card's text, resolved to tickets in the card's own company only.
+ * A reference that matches nothing there is left out, so it stays plain text.
+ */
+async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string; text: string }>) {
+  const wanted = cards.map((c) => ({ ...c, found: [...new Set([...c.text.matchAll(/\b([A-Za-z][A-Za-z0-9]{0,9})-(\d{1,9})\b/g)].map((m) => `${m[1]!.toUpperCase()}-${m[2]}`))] }));
+  const numbers = [...new Set(wanted.flatMap((w) => w.found.map((r) => Number(r.slice(r.lastIndexOf("-") + 1)))))];
+  // lost on restart, harmless because it only lives for this one call
+  const byCompany = new Map<string, Map<string, { ticketId: string; title: string; ref: string }>>();
+  if (numbers.length) {
+    const rows = await db
+      .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(inArray(tickets.number, numbers), inArray(tickets.companyId, [...new Set(cards.map((c) => c.companyId))])));
+    for (const r of rows) {
+      const ref = ticketRef(r.prefix, r.number);
+      if (!ref) continue;
+      const m = byCompany.get(r.companyId) ?? new Map();
+      m.set(ref.toUpperCase(), { ticketId: r.id, title: r.title, ref });
+      byCompany.set(r.companyId, m);
+    }
+  }
+  return new Map(
+    wanted.map((w) => [
+      w.id,
+      Object.fromEntries(w.found.flatMap((r) => { const t = byCompany.get(w.companyId)?.get(r); return t ? [[r, t]] : []; })) as Record<string, { ticketId: string; title: string; ref: string }>,
+    ]),
+  );
+}
+
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[] }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[] }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -147,7 +187,14 @@ export type AnswerExtra = {
   by?: "ceo";
   /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
   handled?: { summary: string; at: string };
+  /** The CEO answered with the decisions tool: recorded as theirs, with its note as the reason (BOS-111). */
+  settledBy?: { agentId: string };
 };
+
+export type Settled = { agentId: string; name: string; note: string | null; at: string };
+
+/** How long a temp-file cleanup waits with the CEO before it moves to the owner: the runner gives up at 10 minutes. */
+export const TEMP_CLEANUP_MINUTES = 5;
 
 /**
  * "Ask the CEO for advice": where a decision stands with the CEO. Kept in the decision's context so the
@@ -533,11 +580,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           .returning({ id: decisions.id });
         return { outcome, rule, decisionId: row?.id ?? null };
       }
-      const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, event.runId));
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
       const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
       const explain = explainPermission(info, agent?.name ?? "An agent");
       // A CEO never approves its own request: those go to the owner.
-      const tier = outcome === "ceo" && agent?.role === "ceo" ? "owner" : outcome;
+      let tier = outcome === "ceo" && agent?.role === "ceo" ? "owner" : outcome;
+      // Temp-file cleanup (BOS-111) waits with the CEO on the alert ladder, so it stays off the owner's
+      // queue and notifications, and moves to the owner if the CEO doesn't settle it in time or escalates it.
+      let ladder: Ladder | undefined;
+      let ceoId: string | undefined;
+      if (tier === "ceo" && rule === TEMP_CLEANUP_RULE) {
+        const [ceo] = await db.select({ id: agents.id, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, runner.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+        if (ceo && !ceo.paused) {
+          ceoId = ceo.id;
+          const since = now().toISOString();
+          ladder = { rung: "ceo", since, minutes: TEMP_CLEANUP_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: "temp-file cleanup goes to the CEO first" }] };
+        } else tier = "owner";
+      }
       // Standing rules are the owner's call, never an agent's.
       const always = tier === "owner" ? alwaysChoices(info, explain) : [];
       const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, explain, ...(always.length ? { always } : {}) };
@@ -548,16 +607,31 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           kind: "permission",
           question: `${explain.title}. ${explain.summary}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
-          // A command that only touches /tmp, with nothing in it Boss Man can't check, is safe to allow.
-          recommendedOption: recommendedVerdict(info) === "deny" && !(explain.scratch && !explain.scratch.unchecked.length) ? DENY : ALLOW,
+          recommendedOption: recommendedVerdict(info) === "deny" ? DENY : ALLOW,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
-          context: { ...context, rule },
+          context: { ...context, rule, ...(ladder ? { tempCleanup: true, ladder } : {}) },
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
-      if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
+      if (row && ceoId && wake) {
+        // High priority, like an alert: the agent is waiting, and the runner gives up at 10 minutes.
+        await wake({
+          agentId: ceoId,
+          reason: "decision",
+          priority: 3,
+          note: [
+            `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
+            `Command: ${explain.command ?? ""}`,
+            "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
+            "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
+            "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
+            "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
+            `If you don't answer within ${TEMP_CLEANUP_MINUTES} minutes it goes to the owner.`,
+          ].join("\n").slice(0, 4000),
+        });
+      } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
@@ -712,12 +786,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .select({
           id: tickets.id,
           title: tickets.title,
+          number: tickets.number,
+          prefix: companies.ticketPrefix,
           dueDate: tickets.dueDate,
           milestoneTarget: milestones.targetDate,
           krPriority: objectives.priority,
           milestoneObjectiveId: milestones.objectiveId,
         })
         .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
         .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
         .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
         .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
@@ -729,7 +806,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info = new Map(
         work.map((w) => {
           const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
-          return [w.id, { title: w.title, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
+          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
         }),
       );
       const deps = await db.select().from(ticketDependencies);
@@ -773,9 +850,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       };
 
+      // The ticket a card is about: what it holds up, plus the ticket named in its context (which may be done, or hold nothing up).
+      const aboutIds = (d: typeof decisions.$inferSelect): string[] => {
+        const own = (d.context as { ticketId?: unknown }).ticketId;
+        return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : [])])];
+      };
+      const wantedAbout = [...new Set(open.flatMap(({ d }) => aboutIds(d)))];
+      const aboutRows = wantedAbout.length
+        ? await db
+            .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
+            .from(tickets)
+            .innerJoin(companies, eq(companies.id, tickets.companyId))
+            .where(inArray(tickets.id, wantedAbout))
+        : [];
+      const aboutInfo = new Map(aboutRows.map((r) => [r.id, r]));
+
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
-        const chain: Array<BlockedTicket & { ticketId: string; title: string }> = [];
+        const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
         const seen = new Set<string>();
         let frontier = direct(d).filter((id) => info.has(id));
         for (let depth = 1; frontier.length && depth <= 10; depth++) {
@@ -785,16 +877,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             seen.add(id);
             const i = info.get(id);
             if (!i) continue;
-            chain.push({ ticketId: id, title: i.title, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
+            chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
             next.push(...(dependents.get(id) ?? []));
           }
           frontier = next;
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
-        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, ...rank };
+        const about = aboutIds(d).flatMap((id) => { const r = aboutInfo.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
+        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
+      const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
       const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
-      return Promise.all(sorted.map(async (r) => ((r.context as DecisionContext).type === "stalled_run" ? { ...r, evidence: await stallEvidence((r.context as { runId: string }).runId) } : r)));
+      return Promise.all(
+        sorted.map(async (r) => {
+          const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
+          return (r.context as DecisionContext).type === "stalled_run" ? { ...withRefs, evidence: await stallEvidence((r.context as { runId: string }).runId) } : withRefs;
+        }),
+      );
     },
 
     /** The owner asks the CEO for advice on an open decision. It stays open and answerable. Returns null if it isn't open. */
@@ -943,7 +1042,20 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(ne(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' in ('reissued', 'handled')`, sql`(${decisions.context}->'advice'->>'at')::timestamptz > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.createdAt))
         .limit(20);
-      return rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! }));
+      // Permission requests the CEO settled (BOS-111): what was allowed or denied, and why.
+      const permissions = await db
+        .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context, answer: decisions.answer })
+        .from(decisions)
+        .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
+        .orderBy(desc(decisions.answeredAt))
+        .limit(50);
+      return [
+        ...rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! })),
+        ...permissions.map((r) => {
+          const ctx = r.context as Extract<DecisionContext, { type: "permission" }>;
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), settled: { by: ctx.settled!.name, answer: r.answer ?? "", note: ctx.settled!.note, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true } };
+        }),
+      ];
     },
 
     /** Records the answer and resumes what was waiting. Returns null if not open. */
@@ -971,6 +1083,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         answer = ALLOW;
       }
       if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
+      // Kept on the decision so the owner can see who settled it and why (BOS-111). ctx is the same object, so later context writes keep it.
+      let settled: Settled | undefined;
+      if (extra.settledBy) {
+        const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, extra.settledBy.agentId));
+        settled = { agentId: extra.settledBy.agentId, name: who?.name ?? "the CEO", note: extra.note?.trim().replace(/\s+/g, " ").slice(0, 500) || null, at: now().toISOString() };
+        (ctx as { settled?: Settled }).settled = settled;
+      }
       // Conditional on still being open (and, for the CEO, still asked), so whoever closes it first wins and the loser changes nothing.
       const [closed] = await db
         .update(decisions)
@@ -981,7 +1100,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           answer,
           answeredAt: now(),
           ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
-          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : {}),
+          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : settled ? { context: ctx } : {}),
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
@@ -1084,7 +1203,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${d.question}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
@@ -1097,7 +1216,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // A rule proposal answered with a button needs nothing more from the CEO.
       if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}` });
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${extra.by === "ceo" || settled ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}` });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
