@@ -46,6 +46,8 @@ export type WatchdogDeps = {
   nudge: Nudge;
   raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[] }) => Promise<{ id: string }>;
   assign: (ticketId: string, agentId: string | null) => Promise<unknown>;
+  /** Puts a ticket back in the state it was in (through the normal ticket update, so it is versioned and logged). */
+  restoreState: (ticketId: string, state: SnapTicket["state"]) => Promise<unknown>;
   /** A "Got it" decision for the owner: reaches their queue and their phone. */
   alert: (companyId: string, question: string) => Promise<unknown>;
   notifyOwner: (n: { companyId: string; level: "note" | "flag"; title: string; body?: string; link: string }) => Promise<unknown>;
@@ -333,6 +335,13 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     await syncFlags(c.id, evaluate(snap, s, t), s);
     await db.update(companies).set({ watchdogLastSweepAt: t }).where(eq(companies.id, c.id));
 
+    // An escalated flag the CEO hasn't cleared within its limit starts over: the Scrum Master gets it again, with fresh snoozes.
+    const escalated = await db.select().from(watchdogFlags).where(and(eq(watchdogFlags.companyId, c.id), eq(watchdogFlags.status, "open"), isNotNull(watchdogFlags.escalatedAt)));
+    for (const f of escalated) {
+      if (f.escalatedAt!.getTime() + ruleLimitMs(f.rule as WatchdogRule, s) > t.getTime()) continue;
+      await db.update(watchdogFlags).set({ escalatedAt: null, snoozeCount: 0, snoozedUntil: null, snoozeReason: null, dueAt: t }).where(eq(watchdogFlags.id, f.id));
+    }
+
     const due = await db
       .select()
       .from(watchdogFlags)
@@ -365,7 +374,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     // Rule 4: snoozed twice in a row and still tripping goes to the CEO, not back to the Scrum Master.
     for (const f of due.filter((x) => x.rule !== "owner_decision_waiting" && x.snoozeCount >= 2)) {
       const boss = await ceo(c.id);
-      if (!boss || !(await withinCap(c.id, "nudges", s))) return { flagged: 0 };
+      if (!boss || !(await withinCap(c.id, "nudges", s))) continue;
       const info = snap.titles.get(f.ticketId);
       const w = await deps.notify(boss.id, {
         ticketId: f.ticketId,
@@ -648,7 +657,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
             .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
             .where(eq(ticketDependencies.blockedTicketId, a.ticketId!));
           const held = left.some((x) => (x.ticket && x.ticket !== "done") || x.decision === "open" || (x.engagement && x.engagement !== "signed_off"));
-          if (t?.systemState === "blocked" && !held && before.state && before.state !== "blocked") await db.update(tickets).set({ systemState: before.state, lastActivityAt: now() }).where(eq(tickets.id, t.id));
+          if (t?.systemState === "blocked" && !held && before.state && before.state !== "blocked") await deps.restoreState(t.id, before.state);
           what = "withdrew the decision";
           break;
         }
