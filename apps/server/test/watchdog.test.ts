@@ -514,7 +514,8 @@ describe("the read API and backtest (BOS-58)", () => {
     expect(flags).toHaveLength(1);
     expect(flags[0]).toMatchObject({ ticketId: t.id, rule: "unassigned", ticketTitle: "Add rate limiting" });
     const acts = (await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/actions`)).json();
-    expect(acts[0]).toMatchObject({ kind: "sweep_wake", actorName: "Boss Man" });
+    // After 08:00 owner time the same sweep also sends the daily summary, so look for the wake rather than the first row.
+    expect(acts.find((a: { kind: string }) => a.kind === "sweep_wake")).toMatchObject({ kind: "sweep_wake", actorName: "Boss Man" });
     const bt = (await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/backtest?days=1`)).json();
     expect(bt.flags.some((f: { ticketId: string; rule: string }) => f.ticketId === t.id && f.rule === "unassigned")).toBe(true);
     expect(bt.scrumMasterWakes).toBeGreaterThan(0);

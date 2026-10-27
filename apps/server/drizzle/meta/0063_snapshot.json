@@ -1,5 +1,5 @@
 {
-  "id": "847fdd2f-c195-4b10-958d-6a4062fbcf80",
+  "id": "0752089c-789b-414d-bf28-acee12aae478",
   "prevId": "dce6a43b-7797-4dcb-8bb9-e91134d10a8e",
   "version": "7",
   "dialect": "postgresql",
@@ -285,6 +285,182 @@
           "tableTo": "agents",
           "columnsFrom": [
             "by_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.agent_notes": {
+      "name": "agent_notes",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "agent_id": {
+          "name": "agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "why": {
+          "name": "why",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_by_agent_id": {
+          "name": "requested_by_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ticket_id": {
+          "name": "ticket_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "agent_notes_agent": {
+          "name": "agent_notes_agent",
+          "columns": [
+            {
+              "expression": "agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "agent_notes_company_id_companies_id_fk": {
+          "name": "agent_notes_company_id_companies_id_fk",
+          "tableFrom": "agent_notes",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "agent_notes_agent_id_agents_id_fk": {
+          "name": "agent_notes_agent_id_agents_id_fk",
+          "tableFrom": "agent_notes",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "agent_notes_requested_by_agent_id_agents_id_fk": {
+          "name": "agent_notes_requested_by_agent_id_agents_id_fk",
+          "tableFrom": "agent_notes",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "requested_by_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "agent_notes_ticket_id_tickets_id_fk": {
+          "name": "agent_notes_ticket_id_tickets_id_fk",
+          "tableFrom": "agent_notes",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "agent_notes_run_id_runs_id_fk": {
+          "name": "agent_notes_run_id_runs_id_fk",
+          "tableFrom": "agent_notes",
+          "tableTo": "runs",
+          "columnsFrom": [
+            "run_id"
           ],
           "columnsTo": [
             "id"
@@ -3117,6 +3293,210 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.note_requests": {
+      "name": "note_requests",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "agent_id": {
+          "name": "agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_by_agent_id": {
+          "name": "requested_by_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ticket_id": {
+          "name": "ticket_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "why": {
+          "name": "why",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "note_request_status",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "decline_reason": {
+          "name": "decline_reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "note_id": {
+          "name": "note_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "decided_at": {
+          "name": "decided_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "note_requests_agent_status": {
+          "name": "note_requests_agent_status",
+          "columns": [
+            {
+              "expression": "agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "note_requests_requester_time": {
+          "name": "note_requests_requester_time",
+          "columns": [
+            {
+              "expression": "requested_by_agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "note_requests_company_id_companies_id_fk": {
+          "name": "note_requests_company_id_companies_id_fk",
+          "tableFrom": "note_requests",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "note_requests_agent_id_agents_id_fk": {
+          "name": "note_requests_agent_id_agents_id_fk",
+          "tableFrom": "note_requests",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "note_requests_requested_by_agent_id_agents_id_fk": {
+          "name": "note_requests_requested_by_agent_id_agents_id_fk",
+          "tableFrom": "note_requests",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "requested_by_agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "note_requests_ticket_id_tickets_id_fk": {
+          "name": "note_requests_ticket_id_tickets_id_fk",
+          "tableFrom": "note_requests",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "note_requests_note_id_agent_notes_id_fk": {
+          "name": "note_requests_note_id_agent_notes_id_fk",
+          "tableFrom": "note_requests",
+          "tableTo": "agent_notes",
+          "columnsFrom": [
+            "note_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.notifications": {
       "name": "notifications",
       "schema": "",
@@ -5249,320 +5629,6 @@
       },
       "indexes": {},
       "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.skill_proposals": {
-      "name": "skill_proposals",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_url": {
-          "name": "source_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pinned_ref": {
-          "name": "pinned_ref",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "files": {
-          "name": "files",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "file_hashes": {
-          "name": "file_hashes",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "bundle_hash": {
-          "name": "bundle_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "why": {
-          "name": "why",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "proposed_agent_ids": {
-          "name": "proposed_agent_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "proposed_by_agent_id": {
-          "name": "proposed_by_agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "replaces_skill_id": {
-          "name": "replaces_skill_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "has_scripts": {
-          "name": "has_scripts",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "script_files": {
-          "name": "script_files",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "review_required": {
-          "name": "review_required",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'proposed'"
-        },
-        "review_ticket_id": {
-          "name": "review_ticket_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "verdict": {
-          "name": "verdict",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "verdict_summary": {
-          "name": "verdict_summary",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "findings": {
-          "name": "findings",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "conditions": {
-          "name": "conditions",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reviewed_bundle_hash": {
-          "name": "reviewed_bundle_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "decision_id": {
-          "name": "decision_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "decided_by": {
-          "name": "decided_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "decided_at": {
-          "name": "decided_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "overridden": {
-          "name": "overridden",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "overridden_by": {
-          "name": "overridden_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "overridden_at": {
-          "name": "overridden_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "installed_skill_id": {
-          "name": "installed_skill_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "skill_proposals_open_name": {
-          "name": "skill_proposals_open_name",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "status in ('proposed','in_review','awaiting_owner')",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "skill_proposals_company_id_companies_id_fk": {
-          "name": "skill_proposals_company_id_companies_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_proposed_by_agent_id_agents_id_fk": {
-          "name": "skill_proposals_proposed_by_agent_id_agents_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "proposed_by_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_replaces_skill_id_skills_id_fk": {
-          "name": "skill_proposals_replaces_skill_id_skills_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "skills",
-          "columnsFrom": [
-            "replaces_skill_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_review_ticket_id_tickets_id_fk": {
-          "name": "skill_proposals_review_ticket_id_tickets_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "tickets",
-          "columnsFrom": [
-            "review_ticket_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_decision_id_decisions_id_fk": {
-          "name": "skill_proposals_decision_id_decisions_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "decisions",
-          "columnsFrom": [
-            "decision_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_installed_skill_id_skills_id_fk": {
-          "name": "skill_proposals_installed_skill_id_skills_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "skills",
-          "columnsFrom": [
-            "installed_skill_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
@@ -8093,8 +8159,7 @@
         "stale_blocker",
         "stalled_run",
         "engagement",
-        "budget",
-        "skill"
+        "budget"
       ]
     },
     "public.decision_status": {
@@ -8186,6 +8251,15 @@
         "manual",
         "agent",
         "check"
+      ]
+    },
+    "public.note_request_status": {
+      "name": "note_request_status",
+      "schema": "public",
+      "values": [
+        "pending",
+        "accepted",
+        "declined"
       ]
     },
     "public.note_source": {

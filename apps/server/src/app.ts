@@ -14,9 +14,10 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/s
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
+import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
@@ -177,6 +178,7 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
+  const notesSvc = notesService(db);
   const agentsSvc = agentsService(db, {
     now: opts.now,
     notify: (n) => notes.notify(n),
@@ -444,7 +446,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -1840,6 +1842,38 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/agents/:id/retire", async (req, reply) => agentsSvc.retire(IdParam.parse(req.params).id).catch(agentErrors(reply)));
     owner.get("/api/agents/:id/history", async (req, reply) => agentsSvc.history(IdParam.parse(req.params).id).catch(agentErrors(reply)));
     owner.post("/api/agent-changes/:id/undo", async (req, reply) => agentsSvc.undo(IdParam.parse(req.params).id).catch(agentErrors(reply)));
+
+    // The CEO's lasting notes (BOS-85): the owner sees, adds, edits and deletes them, within the same caps, and sees colleagues' requests.
+    const noteErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof NoteError) return reply.code(err.status).send({ error: "note", message: err.message });
+      throw err;
+    };
+    const NoteBody = z.object({ title: z.string().trim().min(1).max(NOTE_LIMITS.title), text: z.string().trim().min(1).max(NOTE_LIMITS.text), why: z.string().trim().min(1).max(NOTE_LIMITS.why) });
+    const noteOf = async (id: string) => (await db.select({ companyId: agentNotes.companyId }).from(agentNotes).where(eq(agentNotes.id, id)))[0];
+    owner.get("/api/agents/:id/notes", async (req, reply) => {
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, IdParam.parse(req.params).id));
+      if (!a) return reply.code(404).send({ error: "not_found" });
+      // Pending and declined requests from other agents show beside the notes.
+      return { items: await notesSvc.withOrigin(a.companyId, IdParam.parse(req.params).id), requests: await notesSvc.requests(a.companyId, IdParam.parse(req.params).id), limits: NOTE_LIMITS };
+    });
+    owner.post("/api/agents/:id/notes", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, id));
+      if (!a) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.save(a.companyId, id, NoteBody.parse(req.body), { source: "owner" }).then((n) => reply.code(201).send(n), noteErrors(reply));
+    });
+    owner.patch("/api/agent-notes/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const n = await noteOf(id);
+      if (!n) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.update(n.companyId, id, NoteBody.partial().parse(req.body), { owner: true }).then((r) => r.after, noteErrors(reply));
+    });
+    owner.delete("/api/agent-notes/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const n = await noteOf(id);
+      if (!n) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.remove(n.companyId, id, { owner: true }).then(() => ({ ok: true }), noteErrors(reply));
+    });
 
     // The Scrum Master watchdog (BOS-58): settings and health, its flags and action log (read by the activity view and daily summary), and undo.
     const watchdogErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {

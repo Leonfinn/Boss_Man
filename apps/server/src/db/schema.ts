@@ -840,6 +840,57 @@ export const ownerChatMessages = pgTable(
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],
 );
 
+/**
+ * An agent's lasting notes (BOS-85): corrections and preferences the owner gave in chat, shown
+ * in every later chat and run. Kept apart from the owner's standing instructions. Only the CEO
+ * writes them for now; keyed by agent so others can later.
+ */
+export const agentNotes = pgTable(
+  "agent_notes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    text: text("text").notNull(),
+    /** What the owner said, quoted; for an accepted request, the requester's reason. */
+    why: text("why").notNull(),
+    /** Where it came from: `chat` (saved from the owner chat), `ticket` (saved in a run from the owner's message on `ticketId`, BOS-95), `owner` (Agents page) or `request` (another agent asked, the CEO accepted). */
+    source: text("source").notNull(),
+    /** For `request`: who asked, and on which ticket; for `ticket`, the ticket the owner wrote on. */
+    requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("agent_notes_agent").on(t.agentId, t.createdAt)],
+);
+
+export const noteRequestStatus = pgEnum("note_request_status", ["pending", "accepted", "declined"]);
+
+/** Another agent asking the CEO to keep a note (BOS-85): only the CEO's accept writes one. */
+export const noteRequests = pgTable(
+  "note_requests",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** The CEO it's for. */
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    requestedByAgentId: uuid("requested_by_agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    text: text("text").notNull(),
+    why: text("why").notNull(),
+    status: noteRequestStatus("status").notNull().default("pending"),
+    declineReason: text("decline_reason"),
+    noteId: uuid("note_id").references(() => agentNotes.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [index("note_requests_agent_status").on(t.agentId, t.status), index("note_requests_requester_time").on(t.requestedByAgentId, t.createdAt)],
+);
+
 /** What the PA did with each owner question (R87): posted, or escalated to the CEO with why; the CEO may mark it right or wrong. */
 export const paAnswers = pgTable(
   "pa_answers",
