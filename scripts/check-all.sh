@@ -9,10 +9,10 @@ node --test scripts/*.test.mjs
 node scripts/lint-migrations.mjs
 node scripts/check-in-memory-state.mjs
 # Memory-safe on a shared runner (8 GB cgroup, other agents beside us): one package at a time,
-# 2 PGlite workers (~2.3 GB peak), and a capped heap for tsc. Callers can override any of these.
-export BOSSMAN_TEST_WORKERS="${BOSSMAN_TEST_WORKERS:-2}"
-export NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}"
-pnpm -r --workspace-concurrency=1 typecheck
+# at most 2 PGlite workers (fewer when the cgroup has less free; see apps/server/vitest.config.ts),
+# and a capped heap for tsc only. Callers can override any of these.
+export BOSSMAN_TEST_MAX_WORKERS="${BOSSMAN_TEST_MAX_WORKERS:-2}"
+NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=2048}" pnpm -r --workspace-concurrency=1 typecheck
 pnpm -r --workspace-concurrency=1 test
 pnpm build
 scripts/check-shell.sh
