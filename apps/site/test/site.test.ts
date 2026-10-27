@@ -56,6 +56,14 @@ describe("build", () => {
     expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toEqual([]);
   });
 
+  it("rejects a SITE_URL that is not a bare https origin", () => {
+    const out = path.join(tmpdir(), "site-bad-url");
+    for (const bad of ["example.com", "http://example.com", "https://example.com/docs", "https://exa mple.com"]) {
+      expect(() => build({ outDir: out, siteUrl: bad })).toThrow(/SITE_URL/);
+    }
+    rmSync(out, { recursive: true, force: true });
+  });
+
   it("fails on an unknown placeholder or a page without a description", () => {
     expect(() => fill("{{nope}}", { repo: "x" }, "t.html")).toThrow(/unknown placeholder/);
     expect(() => parsePage("---\ntitle: A\npath: /a\n---\n<h1>A</h1>", "a.html")).toThrow(/description/);

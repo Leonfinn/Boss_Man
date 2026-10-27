@@ -98,6 +98,9 @@ function headTags(config, meta, siteUrl) {
 
 export function build({ srcDir = path.join(root, "src"), publicDir = path.join(root, "public"), outDir = path.join(root, "dist"), siteUrl = process.env.SITE_URL ?? "" } = {}) {
   siteUrl = siteUrl.replace(/\/+$/, "");
+  if (siteUrl && !/^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(siteUrl)) {
+    throw new Error(`SITE_URL must be an https origin such as https://example.com (no path, query or spaces), got "${siteUrl}"`);
+  }
   const config = JSON.parse(readFileSync(path.join(srcDir, "site.json"), "utf8"));
   const vars = {
     repo: config.repo,

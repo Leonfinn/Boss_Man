@@ -10,7 +10,7 @@ pnpm --filter @boss-man/site check      # links, images, titles, descriptions, o
 pnpm --filter @boss-man/site test
 ```
 
-`SITE_URL` (for example `https://example.com`, no trailing slash) turns on canonical links, absolute `og:` image URLs and `sitemap.xml`. Without it those are left out. Set it in the Cloudflare Pages build settings once the domain is chosen.
+`SITE_URL` (an https address such as `https://example.com`, no path; the build stops on anything else) turns on canonical links, absolute `og:` image URLs and `sitemap.xml`. Without it those are left out. Set it in the Cloudflare Pages build settings once the domain is chosen.
 
 ## Cloudflare Pages settings
 
