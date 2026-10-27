@@ -242,7 +242,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 <span className="muted">
                   ·{" "}
                   {a.settled
-                    ? `${a.settled.answer === "Allow once" ? "allowed" : a.settled.answer === "Deny" ? "denied" : a.settled.answer} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
+                    ? `${a.settled.answer === "Allow once" ? "allowed" : a.settled.answer === "Deny" ? "denied" : a.settled.answer} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
                     : a.advice?.state === "reissued"
                       ? "replaced by a clearer decision"
                       : `handled by the CEO: ${a.advice?.summary ?? "done"}`}

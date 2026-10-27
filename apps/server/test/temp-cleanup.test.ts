@@ -6,11 +6,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, notifications, runners, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, projects, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import type { Ladder } from "../src/services/alert-ladder.js";
 
 // BOS-111: a request whose only deletes are of temp files goes to the CEO first, not the owner.
+// BOS-120: so does one whose deletes are plain relative paths in the agent's own checkout.
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
@@ -34,16 +35,21 @@ async function setup() {
   built.runners.connect(runner!.id, (cmd) => (sent.push(cmd), true));
   let seq = 0;
   /** An agent's run asks to run a shell command; returns the decision it made, if any. */
-  const ask = async (command: string, agentId = dev.id) => {
+  const ask = async (command: string, agentId = dev.id, opts: { ticketId?: string; rawInput?: Record<string, unknown> } = {}) => {
     const runId = randomUUID();
     const requestId = randomUUID();
     await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.started", runId, agentId, acpSessionId: "s", model: null } });
-    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Create branch worktree and install deps", kind: "execute", rawInput: { command }, optionKinds: ["allow_once", "reject_once"] } });
+    if (opts.ticketId) await db.update(runs).set({ ticketId: opts.ticketId }).where(eq(runs.id, runId));
+    await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Create branch worktree and install deps", kind: "execute", rawInput: { command, ...opts.rawInput }, optionKinds: ["allow_once", "reject_once"] } });
     const [d] = await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
     return { d, runId, requestId };
   };
+  const [repo] = await db.insert(projects).values({ companyId, name: "App", repoUrl: "https://example.com/app.git" }).returning();
+  const [plain] = await db.insert(projects).values({ companyId, name: "Notes" }).returning();
+  const [ticket] = await db.insert(tickets).values({ companyId, projectId: repo!.id, title: "Probe extra spellings", systemState: "in_progress", assigneeAgentId: dev.id }).returning();
+  const [noRepo] = await db.insert(tickets).values({ companyId, projectId: plain!.id, title: "Write notes", systemState: "in_progress", assigneeAgentId: dev.id }).returning();
   await db.delete(wakes);
-  return { ...built, db, close, base, req, companyId, dev, ceo: ceo!, sent, ask, advance: (m: number) => (clock = new Date(clock.getTime() + m * 60_000)) };
+  return { ...built, db, close, base, req, companyId, dev, ceo: ceo!, sent, ask, ticket: ticket!, noRepo: noRepo!, advance: (m: number) => (clock = new Date(clock.getTime() + m * 60_000)) };
 }
 
 beforeEach(async () => {
@@ -134,5 +140,68 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     const { d } = await ctx.ask(CLEANUP);
     expect(d).toMatchObject({ tier: "owner", recommendedOption: "Allow once" });
     expect((d!.context as { ladder?: unknown }).ladder).toBeUndefined();
+  });
+});
+
+describe("deletes in the agent's own working copy go to the CEO first (BOS-120)", () => {
+  const PROBE = "rm -f test/zz-probe.test.ts && rm -rf dist 2>/dev/null; git status";
+
+  it("waits with the CEO, recommended Allow, and every card says which checkout and which files", async () => {
+    const { d } = await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id });
+    expect(d).toMatchObject({ tier: "ceo", status: "open", recommendedOption: "Allow once" });
+    const c = d!.context as { tempCleanup?: boolean; workingCopy: { ticketId: string; branch: string; files: string[] }; ladder: Ladder };
+    expect(c.tempCleanup).toBeUndefined();
+    expect(c.workingCopy).toMatchObject({ ticketId: ctx.ticket.id, branch: `bossman/${ctx.ticket.id}`, files: ["test/zz-probe.test.ts", "dist"] });
+    expect(c.ladder).toMatchObject({ rung: "ceo", minutes: 5 });
+    expect(d!.question).toContain(`working copy for `);
+    expect(d!.question).toContain(`(branch bossman/${ctx.ticket.id}): test/zz-probe.test.ts, dist.`);
+    expect((await ctx.decisions.queue()).map((q) => q.id)).not.toContain(d!.id);
+    expect(await ownerNotified(d!.id)).toEqual([]);
+    const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
+    expect(w).toMatchObject({ reason: "decision", priority: 3 });
+    expect(w!.note).toContain("symlink");
+    expect(w!.note).not.toContain("pnpm or npm install");
+
+    const ceo = await client(ctx.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }))).toContain(`${d!.id}: WORKING-COPY CLEANUP: `);
+    await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Allow once", note: "Its own probe file and build output, for its ticket." } });
+    const settled = (await ctx.req("GET", "/api/decisions/advised")).json() as Array<{ id: string; settled?: { workingCopy?: boolean; tempCleanup: boolean } }>;
+    expect(settled.find((x) => x.id === d!.id)?.settled).toMatchObject({ workingCopy: true, tempCleanup: false });
+  });
+
+  it("moves to the owner after 5 minutes, still naming the checkout", async () => {
+    const { d } = await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id });
+    ctx.advance(6);
+    await ctx.alerts.sweep();
+    const moved = await reload(d!.id);
+    expect(moved).toMatchObject({ tier: "owner", status: "open", recommendedOption: "Allow once" });
+    expect(moved.question).toContain("test/zz-probe.test.ts");
+    expect((await ctx.decisions.queue()).map((q) => q.id)).toContain(d!.id);
+  });
+
+  it("goes to the owner as before when Boss Man can't tell the run has a checkout", async () => {
+    // No ticket, a ticket in a project with no repo, or a command that names its own folder.
+    for (const d of [
+      (await ctx.ask(PROBE)).d,
+      (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.noRepo.id })).d,
+      (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, rawInput: { cwd: "/home/node" } })).d,
+      (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, rawInput: { workdir: "/home/node" } })).d,
+    ]) {
+      expect(d).toMatchObject({ tier: "owner", recommendedOption: "Deny" });
+      expect((d!.context as { workingCopy?: unknown; ladder?: unknown }).workingCopy).toBeUndefined();
+      expect((d!.context as { ladder?: unknown }).ladder).toBeUndefined();
+    }
+    // Build output alone keeps BOS-111's Allow recommendation, but still reaches the owner without a checkout.
+    expect((await ctx.ask("rm -rf dist")).d).toMatchObject({ tier: "owner", recommendedOption: "Allow once" });
+    // The CEO's own request, and a paused CEO.
+    expect((await ctx.ask(PROBE, ctx.ceo.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "owner" });
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.ceo.id));
+    expect((await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "owner" });
+  });
+
+  it("keeps path tricks with the owner even on a run with a checkout", async () => {
+    for (const c of ["rm -rf ../other", "rm -rf .git", "cd src && rm -rf x", "rm -rf /home/node/x", "rm -rf $HOME/x", "rm -rf dist; cp -r src /tmp/x"]) {
+      expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier: "owner" });
+    }
   });
 });

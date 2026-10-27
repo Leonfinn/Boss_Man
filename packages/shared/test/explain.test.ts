@@ -101,7 +101,8 @@ describe("alwaysChoices", () => {
     expect(c!.label).toBe("Always allow every agent in this company to read files");
     const rule = [{ name: "all", match: { kinds: ["execute"], safeOnly: true }, outcome: "allow" as const }];
     const run = (command: string) => evaluatePermission({ title: command, kind: "execute", rawInput: { command } }, rule);
-    expect(run("rm -rf dist").outcome).toBe("owner");
+    expect(run("rm -rf /srv/dist").outcome).toBe("owner");
+    expect(run("rm -rf dist").outcome).toBe("ceo");
     expect(run("git push origin main").outcome).toBe("owner");
     expect(run("ls").rule).toBe("all");
   });
