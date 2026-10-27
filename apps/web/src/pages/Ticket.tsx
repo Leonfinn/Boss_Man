@@ -1,4 +1,3 @@
-import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
@@ -7,6 +6,7 @@ import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAtt
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
+import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { readVerdicts } from "@boss-man/shared";
 import { usePoll } from "../hooks";

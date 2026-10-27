@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, ticketDependencies, tickets, watchdogActions, watchdogFlags } from "../src/db/schema.js";
+import { notifications, tickets, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { buildSummary } from "../src/services/watchdog-summary.js";
 
 const H = 3_600_000;
@@ -64,28 +64,37 @@ afterEach(async () => {
   await ctx.close();
 });
 
-const holdBy = async (n: number, question = "Which host?") => {
-  const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question, recommendedOption: "A", options: ["A", "B"] }).returning();
-  for (let i = 0; i < n; i++) {
-    const t = await ctx.ticket(`Held ${i}`, { systemState: "blocked" });
-    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d!.id });
-  }
-  return d!;
-};
-
 describe("urgent interrupts (BOS-60)", () => {
-  it("pages once when one owner decision holds three tickets, and not for two", async () => {
-    const d = await holdBy(2);
+  // Through the real paths: raise a decision on A, then make other tickets wait on A.
+  const raiseOn = async (t: { id: string }) => ctx.decisions.raise({ companyId: ctx.companyId, agentId: null, question: "Which host?", options: ["A", "B"], recommended: "A", blocksTicketId: t.id });
+  const waitOn = async (t: { id: string }, holder: { id: string }) => ctx.work.addDependency(t.id, { ticketId: holder.id });
+
+  it("pages once when one owner decision holds three tickets through the chain, and not for two", async () => {
+    const a = await ctx.ticket("A", { systemState: "blocked" });
+    const b = await ctx.ticket("B", { systemState: "blocked" });
+    const c = await ctx.ticket("C", { systemState: "blocked" });
+    await raiseOn(a);
+    await waitOn(b, a);
     await ctx.watchdog.urgentCheck(ctx.companyId);
     expect(await ctx.pages()).toHaveLength(0);
-    const t = await ctx.ticket("Third", { systemState: "blocked" });
-    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: d.id });
+    await waitOn(c, b); // two hops from the decision
     await ctx.watchdog.urgentCheck(ctx.companyId);
     await ctx.watchdog.urgentCheck(ctx.companyId);
     const pages = await ctx.pages();
     expect(pages).toHaveLength(1);
     expect(pages[0]!.title).toContain("3 tickets");
     expect(await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "urgent_alert"))).toHaveLength(1);
+  });
+
+  it("does not count finished tickets", async () => {
+    const a = await ctx.ticket("A", { systemState: "blocked" });
+    const b = await ctx.ticket("B", { systemState: "blocked" });
+    const c = await ctx.ticket("C", { systemState: "done" });
+    await raiseOn(a);
+    await waitOn(b, a);
+    await waitOn(c, a);
+    await ctx.watchdog.urgentCheck(ctx.companyId);
+    expect(await ctx.pages()).toHaveLength(0);
   });
 });
 

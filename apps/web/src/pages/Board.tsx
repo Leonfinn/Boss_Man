@@ -1,4 +1,3 @@
-import { WatchdogHealth } from "../components/WatchdogHealth";
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef } from "@boss-man/shared";
@@ -10,6 +9,7 @@ import { usePoll } from "../hooks";
 import { GoalSelect, STATUS_TONE, type GoalLink, type Tree } from "./Features";
 import { StarButton } from "./Agents";
 import { ProjectBudget } from "./ProjectBudget";
+import { WatchdogHealth } from "../components/WatchdogHealth";
 import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
 import { Avatar } from "../components/Avatar";
 

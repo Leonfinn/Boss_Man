@@ -186,6 +186,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     if (!done.length) return;
     await log({ companyId, kind: "tripped", reason, summary: `The watchdog switched itself off: ${reason}` });
     await deps.alert(companyId, `The Scrum Master watchdog switched itself off: ${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog. Look at its recent actions first; this usually means something kept tripping the same rule.`);
+    // The Page-level problem: the "Got it" decision above is only a quiet flag, so the owner is also paged once per trip.
+    await deps.notifyOwner({ companyId, level: "page", title: "The watchdog switched itself off", body: `${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog.`, link: "#/settings" });
   }
 
   /**
@@ -471,22 +473,41 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
   async function ownerDecisions(companyId: string) {
     const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
     const rows = await db
-      .select({ id: decisions.id, question: decisions.question, askedAt: decisions.createdAt, number: tickets.number })
+      .select({ id: decisions.id, question: decisions.question, askedAt: decisions.createdAt, ticketId: tickets.id, number: tickets.number })
       .from(ticketDependencies)
       .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
       .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
       .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner"), ne(tickets.systemState, "done")))
       .orderBy(decisions.createdAt);
+    // A decision holds the ticket it blocks and every unfinished ticket waiting on that one, however far down the chain.
+    const waits = await db
+      .select({ blocked: ticketDependencies.blockedTicketId, holder: ticketDependencies.blockerTicketId, number: tickets.number })
+      .from(ticketDependencies)
+      .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
+      .where(and(eq(tickets.companyId, companyId), isNotNull(ticketDependencies.blockerTicketId), ne(tickets.systemState, "done")));
+    const downstream = new Map<string, { id: string; number: number }[]>();
+    for (const w of waits) downstream.set(w.holder!, [...(downstream.get(w.holder!) ?? []), { id: w.blocked, number: w.number ?? 0 }]);
     const by = new Map<string, { id: string; question: string; askedAt: Date; blocks: string[] }>();
     for (const r of rows) {
       const d = by.get(r.id) ?? { id: r.id, question: r.question, askedAt: r.askedAt, blocks: [] };
-      d.blocks.push(ticketRef(c?.prefix, r.number) ?? `#${r.number}`);
+      const seen = new Set<string>([r.ticketId]);
+      const numbers = [r.number];
+      for (const queue = [r.ticketId]; queue.length; ) {
+        for (const n of downstream.get(queue.shift()!) ?? []) if (!seen.has(n.id)) (seen.add(n.id), numbers.push(n.number), queue.push(n.id));
+      }
+      for (const n of numbers) {
+        const ref = ticketRef(c?.prefix, n) ?? `#${n}`;
+        if (!d.blocks.includes(ref)) d.blocks.push(ref);
+      }
       by.set(r.id, d);
     }
     return [...by.values()];
   }
 
-  /** An owner decision holding several tickets pages the owner straight away, once per decision. Nothing else here pings. */
+  /**
+   * The two things that interrupt the owner straight away: an owner decision holding several tickets (a Page, once per decision), and the watchdog
+   * switching itself off at its safety cap (the Page-level problem; trip() pages the owner once per trip). Nothing else here pings.
+   */
   async function urgentCheck(companyId: string) {
     for (const d of (await ownerDecisions(companyId)).filter((x) => x.blocks.length >= URGENT_BLOCKED)) {
       const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "urgent_alert"), sql`${watchdogActions.after}->>'decisionId' = ${d.id}`)).limit(1);
@@ -847,12 +868,12 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         .then((rows) => rows.map((r) => ({ ...r.flag, ticketNumber: r.ticketNumber, ticketTitle: r.ticketTitle })));
     },
 
-    async actions(companyId: string, q: { ticketId?: string; since?: Date; limit?: number }) {
+    async actions(companyId: string, q: { ticketId?: string; since?: Date; limit?: number; excludeKind?: string }) {
       return db
         .select({ action: watchdogActions, actor: agents.name })
         .from(watchdogActions)
         .leftJoin(agents, eq(agents.id, watchdogActions.actorAgentId))
-        .where(and(eq(watchdogActions.companyId, companyId), q.ticketId ? eq(watchdogActions.ticketId, q.ticketId) : undefined, q.since ? gte(watchdogActions.createdAt, q.since) : undefined))
+        .where(and(eq(watchdogActions.companyId, companyId), q.ticketId ? eq(watchdogActions.ticketId, q.ticketId) : undefined, q.since ? gte(watchdogActions.createdAt, q.since) : undefined, q.excludeKind ? ne(watchdogActions.kind, q.excludeKind) : undefined))
         .orderBy(desc(watchdogActions.createdAt))
         .limit(Math.min(q.limit ?? 200, 500))
         .then((rows) => rows.map((r) => ({ ...r.action, actorName: r.actor ?? (r.action.actorAgentId ? null : "Boss Man") })));

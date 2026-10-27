@@ -34,7 +34,7 @@ const KIND: Record<string, string> = {
 
 /** What the Scrum Master and the watchdog did, each with its one-line reason and an undo while one is possible. */
 export function ScrumMasterLog({ companyId, ticketId, heading }: { companyId: string; ticketId?: string; heading?: string }) {
-  const log = usePoll((signal) => api<SmAction[]>(`/api/companies/${companyId}/watchdog/actions?limit=100${ticketId ? `&ticketId=${ticketId}` : ""}`, { signal }), 15_000, `sm-log-${companyId}-${ticketId ?? "all"}`);
+  const log = usePoll((signal) => api<SmAction[]>(`/api/companies/${companyId}/watchdog/actions?limit=100${ticketId ? `&ticketId=${ticketId}` : "&excludeKind=sweep_wake"}`, { signal }), 15_000, `sm-log-${companyId}-${ticketId ?? "all"}`);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const undo = async (id: string) => {
@@ -49,7 +49,7 @@ export function ScrumMasterLog({ companyId, ticketId, heading }: { companyId: st
       setBusy(null);
     }
   };
-  const rows = (Array.isArray(log.data) ? log.data : []).filter((a) => ticketId || a.kind !== "sweep_wake");
+  const rows = Array.isArray(log.data) ? log.data : [];
   if (ticketId && log.data && !rows.length) return null;
   return (
     <section aria-label="Scrum Master activity">

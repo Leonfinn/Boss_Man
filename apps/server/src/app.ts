@@ -1834,7 +1834,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/companies/:id/watchdog/actions", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const q = z.object({ ticketId: Uuid.optional(), since: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
+      const q = z.object({ ticketId: Uuid.optional(), since: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(500).optional(), excludeKind: z.string().max(40).optional() }).parse(req.query);
       return watchdog.actions(id, q).catch(watchdogErrors(reply));
     });
     owner.get("/api/companies/:id/watchdog/backtest", async (req, reply) => {
