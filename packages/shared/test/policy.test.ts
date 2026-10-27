@@ -26,7 +26,7 @@ describe("evaluatePermission defaults", () => {
   });
 
   it("sends destructive commands to the owner", () => {
-    for (const c of ["rm -rf /srv/precious", "rm -fr build", "sudo mkfs.ext4 /dev/sda1", "docker system prune -a", "git push origin main --force", "zfs destroy tank/apps"]) {
+    for (const c of ["rm -rf /srv/precious", "rm -fr build", "rm --recursive --force /home/node", "rm -v -r /srv/x", "rm /srv/x -rf", "find /srv -delete", "find /srv -type f -exec rm {} +", "sudo mkfs.ext4 /dev/sda1", "docker system prune -a", "git push origin main --force", "zfs destroy tank/apps"]) {
       expect(evaluatePermission(exec(c), [])).toMatchObject({ outcome: "owner" });
     }
   });
@@ -162,6 +162,22 @@ describe("temp-file cleanup (BOS-111)", () => {
       "sudo rm -rf /tmp/a",
       "xargs rm -rf /tmp/a",
       "rm -rf --files0-from=/home/list /tmp/a",
+      // A second delete spelled in a way the old DESTRUCTIVE missed (CEO review of 52549fc).
+      "rm -rf /tmp/a; rm --recursive /home/node",
+      "rm -rf /tmp/a; rm --force /home/node/x",
+      "rm -rf /tmp/a; rm -v -r /home/node",
+      "rm -rf /tmp/a; rm /home/node -rf",
+      "rm -rf /tmp/a && rm -R /home",
+      "rm -rf /tmp/a; find /home -delete",
+      "rm -rf /tmp/a; find /home -exec rm {} +",
+      "rm -rf /tmp/a; truncate -s0 /home/x",
+      "rm -rf /tmp/a; ls /home | xargs rm",
+      "rm -rf /tmp/a; rm /home/node/x",
+      "rm -rf /tmp/a; unlink /home/node/x",
+      "rm -rf /tmp/a; rsync -a --delete /tmp/empty/ /home/node/",
+      "rm -rf /tmp/a; git clean -fdx",
+      "rm -rf /tmp/a; python3 -c 'import shutil; shutil.rmtree(\"/home\")'",
+      "rm -rf /tmp/a & rm -rf /home",
     ]) {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
     }
@@ -177,6 +193,6 @@ describe("temp-file cleanup (BOS-111)", () => {
 
   it("doesn't recommend Deny just because a command deletes files", () => {
     for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null", "cd /tmp/x && rm -rf build"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
-    for (const c of ["rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 });

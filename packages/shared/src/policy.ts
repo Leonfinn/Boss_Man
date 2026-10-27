@@ -32,7 +32,8 @@ export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: Policy
 /** The owner's opt-in standing rule for scratch work (Rules page switch). */
 export const SCRATCH_RULE: PolicyRuleSpec = { name: "Always allow commands that only work in /tmp", match: { kinds: ["execute"], scratchOnly: true }, outcome: "allow" };
 
-export const DESTRUCTIVE = String.raw`\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\b|\bmkfs\b|\bdd\s+if=|\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)\b|\bgit\s+push\s+.*--force\b|\bzfs\s+destroy\b|\bshred\b`;
+// rm's -r/-f may come after other flags or the paths (GNU rm reads `rm x -rf`), or be spelled long; find deletes with -delete or -exec.
+export const DESTRUCTIVE = String.raw`\brm\s+(?:[^\s;&|]+\s+)*?(?:-[a-zA-Z]*[rf][a-zA-Z]*|--(?:recursive|force))\b|\bfind\b[^;&|\n]*\s-(?:delete|exec(?:dir)?\s+(?:rm|rmdir|unlink|shred|truncate))\b|\bmkfs\b|\bdd\s+if=|\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)\b|\bgit\s+push\s+.*--force\b|\bzfs\s+destroy\b|\bshred\b`;
 
 export const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
 
@@ -153,12 +154,12 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
   return { outcome: "owner", rule: "No rule matched" };
 }
 
-/** A plain relative path in the agent's working folder: no component starting with a dot (so no .., . or .git), no ~, $ or globs. */
-const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+[\w+@-][\w.+@-]*(?:\/[\w+@-][\w.+@-]*)*\/?)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
+/** Build output in the agent's working folder (node_modules, dist…), by a plain relative path: no component starting with a dot (so no .., . or .git), no ~, $ or globs. Source folders such as src aren't vouched for. */
+const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-][\w.+@-]*\/)*(?:node_modules|dist|build|coverage|out|target)\/?)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
- * files isn't a reason to refuse on its own: temp-file cleanup and deletes of plain names in the
+ * files isn't a reason to refuse on its own: temp-file cleanup and deletes of build output in the
  * working folder are recommended Allow. Deny is for deletes Boss Man can't vouch for (absolute
  * paths outside /tmp, ~, variables, globs, a cd out of /tmp) and for the other destructive commands
  * (mkfs, dd, docker rm, force push, zfs destroy, shred). It only picks the suggested button.

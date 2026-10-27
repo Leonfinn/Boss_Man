@@ -216,6 +216,9 @@ const TEMP_PATH = String.raw`/tmp/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+`;
 /** A delete that touches only TEMP_PATHs, as written; output may only go to /dev/null. */
 const TEMP_DELETE = new RegExp(String.raw`^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+${TEMP_PATH})+(?:\s+(?:(?:[12]|&)?>>?\s*/dev/null|2>&1))*$`);
 
+/** Any word that deletes, wherever it is (quotes, heredocs, other programs' scripts): a temp cleanup may contain none outside its accepted rm's. */
+const DELETING = String.raw`\b(?:rm|rmdir|unlink|shred|truncate|rmtree|rmSync|unlinkSync)\b|\s--?delete\b|\bgit\s+clean\b`;
+
 /**
  * True when every delete in the command is of temp files (BOS-111): each deleting segment is a
  * plain rm/rmdir/unlink of entries directly in /tmp, and nothing else in the raw text (heredocs
@@ -228,8 +231,11 @@ export function tempCleanup(command: string): boolean {
   if (new RegExp(PUSHING, "i").test(command)) return false;
   const deletes = segments(command).filter((s) => TEMP_DELETE.test(s));
   if (!deletes.length) return false;
-  const count = (s: string) => s.match(new RegExp(DESTRUCTIVE, "gi"))?.length ?? 0;
-  return count(command) === deletes.reduce((n, s) => n + count(s), 0);
+  // Both counts must match: DESTRUCTIVE alone misses deletes that today ask no one (truncate, xargs rm), which must not ride along with a temp cleanup.
+  return [DESTRUCTIVE, DELETING].every((re) => {
+    const count = (s: string) => s.match(new RegExp(re, "gi"))?.length ?? 0;
+    return count(command) === deletes.reduce((n, s) => n + count(s), 0);
+  });
 }
 
 /** What a shell command would do, in one sentence led by the worst thing in it. */
