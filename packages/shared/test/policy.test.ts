@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE } from "../src/policy.js";
+import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -8,7 +8,8 @@ describe("the /tmp-only switch", () => {
     for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && cp -r src /tmp/a", "cd /tmp/x && find . -delete"]) {
       expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toEqual({ outcome: "allow", rule: SCRATCH_RULE.name });
     }
-    expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("owner");
+    expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("ceo");
+    expect(evaluatePermission(exec("rm -rf /tmp/fp2/x"), []).outcome).toBe("owner");
   });
 
   it("never covers anything outside /tmp, pushes, the network or programs it can't see into", () => {
@@ -101,5 +102,81 @@ describe("home-network guard", () => {
     expect(evaluatePermission(tool("mcp__crawl4ai__md", { url: "http://172.32.0.1" }), allowAll).outcome).toBe("allow");
     expect(evaluatePermission(tool("mcp__bossman__wiki_read", { url: "http://localhost" }), []).outcome).toBe("allow");
     expect(evaluatePermission(exec("curl http://192.168.68.1"), []).outcome).toBe("allow");
+  });
+});
+
+describe("temp-file cleanup (BOS-111)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+  it("sends deletes of entries directly in /tmp to the CEO, recommended Allow", () => {
+    for (const c of [
+      "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1",
+      "rm -rf /tmp/a /tmp/b.log 2>/dev/null",
+      "rm -rf -- /tmp/.hidden-dir",
+      "rm -f /tmp/x.json; curl -o /tmp/x.json https://example.com/x",
+      "rm -rf /tmp/rv86 &>/dev/null; git worktree prune",
+    ]) {
+      expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+      expect(recommendedVerdict(exec(c)), c).toBe("allow");
+    }
+  });
+
+  it("keeps anything not provably temp-only with the owner", () => {
+    for (const c of [
+      "rm -rf /tmp",
+      "rm -rf /tmp/",
+      "rm -rf /tmp/.",
+      "rm -rf /tmp/..",
+      "rm -rf /tmp/../home",
+      "rm -rf /tmp/a/../../home",
+      "rm -rf /tmp/$X",
+      "rm -rf /tmp/${X}",
+      "rm -rf /tmp/*",
+      "rm -rf /tmp/rv8?",
+      "rm -rf /tmp/[ab]",
+      "rm -rf /tmp/{a,..}",
+      'rm -rf "/tmp/a"',
+      "rm -rf /tmp/a\\ /home",
+      "rm -rf /tmp/a/b",
+      "rm -rf /tmp /home",
+      "rm -rf /tmp/a ~/x",
+      "rm -rf /tmp/a ~",
+      "rm -rf /tmp/a home",
+      "rm -rf /tmp/a $(echo /home)",
+      "rm -rf /tmp/a `echo /home`",
+      "rm -rf /tmp/a > /home/node/.bashrc",
+      "rm -rf /tmp/a; rm -rf /home",
+      "cd /tmp && rm -rf a",
+      'bash -c "rm -rf /home"; rm -rf /tmp/a',
+      "eval 'rm -rf /home' && rm -rf /tmp/a",
+      "rm -rf /tmp/a\nbash <<EOF\nrm -rf /home\nEOF",
+      "(rm -rf /home); rm -rf /tmp/a",
+      "rm() { command rm -rf /home; }; rm -rf /tmp/a",
+      "function rm { :; }; rm -rf /tmp/a",
+      "alias rm='rm -rf /home'; rm -rf /tmp/a",
+      "PATH=/tmp/bin:$PATH rm -rf /tmp/a",
+      "export PATH=/tmp/bin; rm -rf /tmp/a",
+      "rm -rf /tmp/a && git push origin main",
+      "rm -rf /tmp/a && npm publish",
+      "rm -rf /tmp/a && shred /home/x",
+      "rm -rf /tmp/a && dd if=/dev/zero of=/dev/sda",
+      "sudo rm -rf /tmp/a",
+      "xargs rm -rf /tmp/a",
+      "rm -rf --files0-from=/home/list /tmp/a",
+    ]) {
+      expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
+    }
+    // A plain rm without -r/-f never asked anyone, and still doesn't.
+    expect(route("rm /tmp/a").outcome).toBe("allow");
+  });
+
+  it("lets the company's own rules win", () => {
+    expect(route("rm -rf /tmp/a")).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    const mine = [{ name: "Owner sees every rm", match: { commandPattern: "\\brm\\b" }, outcome: "owner" as const }];
+    expect(evaluatePermission(exec("rm -rf /tmp/a"), mine).outcome).toBe("owner");
+  });
+
+  it("doesn't recommend Deny just because a command deletes files", () => {
+    for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null", "cd /tmp/x && rm -rf build"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+    for (const c of ["rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 });

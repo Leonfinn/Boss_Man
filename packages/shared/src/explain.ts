@@ -1,7 +1,7 @@
 // Plain-English explanations of permission requests, worked out from the command itself
 // (no model): what the owner is being asked to allow, and the worst thing it could do.
 
-import { commandOf, type PermissionInfo, type PolicyMatch } from "./policy.js";
+import { commandOf, DESTRUCTIVE, PUSHING, type PermissionInfo, type PolicyMatch } from "./policy.js";
 
 export type Effect = "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown";
 
@@ -34,9 +34,11 @@ const READS = new Set("set export local declare readonly unset shift return exit
 const CHANGES = new Set("tee mv cp mkdir touch chmod chown ln".split(" "));
 const DELETES = new Set("rm rmdir unlink shred".split(" "));
 const NETWORK = new Set("curl wget ssh scp nc ncat rsync".split(" "));
-const GIT_READS = new Set("status log diff show branch rev-parse ls-files blame remote grep describe merge-base show-ref cat-file shortlog".split(" "));
-const GIT_CHANGES = new Set("add commit checkout switch merge reset rebase stash restore cherry-pick tag apply mv".split(" "));
-const GIT_NETWORK = new Set(["fetch", "pull", "clone"]);
+const GIT_READS = new Set("status log diff show branch rev-parse ls-files blame remote grep describe merge-base show-ref cat-file shortlog rev-list for-each-ref ls-tree reflog name-rev symbolic-ref check-ignore count-objects merge-tree range-diff whatchanged version help fsck cherry".split(" "));
+const GIT_CHANGES = new Set("add commit checkout switch merge reset rebase stash restore cherry-pick tag apply mv revert am notes init gc prune config sparse-checkout bisect format-patch update-ref".split(" "));
+const GIT_NETWORK = new Set(["fetch", "pull", "clone", "ls-remote", "submodule"]);
+/** git options that take the next word as their value, so it isn't the subcommand. */
+const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 const PKG = new Set(["npm", "pnpm", "yarn"]);
 const PKG_INSTALL = new Set(["install", "i", "add", "ci", "remove", "uninstall"]);
 
@@ -127,11 +129,16 @@ function explainSegment(seg: string): Part {
     p = flags.some((f) => /^-\w*i/.test(f)) ? part("changes", "Edits files in place", files) : part("reads", "", files.filter((a) => a.includes("/")));
   }
   else if (program === "git") {
-    const sub = rest.find((a) => !a.startsWith("-")) ?? "";
+    const at = rest.findIndex((a, i) => !a.startsWith("-") && !GIT_VALUE_OPTS.has(rest[i - 1] ?? ""));
+    const sub = at < 0 ? "" : rest[at]!;
+    const subArgs = at < 0 ? [] : rest.slice(at + 1);
     p =
       sub === "push" ? part("pushes", "Pushes code to the repository")
       : sub === "clean" || sub === "rm" ? part("deletes", "Deletes files from the project")
       : sub === "clone" && rest.filter((a) => !a.startsWith("-"))[1]?.startsWith("/") ? { ...part("changes", "Copies a repository on this machine", rest.filter((a) => !a.startsWith("-")).slice(2)), local: true }
+      // No targets: a worktree also writes into the repository's .git, so it never counts as /tmp-only work.
+      : sub === "worktree" ? (subArgs[0] === "list" ? part("reads", "") : part("changes", "Adds or removes a second checkout of the project (git worktree)"))
+      : sub === "branch" && subArgs.some((a) => /^-[a-zA-Z]*[dDmM]|^--(delete|move)$/.test(a)) ? part("changes", "Changes the project's files or history")
       : GIT_NETWORK.has(sub) ? part("network", "Uses the network (git)")
       : GIT_CHANGES.has(sub) ? part("changes", "Changes the project's files or history")
       : GIT_READS.has(sub) ? part("reads", "", paths)
@@ -198,8 +205,31 @@ function scratchOnly(segs: string[], parts: Part[]): { unchecked: string[] } | n
     wrote = true;
     const where = p.targets.length ? p.targets.map(at) : [cwd];
     if (where.some((w) => !w || !SCRATCH.test(w))) return null;
+    // Deleting /tmp itself wipes every agent's temp files: not scratch work.
+    if (p.effect === "deletes" && where.includes("/tmp")) return null;
   }
   return wrote ? { unchecked: [...new Set(unchecked)] } : null;
+}
+
+/** One plain entry directly in /tmp: not /tmp itself, no deeper path, nothing the shell would expand or resolve. */
+const TEMP_PATH = String.raw`/tmp/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+`;
+/** A delete that touches only TEMP_PATHs, as written; output may only go to /dev/null. */
+const TEMP_DELETE = new RegExp(String.raw`^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+${TEMP_PATH})+(?:\s+(?:(?:[12]|&)?>>?\s*/dev/null|2>&1))*$`);
+
+/**
+ * True when every delete in the command is of temp files (BOS-111): each deleting segment is a
+ * plain rm/rmdir/unlink of entries directly in /tmp, and nothing else in the raw text (heredocs
+ * and quotes included) looks destructive or pushes. One level only, because rm then removes a
+ * symlink as a link and never follows it; a deeper path could pass through a symlinked folder,
+ * which only the runner's filesystem could tell. Anything that could redefine rm is refused.
+ */
+export function tempCleanup(command: string): boolean {
+  if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH=/.test(command)) return false;
+  if (new RegExp(PUSHING, "i").test(command)) return false;
+  const deletes = segments(command).filter((s) => TEMP_DELETE.test(s));
+  if (!deletes.length) return false;
+  const count = (s: string) => s.match(new RegExp(DESTRUCTIVE, "gi"))?.length ?? 0;
+  return count(command) === deletes.reduce((n, s) => n + count(s), 0);
 }
 
 /** What a shell command would do, in one sentence led by the worst thing in it. */
