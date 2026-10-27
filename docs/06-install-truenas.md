@@ -424,7 +424,7 @@ BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
 docker compose up -d --no-deps server-blue
 ```
    If the live colour is green, also run `docker compose kill -s SIGUSR2 server-green`; green starts as a standby and nothing is in charge until it gets that signal.
-7. Check: `curl -s http://192.168.68.67:3101/api/ready` shows `"role":"leader"`; sign in and open Tickets; and compare the counts with the rehearsal output:
+7. Check: `curl -s http://<nas-ip>:3101/api/ready` shows `"role":"leader"`; sign in and open Tickets; and compare the counts with the rehearsal output:
 ```sh
 docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FROM tickets' -c 'SELECT count(*) FROM drizzle.__drizzle_migrations'
 ```
