@@ -129,14 +129,22 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
     expect(listed.find((x) => x.id === d.id)?.settled).toMatchObject({ by: expect.any(String), answer: "Allow once", note: "It restarts the company's own service." });
   });
 
-  it("a plan addressed to the CEO also waits on the ladder", async () => {
+  it("a plan addressed to the CEO also waits 5 minutes on the ladder, then reaches the owner", async () => {
     const { d } = await ctx.plan();
     expect(d).toMatchObject({ tier: "ceo", status: "open" });
-    expect((d.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo" });
-    expect((d.context as { ladder: Ladder }).ladder.minutes).toBeUndefined();
+    expect((d.context as { ladder: Ladder }).ladder).toMatchObject({ rung: "ceo", minutes: 5 });
     expect(await queueIds()).not.toContain(d.id);
     expect(await teamIds()).toContain(d.id);
     expect(await ownerNotified(d.id)).toEqual([]);
+
+    ctx.advance(4);
+    expect((await ctx.alerts.sweep()).moved).toBe(0);
+    ctx.advance(2);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    const moved = await reload(d.id);
+    expect(moved).toMatchObject({ tier: "owner", status: "open" });
+    expect((moved.context as { triedFirst?: string }).triedFirst).toMatch(/the CEO/);
+    expect(await queueIds()).toContain(d.id);
   });
 });
 

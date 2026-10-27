@@ -155,8 +155,8 @@ export type AnswerExtra = {
 
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
 
-/** How long a permission request waits with the CEO before it moves to the owner: the runner gives up at 10 minutes (BOS-111, BOS-119). */
-export const TEMP_CLEANUP_MINUTES = 5;
+/** How long a permission or plan request waits with the CEO before it moves to the owner: the runner gives up at 10 minutes (BOS-111, BOS-119). */
+export const CEO_HANDOVER_MINUTES = 5;
 
 /**
  * "Ask the CEO for advice": where a decision stands with the CEO. Kept in the decision's context so the
@@ -482,7 +482,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
     }
     // A plan put to the CEO (not to a named approver) waits on the ladder too, so it stays off the
-    // owner's queue until the CEO passes it on or the company's alert time runs out (BOS-119).
+    // owner's queue until the CEO passes it on or the 5-minute handover runs out (BOS-119).
     let ladder: Ladder | undefined;
     let ceoId: string | undefined;
     if (tier === "ceo" && !forAgentId) {
@@ -490,7 +490,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (ceo && !ceo.paused) {
         ceoId = ceo.id;
         const since = now().toISOString();
-        ladder = { rung: "ceo", since, ticketId: t?.id ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: "the plan is the CEO's to approve" }] };
+        ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: t?.id ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: "the plan is the CEO's to approve" }] };
       } else tier = "owner";
     }
     const [row] = await db
@@ -518,7 +518,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           `A plan is waiting for you (decision ${row.id}): ${row.question}`,
           "Approve it to let the agent start building, or send it back with what to change.",
           "Answer with the decisions tool (action answer). If only the owner can settle it, escalate it to them (action escalate).",
-          "If you don't answer in time it goes to the owner, marked as tried by you first.",
+          `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
         ].join("\n").slice(0, 4000),
       });
     else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question, forAgentId ?? undefined);
@@ -582,7 +582,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ceoId = ceo.id;
           const since = now().toISOString();
           const why = rule === TEMP_CLEANUP_RULE ? "temp-file cleanup goes to the CEO first" : `the rule "${rule}" sends it to the CEO`;
-          ladder = { rung: "ceo", since, minutes: TEMP_CLEANUP_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why }] };
+          ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why }] };
         } else tier = "owner";
       }
       // Standing rules are the owner's call, never an agent's.
@@ -622,7 +622,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
                   "A company rule sends it to you rather than the owner. Allow it if you can vouch for it, or deny it if not; if only the owner can settle it (a secret, host access, sign-off, an owner-only choice), escalate it to them (decisions tool, action escalate).",
                 ]),
             "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
-            `If you don't answer within ${TEMP_CLEANUP_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
+            `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
           ].join("\n").slice(0, 4000),
         });
       } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);

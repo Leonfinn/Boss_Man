@@ -28,7 +28,7 @@ export type Ladder = {
   rung: Rung;
   /** When it reached this rung; the timeout counts from here. */
   since: string;
-  /** Overrides the company's alert time, e.g. a permission request, which must reach the owner before the runner gives up (BOS-111, BOS-119). */
+  /** Overrides the company's alert time, e.g. a permission or plan request, which must reach the owner before the runner gives up (BOS-111, BOS-119). */
   minutes?: number;
   ticketId: string | null;
   /** Agents the alert is about: a rung they hold is skipped. */
