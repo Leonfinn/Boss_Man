@@ -28,6 +28,8 @@ export type Ladder = {
   rung: Rung;
   /** When it reached this rung; the timeout counts from here. */
   since: string;
+  /** Overrides the company's alert time, e.g. temp-file cleanup, which must reach the owner before the runner gives up (BOS-111). */
+  minutes?: number;
   ticketId: string | null;
   /** Agents the alert is about: a rung they hold is skipped. */
   about: string[];
@@ -216,7 +218,7 @@ export function alertLadder(
       let moved = 0;
       for (const { d, watchdog } of open) {
         const ladder = (d.context as { ladder: Ladder }).ladder;
-        const minutes = readWatchdogSettings(watchdog).alertMinutes;
+        const minutes = ladder.minutes ?? readWatchdogSettings(watchdog).alertMinutes;
         if (new Date(ladder.since).getTime() + minutes * 60_000 > now().getTime()) continue;
         if (await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`)) moved++;
       }

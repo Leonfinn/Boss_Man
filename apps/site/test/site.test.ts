@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "no
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { build, fill, parsePage } from "../scripts/build.mjs";
+import { build, fill, parsePage, requireSiteUrlOnPages } from "../scripts/build.mjs";
 import { checkSite } from "../scripts/check.mjs";
 
 let tmp: string;
@@ -54,6 +54,12 @@ describe("build", () => {
     expect(sitemap).not.toContain("404");
     expect(readFileSync(path.join(withUrl, "index.html"), "utf8")).toContain('property="og:image" content="https://example.test/img/og.png"');
     expect(checkSite(withUrl, { siteUrl: "https://example.test" })).toEqual([]);
+  });
+
+  it("fails a Cloudflare Pages build without SITE_URL", () => {
+    expect(() => requireSiteUrlOnPages({ CF_PAGES: "1" })).toThrow(/SITE_URL/);
+    expect(() => requireSiteUrlOnPages({ CF_PAGES: "1", SITE_URL: "https://example.com" })).not.toThrow();
+    expect(() => requireSiteUrlOnPages({})).not.toThrow();
   });
 
   it("rejects a SITE_URL that is not a bare https origin", () => {

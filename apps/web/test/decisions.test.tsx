@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company, Decision } from "../src/api";
 import { Decisions } from "../src/pages/Decisions";
+import { when } from "../src/pages/Runs";
 
 afterEach(() => {
   cleanup();
@@ -21,7 +22,7 @@ const decision = (over: Partial<Decision> = {}): Decision => ({
   createdAt: new Date().toISOString(),
   companyName: "App Co",
   agentName: "CEO",
-  blocks: [{ id: "t1", title: "Checkout error states" }],
+  blocks: [{ ticketId: "t1", ref: "APP-3", title: "Checkout error states" }],
   score: 52.4,
   parts: { blocking: 30, urgency: 12, age: 10.4, liveRun: 0 },
   reasons: ["Waiting 40 min"],
@@ -72,7 +73,7 @@ describe("decision queue", () => {
 
     expect(screen.getByRole("heading", { name: "App Co has used 92% of its $60 budget. Raise it?" })).toBeTruthy();
     expect(screen.getByLabelText("Score 52")).toBeTruthy();
-    expect(screen.getByText('Blocks "Checkout error states"')).toBeTruthy();
+    expect(screen.getByRole("link", { name: "APP-3 Checkout error states" }).getAttribute("href")).toBe("#/tickets/t1");
     expect(screen.getByText("Score 52: 30 for the tasks it blocks + 12 for being due soon + 10.4 for waiting.")).toBeTruthy();
     expect(screen.getByText(/what it holds up: tasks it blocks, or 5 when an agent is paused/)).toBeTruthy();
     expect(screen.getByText(`1 decision waiting in ${company.name}, ranked by what they unblock.`, { exact: false })).toBeTruthy();
@@ -81,6 +82,21 @@ describe("decision queue", () => {
     await waitFor(() => expect(screen.getByText("Answered: Raise to $80.")).toBeTruthy());
     expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ method: "POST", body: JSON.stringify({ answer: "Raise to $80" }) }));
     expect(onAnswered).toHaveBeenCalled();
+  });
+
+  it("links the ticket it is about, the tickets it blocks, and known references in the text", () => {
+    const d = decision({
+      kind: "question",
+      question: "The restore proof (APP-70) needs one run. Also see ZZZ-9.",
+      about: [{ ticketId: "t70", ref: "APP-70", title: "Restore proof" }],
+      blocks: [{ ticketId: "t70", ref: "APP-70", title: "Restore proof" }, { ticketId: "t71", ref: "APP-71", title: "Release" }],
+      refs: { "APP-70": { ticketId: "t70", ref: "APP-70", title: "Restore proof" } },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByRole("link", { name: "APP-70" }).getAttribute("href")).toBe("#/tickets/t70");
+    expect(screen.getByRole("link", { name: "APP-71 Release" }).getAttribute("href")).toBe("#/tickets/t71");
+    expect(screen.queryByRole("link", { name: "ZZZ-9" })).toBeNull();
+    expect(screen.getByRole("heading", { name: /ZZZ-9/ })).toBeTruthy();
   });
 
   it("explains a paused agent's score", () => {
@@ -227,5 +243,38 @@ describe("owner asks with steps", () => {
     const tried = screen.getByText(/tried first/).closest("details")!;
     expect(tried.open).toBe(false);
     expect(tried.textContent).toMatch(/no host access/);
+  });
+});
+
+describe("references in steps and folded text", () => {
+  it("links a reference inside a step and inside the folded part of a long question", () => {
+    const refs = { "BOS-70": { ticketId: "t70", title: "Restore proof", ref: "BOS-70" } };
+    const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const d = decision({
+      kind: "question",
+      question: `Run it.\n\n${long}\nSee BOS-70.`,
+      options: ["Done"],
+      recommendedOption: "Done",
+      context: { type: "question", steps: ["Follow the steps on BOS-70."] },
+      refs,
+    } as never);
+    const { container } = render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(container.querySelector("ol[data-steps] a")?.getAttribute("href")).toBe("#/tickets/t70");
+    fireEvent.click(screen.getByRole("button", { name: /Show all/ }));
+    expect(Array.from(container.querySelectorAll("a")).filter((a) => a.getAttribute("href") === "#/tickets/t70").length).toBe(2);
+  });
+});
+
+describe("raised time", () => {
+  it("every card kind shows when it was raised, in the notifications format, from the original time", () => {
+    const earlier = "2026-10-20T09:30:00.000Z";
+    const now = new Date().toISOString();
+    const kinds = ["budget", "question", "permission", "approval"];
+    const ds = kinds.map((kind, i) => decision({ id: `d${i}`, kind, createdAt: i === 0 ? earlier : now, question: `Card ${kind}` }));
+    render(<Decisions decisions={ds} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const times = Array.from(document.querySelectorAll("time")).map((t) => t.textContent);
+    expect(times).toHaveLength(4);
+    expect(times[0]).toBe(when(earlier));
+    expect(times[1]).toBe(when(now));
   });
 });

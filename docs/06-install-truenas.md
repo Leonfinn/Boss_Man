@@ -377,6 +377,61 @@ scripts/update-runner.sh --rollback
 docker compose exec -T db pg_dump -U bossman bossman | gzip > /mnt/NVME_Apps/Container_files/boss-man/bossman-$(date +%F).sql.gz
 ```
 
+**Prove the backup restores.** A backup nobody has restored is a hope. This loads the newest backup into a throwaway database beside the live one (the live database is never written to), counts accounts, projects and tickets, prints how long it took and how much would be lost, and drops the throwaway:
+
+```sh
+cd /mnt/NVME_Apps/Container_files/boss-man/src && scripts/restore-test.sh --fresh-backup
+```
+
+**Restore the live database from a backup (last resort).** Only when a deploy has damaged the data itself. If the code is the problem, use `scripts/deploy.sh --rollback` (or `host-deployer.sh --rollback`) instead: they never touch the data. A restore **replaces the live data** and loses everything written after the backup was taken. Do it at a quiet time, and ask for help if anything below does not look as described. Run every command as root from the checkout, `cd /mnt/NVME_Apps/Container_files/boss-man/src`. The backups are in the folder above it.
+
+1. Pick the backup and rehearse it on the throwaway database first (the live database is not written to). It must end with a line starting `OK:`. If it does not, stop and choose another file:
+```sh
+ls -lt ../bossman-*.sql.gz | head -5
+```
+```sh
+scripts/restore-test.sh ../bossman-YYYY-MM-DD-HHMM.sql.gz
+```
+2. Note the data you will lose: the "live minus restored" column of that output, and the age on its `Backup:` line.
+3. Stop the app so nothing writes. With the single server install:
+```sh
+docker compose stop server
+```
+   With blue/green (step 9d), stop both colours:
+```sh
+docker compose stop server-blue server-green
+```
+4. Keep a copy of the current, damaged data in case the restore was the wrong call (this file is a full copy of your data; delete it when you are sure):
+```sh
+docker compose exec -T db pg_dump -U bossman bossman | gzip > ../before-restore-$(date +%F-%H%M).sql.gz && ls -l ../before-restore-*.sql.gz
+```
+5. Replace the live database. The first command fails with "being accessed by other users" if something is still connected: go back to step 3 and do not continue.
+```sh
+docker compose exec -T db psql -U bossman -d postgres -c 'DROP DATABASE bossman' -c 'CREATE DATABASE bossman OWNER bossman'
+```
+```sh
+gunzip -c ../bossman-YYYY-MM-DD-HHMM.sql.gz | docker compose exec -T db psql -v ON_ERROR_STOP=1 -q -U bossman -d bossman
+```
+6. Start the app. Single server:
+```sh
+docker compose up -d
+```
+   Blue/green: first bring the schema up to what the running code expects (a restored older backup may be behind), using the live colour (`blue` below; find it with `grep reverse_proxy $D/proxy/active.caddy`, where `$D` is the deployer folder from step 9), then start only that colour:
+```sh
+BOSSMAN_MIGRATE_TAG=blue docker compose run --rm migrate
+```
+```sh
+docker compose up -d --no-deps server-blue
+```
+   If the live colour is green, also run `docker compose kill -s SIGUSR2 server-green`; green starts as a standby and nothing is in charge until it gets that signal.
+7. Check: `curl -s http://<nas-ip>:3101/api/ready` shows `"role":"leader"`; sign in and open Tickets; and compare the counts with the rehearsal output:
+```sh
+docker compose exec -T db psql -U bossman -d bossman -tA -c 'SELECT count(*) FROM tickets' -c 'SELECT count(*) FROM drizzle.__drizzle_migrations'
+```
+8. To undo the restore (step 4's copy holds the damaged state): repeat steps 3, 5 and 6 with `../before-restore-….sql.gz`.
+
+If step 5's second command stops with an error, the new empty database is half filled: do not start the app. Repeat step 5 (it drops and recreates) with the same or an older backup.
+
 **Starting again.** To throw away an install and redo it from step 2, stop it and delete the repo and data folders. This deletes the database and every workspace. It keeps the deploy key and `known_hosts`, so GitHub needs nothing new. Check what's there first:
 
 ```sh
@@ -724,6 +779,15 @@ docker compose exec -T server-blue cat /proc/1/cmdline | tr '\0' ' '; echo; curl
 - **The proxy keeps restarting** (`Restarting (255)`, and `docker logs boss-man-proxy-1` says `exec /usr/bin/caddy: operation not permitted`). The `caddy` program in the official image carries a file capability (bind to low ports). With every capability dropped and none added back, Linux refuses to run it at all. The compose file now gives back that one capability (`cap_add: [NET_BIND_SERVICE]`); a checkout from before 23 Oct 2026 lacks it. Bring the checkout up to `main`, then `docker compose up -d --no-deps proxy`.
 - **"Update failed: … blue did not step down. Switched back to blue automatically."** The live colour was built from an image that starts the server through the `tsx` command. That command runs the server as a child process and passes on only SIGINT and SIGTERM, so the hand-over signal (SIGUSR1) never arrives. Images from `5d983a16` on start `node --import tsx` directly. Rebuild the live colour in place (above) once; swaps work after that. The automatic switch-back left the live colour untouched. Any migration the attempt ran was expand-only, so the old code keeps working with it.
 - **Runner shows Offline after the cutover.** Its log (`docker logs -t --since 1h boss-man-runner-<company> 2>&1 | tail`) shows `getaddrinfo ENOTFOUND server` while the proxy is down. It reconnects by itself within 30 seconds of the proxy coming up.
+
+**Go back to the previous release after the 15 minutes** (the old colour has been stopped, its image is still there until the next swap). As root on the NAS, from the deployer folder:
+
+```sh
+$D/host-deployer.sh --rollback --dry-run   # checks only
+$D/host-deployer.sh --rollback             # backs up, starts the old colour, hands over, flips the proxy, checks
+```
+
+It reverses itself if the checks fail. It never touches the database. If the bad release changed the database in a non-expand-only way, see the wiki page "Database restore and blue/green rollback".
 
 **Go back to a single server** (any time, also if step 6 misbehaves):
 

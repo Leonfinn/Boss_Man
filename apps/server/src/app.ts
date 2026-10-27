@@ -58,7 +58,7 @@ import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
-import { schedulerService, type Limits } from "./services/scheduler.js";
+import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
@@ -766,6 +766,18 @@ export async function buildApp(opts: AppOptions) {
       const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
       await notes.markRead(b.all ? "all" : (b.ids ?? []));
       return { unread: await notes.unread() };
+    });
+    // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
+    const runLimits = async () => {
+      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
+      const v = row?.value as { instance?: number; company?: number } | undefined;
+      return { instance: v?.instance ?? scheduler.limits.instance, company: v?.company ?? scheduler.limits.company, defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company } };
+    };
+    owner.get("/api/run-limits", async () => runLimits());
+    owner.put("/api/run-limits", async (req) => {
+      const value = z.object({ instance: z.number().int().min(1).max(32), company: z.number().int().min(1).max(16) }).refine((b) => b.company <= b.instance, { message: "The company limit can't be higher than the all-companies limit." }).parse(req.body);
+      await db.insert(settings).values({ key: "run_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      return runLimits();
     });
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();

@@ -35,7 +35,7 @@ async function setup(limits: Partial<Limits> = {}) {
   let seq = 0;
   const endRun = (runId: string) => built.runners.ingest(runnerRow!, { seq: ++seq, at: new Date().toISOString(), event: { type: "run.ended", runId, stopReason: "end_turn", error: null } });
   const setOnline = (v: boolean) => (online = v);
-  return { ...built, db, close, req, company, ceo, project, commands, endRun, setOnline };
+  return { ...built, db, close, cookie, req, company, ceo, project, commands, endRun, setOnline };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 50));
@@ -276,5 +276,34 @@ describe("scheduler", () => {
     expect(ctx.commands).toHaveLength(1);
     const launched = (await ctx.db.select().from(wakes)).filter((w) => w.status === "launched");
     expect(launched).toHaveLength(1);
+  });
+
+  it("never holds an owner chat behind the instance or company limit, but one chat per agent at a time", async () => {
+    ctx = await setup({ instance: 1, company: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(1); // the one slot is full
+    await ctx.scheduler.wake({ agentId: worker.id, reason: "x" });
+    await ctx.scheduler.wake({ agentId: worker.id, reason: "owner_chat" });
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(2); // the chat launched, the work wake still waits
+    expect(ctx.commands[1]!.agentId).toBe(worker.id);
+    await ctx.scheduler.wake({ agentId: worker.id, reason: "owner_chat", note: "again" });
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(2); // a second chat for the same agent waits
+  });
+
+  it("uses the run limits the owner saved, and rejects a company limit above the instance limit", async () => {
+    ctx = await setup({ instance: 1 });
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const put = (b: object) => ctx!.app.inject({ method: "PUT", url: "/api/run-limits", headers: { cookie: ctx!.cookie }, payload: b });
+    expect((await put({ instance: 2, company: 3 })).statusCode).toBe(400);
+    expect((await put({ instance: 2, company: 2 })).statusCode).toBe(200);
+    expect((await ctx.req("GET", "/api/run-limits")).json()).toMatchObject({ instance: 2, company: 2, defaults: { instance: 8, company: 4 } });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "x" });
+    await ctx.scheduler.wake({ agentId: worker.id, reason: "x" });
+    await ctx.scheduler.tick();
+    expect(ctx.commands).toHaveLength(2); // the test's instance: 1 would have allowed one
   });
 });
