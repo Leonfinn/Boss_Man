@@ -62,6 +62,28 @@ export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { 
   );
 }
 
+function TicketLink({ t }: { t: { ticketId: string; ref?: string | null; title: string } }) {
+  return (
+    <a href={`#/tickets/${t.ticketId}`}>
+      {t.ref ? `${t.ref} ` : ""}
+      {t.title}
+    </a>
+  );
+}
+
+/** Text with ticket references the server resolved (BOS-70) turned into links; anything else stays plain text. */
+function Linked({ text, refs }: { text: string; refs?: Decision["refs"] }) {
+  if (!refs || !Object.keys(refs).length) return <>{text}</>;
+  return (
+    <>
+      {text.split(/\b([A-Za-z][A-Za-z0-9]{0,9}-\d{1,9})\b/).map((part, i) => {
+        const t = i % 2 ? refs[part.toUpperCase()] : undefined;
+        return t ? <a key={i} href={`#/tickets/${t.ticketId}`} title={t.title}>{part}</a> : part;
+      })}
+    </>
+  );
+}
+
 function StallEvidenceView({ e }: { e: StallEvidence }) {
   const { items } = useTranscript(e.runId, 60_000);
   const steps = items.map((i) => ({ i, d: describe(i) })).filter(({ d }) => d.tone !== "text" || d.body?.trim());
@@ -292,16 +314,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
-                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\nNew instructions:")[0]}</h2>
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>
                         <MoreText label="New instructions" text={d.context.instructions} />
                       </>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
-                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n")[0]}</h2>
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
                         <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} />
                       </>
                     ) : (
-                      <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : rule ? d.question.split("\n\n")[0] : d.question}</h2>
+                      <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : <Linked text={rule ? d.question.split("\n\n")[0]! : d.question} refs={d.refs} />}</h2>
                     )}
                     {rule && (
                       <>
@@ -359,7 +381,21 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
-                      {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
+                      {d.about && d.about.length > 0 && (
+                        <span>
+                          About: {d.about.map((t, i) => (
+                            <span key={t.ticketId}>{i > 0 && ", "}<TicketLink t={t} /></span>
+                          ))}
+                        </span>
+                      )}
+                      {d.blocks.length > 0 && (
+                        <span>
+                          Blocks{" "}
+                          {d.blocks.map((t, i) => (
+                            <span key={t.ticketId}>{i > 0 && ", "}<TicketLink t={t} /></span>
+                          ))}
+                        </span>
+                      )}
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
                       {d.reasons.map((r) => (
                         <span key={r}>{r}</span>
@@ -379,7 +415,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>
-                        <p style={{ fontSize: 14 }}>{d.context.triedFirst}</p>
+                        <p style={{ fontSize: 14 }}><Linked text={d.context.triedFirst} refs={d.refs} /></p>
                       </details>
                     )}
                     {d.context?.planText && (
