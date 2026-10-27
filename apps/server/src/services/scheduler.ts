@@ -25,8 +25,6 @@ import type { runnersService } from "./runners.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
-// The watchdog has its own hourly cap (watchdog.ts), so its wakes don't count as ticketless churn.
-import { WATCHDOG_REASON } from "./watchdog.js";
 
 export type Limits = {
   instance: number;
@@ -685,7 +683,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })

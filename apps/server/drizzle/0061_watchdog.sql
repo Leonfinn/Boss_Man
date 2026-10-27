@@ -4,6 +4,7 @@ CREATE TABLE "watchdog_actions" (
 	"ticket_id" uuid,
 	"flag_id" uuid,
 	"actor_agent_id" uuid,
+	"actor_run_id" uuid,
 	"kind" text NOT NULL,
 	"target_agent_id" uuid,
 	"reason" text NOT NULL,

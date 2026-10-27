@@ -1579,13 +1579,12 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], sco
     "watchdog",
     {
       description:
-        "Your only way to act on the problems the watchdog hands you. Every action needs reason: one line saying why. list: the open flags. nudge (ticketId): ask the assignee to pick it up or say why it's stuck. assign (ticketId, to): an unassigned ticket only, to the obvious colleague by name, or \"ceo\" if none is obvious. rewake (ticketId): wake the assignee again after their run crashed or ended without moving the ticket. chase_review (ticketId): wake the pending reviewers. snooze (flagId, hours up to 48): the flag is fine for now; a third snooze in a row is refused and the ticket goes to the CEO. escalate (ticketId): hand it to the CEO. raise_decision (ticketId, question, options, recommended, triedFirst, ownerMustDo, steps): when only the owner can unblock it. undo (actionId): take back one of your own actions. You can't do the work, change risk or priority, or close or cancel tickets. Actions are capped per hour; past the cap the watchdog switches off and the owner is told.",
+        "Your only way to act on the problems the watchdog hands you. Every action needs reason: one line saying why. list: the open flags. nudge (ticketId): ask the assignee to pick it up or say why it's stuck. assign (ticketId, to): an unassigned ticket only, to the obvious colleague by name, or \"ceo\" if none is obvious. rewake (ticketId): wake the assignee again after their run crashed or ended without moving the ticket. chase_review (ticketId): wake the pending reviewers. snooze (flagId, hours up to 48): the flag is fine for now; a third snooze in a row is refused and the ticket goes to the CEO. escalate (ticketId): hand it to the CEO. raise_decision (ticketId, question, options, recommended, triedFirst, ownerMustDo, steps): when only the owner can unblock it. Act only on the problems the watchdog handed you, each action at most once per problem until it is handed to you again. The owner can undo any of your actions. You can't do the work, change risk or priority, or close or cancel tickets. Actions are capped per hour; past the cap the watchdog switches off and the owner is told.",
       inputSchema: {
-        action: z.enum(["list", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "undo"]),
+        action: z.enum(["list", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision"]),
         reason: z.string().max(400).optional(),
         ticketId: z.string().uuid().optional(),
         flagId: z.string().uuid().optional(),
-        actionId: z.string().uuid().optional(),
         to: z.string().min(1).max(100).optional(),
         hours: z.number().positive().max(48).optional(),
         question: z.string().min(1).max(1000).optional(),
@@ -1604,7 +1603,7 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], sco
         if (missing.length) throw new WatchdogError(422, `${input.action} needs ${missing.join(", ")}.`);
       };
       const reason = input.reason ?? "";
-      const done = (a: { id: string }) => text(`Done and logged as action ${a.id} (undo with action undo).`);
+      const done = (a: { id: string }) => text(`Done and logged as action ${a.id}.`);
       try {
         switch (input.action) {
           case "list": {
@@ -1616,7 +1615,7 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], sco
             return done(await watchdog.nudge(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
           case "assign":
             need("ticketId", "to");
-            return done(await watchdog.assign(companyId, agentId, { ticketId: input.ticketId!, to: input.to!, reason }));
+            return done(await watchdog.assign(companyId, agentId, runId, { ticketId: input.ticketId!, to: input.to!, reason }));
           case "rewake":
             need("ticketId");
             return done(await watchdog.rewake(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
@@ -1625,18 +1624,13 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], sco
             return done(await watchdog.chaseReview(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
           case "snooze":
             need("flagId", "hours");
-            return done(await watchdog.snooze(companyId, agentId, { flagId: input.flagId!, hours: input.hours!, reason }));
+            return done(await watchdog.snooze(companyId, agentId, runId, { flagId: input.flagId!, hours: input.hours!, reason }));
           case "escalate":
             need("ticketId");
             return done(await watchdog.escalate(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
           case "raise_decision":
             need("ticketId", "question", "options", "recommended", "triedFirst");
-            return done(await watchdog.raiseDecision(companyId, agentId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason }));
-          case "undo": {
-            need("actionId");
-            const r = await watchdog.undo(companyId, input.actionId!, { agentId, reason: reason || undefined });
-            return text(`Undone: ${r.what}.`);
-          }
+            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason }));
         }
       } catch (err) {
         if (err instanceof WatchdogError) return fail(err.message);

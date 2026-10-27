@@ -85,6 +85,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
   const ownerKeys = decs.filter((d) => d.dedupeKey && (d.dedupeKey.startsWith("missed:") || d.dedupeKey.startsWith("merge-stuck:")));
   const deps = await db.select().from(ticketDependencies).where(and(inArray(ticketDependencies.blockedTicketId, ids), isNotNull(ticketDependencies.blockerTicketId)));
 
+  // not state: the replay's working data, built fresh on every call.
   const state = new Map<string, Timeline<State>>();
   const assignee = new Map<string, Timeline<string | null>>();
   // Decision holds: [ticket, decisionId, from, until]
@@ -160,6 +161,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
     .map((r) => ({ id: r.id, ticketId: r.ticketId!, agentId: r.agentId, startedAt: r.startedAt, endedAt: r.endedAt, outcome: r.outcome }));
 
   type Episode = { ticketId: string; rule: WatchdogRule; firstAt: number; dueAt: number; handOffs: number; clearedAt: number | null };
+  // not state: per call.
   const open = new Map<string, Episode>();
   const episodes: Episode[] = [];
   const wakesAt: number[] = [];

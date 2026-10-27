@@ -67,11 +67,14 @@ function covered(intervals: Array<[number, number]>, from: number, to: number) {
 
 export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[] {
   const t = now.getTime();
+  // not state: lookups built fresh on every call.
   const runsBy = new Map<string, SnapRun[]>();
   for (const r of snap.runs) runsBy.set(r.ticketId, [...(runsBy.get(r.ticketId) ?? []), r]);
+  // not state: per call.
   const holdsBy = new Map<string, SnapHold[]>();
   for (const h of snap.holds) holdsBy.set(h.blockedTicketId, [...(holdsBy.get(h.blockedTicketId) ?? []), h]);
   // Rule 1: a ticket holding others is chased itself; the count goes into its flag.
+  // not state: per call.
   const holding = new Map<string, number>();
   const open = new Set(snap.tickets.filter((x) => x.state !== "done").map((x) => x.id));
   for (const h of snap.holds) if (h.kind === "ticket" && !h.resolved && open.has(h.blockedTicketId)) holding.set(h.holderTicketId, (holding.get(h.holderTicketId) ?? 0) + 1);

@@ -1165,6 +1165,8 @@ export const watchdogActions = pgTable(
     flagId: uuid("flag_id").references(() => watchdogFlags.id, { onDelete: "set null" }),
     /** The Scrum Master; null when Boss Man did it (a sweep wake, an owner reminder, a trip). */
     actorAgentId: uuid("actor_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The Scrum Master's run that did it. */
+    actorRunId: uuid("actor_run_id"),
     /** One of WATCHDOG_ACTIONS. */
     kind: text("kind").notNull(),
     targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),

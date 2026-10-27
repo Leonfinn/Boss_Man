@@ -1837,7 +1837,8 @@ export async function buildApp(opts: AppOptions) {
       const { id } = IdParam.parse(req.params);
       const [a] = await db.select({ companyId: watchdogActions.companyId }).from(watchdogActions).where(eq(watchdogActions.id, id));
       if (!a) return reply.code(404).send({ error: "not_found" });
-      return watchdog.undo(a.companyId, id, { agentId: null }).catch(watchdogErrors(reply));
+      const b = z.object({ reason: z.string().max(400).optional() }).parse(req.body ?? {});
+      return watchdog.undo(a.companyId, id, b).catch(watchdogErrors(reply));
     });
 
     // Scheduling and kill switches (R30).

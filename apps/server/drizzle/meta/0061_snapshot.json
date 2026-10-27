@@ -1,5 +1,5 @@
 {
-  "id": "7a74507c-d068-4617-8851-40bd860cdae1",
+  "id": "476c7bb6-0421-4b2f-a025-61dba9b84180",
   "prevId": "60afd571-5c01-442f-8b97-e571b98bfc51",
   "version": "7",
   "dialect": "postgresql",
@@ -6787,6 +6787,12 @@
         },
         "actor_agent_id": {
           "name": "actor_agent_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actor_run_id": {
+          "name": "actor_run_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
