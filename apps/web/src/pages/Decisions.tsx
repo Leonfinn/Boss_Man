@@ -218,9 +218,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               <li key={a.id}>
                 {a.question}{" "}
                 <span className="muted">
-                  · {a.advice.state === "reissued" ? "replaced by a clearer decision" : `handled by the CEO: ${a.advice.summary ?? "done"}`}
+                  ·{" "}
+                  {a.settled
+                    ? `${a.settled.answer === "Allow once" ? "allowed" : a.settled.answer === "Deny" ? "denied" : a.settled.answer} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
+                    : a.advice?.state === "reissued"
+                      ? "replaced by a clearer decision"
+                      : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
                 </span>
-                {a.advice.replacedBy && (
+                {a.settled?.command && (
+                  <pre className="muted">
+                    <code>{a.settled.command}</code>
+                  </pre>
+                )}
+                {a.advice?.replacedBy && (
                   <>
                     {" "}
                     <a href="#/decisions">See the new one in the list</a>

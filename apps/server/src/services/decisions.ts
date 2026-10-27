@@ -9,6 +9,7 @@ import {
   ruleFor,
   rankDecision,
   recommendedVerdict,
+  TEMP_CLEANUP_RULE,
   type BlockedTicket,
   alwaysChoices,
   explainPermission,
@@ -23,6 +24,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
@@ -33,7 +35,7 @@ type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[] }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[] }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -147,7 +149,14 @@ export type AnswerExtra = {
   by?: "ceo";
   /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
   handled?: { summary: string; at: string };
+  /** The CEO answered with the decisions tool: recorded as theirs, with its note as the reason (BOS-111). */
+  settledBy?: { agentId: string };
 };
+
+export type Settled = { agentId: string; name: string; note: string | null; at: string };
+
+/** How long a temp-file cleanup waits with the CEO before it moves to the owner: the runner gives up at 10 minutes. */
+export const TEMP_CLEANUP_MINUTES = 5;
 
 /**
  * "Ask the CEO for advice": where a decision stands with the CEO. Kept in the decision's context so the
@@ -533,11 +542,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           .returning({ id: decisions.id });
         return { outcome, rule, decisionId: row?.id ?? null };
       }
-      const [run] = await db.select({ agentId: runs.agentId }).from(runs).where(eq(runs.id, event.runId));
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
       const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
       const explain = explainPermission(info, agent?.name ?? "An agent");
       // A CEO never approves its own request: those go to the owner.
-      const tier = outcome === "ceo" && agent?.role === "ceo" ? "owner" : outcome;
+      let tier = outcome === "ceo" && agent?.role === "ceo" ? "owner" : outcome;
+      // Temp-file cleanup (BOS-111) waits with the CEO on the alert ladder, so it stays off the owner's
+      // queue and notifications, and moves to the owner if the CEO doesn't settle it in time or escalates it.
+      let ladder: Ladder | undefined;
+      let ceoId: string | undefined;
+      if (tier === "ceo" && rule === TEMP_CLEANUP_RULE) {
+        const [ceo] = await db.select({ id: agents.id, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, runner.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+        if (ceo && !ceo.paused) {
+          ceoId = ceo.id;
+          const since = now().toISOString();
+          ladder = { rung: "ceo", since, minutes: TEMP_CLEANUP_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: "temp-file cleanup goes to the CEO first" }] };
+        } else tier = "owner";
+      }
       // Standing rules are the owner's call, never an agent's.
       const always = tier === "owner" ? alwaysChoices(info, explain) : [];
       const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, explain, ...(always.length ? { always } : {}) };
@@ -548,16 +569,30 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           kind: "permission",
           question: `${explain.title}. ${explain.summary}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
-          // A command that only touches /tmp, with nothing in it Boss Man can't check, is safe to allow.
-          recommendedOption: recommendedVerdict(info) === "deny" && !(explain.scratch && !explain.scratch.unchecked.length) ? DENY : ALLOW,
+          recommendedOption: recommendedVerdict(info) === "deny" ? DENY : ALLOW,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
-          context: { ...context, rule },
+          context: { ...context, rule, ...(ladder ? { tempCleanup: true, ladder } : {}) },
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
-      if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
+      if (row && ceoId && wake) {
+        // High priority, like an alert: the agent is waiting, and the runner gives up at 10 minutes.
+        await wake({
+          agentId: ceoId,
+          reason: "decision",
+          priority: 3,
+          note: [
+            `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
+            `Command: ${explain.command ?? ""}`,
+            "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands that change nothing outside /tmp, so it came to you rather than the owner.",
+            "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
+            "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
+            `If you don't answer within ${TEMP_CLEANUP_MINUTES} minutes it goes to the owner.`,
+          ].join("\n").slice(0, 4000),
+        });
+      } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
@@ -943,7 +978,20 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(ne(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' in ('reissued', 'handled')`, sql`(${decisions.context}->'advice'->>'at')::timestamptz > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.createdAt))
         .limit(20);
-      return rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! }));
+      // Permission requests the CEO settled (BOS-111): what was allowed or denied, and why.
+      const permissions = await db
+        .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context, answer: decisions.answer })
+        .from(decisions)
+        .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
+        .orderBy(desc(decisions.answeredAt))
+        .limit(50);
+      return [
+        ...rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! })),
+        ...permissions.map((r) => {
+          const ctx = r.context as Extract<DecisionContext, { type: "permission" }>;
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), settled: { by: ctx.settled!.name, answer: r.answer ?? "", note: ctx.settled!.note, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true } };
+        }),
+      ];
     },
 
     /** Records the answer and resumes what was waiting. Returns null if not open. */
@@ -971,6 +1019,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         answer = ALLOW;
       }
       if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
+      // Kept on the decision so the owner can see who settled it and why (BOS-111). ctx is the same object, so later context writes keep it.
+      let settled: Settled | undefined;
+      if (extra.settledBy) {
+        const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, extra.settledBy.agentId));
+        settled = { agentId: extra.settledBy.agentId, name: who?.name ?? "the CEO", note: extra.note?.trim().replace(/\s+/g, " ").slice(0, 500) || null, at: now().toISOString() };
+        (ctx as { settled?: Settled }).settled = settled;
+      }
       // Conditional on still being open (and, for the CEO, still asked), so whoever closes it first wins and the loser changes nothing.
       const [closed] = await db
         .update(decisions)
@@ -981,7 +1036,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           answer,
           answeredAt: now(),
           ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
-          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : {}),
+          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : settled ? { context: ctx } : {}),
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
@@ -1084,7 +1139,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${d.question}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
@@ -1097,7 +1152,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // A rule proposal answered with a button needs nothing more from the CEO.
       if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}` });
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${extra.by === "ceo" || settled ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}` });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
