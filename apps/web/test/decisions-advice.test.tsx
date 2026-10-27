@@ -78,3 +78,11 @@ describe("ask the CEO for advice", () => {
     expect(screen.getByText("Old wording?")).toBeTruthy();
   });
 });
+
+describe("a decision the CEO wrote to replace an unclear one", () => {
+  it("says the CEO wrote it and lists its numbered steps", () => {
+    render(<Decisions decisions={[decision({ context: { steps: ["Open Settings", "Click Save"], advice: { state: "replacement", replaces: "d0" } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText(/Written by the CEO to replace an earlier, unclear decision/)).toBeTruthy();
+    expect(screen.getAllByRole("listitem").map((li) => li.textContent)).toEqual(expect.arrayContaining(["Open Settings", "Click Save"]));
+  });
+});
