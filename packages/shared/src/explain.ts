@@ -258,18 +258,20 @@ function safeBeside(words: string[], cwd: { tmp: boolean }): boolean {
       if (sub === "status" || sub === "rev-parse") return true;
       if (sub !== "worktree") return false;
       if (action === "list" || action === "prune") return args.every((w) => w.startsWith("-") && !w.startsWith("--expire"));
-      if (action !== "add" && action !== "remove") return false;
-      // The checkout's folder is the first operand, after the value of -b/-B; it must be an entry directly in /tmp (remove deletes it).
+      // Only add. remove follows a symlink at /tmp/NAME and deletes its target (BOS-111 security review);
+      // rm -rf /tmp/NAME then git worktree prune does the same cleanup. No -B: it resets an existing branch.
+      if (action !== "add") return false;
+      // The checkout's folder is the first operand, after the value of -b; it must be an entry directly in /tmp.
       const ops: string[] = [];
       for (let i = 0; i < args.length; i++) {
         const w = args[i]!;
-        if (w === "-b" || w === "-B") i++;
-        else if (w === "-f" || w === "--force" || w === "--detach" || w === "--no-checkout" || w === "-q" || w === "--quiet") continue;
+        if (w === "-b") i++;
+        else if (w === "--detach" || w === "--no-checkout" || w === "-q" || w === "--quiet") continue;
         else if (w.startsWith("-")) return false;
         else ops.push(w);
       }
       if (!ops.length || !TEMP_ONLY.test(ops[0]!)) return false;
-      return action === "add" ? ops.length <= 2 && !(ops[1] ?? "").startsWith("/") && !(ops[1] ?? "").includes("..") : ops.length === 1;
+      return ops.length <= 2 && !(ops[1] ?? "").startsWith("/") && !(ops[1] ?? "").includes("..");
     }
     default:
       return false;

@@ -115,7 +115,7 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf -- /tmp/.hidden-dir",
       "rm -rf /tmp/rv86 &>/dev/null; git worktree prune",
       "rm -rf /tmp/wt && git worktree add -b bos-111 /tmp/wt origin/main 2>&1 && mkdir -p /tmp/wt-logs/a",
-      "git worktree remove --force /tmp/wt; rm -rf /tmp/wt; git worktree list",
+      "rm -rf /tmp/wt; git worktree prune; git worktree list",
       "rm -rf /tmp/x && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
     ]) {
       expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
@@ -206,6 +206,12 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/a; command rm -rf /home/node",
       "rm -rf /tmp/a; X=1 echo hi",
       "rm -rf /tmp/a; git worktree remove /home/node/wt",
+      // remove follows a symlink at /tmp/lnk and deletes the folder it points to (BOS-111 security review).
+      "rm -rf /tmp/a; git worktree remove --force /tmp/lnk",
+      "rm -rf /tmp/a; git worktree remove /tmp/lnk",
+      // -B resets a branch that already exists.
+      "rm -rf /tmp/a; git worktree add -B main /tmp/b origin/main",
+      "rm -rf /tmp/a; git worktree add --force /tmp/b",
       "rm -rf /tmp/a; git worktree remove /tmp/a/b",
       "rm -rf /tmp/a; git worktree add /home/node/wt",
       "rm -rf /tmp/a; git worktree add --orphan /tmp/b",
