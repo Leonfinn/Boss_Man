@@ -1,4 +1,7 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { issueRunToken } from "../src/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
@@ -8,7 +11,9 @@ import { checkVerdict, hashFiles, reviewBody, scriptFilesOf } from "../src/servi
 import { SKILL_ADD, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
+const clients: Client[] = [];
 afterEach(async () => {
+  await Promise.all(clients.splice(0).map((c) => c.close().catch(() => undefined)));
   await ctx?.app.close();
   await ctx?.close();
   ctx = undefined;
@@ -33,6 +38,8 @@ const fakeFetch = (async (input: string | URL) => {
 async function setup() {
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", fetch: fakeFetch });
+  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  const base = `127.0.0.1:${(built.app.server.address() as { port: number }).port}`;
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
   const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
@@ -42,7 +49,14 @@ async function setup() {
   await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
   await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" });
   const svc = built.skillProposals;
-  return { ...built, db, close, company, ceo, worker, reviewer, svc };
+  const mcp = async (agentId: string) => {
+    const token = await issueRunToken(db, { companyId: company.id, agentId, runId: randomUUID() });
+    const c = new Client({ name: "t", version: "0" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    clients.push(c);
+    return c;
+  };
+  return { ...built, db, close, company, ceo, worker, reviewer, svc, mcp };
 }
 
 describe("script detection", () => {
@@ -287,5 +301,32 @@ describe("decision and install", () => {
     expect(await c.svc.expireOld()).toBe(1);
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("expired");
     expect(await openDecision(c)).toHaveLength(0);
+  });
+});
+
+const txt = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
+
+describe("the skills tool", () => {
+  it("only the CEO proposes and only the Security Reviewer gives a verdict", async () => {
+    const c = (ctx = await setup());
+    const asWorker = await c.mcp(c.worker.id);
+    const asCeo = await c.mcp(c.ceo.id);
+    const asReviewer = await c.mcp(c.reviewer.id);
+    const files = [{ path: "SKILL.md", content: md("Steps.") }, { path: "scripts/go.sh", content: "echo hi\n" }];
+    const args = { action: "propose", files, why: "Because", agents: ["engineer"] };
+    expect(txt(await asWorker.callTool({ name: "skills", arguments: args }))).toBe("Only your company's CEO can propose a skill.");
+    expect(txt(await asReviewer.callTool({ name: "skills", arguments: args }))).toBe("Only your company's CEO can propose a skill.");
+    expect(txt(await asCeo.callTool({ name: "skills", arguments: { ...args, agents: ["Nobody"] } }))).toContain("No agent called Nobody");
+    expect(txt(await asCeo.callTool({ name: "skills", arguments: args }))).toContain("needs a security review");
+    const [p] = JSON.parse(txt(await asCeo.callTool({ name: "skills", arguments: { action: "proposals" } })));
+    expect(p).toMatchObject({ name: "tidy", status: "in_review", hasScripts: true });
+    const verdict = { action: "review_verdict", proposalId: p.id, bundleHash: p.bundleHash, verdict: "recommend", summary: "Fine." };
+    expect(txt(await asCeo.callTool({ name: "skills", arguments: verdict }))).toBe("Only the Security Reviewer can give a verdict on a skill.");
+    expect(txt(await asWorker.callTool({ name: "skills", arguments: { action: "proposals" } }))).toBe("Only the CEO and the Security Reviewer can use skill proposals.");
+    expect(txt(await asReviewer.callTool({ name: "skills", arguments: { action: "proposal_file", proposalId: p.id, path: "scripts/go.sh" } }))).toContain("   1  echo hi");
+    expect(txt(await asReviewer.callTool({ name: "skills", arguments: { ...verdict, findings: [{ file: "scripts/go.sh", lineStart: 5, lineEnd: 6, title: "t", severity: "low", confidence: "likely", behaviour: "b", harm: "h", blocks: false }] } }))).toContain("aren't inside");
+    expect(txt(await asReviewer.callTool({ name: "skills", arguments: verdict }))).toContain("Verdict recorded");
+    expect((await openDecision(c)).length).toBe(1);
+    expect(await c.db.select().from(skills)).toHaveLength(0);
   });
 });

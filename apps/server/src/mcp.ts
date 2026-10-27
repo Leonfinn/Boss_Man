@@ -30,6 +30,8 @@ import { TicketChatError, type ticketChatService } from "./services/ticket-chat.
 import { findSection, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
+import type { SkillFinding } from "./db/schema.js";
+import type { skillProposalsService } from "./services/skill-proposals.js";
 import { AgentError, type agentsService } from "./services/agents.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
@@ -91,6 +93,7 @@ type Services = {
   ticketChat: ReturnType<typeof ticketChatService>;
   wiki: ReturnType<typeof wikiService>;
   skills: ReturnType<typeof skillsService>;
+  skillProposals: ReturnType<typeof skillProposalsService>;
   agents: ReturnType<typeof agentsService>;
   pa: ReturnType<typeof paService>;
   images: ReturnType<typeof ticketImagesService>;
@@ -115,7 +118,7 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   }) as never;
 }
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images, watchdog, alerts }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
@@ -349,7 +352,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
+  registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
 
   server.registerTool(
@@ -923,7 +926,7 @@ function registerViewImage(server: McpServer, images: Services["images"], scope:
   );
 }
 
-function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, review, agents: team }: Pick<Services, "notes" | "wiki" | "skills" | "review" | "agents">, scope: Scope) {
+function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, skillProposals, review, agents: team }: Pick<Services, "notes" | "wiki" | "skills" | "skillProposals" | "review" | "agents">, scope: Scope) {
   server.registerTool(
     "tickets",
     {
@@ -1013,17 +1016,91 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, r
     },
   );
 
+  const FindingInput = z.object({
+    file: z.string().max(500),
+    lineStart: z.number().int().min(1),
+    lineEnd: z.number().int().min(1),
+    title: z.string().trim().min(1).max(200),
+    severity: z.enum(["critical", "high", "medium", "low"]),
+    confidence: z.enum(["confirmed", "likely"]),
+    behaviour: z.string().trim().min(1).max(2000),
+    harm: z.string().trim().min(1).max(2000),
+    fix: z.string().trim().max(1000).default("none"),
+    blocks: z.boolean(),
+  });
   server.registerTool(
     "skills",
     {
       description:
-        "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; giving a pack's name (e.g. obra/superpowers) gives every skill in it. The owner is told. Skills are added to the library by the owner.",
-      inputSchema: { action: z.enum(["list", "give", "take"]), skill: z.string().max(200).optional(), agent: z.string().max(80).optional() },
+        "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; giving a pack's name (e.g. obra/superpowers) gives every skill in it. The owner is told. " +
+        "New skills reach the library only by the owner's decision. The CEO proposes one with propose: either a draft (name, files [{path, content}] with a SKILL.md, why, agents) or an internet link (url, optionally skill to pick one from a repository, why, agents). Link skills are pinned to the exact version fetched. The system decides whether a security review is needed (always for links; for a draft only if it contains a script), sends it to the Security Reviewer, and then asks the owner; you cannot skip either step. proposals lists proposals and their state; proposal reads one. A new version of an installed skill is proposed the same way. " +
+        "Security Reviewer: proposal (proposalId) shows a proposal's files, proposal_file (proposalId, path) reads one file with numbered lines, and review_verdict (proposalId, bundleHash from the ticket, verdict recommend | recommend with conditions | advise against, summary, conditions, findings with file and line range) gives the verdict.",
+      inputSchema: {
+        action: z.enum(["list", "give", "take", "propose", "proposals", "proposal", "proposal_file", "review_verdict"]),
+        skill: z.string().max(200).optional(),
+        agent: z.string().max(80).optional(),
+        name: z.string().max(80).optional(),
+        files: z.array(z.object({ path: z.string().min(1).max(500), content: z.string().max(4_000_000), encoding: z.enum(["utf8", "base64"]).optional() })).max(200).optional(),
+        url: z.string().max(2000).optional(),
+        why: z.string().max(4000).optional(),
+        agents: z.array(z.string().max(80)).max(30).optional(),
+        proposalId: z.string().uuid().optional(),
+        path: z.string().max(500).optional(),
+        bundleHash: z.string().max(100).optional(),
+        verdict: z.enum(["recommend", "recommend with conditions", "advise against"]).optional(),
+        summary: z.string().max(4000).optional(),
+        conditions: z.array(z.string().max(1000)).max(20).optional(),
+        findings: z.array(FindingInput).max(100).optional(),
+      },
     },
-    async ({ action, skill, agent }) => {
+    async (input) => {
+      const { action, skill, agent } = input;
       if (action === "list") return text(JSON.stringify((await skills.list(scope.companyId)).map((s) => ({ name: s.name, ...(s.pack ? { pack: s.pack } : {}), description: s.description, agents: s.agents.map((a) => a.name) }))));
-      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-      if (me?.role !== "ceo") return fail("Only your company's CEO can give or take skills.");
+      const [me] = scope.agentId ? await db.select({ role: agents.role, kind: agents.reviewKind }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      const isCeo = me?.role === "ceo";
+      const isReviewer = me?.kind === "security";
+      if (action === "propose" || action === "proposals" || action === "proposal" || action === "proposal_file" || action === "review_verdict") {
+        if (action === "propose" && !isCeo) return fail("Only your company's CEO can propose a skill.");
+        if (action === "review_verdict" && !isReviewer) return fail("Only the Security Reviewer can give a verdict on a skill.");
+        if (!isCeo && !isReviewer) return fail("Only the CEO and the Security Reviewer can use skill proposals.");
+        try {
+          if (action === "proposals") return text(JSON.stringify((await skillProposals.list(scope.companyId)).map((p) => ({ id: p.id, name: p.name, source: p.source, status: p.status, verdict: p.verdict, reviewRequired: p.reviewRequired, hasScripts: p.hasScripts, reviewTicketId: p.reviewTicketId, bundleHash: p.bundleHash }))));
+          if (action === "propose") {
+            const names = input.agents ?? [];
+            const team_ = names.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) in (${sql.join(names.map((n) => sql`${n.toLowerCase()}`), sql`, `)})`)) : [];
+            const missing = names.filter((n) => !team_.some((t) => t.name.toLowerCase() === n.toLowerCase()));
+            if (missing.length) return fail(`No agent called ${missing.join(", ")}. Use board to see who there is.`);
+            const base = { companyId: scope.companyId, byAgentId: scope.agentId, why: input.why ?? "", agentIds: team_.map((t) => t.id) };
+            const p = input.url
+              ? await skillProposals.propose({ ...base, source: "link", url: input.url, skill: input.skill })
+              : await skillProposals.propose({ ...base, source: "draft", name: input.name, files: (input.files ?? []).map((f) => ({ path: f.path, content: f.encoding === "base64" ? f.content : Buffer.from(f.content, "utf8").toString("base64") })) });
+            return text(
+              p.status === "in_review"
+                ? `Proposed ${p.name}. It needs a security review (${p.source === "link" ? "it comes from the internet" : "it contains a script"}); the Security Reviewer has a task for it. The owner decides after the review.`
+                : `Proposed ${p.name}. No security review is needed (a draft with no scripts), so it is with the owner to decide. Nothing is added until they say yes.`,
+            );
+          }
+          if (!input.proposalId) return fail("Give the proposalId (see proposals).");
+          if (action === "review_verdict") {
+            if (!input.bundleHash || !input.verdict || !input.summary) return fail("Give bundleHash, verdict and summary.");
+            const verdict = input.verdict === "recommend" ? "recommend" : input.verdict === "advise against" ? "advise_against" : "conditions";
+            const p = await skillProposals.recordVerdict(scope.companyId, scope.agentId, input.proposalId, { bundleHash: input.bundleHash, verdict, summary: input.summary, conditions: input.conditions, findings: input.findings as SkillFinding[] | undefined });
+            return text(`Verdict recorded for ${p.name}: ${input.verdict}. The owner has been asked to decide.`);
+          }
+          const d = await skillProposals.detail(scope.companyId, input.proposalId);
+          if (action === "proposal_file") {
+            const f = d.files.find((x) => x.path === input.path);
+            if (!f) return fail(`No file ${input.path} in this proposal.`);
+            if (f.text === null) return text(`${f.path} is not text (${f.size} bytes, sha256 ${f.hash}).`);
+            return text(f.text.split("\n").map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join("\n").slice(0, 200_000));
+          }
+          return text(JSON.stringify({ ...d, files: d.files.map((f) => ({ path: f.path, size: f.size, sha256: f.hash, script: f.script })) }));
+        } catch (err) {
+          if (err instanceof SkillError) return fail(err.message);
+          throw err;
+        }
+      }
+      if (!isCeo) return fail("Only your company's CEO can give or take skills.");
       if (!skill || !agent) return fail("Give the skill's name and the agent's name.");
       const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`));
       if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
@@ -1576,10 +1653,10 @@ function readOnly(server: McpServer, runId: string): Pick<McpServer, "registerTo
 }
 
 /** The PA's server: the read tools plus pa_reply and pa_escalate, and nothing that writes (R87). */
-function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa, images }: Services, scope: Scope) {
+function buildPaServer(db: Db, { notes, wiki, skills, skillProposals, review, agents: team, pa, images }: Services, scope: Scope) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   const reads = readOnly(server, scope.runId);
-  registerSharedTools(reads as McpServer, db, { notes, wiki, skills, review, agents: team }, scope);
+  registerSharedTools(reads as McpServer, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
   registerBoard(reads, db, scope);
   registerListMyWork(reads, db, scope);
@@ -1708,9 +1785,9 @@ const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().opti
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team, images }: Services, scope: Scope, hooks: McpHooks) {
+function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
-  registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
+  registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
   const workFail = (err: unknown) => {
