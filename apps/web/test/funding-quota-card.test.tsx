@@ -37,6 +37,13 @@ describe("quota card wording", () => {
     expect(screen.getByText(/Runs out about \w{3},? .* at /)).toBeTruthy();
   });
 
+  it("shows the day and date for a time later today", async () => {
+    stubApi({ runsOutAt: new Date(Date.now() + 3_600_000).toISOString(), beforeReset: true });
+    render(<Funding companies={[]} />);
+    const day = new Date(Date.now() + 3_600_000).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    expect(await screen.findByText(new RegExp(`Runs out about ${day} at `))).toBeTruthy();
+  });
+
   it("says it won't run out when the projection is after the reset", async () => {
     stubApi({ runsOutAt: later, beforeReset: false });
     render(<Funding companies={[]} />);
