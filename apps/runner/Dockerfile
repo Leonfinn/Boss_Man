@@ -17,9 +17,9 @@
 # Optional build secret "extra_ca": a CA bundle for networks with a TLS-inspecting proxy.
 FROM node:22-bookworm-slim
 
-# Tools agents expect in a workspace: git for code, ssh for SSH deploy targets.
+# Tools agents expect in a workspace: git for code, ssh for SSH deploy targets, shellcheck for the checks CI runs.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-client ca-certificates ripgrep curl jq \
+ && apt-get install -y --no-install-recommends git openssh-client ca-certificates ripgrep curl jq shellcheck \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g --no-audit --no-fund pnpm@10.28.0
