@@ -22,4 +22,10 @@ describe("hidden characters", () => {
     expect(cleanPath("a‮b.md")).toBeNull();
     expect(cleanPath("docs/a.md")).toBe("docs/a.md");
   });
+  it.each(["np\u034Fm install evil", "np\uFE0Fm install evil", "npm\u3164install evil", "np\u0301m install evil", "n\u2800pm i", "\u0440m install evil"])("other invisible or lookalike characters mean review: %j", (line) => {
+    expect(scriptFilesOf(md(line))).toEqual(["SKILL.md"]);
+  });
+  it("paths with those characters are refused", () => {
+    for (const c of ["\u034F", "\uFE0F", "\u3164", "\u0301", "\u2800", "\u0440"]) expect(cleanPath("a" + c + "b.md")).toBeNull();
+  });
 });

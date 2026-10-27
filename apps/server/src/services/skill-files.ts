@@ -34,11 +34,17 @@ const URL_ACTION = /https?:\/\/\S+/i;
 const ACTION_WORD = /\b(?:send|post|upload|submit|transmit|forward|exfiltrate|download|fetch|pipe|run|execute|install|curl|wget|eval)\b/i;
 const ONE_LINER = /\b(?:node|deno|bun|python[\d.]*|ruby|perl|php|lua|powershell|pwsh)\s+(?:-\S+\s+)*-[ecC]\b|\b(?:eval|exec)\s*[(`'"]/i;
 
+/** Characters that are invisible or look like other letters: format characters, combining marks, variation selectors, blank fillers, and a Latin letter mixed with a Cyrillic/Greek/Armenian/Cherokee one in the same word. */
+export function hasHiddenChars(text: string): boolean {
+  if (/[\p{Cf}\p{M}\u115F\u1160\u3164\uFFA0\u2800\u180E\u00AD]/u.test(text)) return true;
+  return text.split(/\s+/).some((w) => /[A-Za-z]/.test(w) && /[\p{Script=Cyrillic}\p{Script=Greek}\p{Script=Armenian}\p{Script=Cherokee}]/u.test(w));
+}
+
 /** Does this instructions text hold a code block, a #! line, or a line an agent could run? */
 function runnableText(text: string): boolean {
   if (text.startsWith("#!")) return true;
   // Invisible format characters (zero-width, bidi) can hide a command from the patterns below: unsure, so review.
-  if (/\p{Cf}/u.test(text)) return true;
+  if (hasHiddenChars(text)) return true;
   for (const line of text.normalize("NFKC").split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
     if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
