@@ -91,7 +91,7 @@ describe("acceptance criteria", () => {
   });
 
   it("moving a ticket with criteria to review without a pass/fail for each is refused, naming the missing ones", async () => {
-    const t = await ctx.ticket({ acceptanceCriteria: CRITERIA });
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id, acceptanceCriteria: CRITERIA });
     const c = await agent(ctx.dev.id);
     const refused = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "It's done; tests pass." } });
     expect(textOf(refused)).toMatch(/pass or fail for each/);
@@ -109,7 +109,7 @@ describe("acceptance criteria", () => {
   });
 
   it("a ticket without criteria moves to review exactly as before", async () => {
-    const t = await ctx.ticket();
+    const t = await ctx.ticket({ assigneeAgentId: ctx.dev.id });
     const c = await agent(ctx.dev.id);
     const r = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "Plain note." } });
     expect(textOf(r)).toContain("is now review");

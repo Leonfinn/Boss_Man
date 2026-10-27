@@ -1332,6 +1332,8 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason }) => {
       const no = await chatRefusal();
       if (no) return fail(no);
+      const notMine = await moveRefusal(db, scope, ticketId, state === "done" && outcome === "cancelled");
+      if (notMine) return fail(notMine);
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
       if (state === "done") {
         const [t] = await db
@@ -1430,6 +1432,22 @@ async function hasOpenBlocker(db: Db, ticketId: string) {
     }
   }
   return false;
+}
+
+/**
+ * A worker moves only its own tickets (BOS-73): assigned to it, a sub-task of one assigned to it, or one it
+ * created that nobody holds yet. Cancelling skips review and merge, so only the CEO or a manager may.
+ */
+async function moveRefusal(db: Db, scope: Scope, ticketId: string, cancelling: boolean): Promise<string | null> {
+  if (await managerIn(db, scope)) return null;
+  if (cancelling) return "Only your CEO or a manager can cancel a ticket. If it should be dropped, nudge them with the reason.";
+  const [t] = await db.select({ assignee: tickets.assigneeAgentId, createdBy: tickets.createdByAgentId, parentId: tickets.parentTicketId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+  if (!t) return "No ticket with that ID in your company.";
+  const me = scope.agentId;
+  if (me && (t.assignee === me || (!t.assignee && t.createdBy === me))) return null;
+  const [parent] = me && t.parentId ? await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, t.parentId)) : [];
+  if (me && parent?.assignee === me) return null;
+  return "That ticket isn't yours: you can move only tickets assigned to you and sub-tasks of them. If it needs to move, tell its assignee or your CEO (ticket_reply on it, or nudge them).";
 }
 
 async function managerIn(db: Db, scope: Scope) {
@@ -1683,7 +1701,7 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], ale
 }
 
 const NUDGE_DESCRIPTION =
-  "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, and none back and forth about the same ticket.";
+  "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
 
 /**
