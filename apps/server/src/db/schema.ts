@@ -855,9 +855,9 @@ export const agentNotes = pgTable(
     text: text("text").notNull(),
     /** What the owner said, quoted; for an accepted request, the requester's reason. */
     why: text("why").notNull(),
-    /** Where it came from: `chat` (saved from the owner chat), `owner` (Agents page) or `request` (another agent asked, the CEO accepted). */
+    /** Where it came from: `chat` (saved from the owner chat), `ticket` (saved in a run from the owner's message on `ticketId`, BOS-95), `owner` (Agents page) or `request` (another agent asked, the CEO accepted). */
     source: text("source").notNull(),
-    /** For `request`: who asked, and on which ticket. */
+    /** For `request`: who asked, and on which ticket; for `ticket`, the ticket the owner wrote on. */
     requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),

@@ -455,13 +455,19 @@ function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; 
   );
 }
 
-type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string };
+type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "ticket" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string };
 type NoteRequest = { id: string; title: string; text: string; why: string; from: string; ticketId: string; ticketRef: string | null; status: "pending" | "accepted" | "declined"; declineReason: string | null; createdAt: string };
 
 /** Where a note came from, for the owner. */
 function NoteOrigin({ n }: { n: AgentNote }) {
   if (n.source === "owner") return <>written by you</>;
   if (n.source === "chat") return <>saved by the CEO from your chat</>;
+  if (n.source === "ticket")
+    return (
+      <>
+        saved by the CEO from your message on {n.ticketId ? <a href={`#/tickets/${n.ticketId}`}>{n.ticketRef ?? "a task"}</a> : "a task"}
+      </>
+    );
   return (
     <>
       asked by {n.requestedBy ?? "a former agent"}

@@ -3,23 +3,26 @@
 // CEO's memory there. Separate from standing instructions, which stay the owner's.
 //
 // The risk is an agent writing text that steers its own later runs, so: notes are capped; the
-// CEO writes them freely only from the owner chat, and each such save must quote the owner's own
-// words from that chat (text read from a ticket or feedback can't pass); other agents can only
+// CEO writes them only on the owner's word: in the owner chat each save must quote the owner from
+// that chat, and in a ticket run (BOS-95) an owner-written message on one of the company's tickets
+// (agent or system text on a ticket, feedback and pages can't pass); other agents can only
 // ask, and only the CEO's explicit accept turns a request into a note; every note keeps its
 // source; and the owner is told in the chat and can edit or delete any note on the Agents page.
 import { and, asc, count, desc, eq, gt, notExists } from "drizzle-orm";
 import { ticketRef, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentNotes, agents, companies, noteRequests, ownerChatMessages, paAnswers, tickets } from "../db/schema.js";
+import { agentNotes, agents, companies, noteRequests, ownerChatMessages, paAnswers, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 
 export const NOTE_LIMITS = { count: 20, title: 80, text: 500, why: 300 } as const;
 /** How many note requests one agent may send, and how many may wait for the CEO at once. */
 export const REQUEST_LIMITS = { perHour: 3, perDay: 10, pending: 20 } as const;
-/** The shortest owner quote accepted as a note's why: long enough that "deploy now" or "no review" can't back a note. */
+/** The shortest owner quote accepted as a note's why: long enough that a "yes please" can't back any note (BOS-95). */
 export const MIN_QUOTE = 20;
 /** How far back in the chat the owner's words are looked for. */
 const QUOTE_LOOKBACK = 50;
+/** How many of the owner's latest ticket messages, across the company, a ticket run's quote is looked for in. */
+const TICKET_QUOTE_LOOKBACK = 200;
 const HOUR = 3_600_000;
 
 export class NoteError extends Error {
@@ -34,7 +37,7 @@ export class NoteError extends Error {
 export type Note = typeof agentNotes.$inferSelect;
 export type NoteRequest = typeof noteRequests.$inferSelect;
 type Fields = { title: string; text: string; why: string };
-type Origin = { source: "chat" | "owner" | "request"; runId?: string | null; requestedByAgentId?: string | null; ticketId?: string | null };
+type Origin = { source: "chat" | "ticket" | "owner" | "request"; runId?: string | null; requestedByAgentId?: string | null; ticketId?: string | null };
 /** Who made a change: the agent itself or the owner, for the activity log. */
 type By = { owner: boolean; runId?: string | null };
 
@@ -115,30 +118,52 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
       return rows.map(({ n, from, number, prefix }) => ({ ...n, requestedBy: from, ticketRef: ticketRef(prefix, number) }));
     },
 
-    /** Refuses unless `why` quotes one of the owner's recent messages in this agent's chat. */
-    async checkQuote(companyId: string, agentId: string, why: string) {
+    /**
+     * Refuses unless `why` quotes the owner: in the chat, one of their recent messages in this
+     * agent's chat; in a ticket run, one of their recent messages on the company's tickets. Only
+     * owner-authored rows are searched, never agent or system ones. Returns the message quoted
+     * (with its ticket, if any), so the owner is shown what backs the note.
+     */
+    async checkQuote(companyId: string, agentId: string, why: string, where: "chat" | "tickets"): Promise<{ text: string; ticketId: string | null }> {
       const q = plain(why).replace(/^["'\s]+|["'\s.,!?;:]+$/g, "");
       if (q.length >= MIN_QUOTE) {
-        const said = await db
-          .select({ text: ownerChatMessages.text })
-          .from(ownerChatMessages)
-          .where(
-            and(
-              eq(ownerChatMessages.companyId, companyId),
-              eq(ownerChatMessages.agentId, agentId),
-              eq(ownerChatMessages.role, "owner"),
-              // A PA escalation is stored as an owner row in the CEO chat, but its text includes the PA's own summary.
-              notExists(db.select({ id: paAnswers.id }).from(paAnswers).where(eq(paAnswers.ceoMessageId, ownerChatMessages.id))),
-            ),
-          )
-          .orderBy(desc(ownerChatMessages.createdAt))
-          .limit(QUOTE_LOOKBACK);
-        if (said.some((m) => plain(m.text).includes(q))) return;
+        const said =
+          where === "chat"
+            ? (
+                await db
+                  .select({ text: ownerChatMessages.text })
+                  .from(ownerChatMessages)
+                  .where(
+                    and(
+                      eq(ownerChatMessages.companyId, companyId),
+                      eq(ownerChatMessages.agentId, agentId),
+                      eq(ownerChatMessages.role, "owner"),
+                      // A PA escalation is stored as an owner row in the CEO chat, but its text includes the PA's own summary.
+                      notExists(db.select({ id: paAnswers.id }).from(paAnswers).where(eq(paAnswers.ceoMessageId, ownerChatMessages.id))),
+                    ),
+                  )
+                  .orderBy(desc(ownerChatMessages.createdAt))
+                  .limit(QUOTE_LOOKBACK)
+              ).map((m) => ({ text: m.text, ticketId: null }))
+            : await db
+                .select({ text: ticketMessages.text, ticketId: ticketMessages.ticketId })
+                .from(ticketMessages)
+                .where(and(eq(ticketMessages.companyId, companyId), eq(ticketMessages.author, "owner")))
+                .orderBy(desc(ticketMessages.createdAt))
+                .limit(TICKET_QUOTE_LOOKBACK);
+        const m = said.find((m) => plain(m.text).includes(q));
+        if (m) return m;
       }
-      throw new NoteError(400, `why must quote the owner's own words from this chat exactly (at least ${MIN_QUOTE} characters). Only what the owner said here can become a note, never text from a ticket, feedback or a page.`);
+      throw new NoteError(
+        400,
+        where === "chat"
+          ? `why must quote the owner's own words from this chat exactly (at least ${MIN_QUOTE} characters). Only what the owner said here can become a note, never text from a ticket, feedback or a page.`
+          : `why must quote, exactly, a message the owner wrote on one of your company's tickets (at least ${MIN_QUOTE} characters). Only the owner's own ticket messages count, never an agent's, feedback or a page.`,
+      );
     },
 
-    async update(companyId: string, id: string, f: Partial<Fields>, by: By) {
+    /** `origin` is where the new why came from, when the CEO changes a note on a fresh owner quote; owner edits keep the old source. */
+    async update(companyId: string, id: string, f: Partial<Fields>, by: By, origin?: { source: "chat" | "ticket"; ticketId: string | null }) {
       check(f);
       const before = await get(companyId, id);
       if (f.title !== undefined) {
@@ -146,10 +171,10 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
         if (same) throw new NoteError(409, `There's already a note called "${same.title}" (id ${same.id}).`);
       }
       const patch = Object.fromEntries(Object.entries(f).filter(([, v]) => v !== undefined).map(([k, v]) => [k, v!.trim()]));
-      // The source stays where the note came from; the activity log says who changed it.
+      // A re-quoted note now rests on that quote, so its source follows it; the activity log says who changed it.
       const [n] = await db
         .update(agentNotes)
-        .set({ ...patch, ...(by.runId ? { runId: by.runId } : {}), updatedAt: now() })
+        .set({ ...patch, ...(by.runId ? { runId: by.runId } : {}), ...(origin ? { source: origin.source, ticketId: origin.ticketId, requestedByAgentId: null } : {}), updatedAt: now() })
         .where(eq(agentNotes.id, id))
         .returning();
       await record(db, { companyId, agentId: by.owner ? null : before.agentId, kind: "note_updated", summary: `updated a note: ${n!.title}` });
@@ -234,7 +259,7 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
 type WithOrigin = Pick<Note, "id" | "title" | "text" | "why" | "source"> & { requestedBy?: string | null; ticketRef?: string | null };
 
 /** Where a note came from, in a few words. */
-export const originOf = (n: WithOrigin) => (n.source === "request" ? `asked by ${n.requestedBy ?? "a former agent"}${n.ticketRef ? ` on ${n.ticketRef}` : ""}, accepted by you` : n.source === "owner" ? "written by the owner" : "saved from the owner chat");
+export const originOf = (n: WithOrigin) => (n.source === "request" ? `asked by ${n.requestedBy ?? "a former agent"}${n.ticketRef ? ` on ${n.ticketRef}` : ""}, accepted by you` : n.source === "owner" ? "written by the owner" : n.source === "ticket" ? `saved from the owner's message on ${n.ticketRef ?? "a ticket"}` : "saved from the owner chat");
 
 /** The notes as prompt lines; none when there are no notes. */
 export function notesLines(notes: WithOrigin[]): string[] {
