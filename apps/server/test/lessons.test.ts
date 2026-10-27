@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, desc, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, wakes, wikiRevisions, wikiPages } from "../src/db/schema.js";
+import { activity, decisions, wakes, wikiRevisions, wikiPages } from "../src/db/schema.js";
 import { briefCommitLine, briefSlug, LESSON_DONT_ADD, LESSON_REPLACE_PREFIX, lessonsFrom } from "../src/services/project-brief.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -43,11 +43,16 @@ describe("lessons learned from sent-back reviews", () => {
     const [d] = await c.open();
     expect(d).toMatchObject({
       kind: "question",
-      tier: "owner",
+      tier: "ceo",
       options: ["Add", "Edit", "Drop"],
       recommendedOption: "Add",
-      question: `Add this lesson to Customer app's brief? "Run the migration check locally before approving."`,
     });
+    expect(d!.question).toContain(`Add this lesson to Customer app's brief? "Run the migration check locally before approving."`);
+    expect(d!.question).toContain('ticket "Add rate limiting"');
+    expect(d!.question).toContain("Current Lessons section (0 of 20)");
+    // The CEO is woken once, with the decision.
+    const woken = (await c.db.select().from(wakes)).filter((x) => x.agentId === c.ceo.id && JSON.stringify(x).includes("Run the migration check"));
+    expect(woken).toHaveLength(1);
     // One decision: sending the exactly same lesson again can't double it.
     await c.db.execute(`update tickets set system_state = 'review'`);
     await c.req("PATCH", `/api/tickets/${c.ticket.id}`, { state: "review" });
@@ -136,7 +141,7 @@ describe("lessons learned from sent-back reviews", () => {
     expect(lessonsFrom((await c.brief())!.body)).toHaveLength(20);
     expect((await c.brief())!.body).not.toContain("Lesson 21");
     const [replace] = (await c.open()).filter((d) => (d.context as { type: string }).type === "lesson_replace");
-    expect(replace).toMatchObject({ tier: "owner" });
+    expect(replace).toMatchObject({ tier: "ceo" });
     expect(replace!.question).toContain("is full (20)");
     expect(replace!.options).toEqual([...Array.from({ length: 20 }, (_, i) => `${LESSON_REPLACE_PREFIX}Lesson ${i + 1}`), LESSON_DONT_ADD]);
     await c.answer(replace!.id, `${LESSON_REPLACE_PREFIX}Lesson 3`);
@@ -235,5 +240,21 @@ describe("lessons learned: QA edge cases", () => {
     expect(kept).toContain("Lesson 21");
     expect(kept).not.toContain("Lesson 3");
     expect(kept).toHaveLength(20);
+  });
+});
+
+describe("lesson decisions go to the CEO (BOS-105)", () => {
+  it("the cap question is for the CEO, and the owner's feed says what was added, dropped and why", async () => {
+    const c = (ctx = await setup());
+    const lines = Array.from({ length: 20 }, (_, i) => `- Lesson ${i + 1}`).join("\n");
+    await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Lessons\n\n${lines}\n`);
+    await c.sendBack("Lesson 21");
+    await c.answer((await sendBackDecision())!.id, "Add", "Worth a line.");
+    const [replace] = (await c.open()).filter((x) => (x.context as { type: string }).type === "lesson_replace");
+    expect(replace).toMatchObject({ tier: "ceo" });
+    expect(JSON.stringify(await c.db.select().from(wakes))).toContain("is full (20)");
+    await c.answer(replace!.id, `${LESSON_REPLACE_PREFIX}Lesson 3`, "Overlaps lesson 4.");
+    const feed = (await c.db.select().from(activity)).filter((a) => a.kind === "lesson_outcome").map((a) => a.summary);
+    expect(feed.some((s) => s.includes('added "Lesson 21" and dropped "Lesson 3"') && s.includes("Overlaps lesson 4."))).toBe(true);
   });
 });

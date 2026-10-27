@@ -308,39 +308,48 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !answer.startsWith(LESSON_REPLACE_PREFIX)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
   }
 
+  /** Tells the owner what happened to a lesson and why, in the activity feed (BOS-105). */
+  async function lessonOutcome(d: typeof decisions.$inferSelect, projectName: string, what: string, note?: string) {
+    const reason = note?.trim().replace(/\s+/g, " ").slice(0, 300);
+    await record(db, { companyId: d.companyId, kind: "lesson_outcome", summary: `Lessons, ${projectName}: ${what}${reason ? ` Reason: ${reason}` : ""} You can edit the brief's Lessons section to undo this.`, at: now() });
+  }
+
   /** Adds the approved lesson to the project's brief, unless the section is full and a line must go first (R-review-lessons). */
   async function answerLessons(d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson" }>, answer: string, extra: AnswerExtra) {
-    if (answer === LESSON_DROP) return;
+    if (answer === LESSON_DROP) return lessonOutcome(d, ctx.projectName, `not added: "${ctx.lesson}".`, extra.note);
     const text = normalizeLesson(answer === LESSON_EDIT ? (extra.note ?? "") : ctx.lesson);
     if (text.length > LESSON_MAX) throw new AnswerError(`A lesson is one line, up to ${LESSON_MAX} characters.`);
     // An edit with no usable note adds nothing: nothing reaches the brief without words behind it.
     if (!text) return;
     const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
     const existing = page ? lessonsFrom(page.body) : [];
-    if (existing.includes(text)) return;
+    if (existing.includes(text)) return lessonOutcome(d, ctx.projectName, `not added, it is already there: "${text}".`);
     if (existing.length >= LESSONS_CAP) {
-      // The section is full: the owner picks which line the new lesson replaces, or leaves it out.
+      // The section is full: the CEO picks which line the new lesson replaces, or leaves it out.
       const unique = [...new Set(existing)];
-      await db
+      const [row] = await db
         .insert(decisions)
         .values({
           companyId: d.companyId,
           kind: "question",
-          question: `The Lessons section of ${ctx.projectName}'s brief is full (${LESSONS_CAP}). Approving the new lesson drops one: which?`,
+          question: `The Lessons section of ${ctx.projectName}'s brief is full (${LESSONS_CAP}). The new lesson is "${text}", from ticket ${ctx.ticketId}. Adding it drops one: which? Judge overlap and value, or answer "${LESSON_DONT_ADD}". Give a one-line reason as the note.`,
           options: [...unique.map((l) => `${LESSON_REPLACE_PREFIX}${l}`), LESSON_DONT_ADD],
           recommendedOption: `${LESSON_REPLACE_PREFIX}${unique[0]}`,
-          tier: "owner",
+          tier: "ceo",
           dedupeKey: `lesson-replace:${ctx.projectId}:${text}`,
           context: { type: "lesson_replace", projectId: ctx.projectId, projectName: ctx.projectName, lesson: text } satisfies DecisionContext,
         })
-        .onConflictDoNothing();
+        .onConflictDoNothing()
+        .returning({ question: decisions.question });
+      if (row) await tellCeo(d.companyId, row.question);
       return;
     }
     await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, text);
+    await lessonOutcome(d, ctx.projectName, `added "${text}".`, answer === LESSON_EDIT ? undefined : extra.note);
   }
 
   /** Finishes a replace: the chosen line goes, the new lesson takes its place. */
-  async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string, ownWords: boolean) {
+  async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string, ownWords: boolean, note?: string) {
     if (ownWords) {
       // The owner answered in their own words. The Lessons section only changes through a lesson decision, so the CEO gets a follow-up one carrying those words.
       const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
@@ -362,9 +371,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (row) await tellCeo(d.companyId, row.question);
       return;
     }
-    if (answer === LESSON_DONT_ADD || !answer.startsWith(LESSON_REPLACE_PREFIX)) return;
+    if (answer === LESSON_DONT_ADD || !answer.startsWith(LESSON_REPLACE_PREFIX)) return lessonOutcome(d, ctx.projectName, `not added, nothing dropped: "${ctx.lesson}".`, note);
     const dropped = answer.slice(LESSON_REPLACE_PREFIX.length);
     await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, ctx.lesson, dropped);
+    await lessonOutcome(d, ctx.projectName, `added "${ctx.lesson}" and dropped "${dropped}".`, note);
   }
 
   async function answerStaleBlocker(ctx: Extract<DecisionContext, { type: "stale_blocker" }>, answer: string, extra: AnswerExtra) {
@@ -1032,7 +1042,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
       } else if (ctx.type === "lesson_replace") {
-        await answerLessonReplace(db, d, ctx, answer, ownWords);
+        await answerLessonReplace(db, d, ctx, answer, ownWords, extra.note);
       } else if (ctx.type === "budget_limit") {
         const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
         if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));

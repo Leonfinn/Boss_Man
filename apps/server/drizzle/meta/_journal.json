@@ -456,6 +456,13 @@
       "when": 1793093796972,
       "tag": "0064_company_advice_timeout",
       "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1793180196972,
+      "tag": "0065_lessons_to_ceo",
+      "breakpoints": true
     }
   ]
 }
