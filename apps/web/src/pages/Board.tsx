@@ -416,6 +416,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       return next;
     });
   const featureList = feats.data?.features ?? [];
+  // A saved feature that is not in this company's list (other company, deleted) counts as any.
+  const featureFilter = filters.feature === "any" || filters.feature === "none" || featureList.some((f) => f.id === filters.feature) ? filters.feature : "any";
   const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
   // The review column is two lanes: agent review, and every ticket, from any column, whose next step is the owner's.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
@@ -613,7 +615,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           {view !== "features" && (
             <label>
               Feature
-              <select value={filters.feature} onChange={(e) => setFilter({ feature: e.target.value })}>
+              <select value={featureFilter} onChange={(e) => setFilter({ feature: e.target.value })}>
                 <option value="any">Any feature</option>
                 <option value="none">No feature</option>
                 {featureList.map((f) => (
@@ -657,7 +659,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
             // Every word must appear in the ticket's reference, title, feature or description.
             const hit = (t: (typeof tickets)[number]) => !words.length || words.every((w) => [t.number ? ticketRef(company?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w));
-            const shown = tickets.filter((t) => (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) && (filters.feature === "any" || (filters.feature === "none" ? !t.featureId : t.featureId === filters.feature)) && (!filters.working || !!t.working?.length) && hit(t));
+            const shown = tickets.filter((t) => (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) && (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) && (!filters.working || !!t.working?.length) && hit(t));
             const named = (t: (typeof shown)[number]) => {
               const a = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
               return a ? a.name : t.assignedToOwner ? "You" : "Nobody yet";

@@ -91,6 +91,15 @@ describe("board filters", () => {
     expect(shown()).toEqual([]);
   });
 
+  it("treats a saved feature that is not in the list as Any feature", async () => {
+    sessionStorage.setItem("board-filters", JSON.stringify({ feature: "gone", working: false }));
+    stub();
+    open();
+    await screen.findByRole("option", { name: "Export" });
+    expect(shown()).toEqual(["Alpha", "Beta", "Gamma", "Delta"]);
+    expect((screen.getByLabelText("Feature") as HTMLSelectElement).value).toBe("any");
+  });
+
   it("remembers both choices", async () => {
     stub();
     open();
