@@ -71,7 +71,7 @@ section.alt { background: var(--lane); }
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 24px; }
 .small { font-size: 14px; color: var(--muted); }
 .badge { display: inline-block; padding: 2px 10px; border: 2px solid var(--badge); border-radius: 999px; color: var(--badge); font-size: 14px; font-weight: 700; letter-spacing: 0.06em; }
-.page-head { padding: 48px 0 24px; }
+.page-head { padding-block: 48px 24px; }
 .page-head .lead { margin-top: 16px; }
 .prose { max-width: 760px; }
 .prose > * + * { margin-top: 16px; }
@@ -131,7 +131,7 @@ ul.bullets li::before { content: ""; position: absolute; left: 4px; top: 0.65em;
 .cta p { max-width: 640px; }
 .cta a:not(.btn) { color: var(--accent-ink); }
 
-.notfound { text-align: center; padding: 56px 0; }
+.notfound { text-align: center; padding-block: 56px; }
 .notfound .stack { display: flex; flex-direction: column; align-items: center; }
 .notfound img { height: 160px; width: auto; }
 
@@ -160,8 +160,7 @@ ul.bullets li::before { content: ""; position: absolute; left: 4px; top: 0.65em;
   h3 { font-size: 22px; }
   .lead { font-size: 20px; }
   section { padding: 72px 0; }
-  .page-head { padding: 72px 0 32px; }
-  .wrap { padding: 0 20px; }
+  .page-head { padding-block: 72px 32px; }
   .hero { padding: 72px 0; }
   .hero .wrap { grid-template-columns: 560px 1fr; align-items: center; gap: 48px; }
   .hero h1 { font-size: 56px; }
