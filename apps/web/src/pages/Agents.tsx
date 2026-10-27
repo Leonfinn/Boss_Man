@@ -611,9 +611,9 @@ function CeoNotes({ agentId }: { agentId: string }) {
 
 /** What the CEO may change about the team without asking (R62). */
 const APPROVALS: Array<[string, string]> = [
-  ["hires", "Hires wait for you"],
-  ["hires_and_edits", "Hires and instruction changes wait"],
-  ["nothing", "Nothing waits; you're told"],
+  ["hires", "Hires and model changes wait"],
+  ["hires_and_edits", "Hires, model and instruction changes wait"],
+  ["nothing", "Only hires and model changes wait"],
 ];
 
 function CeoApprovals({ companyId }: { companyId: string }) {
@@ -630,7 +630,7 @@ function CeoApprovals({ companyId }: { companyId: string }) {
   };
   return (
     <div className="field" style={{ maxWidth: 560 }}>
-      <label htmlFor="ceo-approvals">When the CEO builds the team</label>
+      <label htmlFor="ceo-approvals">What waits for you from the CEO</label>
       <select id="ceo-approvals" value={current.data?.approvals ?? "hires"} onChange={(e) => void set(e.target.value)}>
         {APPROVALS.map(([v, label]) => (
           <option key={v} value={v}>
@@ -638,7 +638,7 @@ function CeoApprovals({ companyId }: { companyId: string }) {
           </option>
         ))}
       </select>
-      <small className="muted">The CEO can propose hires from the templates and propose model changes for agents already hired. Every hire and model change shows all four fields (harness, provider, model and paid from) on a card in Decisions for you to approve, edit or reject. It can also tailor agents' instructions; anything else you're told about, and can undo from the agent's history.</small>
+      <small className="muted">Every hire and model change always waits for you, whatever this setting says: it shows all four fields (harness, provider, model and paid from) on a card in Decisions for you to approve, edit or reject. This setting only decides whether the CEO may change an agent's instructions without waiting. Anything else you're told about, and can undo from the agent's history.</small>
       {error && (
         <p className="error" role="alert">
           {error}
