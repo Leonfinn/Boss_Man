@@ -123,6 +123,8 @@ describe("ticket versions (R81)", () => {
     const base = { ticketId: ctx.ticketId, state: "blocked", summary: "Waiting on the deploy." };
     const until = new Date(Date.now() + 3_600_000).toISOString();
     expect((await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_until: new Date(Date.now() - 1000).toISOString() } })).isError).toBe(true);
+    const tooFar = new Date(Date.now() + 31 * 86_400_000).toISOString();
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_until: tooFar } }))).toMatch(/at most 30 days/);
     expect((await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_reason: "no date" } })).isError).toBe(true);
     expect((await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_until: until, blocked_reason: "two\nlines" } })).isError).toBe(true);
     expect((await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "review", summary: "x", blocked_until: until } })).isError).toBe(true);
@@ -141,6 +143,9 @@ describe("ticket versions (R81)", () => {
     const res = await ctx.app.inject({ method: "POST", url: `/api/tickets/${ctx.ticketId}/state`, headers: { cookie: ctx.cookie }, payload: { state: "blocked", blockedUntil: until, blockedUntilReason: "Friday release" } });
     expect(res.statusCode).toBe(200);
     expect(await row()).toMatchObject({ systemState: "blocked", blockedUntilReason: "Friday release" });
+    const far = await ctx.app.inject({ method: "POST", url: `/api/tickets/${ctx.ticketId}/state`, headers: { cookie: ctx.cookie }, payload: { state: "blocked", blockedUntil: new Date(Date.now() + 31 * 86_400_000).toISOString() } });
+    expect(far.statusCode).toBe(422);
+    expect(far.body).toMatch(/at most 30 days/);
     const bad = await ctx.app.inject({ method: "POST", url: `/api/tickets/${ctx.ticketId}/state`, headers: { cookie: ctx.cookie }, payload: { state: "ready", blockedUntil: until } });
     expect(bad.statusCode).toBe(422);
   });
