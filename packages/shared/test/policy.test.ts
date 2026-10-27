@@ -300,11 +300,9 @@ describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
     for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(route(c), c).toEqual(OWNER);
   });
 
-  // Found in the BOS-126 run: a glob inside /tmp is recommended Allow, because the command counts as /tmp-only work.
-  // The doc comment on recommendedVerdict says globs are Deny. it.fails flips to a failure once that is fixed: then make it a plain it.
-  // One it.fails per pattern, so fixing one of them makes exactly that test fail.
-  for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) {
-    it.fails(`recommends Deny for a glob in /tmp, which would wipe other agents' checkouts: ${c}`, () => {
+  // Found in the BOS-126 run: a glob inside /tmp was recommended Allow, because the command counted as /tmp-only work.
+  for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?", "rm -rf /tmp/{a,b}"]) {
+    it(`recommends Deny for a glob in /tmp, which would wipe other agents' checkouts: ${c}`, () => {
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
     });
   }
