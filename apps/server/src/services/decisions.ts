@@ -26,7 +26,7 @@ import { record } from "./activity.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
-import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, LESSON_REPLACE_PREFIX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
+import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages } from "../db/schema.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -112,6 +112,11 @@ export const KEEP_WAITING_MORE = (minutes: number) => `Keep waiting another ${mi
 export const CANCEL_UPDATE = "Cancel the update";
 
 export class AnswerError extends Error {}
+
+/** The option for dropping a line: numbered, so a long lesson can be chosen by its number. */
+const replaceOption = (i: number, lesson: string) => `Replace #${i + 1}: ${lesson}`;
+/** The lesson a drop answer names, in the numbered or the older "Replace: " form. */
+const replacedLesson = (answer: string) => /^Replace(?: #\d+)?: ([\s\S]*)$/.exec(answer)?.[1];
 
 /** Why an agent's ask is refused, or null: it must say what was tried first, and give steps when the owner has to act. */
 export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?: string[] }): string | null {
@@ -305,7 +310,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
-    if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !answer.startsWith(LESSON_REPLACE_PREFIX)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
+    if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !replacedLesson(answer)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
+    if (ctx.type === "lesson_replace" && !extra.custom) {
+      const dropped = replacedLesson(answer);
+      if (dropped !== undefined) {
+        const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
+        const current = page ? lessonsFrom(page.body) : [];
+        if (!current.includes(dropped)) throw new AnswerError(`That lesson is no longer in the Lessons section (it may have been dropped by another decision). Options still valid: ${(d.options as string[]).filter((o) => { const l = replacedLesson(o); return l !== undefined && current.includes(l); }).join(" | ") || "none"}. Answer "${LESSON_DONT_ADD}" or ask for a fresh decision.`);
+      }
+    }
   }
 
   /** Tells the owner what happened to a lesson and why, in the activity feed (BOS-105). */
@@ -333,8 +346,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           companyId: d.companyId,
           kind: "question",
           question: `The Lessons section of ${ctx.projectName}'s brief is full (${LESSONS_CAP}). The new lesson is "${text}", from ticket ${ctx.ticketId}. Adding it drops one: which? Judge overlap and value, or answer "${LESSON_DONT_ADD}". Give a one-line reason as the note.`,
-          options: [...unique.map((l) => `${LESSON_REPLACE_PREFIX}${l}`), LESSON_DONT_ADD],
-          recommendedOption: `${LESSON_REPLACE_PREFIX}${unique[0]}`,
+          options: [...unique.map((l, i) => replaceOption(i, l)), LESSON_DONT_ADD],
+          recommendedOption: replaceOption(0, unique[0]!),
           tier: "ceo",
           dedupeKey: `lesson-replace:${ctx.projectId}:${text}`,
           context: { type: "lesson_replace", projectId: ctx.projectId, projectName: ctx.projectName, lesson: text } satisfies DecisionContext,
@@ -360,7 +373,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           companyId: d.companyId,
           kind: "question",
           question: `The Lessons section of ${ctx.projectName}'s brief is full (${LESSONS_CAP}). The new lesson is "${ctx.lesson}". The owner was asked which line it replaces and answered in their own words: ${answer}\n\nPick the line their words point to, or "${LESSON_DONT_ADD}" if they ask for something else (then ask the owner).`,
-          options: [...unique.map((l) => `${LESSON_REPLACE_PREFIX}${l}`), LESSON_DONT_ADD],
+          options: [...unique.map((l, i) => replaceOption(i, l)), LESSON_DONT_ADD],
           recommendedOption: LESSON_DONT_ADD,
           tier: "ceo",
           dedupeKey: `lesson-replace-ceo:${d.id}`,
@@ -371,10 +384,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (row) await tellCeo(d.companyId, row.question);
       return;
     }
-    if (answer === LESSON_DONT_ADD || !answer.startsWith(LESSON_REPLACE_PREFIX)) return lessonOutcome(d, ctx.projectName, `not added, nothing dropped: "${ctx.lesson}".`, note);
-    const dropped = answer.slice(LESSON_REPLACE_PREFIX.length);
+    const dropped = replacedLesson(answer);
+    if (answer === LESSON_DONT_ADD || dropped === undefined) return lessonOutcome(d, ctx.projectName, `not added, nothing dropped: "${ctx.lesson}".`, note);
     await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, ctx.lesson, dropped);
     await lessonOutcome(d, ctx.projectName, `added "${ctx.lesson}" and dropped "${dropped}".`, note);
+    // Other open drop decisions for this project no longer offer the line that just went.
+    const siblings = await db.select().from(decisions).where(and(eq(decisions.companyId, d.companyId), eq(decisions.status, "open"), ne(decisions.id, d.id)));
+    for (const o of siblings) {
+      const oc = o.context as DecisionContext;
+      if (oc.type !== "lesson_replace" || oc.projectId !== ctx.projectId) continue;
+      const options = (o.options as string[]).filter((x) => replacedLesson(x) !== dropped);
+      const recommendedOption = options.includes(o.recommendedOption ?? "") ? o.recommendedOption : LESSON_DONT_ADD;
+      await db.update(decisions).set({ options, recommendedOption }).where(eq(decisions.id, o.id));
+    }
   }
 
   async function answerStaleBlocker(ctx: Extract<DecisionContext, { type: "stale_blocker" }>, answer: string, extra: AnswerExtra) {
@@ -929,6 +951,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
       if (!d) return null;
       const options = d.options as string[];
+      // A drop-one decision also takes the short form "Replace #12" for its numbered option.
+      const short = /^Replace #(\d+)$/.exec(answer.trim());
+      if (short && (d.context as DecisionContext).type === "lesson_replace") answer = options.find((o) => o.startsWith(`Replace #${short[1]}: `)) ?? answer;
       // An agent's question can be answered in the owner's own words; anything that acts on the
       // answer (a permission, a deploy, a budget) keeps to its options.
       const ownWords = extra.custom === true && d.kind === "question";
