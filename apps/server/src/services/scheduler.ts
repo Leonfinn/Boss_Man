@@ -578,9 +578,10 @@ export function schedulerService(
     // A CEO's run belongs to its current chapter (CEO continuity).
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     // Why the run started is kept on it, so a run with no ticket still says what it was for
-    // (BOS-118). The ticket a nudge named may be one the run is not formally on.
+    // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake lists
+    // several, and picking one of them would point the card at the wrong ticket.
     const origin = w.reason;
-    const aboutTicket = w.ticketId && w.reason !== "nudge" ? null : await ticketNamedIn(w.note, w.companyId);
+    const aboutTicket = w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
     await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });

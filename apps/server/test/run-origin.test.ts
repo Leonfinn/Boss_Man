@@ -96,6 +96,15 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect((await card(c, c.worker.id)).run).toMatchObject({ origin: "nudge", originFrom: "CEO", runTicketId: t.id });
   });
 
+  it("does not pick one ticket out of a review wake that lists several", async () => {
+    const c = (ctx = await setup());
+    const a = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First" })).json() as { id: string };
+    const b = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second" })).json() as { id: string };
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${a.id} "First": ready\n- ${b.id} "Second": ready` });
+    await c.scheduler.tick();
+    expect(await c.latestRun(c.worker.id)).toMatchObject({ ticketId: null, origin: "review requested", runTicketId: null });
+  });
+
   it("says a scheduled wiki sweep was a sweep", async () => {
     const c = (ctx = await setup());
     const [keeper] = await c.db.select().from(agents).where(eq(agents.duty, "wiki"));

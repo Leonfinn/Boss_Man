@@ -44,20 +44,42 @@ const REASON_LABEL: Record<string, string> = {
 /** Reasons nobody wrote down, which get the honest fallback instead of a label. */
 const NO_REASON = new Set(["run"]);
 
-/** "Asked to review RLH-3, RLH-4", or the plain label when the note names no ticket. */
+/** How much of a ticket title a review label shows. */
+export const REVIEW_TITLE_MAX = 60;
+
+/** One line, cut short to at most `max` characters with an ellipsis. */
+function oneLine(text: string, max: number) {
+  const one = text.replace(/\s+/g, " ").trim();
+  return one.length > max ? `${one.slice(0, max - 1).trimEnd()}…` : one;
+}
+
+/**
+ * The titles a review wake lists, one per item line: `- <uuid> "<title>": <note>`. Only the
+ * item lines count: a title or state note may itself mention another ticket's reference, and
+ * those words are not what is under review.
+ */
+function reviewTitles(note: string | null | undefined): string[] {
+  const titles: string[] = [];
+  for (const m of (note ?? "").matchAll(/^- [0-9a-f-]{36} "(.*?)":/gm)) {
+    const title = oneLine(m[1]!, REVIEW_TITLE_MAX);
+    if (title && !titles.includes(title)) titles.push(title);
+  }
+  return titles;
+}
+
+/** `Asked to review "Fix the build" and 2 more`, or the plain label when the note names no ticket. */
 function reviewLabel(note: string | null | undefined) {
-  const refs = (note?.match(/\b[A-Z][A-Z0-9]{0,7}-\d+\b/g) ?? []).filter((r, i, all) => all.indexOf(r) === i);
-  if (!refs.length) return REASON_LABEL["review requested"]!;
-  const shown = refs.slice(0, 3).join(", ") + (refs.length > 3 ? ` and ${refs.length - 3} more` : "");
-  return `Asked to review ${shown}`;
+  const titles = reviewTitles(note);
+  if (!titles.length) return REASON_LABEL["review requested"]!;
+  const shown = titles.slice(0, 2).map((t) => `"${t}"`).join(", ");
+  const more = titles.length > 2 ? ` and ${titles.length - 2} more` : "";
+  return `Asked to review ${shown}${more}`;
 }
 
 /** A nudge's own words, cut short: one line, no more than RUN_LABEL_REASON_MAX characters. */
 export function shortReason(why: string | null | undefined) {
-  const one = (why ?? "").replace(/\s+/g, " ").trim();
-  if (!one) return "";
-  const cut = one.length > RUN_LABEL_REASON_MAX ? `${one.slice(0, RUN_LABEL_REASON_MAX - 1).trimEnd()}…` : one;
-  return cut;
+  const one = oneLine(why ?? "", RUN_LABEL_REASON_MAX);
+  return one === "" ? "" : one;
 }
 
 /** "Nudged by CEO: re-check the add-a-skill build" — who nudged, then why when there is a why. */
