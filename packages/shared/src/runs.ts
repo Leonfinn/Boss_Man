@@ -75,6 +75,8 @@ export type RunOrigin = {
   /** A nudge's sender and why, when a nudge started it. */
   originFrom?: string | null;
   originNote?: string | null;
+  /** The wake's own note, which names the tickets a review run is about. */
+  wakeNote?: string | null;
   /** The ticket it was about without being on it (a nudge that named one). */
   runTicketId?: string | null;
   endedAt?: string | null;
@@ -101,7 +103,7 @@ export function runLabel(run: RunOrigin): RunLabel {
   if (run.purpose === "chat" || run.origin === "owner_chat") {
     return { text: run.endedAt ? REASON_LABEL["chat answered"]! : "Answering the owner in chat", unknown: false, ticketId };
   }
-  if (run.origin === "review requested") return { text: reviewLabel(run.originNote ?? run.reason), unknown: false, ticketId };
+  if (run.origin === "review requested") return { text: reviewLabel(run.originNote ?? run.wakeNote ?? run.reason), unknown: false, ticketId };
   const reason = run.origin ?? run.reason ?? null;
   if (!reason || NO_REASON.has(reason)) return { text: "Run without a ticket (reason not recorded)", unknown: true, ticketId };
   const known = REASON_LABEL[reason];

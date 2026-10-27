@@ -18,6 +18,8 @@ export function runOriginQuery(alias: string) {
     origin: sql<string | null>`${table}."origin"`,
     originFrom: sql<string | null>`(select a."name" from "agents" a where a."id" = (select n."from_agent_id" from "nudges" n where n."wake_id" = (select w."id" from "wakes" w where w."run_id" = ${table}."id" limit 1) order by n."created_at" desc limit 1))`,
     originNote: sql<string | null>`(select n."why" from "nudges" n where n."wake_id" = (select w."id" from "wakes" w where w."run_id" = ${table}."id" limit 1) order by n."created_at" desc limit 1)`,
+    // A review wake carries its tickets in the note; the card names them from here.
+    wakeNote: sql<string | null>`(select w."note" from "wakes" w where w."run_id" = ${table}."id" limit 1)`,
     runTicketId: sql<string | null>`${table}."run_ticket_id"`,
   };
 }

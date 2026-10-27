@@ -465,7 +465,7 @@ export const wakes = pgTable(
     createdAt: createdAt(),
     launchedAt: timestamp("launched_at", { withTimezone: true }),
   },
-  (t) => [index("wakes_status_priority").on(t.status, t.priority)],
+  (t) => [index("wakes_status_priority").on(t.status, t.priority), index("wakes_run_id").on(t.runId)],
 );
 
 // ---------- Runs, funding and cost ----------

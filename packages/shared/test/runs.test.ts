@@ -44,6 +44,8 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect(runLabel({ purpose: "chat", endedAt: "2026-10-27T10:00:00Z" }).text).toBe("Answered the owner in chat");
     expect(runLabel({ origin: "review requested", originNote: '- abc "Ready for a look"' }).text).toBe("Asked to review");
     expect(runLabel({ origin: "review requested", originNote: '- 11111111-1111-4111-8111-111111111111 "Fix RLH-3"\n- 22222222-2222-4222-8222-222222222222 "Fix RLH-4"' }).text).toBe("Asked to review RLH-3, RLH-4");
+    // In production a review run has no nudge, so the tickets come from the wake's note.
+    expect(runLabel({ origin: "review requested", reason: "review requested", wakeNote: '- 11111111-1111-4111-8111-111111111111 "Fix RLH-3"' }).text).toBe("Asked to review RLH-3");
   });
 
   it("falls back honestly only when nothing recorded the reason", () => {

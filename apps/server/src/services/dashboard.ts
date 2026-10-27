@@ -43,7 +43,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
       const agentCards = team
         .map((a) => {
           const r = byAgent.get(a.id);
-          return { id: a.id, name: a.name, role: a.role, paused: a.paused, duty: a.duty, run: r ? { id: r.id, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, runTicketId: r.runTicketId, startedAt: r.startedAt, endedAt: r.endedAt, result: r.endedAt ? runResult(r.outcome) : ("running" as const) } : null };
+          return { id: a.id, name: a.name, role: a.role, paused: a.paused, duty: a.duty, run: r ? { id: r.id, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, wakeNote: r.wakeNote, runTicketId: r.runTicketId, startedAt: r.startedAt, endedAt: r.endedAt, result: r.endedAt ? runResult(r.outcome) : ("running" as const) } : null };
         })
         .sort((x, y) => Number(!!y.run && !y.run.endedAt) - Number(!!x.run && !x.run.endedAt) || rank[x.role] - rank[y.role] || x.name.localeCompare(y.name));
 

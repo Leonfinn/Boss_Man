@@ -189,6 +189,8 @@ export type RunRow = {
   /** A nudge's sender and why, when a nudge started the run. */
   originFrom?: string | null;
   originNote?: string | null;
+  /** The wake's own note, which names the tickets a review run is about. */
+  wakeNote?: string | null;
   /** The ticket it was about without being on it (a nudge that named one). */
   runTicketId?: string | null;
   /** Tokens over the run, when the agent reported them (R67). */
