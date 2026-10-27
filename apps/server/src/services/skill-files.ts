@@ -23,6 +23,9 @@ export function hashFiles(files: SkillFile[]) {
 const SHELL_CMD = /^\s*(?:[$>#]\s+)?(?:sudo\s+)?(?:curl|wget|sh|bash|zsh|fish|ksh|dash|npx|npm|pnpm|yarn|pip3?|pipx|uv|uvx|python[\d.]*|node|deno|bun|ruby|perl|php|lua|awk|sed|powershell|pwsh|cmd|eval|exec|chmod|chown|rm|nc|ncat|git\s+clone|docker|kubectl|ssh|scp|source|\.\/\S+)\b(?=\s|$)/i;
 const MAKE_CMD = /^\s*(?:[$>]\s+)?make(?:\s+[\w.-]+)?\s*$/i;
 const INLINE_RUN = /\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b|\$\(|`[^`\n]*\b(?:curl|wget)\s[^`\n]*`|\b(?:curl|wget)\s+(?:-\S+\s+)*https?:\/\//i;
+// Inline code, an interpreter one-liner (-e / -c) or eval/exec anywhere in a line: an agent could be told to run it, so review.
+const INLINE_CODE = /`[^`\n]+`/;
+const ONE_LINER = /\b(?:node|deno|bun|python[\d.]*|ruby|perl|php|lua|powershell|pwsh)\s+(?:-\S+\s+)*-[ecC]\b|\b(?:eval|exec)\s*[(`'"]/i;
 
 /** Does this instructions text hold a code block, a #! line, or a line an agent could run? */
 function runnableText(text: string): boolean {
@@ -30,7 +33,7 @@ function runnableText(text: string): boolean {
   for (const line of text.split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
     if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
-    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line)) return true;
+    if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || ONE_LINER.test(line)) return true;
   }
   return false;
 }

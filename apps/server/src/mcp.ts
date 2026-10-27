@@ -159,6 +159,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     async ({ ticketId, agent, note, expected_version }) => {
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
+      if (await skillProposals.isOpenReviewTicket(scope.companyId, ticketId)) return fail("That ticket is the Security Reviewer's task for a skill proposal. It can't be edited or handed over; propose the skill again if it must change.");
       const to = await delegateTarget(agent);
       if ("error" in to) return fail(to.error);
       const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
@@ -204,7 +205,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
 
   registerRoadmap(server, db, work, scope);
 
-  registerTicketMoves(server, db, { review, work, feedback }, scope, hooks, false);
+  registerTicketMoves(server, db, { review, work, feedback, skillProposals }, scope, hooks, false);
 
   server.registerTool(
     "create_ticket",
@@ -1351,7 +1352,7 @@ async function treeRefusal(db: Db, scope: Scope, ticketId: string | undefined): 
  * managers may: the owner asks them there to close or tidy work, and workers move their own
  * tickets from the ticket's run.
  */
-function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback }: Pick<Services, "review" | "work" | "feedback">, scope: Scope, hooks: McpHooks, chat: boolean) {
+function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback, skillProposals }: Pick<Services, "review" | "work" | "feedback" | "skillProposals">, scope: Scope, hooks: McpHooks, chat: boolean) {
   const isManager = () => managerIn(db, scope);
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
@@ -1379,6 +1380,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
+      if (await skillProposals.isOpenReviewTicket(scope.companyId, ticketId)) return fail("That ticket is the Security Reviewer's task for a skill proposal. It can't be edited or handed over; propose the skill again if it must change.");
       if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee or noCode.");
       const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
@@ -1923,7 +1925,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillPro
 
   registerBoard(server, db, scope);
   registerRoadmap(server, db, work, scope);
-  registerTicketMoves(server, db, { review, work, feedback }, scope, hooks, true);
+  registerTicketMoves(server, db, { review, work, feedback, skillProposals }, scope, hooks, true);
   registerNotes(server, db, scope, true, { ticketChat });
 
   // So an agent asked in chat for something it can't do here asks the colleague who can, instead of the owner.

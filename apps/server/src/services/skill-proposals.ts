@@ -23,6 +23,9 @@ const numbered = (text: string) => text.split("\n").map((l, i) => `${String(i + 
 const lineCount = (text: string) => text.replace(/\n$/, "").split("\n").length;
 const SEVERITIES = ["critical", "high", "medium", "low"];
 
+/** The title the review task is created with. */
+export const reviewTitle = (p: Pick<Proposal, "name" | "replacesSkillId">) => `Security review: skill ${p.name}${p.replacesSkillId ? " (new version)" : ""}`;
+
 /** The review ticket's text: every file in full with numbered lines (assets that are not text, or past the size cap, are listed with their hash). */
 export function reviewBody(p: Pick<Proposal, "id" | "name" | "source" | "sourceUrl" | "pinnedRef" | "why" | "files" | "fileHashes" | "bundleHash" | "scriptFiles" | "replacesSkillId">) {
   const scripts = new Set(p.scriptFiles);
@@ -132,6 +135,12 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
   }
 
   return {
+    /** Is this ticket the review task of a proposal that is still open? Nobody edits or reassigns it then. */
+    async isOpenReviewTicket(companyId: string, ticketId: string) {
+      const [r] = await db.select({ id: skillProposals.id }).from(skillProposals).where(and(eq(skillProposals.companyId, companyId), eq(skillProposals.reviewTicketId, ticketId), eq(skillProposals.status, "in_review")));
+      return !!r;
+    },
+
     /** Records a proposal. Fetches and pins a link, hashes every file, works out whether it has scripts. */
     async propose(input: ProposeInput) {
       const why = input.why.trim();
@@ -228,7 +237,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       });
       if (needsReview) {
         try {
-          const t = await deps.createTicket(projectId!, { title: `Security review: skill ${name}${had ? " (new version)" : ""}`, body: reviewBody(p), assigneeAgentId: reviewer!.id, state: "ready", risk: "high", noCode: true, createdByAgentId: input.byAgentId });
+          const t = await deps.createTicket(projectId!, { title: reviewTitle(p), body: reviewBody(p), assigneeAgentId: reviewer!.id, state: "ready", risk: "high", noCode: true, createdByAgentId: input.byAgentId });
           p = (await db.update(skillProposals).set({ status: "in_review", reviewTicketId: t.id, updatedAt: new Date() }).where(eq(skillProposals.id, p.id)).returning())[0]!;
           await record(db, { companyId: input.companyId, ticketId: t.id, agentId: input.byAgentId, kind: "skill.review_requested", summary: `Security review of ${name} sent to ${reviewer!.name}.` });
         } catch (e) {
@@ -253,8 +262,10 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       const [me] = await db.select({ kind: agents.reviewKind }).from(agents).where(and(eq(agents.id, reviewerId), eq(agents.companyId, companyId)));
       if (me?.kind !== "security") throw new SkillError(403, "Only the Security Reviewer can give a verdict.");
       if (p.status !== "in_review" || !p.reviewTicketId) throw new SkillError(409, "This proposal isn't waiting for a review.");
-      const [t] = await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, p.reviewTicketId));
+      const [t] = await db.select({ assignee: tickets.assigneeAgentId, title: tickets.title, body: tickets.body }).from(tickets).where(eq(tickets.id, p.reviewTicketId));
       if (t?.assignee !== reviewerId) throw new SkillError(403, "This proposal's review was given to another reviewer.");
+      // Both are rebuilt from the stored row, so a ticket someone edited after it was made can't carry a verdict.
+      if (t.title !== reviewTitle(p) || t.body !== reviewBody(p)) throw new SkillError(409, "This review task was changed after it was made, so the verdict is refused. Read every file with proposal_file and ask the CEO to propose the skill again.");
       checkVerdict(p, v);
       const [row] = await db
         .update(skillProposals)

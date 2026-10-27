@@ -3,6 +3,8 @@
 // skill comes from a GitHub link (pinned to the commit it was read at), is written in Boss
 // Man, or is uploaded. The owner gives skills to agents, and so can the CEO.
 // Format: https://code.claude.com/docs/en/skills and https://agentskills.io.
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
@@ -115,20 +117,73 @@ export function parseGitHub(url: string): { owner: string; repo: string; ref: st
 /** The name a fetched skill will have: its frontmatter name, else its folder. */
 export const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillName(parseSkillMd(Buffer.from(f.files.find((x) => x.path === "SKILL.md")!.content, "base64").toString("utf8")).name ?? f.folder);
 
-export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
-  const get = deps.fetch ?? fetch;
+/** Loopback, private, link-local, unique-local, carrier-grade NAT, multicast and unspecified addresses (IPv4 and IPv6). */
+export function isPrivateAddress(ip: string): boolean {
+  const v4 = /^(?:::ffff:)?(\d+)\.(\d+)\.(\d+)\.(\d+)$/i.exec(ip);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19));
+  }
+  const x = ip.toLowerCase();
+  return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("::ffff:");
+}
 
-  async function fetchOk(url: string, as: "json" | "bytes") {
-    let res: Response;
-    try {
-      res = await get(url, { headers: { "user-agent": "Boss-Man", accept: as === "json" ? "application/vnd.github+json" : "*/*" }, signal: AbortSignal.timeout(20_000) });
-    } catch {
-      throw new SkillError(502, `Couldn't reach ${new URL(url).host}.`);
+const realLookup = async (host: string) => (await dnsLookup(host, { all: true })).map((a) => a.address);
+
+export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (host: string) => Promise<string[]> } = {}) {
+  const get = deps.fetch ?? fetch;
+  // A test that injects its own fetch never touches the network, so it needs no real DNS; production resolves every host.
+  const lookup = deps.lookup ?? (deps.fetch ? undefined : realLookup);
+
+  /** True for loopback, private, link-local and other addresses a public skill link has no business on. */
+  async function privateHost(host: string) {
+    const h = host.replace(/^\[|\]$/g, "");
+    const addrs = isIP(h) ? [h] : lookup ? await lookup(h) : [];
+    return addrs.some(isPrivateAddress);
+  }
+
+  /** Fetches an https address: no private hosts (also after each redirect), redirects followed by hand, and the body read with a cap. */
+  async function fetchOk(url: string, as: "json" | "bytes", maxBytes = LIMITS.bytes) {
+    let res: Response | undefined;
+    let at = url;
+    for (let hop = 0; hop <= 5; hop++) {
+      const u = new URL(at);
+      if (u.protocol !== "https:") throw new SkillError(400, "Only https links are supported.");
+      if (await privateHost(u.hostname).catch(() => true)) throw new SkillError(400, `${u.host} isn't a public address; skill links must point to the public internet.`);
+      try {
+        res = await get(at, { headers: { "user-agent": "Boss-Man", accept: as === "json" ? "application/vnd.github+json" : "*/*" }, signal: AbortSignal.timeout(20_000), redirect: "manual" });
+      } catch {
+        throw new SkillError(502, `Couldn't reach ${u.host}.`);
+      }
+      if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+        at = new URL(res.headers.get("location")!, at).toString();
+        await res.body?.cancel().catch(() => {});
+        res = undefined;
+        continue;
+      }
+      break;
     }
+    if (!res) throw new SkillError(502, "Too many redirects.");
+    const host = new URL(at).host;
     if (res.status === 404) throw new SkillError(404, "Nothing found at that link. Private repositories aren't supported yet; check the link is public.");
     if (res.status === 403 || res.status === 429) throw new SkillError(429, "GitHub is rate-limiting requests from this server. Try again in an hour.");
-    if (!res.ok) throw new SkillError(502, `${new URL(url).host} answered ${res.status}.`);
-    return as === "json" ? ((await res.json()) as unknown) : Buffer.from(await res.arrayBuffer());
+    if (!res.ok) throw new SkillError(502, `${host} answered ${res.status}.`);
+    const tooBig = new SkillError(400, `That file is over ${Math.round(maxBytes / 1024 / 1024) || maxBytes / 1024 / 1024} MB.`);
+    if (Number(res.headers.get("content-length") ?? 0) > maxBytes) throw tooBig;
+    const chunks: Buffer[] = [];
+    let n = 0;
+    if (res.body) {
+      for await (const c of res.body as unknown as AsyncIterable<Uint8Array>) {
+        n += c.length;
+        if (n > maxBytes) {
+          await res.body.cancel().catch(() => {});
+          throw tooBig;
+        }
+        chunks.push(Buffer.from(c));
+      }
+    }
+    const body = Buffer.concat(chunks);
+    return as === "json" ? (JSON.parse(body.toString("utf8")) as unknown) : body;
   }
 
   async function save(companyId: string, input: { files: SkillFile[]; source: "written" | "link" | "upload"; sourceUrl?: string | null; sourceRef?: string | null; name?: string | null; replaceId?: string | null; pack?: string | null; packUrl?: string | null }) {
@@ -214,7 +269,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     /** For the proposals flow: read a link, optionally at an exact commit (never re-resolving a branch). */
     readGitHub,
     /** For the proposals flow: the bytes at a non-GitHub link. */
-    fetchBytes: (url: string) => fetchOk(url, "bytes") as Promise<Buffer>,
+    fetchBytes: (url: string) => fetchOk(url, "bytes", 1_000_000) as Promise<Buffer>,
     save,
 
     async list(companyId: string) {
