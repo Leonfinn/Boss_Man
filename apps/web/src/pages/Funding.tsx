@@ -2,6 +2,7 @@ import { api, usd, type ActiveRun, type BudgetRow, type Company, type FundingSou
 import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { windowLabel } from "@boss-man/shared";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
 /** "Thu 29 Oct at 14:04": day, date and time in the same style as the reset line. */
@@ -11,16 +12,6 @@ const dayAndTime = (iso: string) => {
   return `${day} at ${d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
 };
 
-/** Plain names for the limits Claude reports; anything unknown gets a readable name, never the raw key. */
-export function windowLabel(key: string): { name: string; note?: string } {
-  if (key === "five_hour") return { name: "5-hour window" };
-  if (key === "seven_day") return { name: "This week" };
-  if (/fable|overage_included/.test(key))
-    return { name: "Fable (this week)", note: "Fable can use up to 50% of your weekly limit. The bar shows how much of Fable's own allowance is used." };
-  const m = /^(\d+)_min$/.exec(key);
-  if (m) return { name: `${m[1]}-minute window` };
-  return { name: "Other limit" };
-}
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
 /** The limit estimate under a quota bar (R78): how fast it's going, and whether it lasts until the reset. */
@@ -117,10 +108,12 @@ function SourceCard({ s }: { s: FundingStatus }) {
           </span>
         </>
       ) : s.quota.length ? (
-        s.quota.map((q) => (
+        s.quota.map((q) => {
+          const label = windowLabel(q.window);
+          return (
           <div key={q.window} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-              <span>{windowLabel(q.window).name}</span>
+              <span>{label.name}</span>
               <span className="mono" style={{ color: q.utilization >= 0.9 ? "var(--amber-ink)" : undefined }}>
                 {pct(q.utilization)}
               </span>
@@ -128,9 +121,9 @@ function SourceCard({ s }: { s: FundingStatus }) {
             <div className={`bar${q.utilization >= 0.9 ? " warn" : ""}`} aria-hidden="true">
               <span style={{ width: pct(Math.min(1, q.utilization)) }} />
             </div>
-            {windowLabel(q.window).note && (
+            {label.note && (
               <span className="muted" style={{ fontSize: 12 }}>
-                {windowLabel(q.window).note}
+                {label.note}
               </span>
             )}
             {q.resetsAt && (
@@ -141,7 +134,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
             )}
             <Forecast f={s.forecasts[q.window]} />
           </div>
-        ))
+          );
+        })
       ) : s.source.kind === "subscription" ? (
         // A subscription isn't paid per run, so there's no money to show; its quota appears after its first run.
         <span className="muted">No quota reported yet. It shows here after the first run on this subscription.</span>

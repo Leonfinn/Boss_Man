@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Funding, windowLabel } from "../src/pages/Funding";
+import { windowLabel } from "@boss-man/shared";
+import { Funding } from "../src/pages/Funding";
 
 afterEach(() => {
   cleanup();
