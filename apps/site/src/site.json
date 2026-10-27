@@ -1,0 +1,15 @@
+{
+  "name": "Boss Man",
+  "repo": "https://github.com/Leonfinn/Boss_Man",
+  "guidePath": "/blob/main/docs/00-first-time-install.md",
+  "licencePath": "/blob/main/LICENSE",
+  "issuesPath": "/issues",
+  "ogImage": "/img/og.png",
+  "ogAlt": "Boss Man: run a company of AI agents. Stay the boss.",
+  "nav": [
+    { "key": "features", "label": "Features", "href": "/features" },
+    { "key": "how-it-works", "label": "How it works", "href": "/how-it-works" },
+    { "key": "faq", "label": "FAQ", "href": "/faq" },
+    { "key": "github", "label": "GitHub", "href": "{{repo}}" }
+  ]
+}

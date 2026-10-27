@@ -1255,6 +1255,40 @@ function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => 
   );
 }
 
+/** How long the CEO has to act on a decision the owner asked for advice on. */
+function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [minutes, setMinutes] = useState(String(company.adviceTimeoutMinutes ?? 120));
+  const act = useAction();
+  const n = Number(minutes);
+  const valid = Number.isInteger(n) && n >= 5 && n <= 1440;
+  return (
+    <Section id="advice-timeout-h" title="Asking the CEO for advice">
+      <p className="muted" style={{ fontSize: 14 }}>
+        When you press "Ask the CEO for advice" on a decision, the CEO has this long to rewrite or settle it. After that it goes back to you as it was.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="advice-timeout">Minutes the CEO has</label>
+        <input id="advice-timeout" type="number" min={5} max={1440} value={minutes} onChange={(e) => setMinutes(e.target.value)} style={{ width: 80 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { adviceTimeoutMinutes: n } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** The company's hourly nudge limit (BOS-73). */
 function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
@@ -1439,6 +1473,57 @@ function SelfDeploy({ go }: { go: (to: string) => void }) {
 
 type LastUpdate = { at: string; startedAt: string | null; ok: boolean; title: string; body: string } | null;
 type MaintenanceView = ({ on: false } | { on: true; deadline: string; runs: number; companies: number }) & { last?: LastUpdate };
+
+/** How many agents may run at once, in total and per company; the per-agent limit is fixed at one. */
+function RunLimits() {
+  const view = usePoll((signal) => api<{ instance: number; company: number; defaults: { instance: number; company: number } }>("/api/run-limits", { signal }), 30_000, "run-limits");
+  const act = useAction();
+  const [edit, setEdit] = useState<{ instance: string; company: string } | null>(null);
+  const d = view.data;
+  if (!d) return null;
+  const v = edit ?? { instance: String(d.instance), company: String(d.company) };
+  const [i, c] = [Number(v.instance), Number(v.company)];
+  const valid = Number.isInteger(i) && i >= 1 && i <= 32 && Number.isInteger(c) && c >= 1 && c <= 16 && c <= i;
+  return (
+    <Section id="run-limits-h" title="How many agents run at once">
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="limit-instance">Across all companies (1 to 32)</label>
+        <input id="limit-instance" type="number" min={1} max={32} value={v.instance} onChange={(e) => setEdit({ ...v, instance: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Agents running at once, across all companies (default {d.defaults.instance}). Each running agent uses memory and CPU on this machine and spends from its funding source. Higher: more work happens in parallel, but more spend at once and more load on the server. Lower: work queues for longer.
+        </p>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <label htmlFor="limit-company">In one company (1 to 16, no more than the number above)</label>
+        <input id="limit-company" type="number" min={1} max={16} value={v.company} onChange={(e) => setEdit({ ...v, company: e.target.value })} style={{ width: 80 }} />
+        <p className="muted" style={{ fontSize: 14 }}>
+          Agents running at once in one company (default {d.defaults.company}). Stops one busy company from using every slot. Higher: that company's tickets and reviews start sooner; spend can rise faster. Lower: tickets wait in the queue (you'll see "at a concurrency limit").
+        </p>
+      </div>
+      <p className="muted" style={{ fontSize: 14 }}>
+        Each agent always does one piece of work at a time (it has one working folder), plus one chat with you. Your chats are never held by these limits.
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api("/api/run-limits", { method: "PUT", body: { instance: i, company: c } });
+              setEdit(null);
+              view.reload();
+              return "Saved.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
 
 /** Drain-then-swap for runner updates: start it by hand (after scripts/update-runner.sh built the image) or cancel one that is running. */
 function RunnerUpdate() {
@@ -1767,6 +1852,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
           <>
             <ServerPanel />
             <SelfDeploy go={go} />
+            <RunLimits />
           </>
         )}
         {current.id === "transfer" && <ImportCompany go={go} onChanged={onChanged} />}
@@ -1813,6 +1899,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <AdviceTimeout company={company} onChanged={onChanged} />
             <Watchdog company={company} />
             <Chapters company={company} />
           </div>

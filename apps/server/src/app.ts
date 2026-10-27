@@ -14,9 +14,10 @@ import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/s
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
+import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
@@ -56,7 +57,7 @@ import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
-import { schedulerService, type Limits } from "./services/scheduler.js";
+import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
 import { applyPackage, ImportError, previewPackage, readPackage } from "./services/company-import.js";
 import { mcpRoutes } from "./mcp.js";
@@ -176,6 +177,7 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
+  const notesSvc = notesService(db);
   const agentsSvc = agentsService(db, {
     now: opts.now,
     notify: (n) => notes.notify(n),
@@ -363,6 +365,7 @@ export async function buildApp(opts: AppOptions) {
     }
   });
   const sweeps = sweepService(db, {
+    expireAdvice: () => decisionsSvc.expireAdvice(),
     limits: opts.sweepLimits,
     now: opts.now,
     wake: (input) => scheduler.notify(input.agentId, input),
@@ -390,6 +393,7 @@ export async function buildApp(opts: AppOptions) {
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
+    localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
     now: opts.now,
     log: (m) => app.log.error(m),
   });
@@ -432,7 +436,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images, watchdog, alerts }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images, watchdog, alerts }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -591,7 +595,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
@@ -744,6 +748,18 @@ export async function buildApp(opts: AppOptions) {
       const b = z.object({ ids: z.array(Uuid).max(500).optional(), all: z.boolean().optional() }).parse(req.body);
       await notes.markRead(b.all ? "all" : (b.ids ?? []));
       return { unread: await notes.unread() };
+    });
+    // Run limits: how many agents may work at once (instance-wide and per company); per-agent stays fixed at 1.
+    const runLimits = async () => {
+      const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, "run_limits"));
+      const v = row?.value as { instance?: number; company?: number } | undefined;
+      return { instance: v?.instance ?? scheduler.limits.instance, company: v?.company ?? scheduler.limits.company, defaults: { instance: DEFAULT_LIMITS.instance, company: DEFAULT_LIMITS.company } };
+    };
+    owner.get("/api/run-limits", async () => runLimits());
+    owner.put("/api/run-limits", async (req) => {
+      const value = z.object({ instance: z.number().int().min(1).max(32), company: z.number().int().min(1).max(16) }).refine((b) => b.company <= b.instance, { message: "The company limit can't be higher than the all-companies limit." }).parse(req.body);
+      await db.insert(settings).values({ key: "run_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
+      return runLimits();
     });
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
@@ -1814,6 +1830,38 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/agents/:id/history", async (req, reply) => agentsSvc.history(IdParam.parse(req.params).id).catch(agentErrors(reply)));
     owner.post("/api/agent-changes/:id/undo", async (req, reply) => agentsSvc.undo(IdParam.parse(req.params).id).catch(agentErrors(reply)));
 
+    // The CEO's lasting notes (BOS-85): the owner sees, adds, edits and deletes them, within the same caps, and sees colleagues' requests.
+    const noteErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof NoteError) return reply.code(err.status).send({ error: "note", message: err.message });
+      throw err;
+    };
+    const NoteBody = z.object({ title: z.string().trim().min(1).max(NOTE_LIMITS.title), text: z.string().trim().min(1).max(NOTE_LIMITS.text), why: z.string().trim().min(1).max(NOTE_LIMITS.why) });
+    const noteOf = async (id: string) => (await db.select({ companyId: agentNotes.companyId }).from(agentNotes).where(eq(agentNotes.id, id)))[0];
+    owner.get("/api/agents/:id/notes", async (req, reply) => {
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, IdParam.parse(req.params).id));
+      if (!a) return reply.code(404).send({ error: "not_found" });
+      // Pending and declined requests from other agents show beside the notes.
+      return { items: await notesSvc.withOrigin(a.companyId, IdParam.parse(req.params).id), requests: await notesSvc.requests(a.companyId, IdParam.parse(req.params).id), limits: NOTE_LIMITS };
+    });
+    owner.post("/api/agents/:id/notes", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, id));
+      if (!a) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.save(a.companyId, id, NoteBody.parse(req.body), { source: "owner" }).then((n) => reply.code(201).send(n), noteErrors(reply));
+    });
+    owner.patch("/api/agent-notes/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const n = await noteOf(id);
+      if (!n) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.update(n.companyId, id, NoteBody.partial().parse(req.body), { owner: true }).then((r) => r.after, noteErrors(reply));
+    });
+    owner.delete("/api/agent-notes/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const n = await noteOf(id);
+      if (!n) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.remove(n.companyId, id, { owner: true }).then(() => ({ ok: true }), noteErrors(reply));
+    });
+
     // The Scrum Master watchdog (BOS-58): settings and health, its flags and action log (read by the activity view and daily summary), and undo.
     const watchdogErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
       if (err instanceof WatchdogError) return reply.code(err.status).send({ error: "watchdog", message: err.message });
@@ -1833,7 +1881,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/companies/:id/watchdog/actions", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const q = z.object({ ticketId: Uuid.optional(), since: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
+      const q = z.object({ ticketId: Uuid.optional(), since: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(500).optional(), excludeKind: z.string().max(40).optional() }).parse(req.query);
       return watchdog.actions(id, q).catch(watchdogErrors(reply));
     });
     owner.get("/api/companies/:id/watchdog/backtest", async (req, reply) => {
@@ -1895,6 +1943,20 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/decisions", async () => decisionsSvc.queue());
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
     owner.get("/api/decisions/with-team", async () => decisionsSvc.withTeam());
+
+    // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).
+    owner.post("/api/decisions/:id/ask-advice", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { note } = z.object({ note: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+      try {
+        const r = await decisionsSvc.askAdvice(id, note || undefined);
+        return r ?? reply.code(404).send({ error: "not_open" });
+      } catch (err) {
+        if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
+        throw err;
+      }
+    });
+    owner.get("/api/decisions/advised", async () => decisionsSvc.recentlyAdvised());
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

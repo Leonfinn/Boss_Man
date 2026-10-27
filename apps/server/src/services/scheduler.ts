@@ -23,6 +23,7 @@ import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
+import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
@@ -429,7 +430,10 @@ export function schedulerService(
 
   async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date) {
     const me = agentIdentity(agent, companyName);
-    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
+    // The CEO's notes and waiting note requests (BOS-85) go in this wake prompt, which every run gets,
+    // rather than the chapter's frozen directive, so a note saved mid-chapter shows on the next run.
+    const notes = agent.role === "ceo" ? await ceoNotesLines(db, agent.companyId, agent.id) : [];
+    const lines = [`You are ${me.who}, working through Boss Man.`, ...me.instructions, ...notes, "", await buildBrief(db, { companyId: agent.companyId, agentId: agent.id, role: agent.role, since: agent.briefSeenAt, now: briefAt })];
     const toolServers = await toolServersFor(agent);
     if (toolServers.length)
       lines.push(
@@ -948,6 +952,11 @@ export function schedulerService(
       }
 
       const active = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose }).from(runs).where(isNull(runs.endedAt));
+      // The owner's Settings override the instance and company limits when saved (settings.run_limits).
+      const [lrow] = await db.select().from(settings).where(eq(settings.key, "run_limits"));
+      const stored = lrow?.value as { instance?: number; company?: number } | undefined;
+      const maxTotal = stored?.instance ?? limits.instance;
+      const maxCompany = stored?.company ?? limits.company;
       let total = active.length;
       const byCompany = new Map<string, number>();
       const byAgent = new Map<string, number>();
@@ -989,7 +998,8 @@ export function schedulerService(
           continue;
         }
         const isChat = w.reason === CHAT_REASON;
-        if (total >= limits.instance || (byCompany.get(w.companyId) ?? 0) >= limits.company || (isChat ? chatting.has(w.agentId) : (byAgent.get(w.agentId) ?? 0) >= limits.agent)) {
+        // Chats with the owner are held only by their agent's one chat slot; work wakes face all three limits.
+        if (isChat ? chatting.has(w.agentId) : total >= maxTotal || (byCompany.get(w.companyId) ?? 0) >= maxCompany || (byAgent.get(w.agentId) ?? 0) >= limits.agent) {
           // A review stuck behind its busy reviewer goes to another qualified reviewer who is free.
           const waited = t.getTime() - w.createdAt.getTime();
           if (w.reason === REVIEW_REASON && (byAgent.get(w.agentId) ?? 0) >= limits.agent && waited >= limits.reviewHandoverMs) {

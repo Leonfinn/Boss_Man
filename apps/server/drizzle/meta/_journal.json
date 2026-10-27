@@ -442,6 +442,27 @@
       "when": 1793067531363,
       "tag": "0062_company_nudge_cap",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1793088758411,
+      "tag": "0063_agent_notes",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1793093796972,
+      "tag": "0064_company_advice_timeout",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1793180196972,
+      "tag": "0065_lessons_to_ceo",
+      "breakpoints": true
     }
   ]
 }

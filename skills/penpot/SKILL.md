@@ -26,7 +26,8 @@ In the steps below, `<skill dir>` is this skill's base directory (shown when the
 **Draw**
 1. `$P agent-project TEAM_ID` prints the id of the "Agent designs" project (made if missing).
 2. `$P create-file PROJECT_ID "Name"` prints `file-id<TAB>name`.
-3. Write a layout file (below) in /tmp, then `$P apply FILE_ID /tmp/layout.json`. It adds the page (if new), the boards and the shapes, and prints `type<TAB>id<TAB>name` for each. Applying the same page again adds more boards beside the existing ones; it does not replace anything, so to redo a board, `remove-shape` it first.
+3. Write a layout file (below) in /tmp. Run `$P validate /tmp/layout.json` first: it writes nothing, needs no Penpot connection, and prints plain-word `error:` lines (each names the shape and the fix; an apply refuses while any remain) and `warning:` lines (text that is hard to read, duplicate names). Then `$P apply FILE_ID /tmp/layout.json`. It adds the page (if new), the boards and the shapes, and prints `type<TAB>id<TAB>name<TAB>added|updated` for each (and `removed<TAB>id<TAB>name`).
+   **Applying again updates by name.** Boards and shapes that already exist on the page with the same name and kind are updated in place, so the owner's comments survive; new names are added; nothing is deleted unless the layout says so with `{"remove": "Shape name"}` (in a board's `children`, or in `boards` for a whole board; a name that isn't there is ignored). A board that already exists keeps its place and size (only a new `fill`/`stroke` is applied; its `x`, `y`, `w`, `h` are ignored), and a group keeps its frame while its children are updated. Give siblings different names, since that is how they are matched.
 4. `$P link FILE_ID [PAGE_ID]` prints the address the owner opens. Put it in the ticket reply.
 5. Change a shape: `$P modify FILE_ID PAGE_ID SHAPE_ID name=.. x=.. y=.. w=.. h=.. fill=#hex text=..`. Remove one: `$P remove-shape FILE_ID PAGE_ID SHAPE_ID` (removing a board or group removes what is inside). Move/resize works on rectangles, ellipses and text only; for boards and groups, remove and apply again. Also `rename-file FILE_ID NAME` and `delete-file FILE_ID`.
 
@@ -44,9 +45,11 @@ In the steps below, `<skill dir>` is this skill's base directory (shown when the
 ]}
 ```
 
-- Sizes: desktop 1440 wide, mobile 390 wide (any height). Boards without `x` are placed side by side with a gap; `y` defaults to 0.
-- Shape x/y are relative to their board. Types: `rect`, `ellipse`, `text`, `group`. Optional: `fill`, `stroke`, `strokeWidth`, `radius`, `name`. Text: `text`, `size`, `font` (default `sourcesanspro`; a Google font name like `Inter` also works), `weight` (`bold`), `align`; give `w` for wrapped text. Colours are `#rrggbb`.
-- Images are not supported yet.
+- Sizes: `"preset": "desktop"` is 1440x1024 and `"preset": "mobile"` is 390x844; an explicit `w`/`h` wins over the preset. Without a preset or `w`/`h` a board is 1440x900. New boards without `x` are placed side by side with a 100px gap; `y` defaults to 0.
+- Colour palette: add `"colours": {"brand": "#1e40af", "ink": "#111111"}` next to `page`, then write `"fill": "brand"` or `"stroke": "ink"` anywhere (boards and shapes, text included). A value is either `#rrggbb` or a name in `colours`.
+- Contrast: `validate` (and `apply`) warn when text is under 4.5:1 against what is behind it (3:1 for text of size 24 or more). The background is the last rect, ellipse or image drawn before it that covers its top-left corner, else the board's fill. It is a warning, not a stop: fix it or say why it is fine.
+- Shape x/y are relative to their board. Types: `rect`, `ellipse`, `text`, `group`, `image`. Optional: `fill`, `stroke`, `strokeWidth`, `radius`, `name`. Text: `text`, `size`, `font` (default `sourcesanspro`; a Google font name like `Inter` also works), `weight` (`bold`), `align`; give `w` for wrapped text. Colours are `#rrggbb`.
+- Images: `{"type": "image", "name": "Photo", "x": 0, "y": 0, "w": 300, "h": 200, "path": "/tmp/photo.png"}` (a png, jpg, gif or webp file under 5 MB that you made or downloaded for this ticket). The script tries to upload it into the Penpot file with the agent token. **If Penpot accepts it, the shape shows the picture. If it doesn't (or there is no `path`, or the file isn't a real picture), the shape is a grey rectangle named "Image"** and the script prints a `note:` line saying why. The upload call was written from Penpot's API but has not been tried against the company's Penpot yet, so check the `note:` lines, and tell the owner in the ticket which of the two you got.
 
 ## If export fails
 

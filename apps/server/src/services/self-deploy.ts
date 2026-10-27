@@ -190,7 +190,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const s = await status();
       if (s?.result === "running") throw new AnswerError("A deploy is running now. Wait for it to finish.");
       if (await pending()) throw new AnswerError("A deploy request is already waiting for the host. Try again in a minute.");
-      if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed") throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
+      // Only the commit that failed to deploy is refused: after a rollback or a deploy by hand, what runs can still be built.
+      if (ctx.target === "runner" && s?.target === "server" && s.result !== "deployed" && s.to_commit === ctx.commit) throw new AnswerError("The server deploy has not succeeded, so the runners are not updated.");
     },
 
     /** Hands the approved request to the host: written beside its final name, then renamed, so the host never reads half a file. // leader-only */
