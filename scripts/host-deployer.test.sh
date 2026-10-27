@@ -198,6 +198,9 @@ W="$T/world"; DL="$T/docker.log"
 cat >"$T/bin/docker" <<'FAKE'
 #!/usr/bin/env bash
 # A tiny pretend Docker: a world of two colours, a proxy, and files for their state.
+if [[ $1 == image ]]; then # image inspect boss-man-server:<colour>
+  [[ -z ${FAKE_NO_IMAGE:-} ]]; exit
+fi
 [[ $1 == compose ]] || exit 99
 shift; a="$*"; echo "docker $a" >>"$DL"
 role() { cat "$W/role.$1" 2>/dev/null || echo down; }
@@ -211,6 +214,7 @@ case "$a" in
   "build server-"*) c=${a#build server-}; [[ -z ${FAKE_BUILD_FAIL:-} ]] || exit 1; echo "$BOSSMAN_COMMIT" >"$W/built.$c"; echo "build $c commit=$BOSSMAN_COMMIT" >>"$DL" ;;
   "run --rm migrate") echo "migrate tag=$BOSSMAN_MIGRATE_TAG" >>"$DL"; exit "${FAKE_MIGRATE_RC:-0}" ;;
   "up -d --no-deps --force-recreate server-"*) c=${a##*server-}; touch "$W/running.$c"; cp "$W/built.$c" "$W/commit.$c"; echo standby >"$W/role.$c" ;;
+  "up -d --no-deps server-"*) c=${a##*server-}; touch "$W/running.$c"; echo standby >"$W/role.$c" ;;
   "kill -s USR1 server-"*) c=${a##*server-}; echo "signal USR1 $c" >>"$DL"; [[ -n ${FAKE_NO_DEMOTE:-} ]] || echo standby >"$W/role.$c" ;;
   "kill -s USR2 server-"*) c=${a##*server-}; echo "signal USR2 $c" >>"$DL"; echo leader >"$W/role.$c" ;;
   "stop server-"*) c=${a##*server-}; rm -f "$W/running.$c"; echo "stopped $c" >>"$DL" ;;
@@ -244,7 +248,7 @@ order() { # log-file pattern...: each pattern must appear after the previous one
 reset_world() {  # live colour = $1, leading at commit $2
   local idle=green; [[ $1 == green ]] && idle=blue
   rm -rf "$W"; mkdir -p "$W"; touch "$W/running.proxy" "$W/running.$1"; echo leader >"$W/role.$1"; echo "$2" >"$W/commit.$1"
-  rm -rf "$D/proxy" "$D/state/soak"; mkdir -p "$D/proxy"; chmod 755 "$D/proxy"
+  rm -rf "$D/proxy" "$D/state/soak" "$D/state/previous" "$D/state/hold"; mkdir -p "$D/proxy"; chmod 755 "$D/proxy"
   printf '# x\n# Written by host-deployer.sh. Live colour: %s\n(active) {\n\treverse_proxy server-%s:{args[0]} {\n\t}\n}\n' "$1" "$1" >"$D/proxy/active.caddy"
   : >"$DL"; : >"$T/hook.out"; : >"$D/deployer.log"; echo "$idle" >/dev/null
 }
@@ -348,6 +352,47 @@ grep -q 'mktemp "\$STATE/active' "$here/host-deployer.sh" || fail "include temp 
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 b5="$(push deploy/caddy/Caddyfile)"; bgreq "$b5"; bg
 has "$D/outbox/status.json" "deployment files (deploy/caddy/Caddyfile)"; hasnt "$DL" "pg_dump"
+
+# 22. Manual rollback, long after the window (no soak file, old colour stopped): back to the other colour.
+git -C "$T/w" reset -q --hard "$b5^"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop case 21 Caddyfile commit
+reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
+b6="$(push apps/server/bg6)"; bgreq "$b6"; bg
+[[ $(status result) == deployed ]] || fail "setup swap: $(cat "$D/outbox/status.json")"
+sed -i 's/deadline=[0-9]*/deadline=1/' "$D/state/soak"; bg   # the window ends: blue is stopped
+[[ ! -e $W/running.blue ]] || fail "setup: blue should be stopped"
+: >"$DL"; : >"$T/hook.out"
+bg --rollback --dry-run; hasnt "$DL" "signal"; hasnt "$DL" "pg_dump"; live_is green
+bg --rollback
+[[ $(status result) == rolled_back ]] || fail "manual rollback: $(cat "$D/outbox/status.json")"
+order "$DL" "pg_dump" "up -d --no-deps server-blue" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
+hasnt "$DL" "build"; hasnt "$DL" "migrate"; hasnt "$DL" "force-recreate"
+live_is blue; [[ $(cat "$W/role.blue") == leader && ! -e $W/running.green ]] || fail "world after manual rollback"
+[[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not moved to the running code"
+has "$T/hook.out" '"result": "rolled_back"'
+# The rejected release is held (not offered again); a newer commit lifts the hold.
+[[ $(cat "$D/state/hold") == "$b6" && ! -e $D/state/previous ]] || fail "hold / previous not recorded after rollback"
+touch "$D/inbox/check"; bg
+[[ $(jget "$D/outbox/available.json" tip) == "$P" ]] || fail "offered the rolled-back release again"
+b7="$(push apps/server/bg7)"; touch "$D/inbox/check"; bg
+[[ $(jget "$D/outbox/available.json" tip) == "$b7" ]] || fail "a newer commit was not offered"
+# No image to go back to: nothing is touched.
+reset_world green "$cur"; : >"$DL"; FAKE_NO_IMAGE=1 "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without an image should fail"
+hasnt "$DL" "signal"; hasnt "$DL" "pg_dump"; live_is green
+# The other colour fails the checks after the flip: reversed, still live on the original colour.
+reset_world green "$cur"; : >"$DL"; echo "blue $cur" >"$D/state/previous"; echo "$cur" >"$W/commit.blue"
+FAKE_VERIFY_FAIL=blue BG_POLL_SECONDS=0 BG_READY_SECONDS=1 BG_HANDOVER_SECONDS=1 "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "a rollback whose checks fail must exit non-zero"
+live_is green; [[ $(cat "$W/role.green") == leader ]] || fail "original colour not restored"
+# A deploy that failed after its build left a different build in the stopped colour: refused, live untouched.
+reset_world green "$cur"; echo "blue $cur" >"$D/state/previous"; echo "$b6" >"$W/commit.blue"; : >"$DL"
+"$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback to an unrecorded build should fail"
+hasnt "$DL" "signal"; live_is green; [[ $(cat "$W/role.green") == leader ]] || fail "live colour touched by a refused rollback"
+# No record of a previous release at all: refused.
+reset_world green "$cur"; echo "$cur" >"$W/commit.blue"; : >"$DL"
+"$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without a recorded previous release should fail"
+hasnt "$DL" "signal"; live_is green
+# Not blue/green: refused.
+unset COMPOSE_FILE; "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "rollback without blue/green should fail"; has "$T/out" "does not use blue/green"
+export COMPOSE_FILE="docker-compose.yml:deploy/truenas.yml:deploy/truenas-bluegreen.yml"
 
 # With no BOSSMAN_DEPLOYER, the copy uses the folder it sits in.
 own="$(mktemp -d)"; mkdir -p "$own/deployer"; cp "$here/host-deployer.sh" "$own/deployer/"

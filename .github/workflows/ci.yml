@@ -124,5 +124,6 @@ jobs:
           scripts/update-runner.test.sh
           scripts/rebuild-live.test.sh
           scripts/backup-penpot.test.sh
+          scripts/restore-test.test.sh
           skills/penpot/scripts/penpot.test.sh
           skills/penpot/scripts/penpot.write.test.sh
