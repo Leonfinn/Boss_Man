@@ -1,28 +1,54 @@
 #!/usr/bin/env bash
-# Tests the heavy-phase lock in scripts/check-all.sh with stubbed pnpm/node (nothing real runs).
+# Checks check-all.sh's retry logic with a stub in place of the real checks (BOSSMAN_CHECK_BODY).
+# shellcheck disable=SC2016  # the stub bodies are meant to expand later, inside the child
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
-command -v flock >/dev/null || { echo "check-all.test: flock missing, skipped"; exit 0; }
-tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-printf '#!/bin/sh\nexit 0\n' > "$tmp/pnpm"; cp "$tmp/pnpm" "$tmp/node"; chmod +x "$tmp/pnpm" "$tmp/node"
-export PATH="$tmp:$PATH" CHECK_ALL_LOCK="$tmp/lock" CHECK_ALL_STOP_AFTER_LOCK=1
-fail() { echo "check-all.test: FAIL: $*" >&2; exit 1; }
+here="$(cd "$(dirname "$0")" && pwd)"
+t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
+fail() { echo "FAIL: $*"; exit 1; }
+export BOSSMAN_CHECK_RETRY_SECONDS=0
+runs() { grep -c . "$t/count" 2>/dev/null || echo 0; }
 
-out=$(scripts/check-all.sh 2>&1) || fail "free lock: expected success, got: $out"
-grep -q "lock held" <<<"$out" || fail "free lock: not acquired"
+# run <expected rc> <expected runs> <label> <stub body> [dir] [command]
+run() {
+  local want_rc=$1 want_runs=$2 label=$3 body=$4 dir=${5:-$here/..} cmd=${6:-./scripts/check-all.sh} rc=0
+  : >"$t/count"; export COUNT="$t/count"
+  (cd "$dir" && BOSSMAN_CHECK_BODY="$body" $cmd >"$t/out" 2>&1) || rc=$?
+  [ "$rc" -eq "$want_rc" ] || fail "$label: rc $rc, want $want_rc: $(cat "$t/out")"
+  [ "$(runs)" -eq "$want_runs" ] || fail "$label: ran $(runs) times, want $want_runs"
+}
 
-# A second caller waits, then gives up with exit 1 after CHECK_ALL_LOCK_WAIT.
-( exec 8>"$tmp/lock"; flock 8; sleep 5 ) & holder=$!
-sleep 0.5
-rc=0; out=$(CHECK_ALL_LOCK_WAIT=1 scripts/check-all.sh 2>&1) || rc=$?
-[ "$rc" = 1 ] || fail "busy lock: expected exit 1, got $rc"
-grep -q "waiting for it" <<<"$out" || fail "busy lock: no waiting message: $out"
-grep -q "gave up" <<<"$out" || fail "busy lock: messages missing: $out"
-kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+run 0 1 "success" 'echo x >>"$COUNT"'
+run 3 3 "EAGAIN retried, final rc kept" 'echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3'
+run 3 3 "spawnSync form retried" 'echo x >>"$COUNT"; echo "Error: spawnSync git EAGAIN"; exit 3'
+run 3 1 "real failure not retried" 'echo x >>"$COUNT"; echo "AssertionError: nope"; exit 3'
+run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2 ]; then echo "fork: retry"; exit 1; fi'
+run 3 1 "no retry when another run would blow the budget" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
+run 0 1 "relative path from scripts/" 'echo x >>"$COUNT"' "$here" ./check-all.sh
+run 0 1 "bash check-all.sh from scripts/" 'echo x >>"$COUNT"' "$here" "bash check-all.sh"
 
-# Once the holder lets go, the waiter gets in.
-( exec 8>"$tmp/lock"; flock 8; sleep 1 ) & 
-sleep 0.3
-out=$(CHECK_ALL_LOCK_WAIT=10 scripts/check-all.sh 2>&1) || fail "released lock: expected success, got: $out"
-wait
-echo "check-all.test: ok"
+# The heavy-phase lock (needs flock). pnpm/node are stubbed and CHECK_ALL_STOP_AFTER_LOCK stops the child once the lock is held.
+if command -v flock >/dev/null; then
+  mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
+  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 "$@" ./scripts/check-all.sh 2>&1); }
+
+  out=$(lock env) || fail "free lock: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "free lock: not acquired"
+
+  # A second caller waits, then gives up with exit 1 after CHECK_ALL_LOCK_WAIT (no retry: not a process-limit error).
+  ( exec 8>"$t/lock"; flock 8; sleep 5 ) & holder=$!
+  sleep 0.5
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 1 ] || fail "busy lock: expected exit 1, got $rc"
+  grep -q "waiting for it" <<<"$out" || fail "busy lock: no waiting message: $out"
+  grep -q "gave up" <<<"$out" || fail "busy lock: messages missing: $out"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+
+  # Once the holder lets go, the waiter gets in.
+  ( exec 8>"$t/lock"; flock 8; sleep 1 ) & holder=$!
+  sleep 0.3
+  out=$(lock env CHECK_ALL_LOCK_WAIT=10) || fail "released lock: expected success, got: $out"
+  wait "$holder"
+else
+  echo "check-all.test.sh: flock missing, lock cases skipped"
+fi
+echo "check-all.test.sh: ok"
