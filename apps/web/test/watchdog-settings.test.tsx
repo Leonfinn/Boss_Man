@@ -61,7 +61,7 @@ describe("watchdog settings (BOS-58)", () => {
     });
     render(<Watchdog company={company} />);
     expect(await screen.findByText(/On\. Last check .* 2 open issues\./)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Test on the past 14 days" }));
+    fireEvent.click(screen.getByRole("button", { name: "Test on the past 48 hours" }));
     expect(await screen.findByText(/would have raised 1 flag and woken the Scrum Master 1 time/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "BOS-26" })).toBeTruthy();
     expect(screen.getByText("nobody is assigned")).toBeTruthy();
