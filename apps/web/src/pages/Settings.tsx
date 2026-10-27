@@ -1095,6 +1095,8 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "reviewBounces", label: "Review loop after more than", unit: "send-backs" },
   { key: "maxSmRunsPerHour", label: "Most Scrum Master runs per hour", unit: "runs" },
   { key: "maxNudgesPerHour", label: "Most Scrum Master actions per hour", unit: "actions" },
+  { key: "alertMinutes", label: "Move an alert up a level after", unit: "minutes" },
+  { key: "maxCeoAlertsPerHour", label: "Most alerts sent to the CEO per hour", unit: "alerts" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */

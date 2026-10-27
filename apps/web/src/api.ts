@@ -65,6 +65,9 @@ export const RISKS: Risk[] = ["trivial", "low", "medium", "high", "critical"];
 /** A permission request in plain words, worked out by the server (shared/explain.ts). */
 export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] } };
 
+/** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
+export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
+
 export type Decision = {
   id: string;
   companyId: string;
