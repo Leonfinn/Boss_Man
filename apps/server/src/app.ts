@@ -387,6 +387,7 @@ export async function buildApp(opts: AppOptions) {
     assign: (ticketId, agentId) => work.updateTicket(ticketId, { assigneeAgentId: agentId }),
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
+    localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
     now: opts.now,
     log: (m) => app.log.error(m),
   });

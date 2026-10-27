@@ -1,3 +1,4 @@
+import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { useEffect, useState } from "react";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
@@ -542,6 +543,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </p>
           )}
 
+          <ScrumMasterLog companyId={t.companyId} ticketId={t.id} heading="Scrum Master" />
           <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
         </div>
 

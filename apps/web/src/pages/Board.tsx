@@ -1,3 +1,4 @@
+import { WatchdogHealth } from "../components/WatchdogHealth";
 import { useState, type FormEvent } from "react";
 import { api, FEATURE_STATUSES, FEATURE_STATUS_LABEL, RISKS, type Board as BoardData, type Company, type Feature, type FeatureStatus, type Project, type Risk, type ScoredFeatures } from "../api";
 import { ticketRef } from "@boss-man/shared";
@@ -447,6 +448,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <h1>{current?.name ?? "Kanban"}</h1>
           {current?.repoUrl && <p className="sub mono" style={{ fontSize: 13 }}>{current.repoUrl}</p>}
         </div>
+        {current && <WatchdogHealth companyId={current.companyId} />}
         {current && (
           <StarButton
             agent={current}

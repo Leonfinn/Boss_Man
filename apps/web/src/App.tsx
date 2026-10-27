@@ -16,6 +16,7 @@ import { Rules } from "./pages/Rules";
 import { Secrets } from "./pages/Secrets";
 import { Funding } from "./pages/Funding";
 import { Notifications } from "./pages/Notifications";
+import { ScrumMaster } from "./pages/ScrumMaster";
 import { Plan } from "./pages/Plan";
 import { ChatPage } from "./pages/Chat";
 import { Dashboard } from "./pages/Dashboard";
@@ -59,7 +60,7 @@ function useFeedNotifications(feed: NoticeFeed | null) {
 }
 
 /** Screens whose address names a company, e.g. #/wiki/<company>/… (R72). */
-const COMPANY_SCREENS = new Set(["chat", "wiki", "features", "feedback", "plan", "rules", "settings", "projects"]);
+const COMPANY_SCREENS = new Set(["scrum-master", "chat", "wiki", "features", "feedback", "plan", "rules", "settings", "projects"]);
 const CHOSEN = "bm-company";
 function remember(id: string, set: (id: string) => void) {
   set(id);
@@ -190,6 +191,8 @@ function Signed({ onLogout }: { onLogout: () => void }) {
           route[1] ? <Run key={route[1]} runId={route[1]} companies={list} /> : <Runs companies={list} />
         ) : page === "tickets" && route[1] ? (
           <Ticket key={route[1]} id={route[1]} companies={list} />
+        ) : page === "scrum-master" ? (
+          <ScrumMaster company={current} />
         ) : page === "notifications" ? (
           <Notifications feed={feed.data} onChanged={feed.reload} companies={companies.data} />
         ) : page === "funding" || page === "rules" || page === "secrets" ? (

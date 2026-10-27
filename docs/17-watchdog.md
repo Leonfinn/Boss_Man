@@ -92,3 +92,10 @@ The next one over the cap switches the watchdog off. It sets `watchdog_tripped_a
 
 - **Fastest:** switch it off in Settings. It stops at the next pass.
 - **Full:** revert the code. Migration `0061` is expand-only, so older code runs on the new schema. The `tickets_state_clock` trigger only writes the new columns.
+
+## What the owner sees (BOS-60)
+
+- **Scrum Master view** (sidebar → Scrum Master): every logged action, newest first, with its one-line reason and an Undo while one is possible. The same list, filtered to one ticket, shows on the ticket page. Sweep wakes are hidden from the company view.
+- **Health chip** on the board: "Watchdog: last check 3 min ago · 2 issues being handled", or "off", or "stopped itself (safety cap hit)". Amber when no check has run for 15 minutes.
+- **Daily summary** (`dailySummary`, run after each sweep): a "note" in the owner's feed, from 8:00 owner-local time, at most once a day, and only if something was caught, cleared or done since the last one. It carries counts, what is still open and who it waits on, owner decisions with their age, and a headline (stuck tickets and the oldest). Owner-decision waits are not counted as stuck.
+- **Urgent** (`urgentCheck`): one owner decision holding three or more unfinished tickets sends a Page (once per decision). That is the only interrupt the watchdog adds; the cap-trip alert and the 8-hour decision reminder are unchanged. Both are logged as `urgent_alert` and `daily_summary` actions.

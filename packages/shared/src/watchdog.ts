@@ -62,7 +62,7 @@ export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   owner_decision_waiting: "it waits on the owner's decision",
 };
 
-export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo"] as const;
+export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert"] as const;
 export type WatchdogActionKind = (typeof WATCHDOG_ACTIONS)[number];
 
 /** Actions that reach another agent or the owner; they count toward maxNudgesPerHour (an undone one still counts, so undo can't refill the cap). */
