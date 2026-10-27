@@ -126,9 +126,30 @@ describe("work only in a temporary folder", () => {
     expect(scratch("cd /tmp/x && git push origin main")).toBeUndefined();
     expect(scratch("cd /tmp && git clone https://example.com/r.git r")).toBeUndefined();
     expect(scratch("cd /tmp/x && git checkout main && cd /home/node && git checkout main")).toBeUndefined();
+    // A worktree writes the repository's .git and makes its branch there (BOS-111 adversarial review).
+    expect(scratch("rm -rf /tmp/a && cd /tmp/b && git worktree add -b feature-x /tmp/c")).toBeUndefined();
+    expect(scratch("cd /tmp/b && git worktree prune > /tmp/b/log")).toBeUndefined();
     expect(scratch("rm -rf /tmp/$DIR")).toBeUndefined();
     expect(scratch("node build.js")).toBeUndefined();
     // Only reading isn't the case this line is for.
     expect(scratch("cat /tmp/x")).toBeUndefined();
+  });
+});
+
+describe("git subcommands (BOS-111)", () => {
+  it("recognises worktrees, -C and branch deletes", () => {
+    expect(explainCommand("git worktree list").effect).toBe("reads");
+    for (const c of ["git worktree add /tmp/rv86 origin/main", "git worktree remove --force /tmp/rv86", "git worktree prune"]) {
+      expect(explainCommand(c), c).toMatchObject({ effect: "changes", summary: "Adds or removes a second checkout of the project (git worktree)." });
+      // It also writes the repository's .git, so it isn't /tmp-only work.
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+    }
+    expect(explainCommand("git -C /repo status").effect).toBe("reads");
+    expect(explainCommand("git -c core.pager=cat log -1").effect).toBe("reads");
+    expect(explainCommand("git merge-tree --write-tree --name-only origin/main HEAD").effect).toBe("reads");
+    expect(explainCommand("git ls-remote origin").effect).toBe("network");
+    expect(explainCommand("git branch -D old").effect).toBe("changes");
+    expect(explainCommand("git branch --list").effect).toBe("reads");
+    expect(explainCommand("git frobnicate").summary).toBe("Runs a git command Boss Man doesn't recognise: frobnicate.");
   });
 });
