@@ -152,8 +152,26 @@ const WATCH_EVERY: Array<[number, string]> = [
 const inText = (ms: number) => (ms <= 0 ? "Due now" : ms < 3_600_000 ? `In ${Math.ceil(ms / 60_000)}m` : `In ${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m`);
 const localInput = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 
+const PROPS_KEY = "bossman.ticket.workCollapsed";
+/** The remembered choice; with none, narrow tablets (just above the stacking width) start collapsed. */
+const readPropsCollapsed = () => {
+  try {
+    const saved = localStorage.getItem(PROPS_KEY);
+    if (saved !== null) return saved === "1";
+  } catch {}
+  return window.innerWidth > 900 && window.innerWidth < 1100;
+};
+
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
   const ticket = usePoll((signal) => api<TicketDetail>(`/api/tickets/${id}`, { signal }), 15_000, id);
+  const [propsCollapsed, setPropsCollapsed] = useState(readPropsCollapsed);
+  const togglePanel = () => {
+    const next = !propsCollapsed;
+    setPropsCollapsed(next);
+    try {
+      localStorage.setItem(PROPS_KEY, next ? "1" : "0");
+    } catch {}
+  };
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
@@ -354,7 +372,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
-      <div className="ticket-layout">
+      <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
@@ -561,8 +579,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
-          <h2 className="section-label">Work</h2>
-          <dl>
+          <div className="props-head">
+            <h2 className="section-label">Work</h2>
+            <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} onClick={togglePanel}>
+              {propsCollapsed ? "Show" : "Hide"}
+            </button>
+          </div>
+          <dl hidden={propsCollapsed}>
             <dt>Status</dt>
             <dd>
               <span className={`tag ${STATE_TONE[t.systemState] ?? ""}`}>{t.systemState === "done" && t.outcome === "cancelled" ? "Cancelled" : (STATE_LABEL[t.systemState] ?? t.systemState)}</span>

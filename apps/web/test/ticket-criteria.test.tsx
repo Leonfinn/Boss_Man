@@ -73,3 +73,33 @@ describe("the no-code flag on the ticket page", () => {
     expect(screen.queryByLabelText(/Doesn't need code changes/)).toBeNull();
   });
 });
+describe("the collapsible Work panel", () => {
+  it("hides and shows the panel, and remembers the choice on this device", async () => {
+    localStorage.clear();
+    vi.stubGlobal("fetch", stub({}));
+    vi.stubGlobal("innerWidth", 1440);
+    const first = render(<Ticket id="t1" companies={[company]} />);
+    const hide = await screen.findByRole("button", { name: "Hide" });
+    expect(first.container.querySelector(".ticket-props dl")!.hasAttribute("hidden")).toBe(false);
+    fireEvent.click(hide);
+    expect(first.container.querySelector(".ticket-layout")!.classList.contains("props-collapsed")).toBe(true);
+    expect(first.container.querySelector(".ticket-props dl")!.hasAttribute("hidden")).toBe(true);
+    first.unmount();
+    const second = render(<Ticket id="t1" companies={[company]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Show" }));
+    expect(second.container.querySelector(".ticket-props dl")!.hasAttribute("hidden")).toBe(false);
+    expect(localStorage.getItem("bossman.ticket.workCollapsed")).toBe("0");
+  });
+
+  it("starts collapsed on a narrow tablet with no saved choice, expanded on desktop", async () => {
+    localStorage.clear();
+    vi.stubGlobal("fetch", stub({}));
+    vi.stubGlobal("innerWidth", 1000);
+    const tablet = render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByRole("button", { name: "Show" });
+    tablet.unmount();
+    vi.stubGlobal("innerWidth", 1440);
+    render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByRole("button", { name: "Hide" });
+  });
+});
