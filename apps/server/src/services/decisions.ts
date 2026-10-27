@@ -586,7 +586,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           note: [
             `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
             `Command: ${explain.command ?? ""}`,
-            "Its only deletes are of entries directly in /tmp, so it came to you rather than the owner.",
+            "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands that change nothing outside /tmp, so it came to you rather than the owner.",
             "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
             "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
             `If you don't answer within ${TEMP_CLEANUP_MINUTES} minutes it goes to the owner.`,

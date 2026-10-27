@@ -216,22 +216,91 @@ const TEMP_PATH = String.raw`/tmp/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+`;
 /** A delete that touches only TEMP_PATHs, as written; output may only go to /dev/null. */
 const TEMP_DELETE = new RegExp(String.raw`^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+${TEMP_PATH})+(?:\s+(?:(?:[12]|&)?>>?\s*/dev/null|2>&1))*$`);
 
-/** Any word that deletes, wherever it is (quotes, heredocs, other programs' scripts): a temp cleanup may contain none outside its accepted rm's. */
+/** Any word that deletes, wherever it is: a second guard behind the allow-list, which must find none outside the accepted rm's. */
 const DELETING = String.raw`\b(?:rm|rmdir|unlink|shred|truncate|rmtree|rmSync|unlinkSync)\b|\s--?delete\b|\bgit\s+clean\b`;
 
 /**
- * True when every delete in the command is of temp files (BOS-111): each deleting segment is a
- * plain rm/rmdir/unlink of entries directly in /tmp, and nothing else in the raw text (heredocs
- * and quotes included) looks destructive or pushes. One level only, because rm then removes a
+ * The only characters a temp cleanup may contain. Nothing the shell quotes, escapes, expands or
+ * substitutes ($ ` \ ' " ~ * ? [ { ( < # !), so every word is exactly what runs, and no heredoc
+ * or script can hide inside (BOS-111 security review: "r"m, r\m and ${x}m all spell rm).
+ */
+const PLAIN = /^[A-Za-z0-9._+@%:=,/ \t\n;&|>-]+$/;
+/** A redirect: optional fd at the start of a word, then its target. */
+const REDIRECT = /(?:(?<=^|\s)[12&])?>>?\s*(&[12](?![^\s])|[^\s>&]*)/g;
+const TEMP_ONLY = new RegExp(`^${TEMP_PATH}$`);
+/** A new folder under /tmp, any depth: mkdir only adds, so a symlink on the way can't destroy anything. */
+const TEMP_DIR = /^\/tmp\/(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9._+@/-]+$/;
+const INSTALL_FLAGS = new Set(["--frozen-lockfile", "--no-frozen-lockfile", "--prefer-offline", "--offline", "--silent", "-s", "--reporter=silent", "--ignore-scripts"]);
+
+/**
+ * Whether one segment is known to change nothing outside /tmp. An allow-list of programs and the
+ * shapes of their arguments; anything not on it is not temp cleanup. mv, cp, tee, ln, touch, dd,
+ * sed, interpreters and shells are left off on purpose: each can move, overwrite or delete
+ * anywhere (mv /home/x /tmp/b followed by rm -rf /tmp/b is a delete outside /tmp).
+ */
+function safeBeside(words: string[], cwd: { tmp: boolean }): boolean {
+  const [program, ...rest] = words;
+  const operands = rest.filter((w) => !w.startsWith("-"));
+  switch (program) {
+    case "true": case "echo": case "pwd": case "ls": case "sleep": case "date":
+      return true;
+    case "cd":
+      cwd.tmp = rest.length === 1 && TEMP_ONLY.test(rest[0]!);
+      return rest.length <= 1;
+    case "mkdir":
+      return operands.length > 0 && operands.every((w) => TEMP_DIR.test(w)) && rest.every((w) => !w.startsWith("-") || w === "-p");
+    case "pnpm": case "npm":
+      // Install writes node_modules into the current folder, so only in a /tmp checkout. No -C, --dir or --prefix to point it elsewhere.
+      return cwd.tmp && ["install", "i", "ci"].includes(rest[0] ?? "") && rest.slice(1).every((w) => INSTALL_FLAGS.has(w));
+    case "git": {
+      // The subcommand comes straight after git: no -c, -C or --exec-path, which can run programs or point it elsewhere.
+      const [sub, action, ...args] = rest;
+      if (sub === "status" || sub === "rev-parse") return true;
+      if (sub !== "worktree") return false;
+      if (action === "list" || action === "prune") return args.every((w) => w.startsWith("-") && !w.startsWith("--expire"));
+      if (action !== "add" && action !== "remove") return false;
+      // The checkout's folder is the first operand, after the value of -b/-B; it must be an entry directly in /tmp (remove deletes it).
+      const ops: string[] = [];
+      for (let i = 0; i < args.length; i++) {
+        const w = args[i]!;
+        if (w === "-b" || w === "-B") i++;
+        else if (w === "-f" || w === "--force" || w === "--detach" || w === "--no-checkout" || w === "-q" || w === "--quiet") continue;
+        else if (w.startsWith("-")) return false;
+        else ops.push(w);
+      }
+      if (!ops.length || !TEMP_ONLY.test(ops[0]!)) return false;
+      return action === "add" ? ops.length <= 2 && !(ops[1] ?? "").startsWith("/") && !(ops[1] ?? "").includes("..") : ops.length === 1;
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * True when every delete in the command is of temp files and nothing else in it changes anything
+ * outside /tmp (BOS-111). An allow-list, per segment: each is either a plain rm/rmdir/unlink of
+ * entries directly in /tmp or a known-safe command (safeBeside), its output going only to
+ * /dev/null or an entry directly in /tmp. Deletes are one level only, because rm then removes a
  * symlink as a link and never follows it; a deeper path could pass through a symlinked folder,
- * which only the runner's filesystem could tell. Anything that could redefine rm is refused.
+ * which only the runner's filesystem could tell. The destructive-word counts stay as a second guard.
  */
 export function tempCleanup(command: string): boolean {
+  if (!PLAIN.test(command)) return false;
   if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH=/.test(command)) return false;
   if (new RegExp(PUSHING, "i").test(command)) return false;
-  const deletes = segments(command).filter((s) => TEMP_DELETE.test(s));
+  const segs = segments(command);
+  const deletes = segs.filter((s) => TEMP_DELETE.test(s));
   if (!deletes.length) return false;
-  // Both counts must match: DESTRUCTIVE alone misses deletes that today ask no one (truncate, xargs rm), which must not ride along with a temp cleanup.
+  const cwd = { tmp: false };
+  for (const s of segs) {
+    if (deletes.includes(s)) continue;
+    let ok = true;
+    const rest = s.replace(REDIRECT, (_, to: string) => {
+      if (!(to === "/dev/null" || to === "&1" || to === "&2" || TEMP_ONLY.test(to))) ok = false;
+      return " ";
+    });
+    if (!ok || /[>&]/.test(rest) || !safeBeside(rest.trim().split(/\s+/), cwd)) return false;
+  }
   return [DESTRUCTIVE, DELETING].every((re) => {
     const count = (s: string) => s.match(new RegExp(re, "gi"))?.length ?? 0;
     return count(command) === deletes.reduce((n, s) => n + count(s), 0);

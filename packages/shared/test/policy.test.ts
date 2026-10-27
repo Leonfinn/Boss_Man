@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { tempCleanup } from "../src/explain.js";
 import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
@@ -112,8 +113,10 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1",
       "rm -rf /tmp/a /tmp/b.log 2>/dev/null",
       "rm -rf -- /tmp/.hidden-dir",
-      "rm -f /tmp/x.json; curl -o /tmp/x.json https://example.com/x",
       "rm -rf /tmp/rv86 &>/dev/null; git worktree prune",
+      "rm -rf /tmp/wt && git worktree add -b bos-111 /tmp/wt origin/main 2>&1 && mkdir -p /tmp/wt-logs/a",
+      "git worktree remove --force /tmp/wt; rm -rf /tmp/wt; git worktree list",
+      "rm -rf /tmp/x && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
     ]) {
       expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
@@ -178,8 +181,49 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/a; git clean -fdx",
       "rm -rf /tmp/a; python3 -c 'import shutil; shutil.rmtree(\"/home\")'",
       "rm -rf /tmp/a & rm -rf /home",
+      // Spellings no word list sees, and changes that aren't deletes (Security Reviewer, 4129e12): only an allow-list stops them.
+      'rm -rf /tmp/a; "r"m -rf /home/node',
+      "rm -rf /tmp/a; r\\m -rf /home/node",
+      "rm -rf /tmp/a\nx=r; ${x}m -rf /home/node",
+      "rm -rf /tmp/a; mv /home/node/repo /tmp/b && rm -rf /tmp/b",
+      "rm -rf /tmp/a; python3 -c 'import os; os.remove(\"/home/node/x\")'",
+      "rm -rf /tmp/a; : > /home/node/.bashrc",
+      "rm -rf /tmp/a; cp /dev/null /home/node/x",
+      "rm -rf /tmp/a; dd of=/home/node/x",
+      "rm -rf /tmp/a; echo x > /home/node/.bashrc",
+      "rm -rf /tmp/a; echo x >| /home/node/.bashrc",
+      "rm -rf /tmp/a; echo x >& /home/node/x",
+      "rm -rf /tmp/a; echo x >> /tmp/a/b",
+      "rm -rf /tmp/a; echo x 2>&1x",
+      "rm -rf /tmp/a; sed -i d /home/node/x",
+      "rm -rf /tmp/a; tee /home/node/x",
+      "rm -rf /tmp/a; touch /home/node/x",
+      "rm -rf /tmp/a; ln -sf /home/node /tmp/b",
+      "rm -rf /tmp/a; sh /tmp/x.sh",
+      "rm -rf /tmp/a; node -e x",
+      "rm -rf /tmp/a; curl -o /tmp/x.json https://example.com/x",
+      "rm -rf /tmp/a; /bin/rm -rf /home/node",
+      "rm -rf /tmp/a; command rm -rf /home/node",
+      "rm -rf /tmp/a; X=1 echo hi",
+      "rm -rf /tmp/a; git worktree remove /home/node/wt",
+      "rm -rf /tmp/a; git worktree remove /tmp/a/b",
+      "rm -rf /tmp/a; git worktree add /home/node/wt",
+      "rm -rf /tmp/a; git worktree add --orphan /tmp/b",
+      "rm -rf /tmp/a; git -c core.fsmonitor=/tmp/x status",
+      "rm -rf /tmp/a; git -C /home/node/repo worktree add /tmp/b",
+      "rm -rf /tmp/a; git clean -fdx /tmp/b",
+      "rm -rf /tmp/a; git checkout -- .",
+      "rm -rf /tmp/a; pnpm install",
+      "rm -rf /tmp/a; cd /home/node/repo && pnpm install",
+      "rm -rf /tmp/a; cd /tmp/b && pnpm install --dir=/home/node/repo",
+      "rm -rf /tmp/a; cd /tmp/b && pnpm install -C /home/node/repo",
+      "rm -rf /tmp/a; cd /tmp/b && pnpm run build",
+      "rm -rf /tmp/a; mkdir /tmp/a/../../home/x",
+      "rm -rf /tmp/a; mkdir -m 777 /tmp/b",
+      "rm -rf /tmp/a\r\nrm -rf /home/node",
     ]) {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
+      expect(tempCleanup(c), c).toBe(false);
     }
     // A plain rm without -r/-f never asked anyone, and still doesn't.
     expect(route("rm /tmp/a").outcome).toBe("allow");
