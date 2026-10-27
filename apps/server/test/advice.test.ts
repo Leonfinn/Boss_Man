@@ -62,8 +62,12 @@ describe("ask the CEO for advice", () => {
     const [w] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id));
     expect(w!.note).toContain("What does A mean?");
     expect(w!.note).toContain(d.id);
-    expect((await c.req("POST", `/api/decisions/${d.id}/ask-advice`, {})).statusCode).toBe(422);
+    // Pressing it twice is harmless: same state, one wake, one log line.
+    expect((await c.req("POST", `/api/decisions/${d.id}/ask-advice`, { note: "again" })).statusCode).toBe(200);
+    expect((await row(c, d.id)).context).toMatchObject({ advice: { state: "asking", note: "What does A mean?" } });
+    expect((await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id))).length).toBe(1);
     expect((await c.db.select().from(activity).where(eq(activity.kind, "decision_advice_asked"))).length).toBe(1);
+    expect((await c.req("POST", `/api/decisions/${d.id}/ask-advice`, { note: "x".repeat(501) })).statusCode).toBe(400);
     // Still in the owner's queue.
     expect(((await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>).map((r) => r.id)).toContain(d.id);
   });
@@ -125,7 +129,9 @@ describe("ask the CEO for advice", () => {
     const ceo = await c.mcp(c.ceo.id);
     const owned = [
       { kind: "approval" as const, context: { type: "permission", plan: true }, options: ["Approve plan", "Keep planning"] },
-      { kind: "permission" as const, context: { type: "permission" }, options: ["Allow once", "Deny"] },
+      { kind: "question" as const, context: { type: "self_deploy", target: "server", commit: "abc", fromCommit: "def" }, options: ["Deploy", "Not now"] },
+      { kind: "question" as const, context: { type: "question", steps: ["Open Settings", "Click Save"] }, options: ["Done", "Not now"] },
+      { kind: "budget" as const, context: { type: "budget_limit", policyId: randomUUID() }, options: ["Raise it by half", "Leave it"] },
       { kind: "question" as const, context: { type: "hire", proposal: { name: "X" }, byAgentId: c.ceo.id }, options: ["Hire", "Not now"] },
       { kind: "question" as const, context: { type: "rule_proposal", rule: {} }, options: ["Add this rule", "Don't add"] },
       { kind: "approval" as const, context: { type: "deploy", deployId: randomUUID() }, options: ["Approve", "Reject"] },
@@ -138,9 +144,43 @@ describe("ask the CEO for advice", () => {
       expect(isError(r), o.context.type).toBe(true);
       expect((await row(c, d!.id)).status).toBe("open");
     }
-    // Nor can an approval or permission be reissued as a question.
+    // A question the CEO raised itself can only be reissued.
+    const own = await c.decisions.raise({ companyId: c.company.id, agentId: c.ceo.id, question: "CEO's own question?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "Tried everything I could on my own" });
+    await c.req("POST", `/api/decisions/${own.id}/ask-advice`, {});
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: own.id, outcome: "handled", summary: "I answered my own question.", answer: "Yes" } }))).toBe(true);
+    expect((await row(c, own.id)).status).toBe("open");
+    // Nor can an approval be reissued as a question.
     const [p] = await c.db.select().from(decisions).where(eq(decisions.question, "Owner only permission"));
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: p!.id, ...reissue } }))).toBe(true);
+  });
+
+  it("has no ask for a permission request", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "permission", question: "Run rm?", options: ["Allow once", "Deny"], recommendedOption: "Deny", context: { type: "permission" } }).returning();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/ask-advice`, {})).statusCode).toBe(422);
+    expect((await row(c, d!.id)).context).toEqual({ type: "permission" });
+  });
+
+  it("a timeout after the CEO has advised changes nothing", async () => {
+    const c = (ctx = await setup());
+    const { d } = await c.question();
+    await c.req("POST", `/api/decisions/${d.id}/ask-advice`, {});
+    const ceo = await c.mcp(c.ceo.id);
+    await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, ...reissue } });
+    c.advance(200 * MIN);
+    await c.req("POST", "/api/sweep");
+    expect((await row(c, d.id)).status).toBe("withdrawn");
+    expect((await row(c, d.id)).context).toMatchObject({ advice: { state: "reissued" } });
+    expect((await c.db.select().from(activity).where(eq(activity.kind, "decision_advice_timed_out"))).length).toBe(0);
+  });
+
+  it("logs the CEO's run", async () => {
+    const c = (ctx = await setup());
+    const { d } = await c.question();
+    await c.req("POST", `/api/decisions/${d.id}/ask-advice`, {});
+    const ceo = await c.mcp(c.ceo.id);
+    await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, ...reissue } });
+    expect((await c.db.select().from(activity).where(eq(activity.kind, "decision_reissued")))[0]!.summary).toMatch(/CEO run [0-9a-f-]{36}/);
   });
 
   it("returns to the owner when the CEO doesn't act in time (default 2 hours, a setting)", async () => {

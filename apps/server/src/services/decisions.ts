@@ -140,6 +140,8 @@ export type AnswerExtra = {
   custom?: boolean;
   /** The CEO settled it ("handled" advice), so the record and the wake say so instead of "the owner". */
   by?: "ceo";
+  /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
+  handled?: { summary: string; at: string };
 };
 
 /**
@@ -163,10 +165,13 @@ export type Advice = {
 export const adviceOf = (context: unknown): Advice | undefined => (context as { advice?: Advice } | null)?.advice;
 export const ADVICE_DEFAULT_MINUTES = 120;
 
-/** Only these can be settled by the CEO; approvals, plans, hires, permissions, deploys and sign-offs are the owner's. */
-function ceoCanHandle(d: { kind: string; context: unknown }) {
-  const t = (d.context as DecisionContext).type;
-  return (d.kind === "question" && t === "question") || t === "stale_blocker" || t === "stalled_run";
+/**
+ * An allow-list: the CEO may settle only an agent's plain question (no steps for the owner) that another agent raised.
+ * Everything else (approvals, permissions, budgets, engagements, every special context type, the CEO's own request) can only be reissued.
+ */
+function ceoCanHandle(d: { kind: string; context: unknown; raisedByAgentId: string | null }, raisedByCeo: boolean) {
+  const ctx = d.context as DecisionContext;
+  return d.kind === "question" && ctx.type === "question" && !ctx.steps?.length && !!d.raisedByAgentId && !raisedByCeo;
 }
 
 const ALLOW = "Allow once";
@@ -741,7 +746,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     async askAdvice(id: string, note?: string) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
       if (!d) return null;
-      if (adviceOf(d.context)?.state === "asking") throw new AnswerError("The CEO is already looking at this.");
+      // Pressing twice is harmless.
+      if (adviceOf(d.context)?.state === "asking") return { id, advice: adviceOf(d.context)! };
+      if (d.kind === "permission") throw new AnswerError("A permission request holds a live run, so it can't be put to the CEO. Answer it, or deny it.");
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo || !wake) throw new AnswerError("This company has no CEO to ask.");
       const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}) };
@@ -777,7 +784,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[] } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; summary: string; answer?: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[] } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string }) {
+      const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
       if (d.status !== "open") return null;
@@ -805,6 +813,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: d.raisedByAgentId,
+            // The card says the CEO wrote it and points back at the original (advice.replaces).
             context: { type: "question", triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), advice: { state: "replacement", replaces: d.id, at } satisfies Advice },
           });
           await tx.update(ticketDependencies).set({ blockerDecisionId: newId }).where(eq(ticketDependencies.blockerDecisionId, d.id));
@@ -812,24 +821,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         });
         if (!made) return null;
         const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, newId));
-        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO reissued "${d.question}" with more detail`, at: now() });
+        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO reissued "${d.question}" with more detail${via}`, at: now() });
         return { outcome: "reissue" as const, id: newId };
       }
-      if (!ceoCanHandle(d)) throw new AnswerError("Only the owner can settle this kind of decision (an approval, plan, hire, permission, deploy, sign-off or rule). Reissue it instead, or leave it for the owner.");
+      const raiser = d.raisedByAgentId ? (await db.select({ role: agents.role }).from(agents).where(eq(agents.id, d.raisedByAgentId)))[0] : undefined;
+      if (!ceoCanHandle(d, raiser?.role === "ceo" || d.raisedByAgentId === input.agentId)) throw new AnswerError("Only the owner can settle this one: only an agent's plain question can be handled by the CEO, never the CEO's own request, an approval, a permission, or anything with steps for the owner. Reissue it instead, or leave it for the owner.");
       const summary = input.summary.trim();
-      const ctx = d.context as DecisionContext;
       const options = d.options as string[];
       let r;
-      if (ctx.type === "question" && !input.answer) {
+      const handled = { summary, at };
+      if (!input.answer) {
         // The work settles it and no option says so: a written answer, like the owner's own words.
-        r = await this.answer(d.id, `Handled by the CEO: ${summary}`.slice(0, 4000), { custom: true, by: "ceo" });
+        r = await this.answer(d.id, `Handled by the CEO: ${summary}`.slice(0, 4000), { custom: true, by: "ceo", handled });
       } else {
-        if (!input.answer || !options.includes(input.answer)) throw new AnswerError(`Give answer: one of ${options.join(", ")}.`);
-        r = await this.answer(d.id, input.answer, { by: "ceo" });
+        if (!options.includes(input.answer)) throw new AnswerError(`Give answer: one of ${options.join(", ")}.`);
+        r = await this.answer(d.id, input.answer, { by: "ceo", handled });
       }
       if (!r) return null;
-      await db.update(decisions).set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify({ ...advice, state: "handled", at, summary })}::jsonb)` }).where(eq(decisions.id, d.id));
-      await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_handled", summary: `CEO handled "${d.question}": ${summary}`, at: now() });
+      await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_handled", summary: `CEO handled "${d.question}": ${summary}${via}`, at: now() });
       return { outcome: "handled" as const, id: d.id };
     },
 
@@ -891,12 +900,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         answer = ALLOW;
       }
       if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
-      await db
+      // Conditional on still being open (and, for the CEO, still asked), so whoever closes it first wins and the loser changes nothing.
+      const [closed] = await db
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again; so does a
         // loop alert (alert-ladder.ts), whose key only stops a repeat while it is open.
-        .set({ status: "answered", answer, answeredAt: now(), ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}) })
-        .where(eq(decisions.id, id));
+        .set({
+          status: "answered",
+          answer,
+          answeredAt: now(),
+          ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
+          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : {}),
+        })
+        .where(and(eq(decisions.id, id), eq(decisions.status, "open"), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
+        .returning({ id: decisions.id });
+      if (!closed) return null;
 
       let delivered: boolean | null = null;
       let endedHere = false;

@@ -345,7 +345,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </p>
                     )}
                     {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
-                    {advice?.state === "replacement" && advice.replaces && <p className="muted">The CEO rewrote this decision to be clearer.</p>}
+                    {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
                       {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
@@ -469,12 +469,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             </div>
                           </form>
                         )}
-                        {d.kind !== "stalled_run" && !asking && ownWords[d.id] === undefined && (
+                        {d.kind !== "permission" && d.context?.type !== "permission" && !asking && ownWords[d.id] === undefined && (
                           <details className="advice">
                             <summary>Not enough detail?</summary>
                             <div className="field">
                               <label htmlFor={`advice-${d.id}`}>What's unclear (optional, one line)</label>
-                              <input id={`advice-${d.id}`} type="text" maxLength={300} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
+                              <input id={`advice-${d.id}`} type="text" maxLength={500} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
                             </div>
                             <div className="actions">
                               <button type="button" className="btn" disabled={busy === d.id} onClick={() => void askAdvice(d)}>

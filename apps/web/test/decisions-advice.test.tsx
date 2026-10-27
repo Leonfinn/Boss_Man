@@ -44,6 +44,11 @@ describe("ask the CEO for advice", () => {
     expect(JSON.parse(init.body as string)).toEqual({ note: "What is A?" });
   });
 
+  it("has no ask button on a permission request", () => {
+    render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission" } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.queryByText("Not enough detail?")).toBeNull();
+  });
+
   it("shows 'CEO is looking at this' greyed but still answerable", () => {
     render(<Decisions decisions={[decision({ context: { advice: { state: "asking", note: "What is A?" } } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByRole("status").textContent).toMatch(/CEO is looking at this/);

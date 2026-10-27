@@ -1935,7 +1935,7 @@ export async function buildApp(opts: AppOptions) {
     // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).
     owner.post("/api/decisions/:id/ask-advice", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { note } = z.object({ note: z.string().trim().max(300).optional() }).parse(req.body ?? {});
+      const { note } = z.object({ note: z.string().trim().max(500).optional() }).parse(req.body ?? {});
       try {
         const r = await decisionsSvc.askAdvice(id, note || undefined);
         return r ?? reply.code(404).send({ error: "not_open" });
