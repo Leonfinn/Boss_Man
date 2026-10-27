@@ -22,3 +22,4 @@ export * from "./review-policy.js";
 export * from "./explain.js";
 export * from "./addons.js";
 export * from "./watchdog.js";
+export * from "./destructive.js";

@@ -2,6 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
+import { commandRisks, type Risk } from "./destructive.js";
 import { explainCommand, tempCleanup } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
@@ -25,6 +26,10 @@ export type PolicyMatch = {
   scratchOnly?: boolean;
   /** Only matches a shell command whose every delete is of an entry directly in /tmp, with nothing else destructive or pushing (BOS-111, tempCleanup in explain.ts). */
   tempCleanupOnly?: boolean;
+  /** Only matches a shell command that deletes or destroys data, judged by what each part runs (BOS-116, destructive.ts). */
+  destructive?: boolean;
+  /** Only matches a shell command that pushes or publishes, judged the same way. */
+  pushing?: boolean;
 };
 
 export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: PolicyOutcome };
@@ -32,6 +37,7 @@ export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: Policy
 /** The owner's opt-in standing rule for scratch work (Rules page switch). */
 export const SCRATCH_RULE: PolicyRuleSpec = { name: "Always allow commands that only work in /tmp", match: { kinds: ["execute"], scratchOnly: true }, outcome: "allow" };
 
+// The old text patterns, kept as a second net under commandRisks (BOS-116): anything they caught is still caught.
 // rm's -r/-f may come after other flags or the paths (GNU rm reads `rm x -rf`), or be spelled long; find deletes with -delete or -exec.
 export const DESTRUCTIVE = String.raw`\brm\s+(?:[^\s;&|]+\s+)*?(?:-[a-zA-Z]*[rf][a-zA-Z]*|--(?:recursive|force))\b|\bfind\b[^;&|\n]*\s-(?:delete|exec(?:dir)?\s+(?:rm|rmdir|unlink|shred|truncate))\b|\bmkfs\b|\bdd\s+if=|\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)\b|\bgit\s+push\s+.*--force\b|\bzfs\s+destroy\b|\bshred\b`;
 
@@ -42,9 +48,9 @@ export const TEMP_CLEANUP_RULE = "Temp-file cleanup goes to the CEO first";
 export const DEFAULT_POLICY: PolicyRuleSpec[] = [
   { name: "Boss Man's own tools", match: { titlePattern: String.raw`^(mcp__bossman__|mcp\.bossman\.)` }, outcome: "allow" },
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
-  { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
-  { name: "Destructive commands go to the owner", match: { commandPattern: DESTRUCTIVE }, outcome: "owner" },
-  { name: "Pushing and publishing go to the owner", match: { commandPattern: PUSHING }, outcome: "owner" },
+  { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], destructive: true, tempCleanupOnly: true }, outcome: "ceo" },
+  { name: "Destructive commands go to the owner", match: { destructive: true }, outcome: "owner" },
+  { name: "Pushing and publishing go to the owner", match: { pushing: true }, outcome: "owner" },
   { name: "Reading, searching and editing the workspace", match: { kinds: ["read", "search", "edit", "think", "fetch"] }, outcome: "allow" },
   { name: "Other shell commands", match: { kinds: ["execute"] }, outcome: "allow" },
   // Anything else (delete, move, unknown tools) falls through to the owner.
@@ -56,7 +62,7 @@ export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute"
 /** What's wrong with a rule's match, if anything: it needs a condition, and its patterns must compile. */
 export function ruleProblems(match: PolicyMatch): string[] {
   const problems: string[] = [];
-  if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
+  if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly && !match.destructive && !match.pushing) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
   for (const k of match.kinds ?? []) if (!(TOOL_KINDS as readonly string[]).includes(k)) problems.push(`"${k}" isn't a tool kind. Use: ${TOOL_KINDS.join(", ")}.`);
   for (const [label, p] of [["command pattern", match.commandPattern], ["title pattern", match.titlePattern]] as const) {
     if (p == null) continue;
@@ -73,6 +79,25 @@ export function commandOf(rawInput: unknown): string | null {
   if (Array.isArray(c) && c.every((x) => typeof x === "string")) return c.join(" ");
   return null;
 }
+
+/** Quoted text is data (a sed script, a commit message) unless a shell runs it. */
+const runText = (cmd: string) => (/\b(sh|bash|zsh)\s+-c\b|\beval\b/.test(cmd) ? cmd : cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''"));
+
+/** What a request's shell command destroys or pushes. An argv array is read as its words, so ["bash", "-lc", "…"] keeps its script whole. */
+function risksOf(info: PermissionInfo): Risk[] {
+  const raw = info.rawInput && typeof info.rawInput === "object" ? (info.rawInput as Record<string, unknown>) : {};
+  const argv = raw["command"] ?? raw["cmd"];
+  if (Array.isArray(argv) && argv.every((x) => typeof x === "string")) return commandRisks(argv);
+  const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);
+  return cmd ? commandRisks(cmd) : [];
+}
+
+const hits = (info: PermissionInfo, kind: Risk["kind"], legacy: string) => {
+  const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null) ?? "";
+  return risksOf(info).some((r) => r.kind === kind) || new RegExp(legacy, "i").test(runText(cmd));
+};
+export const isDestructive = (info: PermissionInfo) => hits(info, "destroys", DESTRUCTIVE);
+export const isPushing = (info: PermissionInfo) => hits(info, "pushes", PUSHING);
 
 function safeRegex(pattern: string): RegExp | null {
   try {
@@ -91,21 +116,21 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const re = safeRegex(rule.commandPattern);
     if (!cmd || !re || !re.test(cmd)) return false;
   }
-  if (rule.safeOnly) {
-    const cmd = commandOf(info.rawInput) ?? "";
-    if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
-  }
+  if (rule.safeOnly && (isDestructive(info) || isPushing(info))) return false;
+  if (rule.destructive && !isDestructive(info)) return false;
+  if (rule.pushing && !isPushing(info)) return false;
   if (rule.scratchOnly) {
     // shortcut: paths are checked as written, so a symlink inside /tmp pointing elsewhere isn't caught; resolving them needs the runner's filesystem.
     const scratch = explainCommand(commandOf(info.rawInput) ?? "").scratch;
     if (!scratch || scratch.unchecked.length) return false;
   }
-  if (rule.tempCleanupOnly && !tempCleanup(commandOf(info.rawInput) ?? "")) return false;
+  // A string only: an argv array runs without a shell, so tempCleanup's reading of ; and && wouldn't hold.
+  if (rule.tempCleanupOnly && !tempCleanup(typeof (info.rawInput as Record<string, unknown> | null)?.["command"] === "string" ? commandOf(info.rawInput)! : "")) return false;
   if (rule.titlePattern) {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly);
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.destructive || rule.pushing);
 }
 
 /** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
@@ -169,10 +194,12 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   // A command that only works in /tmp, with nothing in it Boss Man can't check, is safe too.
   const scratch = explainCommand(cmd).scratch;
   if (tempCleanup(cmd) || (scratch && !scratch.unchecked.length)) return "allow";
-  // Quoted text is data (a sed script, a commit message) unless a shell runs it.
-  const run = /\b(sh|bash|zsh)\s+-c\b|\beval\b/.test(cmd) ? cmd : cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+  // Of what the reader finds (BOS-116), only a plainly written rm of build output can be vouched for.
+  const found = risksOf(info).filter((r) => r.kind === "destroys");
+  if (found.some((r) => !r.plain || !WORKSPACE_DELETE.test(r.text))) return "deny";
+  const run = runText(cmd);
   const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
-  if (!hits.length) return "allow";
+  if (!hits.length && !found.length) return "allow";
   if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
