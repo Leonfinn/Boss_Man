@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, notifications, projects, tickets } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, projects, settings, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -25,22 +25,24 @@ async function setup() {
   const req = (method: "GET" | "POST" | "PATCH" | "PUT", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer", template: "engineer" })).json() as { id: string };
+  const funding = (await req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
   const mcp = async (agentId: string) => {
     const token = await issueRunToken(db, { companyId: company.id, agentId, runId: randomUUID() });
     const c = new Client({ name: "t", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, close, req, company, ceo, worker, mcp };
+  return { ...built, db, close, req, company, ceo, worker, funding, mcp };
 }
 
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+const setupArgs = (c: { funding: { id: string } }, extra: Record<string, unknown> = {}) => ({ harness: "claude", provider: "anthropic", model: "claude-opus-4-5", fundingSourceId: c.funding.id, reason: "Test hire.", ...extra });
 
 describe("the CEO builds the team (R62)", () => {
   it("proposes a hire that waits for the owner, and is hired on approval with its history", async () => {
     const c = (ctx = await setup());
     const client = await c.mcp(c.ceo.id);
-    const r = await client.callTool({ name: "propose_hire", arguments: { name: "Sam", template: "scrum-master", reason: "Someone should keep an eye on the checkout tickets." } });
+    const r = await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Sam", template: "scrum-master", reason: "Someone should keep an eye on the checkout tickets." }) });
     expect(textOf(r)).toMatch(/waiting for the owner's approval \(decision /);
     expect(await c.db.select().from(agents).where(eq(agents.name, "Sam"))).toEqual([]);
     const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
@@ -56,20 +58,81 @@ describe("the CEO builds the team (R62)", () => {
 
     // Only the CEO hires; a bad template is refused with the list.
     const other = await c.mcp(c.worker.id);
-    expect(await other.callTool({ name: "propose_hire", arguments: { name: "X", reason: "why not" } })).toMatchObject({ isError: true });
-    expect(textOf(await client.callTool({ name: "propose_hire", arguments: { name: "X", template: "pilot", reason: "r" } }))).toContain("Templates: engineer");
+    expect(await other.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "X", reason: "why not" }) })).toMatchObject({ isError: true });
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "X", template: "pilot", reason: "r" }) }))).toContain("Templates: engineer");
     await client.close();
     await other.close();
   });
 
-  it("hires straight away when the owner says nothing needs approval", async () => {
+  it("always waits for the owner on a hire, even when nothing else needs approval", async () => {
     const c = (ctx = await setup());
     expect((await c.req("GET", `/api/companies/${c.company.id}/agent-approvals`)).json()).toEqual({ approvals: "hires" });
     await c.req("PUT", `/api/companies/${c.company.id}/agent-approvals`, { approvals: "nothing" });
     const client = await c.mcp(c.ceo.id);
-    expect(textOf(await client.callTool({ name: "propose_hire", arguments: { name: "Quinn", template: "qa", reason: "Releases need testing." } }))).toMatch(/^Quinn is hired/);
+    const args = setupArgs(c, { name: "Quinn", template: "qa", reason: "Releases need testing." });
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: args }))).toMatch(/waiting for the owner's approval/);
+    expect(await c.db.select().from(agents).where(eq(agents.name, "Quinn"))).toEqual([]);
     await client.close();
-    expect((await c.db.select().from(notifications)).map((n) => n.title)).toContain("The CEO hired Quinn (QA)");
+    // The card carries all four model fields.
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    expect(d!.question).toContain("Harness: Claude Code · Provider: Anthropic · Model: claude-opus-4-5 · Paid from: Claude Max");
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire" })).statusCode).toBeLessThan(300);
+    expect((await c.db.select().from(agents).where(eq(agents.name, "Quinn")))[0]).toMatchObject({ agentKind: "claude", model: "claude-opus-4-5", fundingSourceId: c.funding.id });
+    expect((await c.db.select().from(notifications)).map((n) => n.title)).toEqual([]);
+  });
+
+  it("lists the valid model choices and refuses combinations the server can't run", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    const options = JSON.parse(textOf(await client.callTool({ name: "model_options", arguments: {} })));
+    expect(options.harnesses).toEqual([{ value: "claude", label: "Claude Code" }, { value: "codex", label: "Codex" }, { value: "opencode", label: "OpenCode" }]);
+    expect(options.providers).toEqual(expect.arrayContaining([{ value: "anthropic", label: "Anthropic" }, { value: "ollama", label: "Ollama" }]));
+    expect(options.fundingSources).toEqual([expect.objectContaining({ id: c.funding.id, name: "Claude Max", provider: "anthropic" })]);
+
+    // An Ollama source can't run a Claude Code agent, and the provider must match the source.
+    const ollama = (await c.req("POST", "/api/funding-sources", { name: "Ollama Cloud", kind: "subscription", provider: "ollama" })).json() as { id: string };
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "A", harness: "claude", provider: "ollama", fundingSourceId: ollama.id, model: "qwen3:8b" }) }))).toContain("Claude Code can't run on Ollama");
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "B", provider: "ollama" }) }))).toContain("pays with Anthropic, not Ollama");
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "C", fundingSourceId: "not-a-uuid" }) }))).toContain("Invalid UUID");
+
+    // A model list the runner reported is enforced for a real model ID.
+    await c.db.insert(settings).values({ key: `models:${c.company.id}:opencode`, value: { models: [{ value: "ollama/qwen3:8b", name: "Qwen3" }], observedAt: new Date().toISOString() } });
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "D", harness: "opencode", provider: "ollama", fundingSourceId: ollama.id, model: "ollama/unknown" }) }))).toContain("isn't in the list");
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "D", harness: "opencode", provider: "ollama", fundingSourceId: ollama.id, model: "ollama/qwen3:8b" }) }))).toMatch(/waiting for the owner's approval/);
+    await client.close();
+  });
+
+  it("proposes a model change for an existing agent and applies it only on the owner's say-so", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    const ollama = (await c.req("POST", "/api/funding-sources", { name: "Ollama Cloud", kind: "subscription", provider: "ollama" })).json() as { id: string };
+    const change = { agent: "Engineer", harness: "opencode", provider: "ollama", model: "qwen3:8b", fundingSourceId: ollama.id, reason: "Cheaper for routine work." };
+    expect(textOf(await client.callTool({ name: "propose_model_change", arguments: change }))).toMatch(/waiting for the owner/);
+    const [d] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "model_change");
+    expect(d).toMatchObject({ options: ["Approve", "Edit", "Reject"], recommendedOption: "Approve" });
+    // Nothing changes until the owner answers.
+    expect((await c.db.select().from(agents).where(eq(agents.id, c.worker.id)))[0]).toMatchObject({ agentKind: "claude", model: null, fundingSourceId: null });
+    expect(d!.question).toContain("Harness: Claude Code · Provider: not set · Model: default · Paid from: not set");
+    expect(d!.question).toContain("Harness: OpenCode · Provider: Ollama · Model: qwen3:8b · Paid from: Ollama Cloud");
+
+    // An edit is checked with the same rules: a Claude Code harness on Ollama is refused and the card stays open.
+    const bad = await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Edit", modelConfig: { harness: "claude", provider: "ollama", model: "qwen3:8b", fundingSourceId: ollama.id } });
+    expect(bad.statusCode).toBe(422);
+    expect(bad.json().message).toContain("Claude Code can't run on Ollama");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+
+    // Reject changes nothing.
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Reject" })).statusCode).toBe(200);
+    expect((await c.db.select().from(agents).where(eq(agents.id, c.worker.id)))[0]).toMatchObject({ agentKind: "claude", model: null, fundingSourceId: null });
+
+    // A second proposal, approved, lands only between runs and says so.
+    await client.callTool({ name: "propose_model_change", arguments: change });
+    const open = (await c.db.select().from(decisions)).find((x) => x.status === "open" && (x.context as { type?: string }).type === "model_change")!;
+    expect((await c.req("POST", `/api/decisions/${open.id}/answer`, { answer: "Approve" })).statusCode).toBe(200);
+    expect((await c.db.select().from(agents).where(eq(agents.id, c.worker.id)))[0]).toMatchObject({ agentKind: "opencode", model: "qwen3:8b", fundingSourceId: ollama.id });
+    const applied = (await c.db.select().from(decisions).where(eq(decisions.id, open.id)))[0]!;
+    expect((applied.context as { applied?: { afterRunId: string | null } }).applied).toEqual({ at: expect.any(String), afterRunId: null });
+    await client.close();
   });
 
   it("changes instructions with a notification and undo, or waits when the owner approves edits too", async () => {
@@ -153,8 +216,8 @@ describe("the CEO assigns tickets, including to a planned hire", () => {
     const planned = await ticketOf(c, "Design the filter bar");
     const taken = await ticketOf(c, "Already taken");
 
-    expect(await client.callTool({ name: "propose_hire", arguments: { name: "Dee", template: "scrum-master", reason: "r", forTickets: [randomUUID()] } })).toMatchObject({ isError: true });
-    const r = await client.callTool({ name: "propose_hire", arguments: { name: "Dee", template: "scrum-master", reason: "Needs a designer", forTickets: [planned.id, taken.id] } });
+    expect(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Dee", template: "scrum-master", reason: "r", forTickets: [randomUUID()] }) })).toMatchObject({ isError: true });
+    const r = await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Dee", template: "scrum-master", reason: "Needs a designer", forTickets: [planned.id, taken.id] }) });
     expect(textOf(r)).toMatch(/waiting for the owner's approval/);
     expect((await ticketOf(c, "Design the filter bar")).assigneeAgentId).toBeNull();
 

@@ -97,9 +97,11 @@ export type DecisionContext =
   /** The lesson is approved but the project's Lessons section is full: pick which line it replaces. */
   | { type: "lesson_replace"; projectId: string; projectName: string; lesson: string }
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
-  | { type: "hire"; proposal: { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; reason?: string; forTickets?: string[] }; byAgentId: string }
+  | { type: "hire"; proposal: HireProposal; byAgentId: string }
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
+  /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
+  | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null } }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
   | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
 
@@ -170,10 +172,17 @@ export function checkAsk(a: { triedFirst: string; ownerMustDo?: boolean; steps?:
   return null;
 }
 
+/** An agent's model setup as the CEO sets it and the owner sees it (BOS-128). */
+export type AgentModelConfig = { harness: string; provider: string; model: string; fundingSourceId: string; fundingSourceName?: string };
+
 /** One proposed hire in a team plan (docs/13). */
-export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string; serves?: string | null };
+export type TeamHire = { name: string; template?: string; title?: string | null; model?: string | null; fundingSourceId?: string | null; fundingSourceName?: string; harness?: string; provider?: string; skills?: string[]; reason: string; serves?: string | null };
+export type HireProposal = { name: string; template?: string; title?: string | null; instructions?: string | null; model?: string | null; fundingSourceId?: string | null; harness?: string; provider?: string; reason?: string; /** Tickets waiting for this hire; they go to the new agent once hired. */ forTickets?: string[] };
 export const TEAM_HIRE = "Hire the ticked ones";
 export const TEAM_NOT_NOW = "Not now";
+export const MODEL_APPROVE = "Approve";
+export const MODEL_EDIT = "Edit";
+export const MODEL_REJECT = "Reject";
 
 export type AnswerExtra = {
   /** A team plan: which proposed hires (by position) the owner ticked; all of them when absent. */
@@ -189,6 +198,8 @@ export type AnswerExtra = {
   handled?: { summary: string; at: string };
   /** The CEO answered with the decisions tool: recorded as theirs, with its note as the reason (BOS-111). */
   settledBy?: { agentId: string };
+  /** A model change the owner edited before approving; checked with the same validator as the tool. */
+  modelConfig?: AgentModelConfig;
 };
 
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
@@ -250,6 +261,7 @@ export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
+type ModelChangeHook = (ctx: Extract<DecisionContext, { type: "model_change" }>, companyId: string, config: AgentModelConfig) => Promise<{ afterRunId: string | null }>;
 
 /**
  * What the blockers that just resolved produced, for the "unblocked" wake (R85). An answered
@@ -287,6 +299,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
+  let onModelChange: ModelChangeHook | null = null;
   let onTeamPlan: TeamPlanHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
@@ -729,6 +742,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onAgentDecision = hook;
     },
 
+    setModelChangeHook(hook: ModelChangeHook) {
+      onModelChange = hook;
+    },
+
     setTeamPlanHook(hook: TeamPlanHook) {
       onTeamPlan = hook;
     },
@@ -1073,6 +1090,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (options.length > 0 && !ownWords && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
       const ctx = d.context as DecisionContext;
+      if (ctx.type === "model_change" && answer === MODEL_EDIT && !extra.modelConfig) throw new AnswerError("Edit needs the harness, provider, model and paid-from you want.");
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
       const always = ctx.type === "permission" ? ctx.always?.find((a) => a.label === answer) : undefined;
@@ -1158,6 +1176,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "team_plan") {
         if (answer === TEAM_HIRE) {
           await onTeamPlan?.(ctx, d.companyId, [...new Set(extra.picks ?? ctx.hires.map((_, i) => i))]);
+        }
+      } else if (ctx.type === "model_change") {
+        if (answer !== MODEL_REJECT) {
+          try {
+            const config = answer === MODEL_EDIT ? extra.modelConfig! : ctx.proposed;
+            const applied = (await onModelChange?.(ctx, d.companyId, config)) ?? { afterRunId: null };
+            await db
+              .update(decisions)
+              .set({ context: { ...ctx, applied: { at: now().toISOString(), afterRunId: applied.afterRunId } } })
+              .where(eq(decisions.id, id));
+          } catch (err) {
+            // Nothing changed, so leave the card open for another try.
+            await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+            throw err instanceof AnswerError ? err : new AnswerError((err as Error).message);
+          }
         }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
         await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");

@@ -181,6 +181,7 @@ export async function buildApp(opts: AppOptions) {
   const agentsSvc = agentsService(db, {
     now: opts.now,
     notify: (n) => notes.notify(n),
+    catalog: (companyId) => models.forCompany(companyId),
     // Tickets the CEO planned for a hire go to them once hired; one already taken or finished is left alone.
     assignPlanned: async (companyId, hired, ticketIds) => {
       for (const id of ticketIds) {
@@ -302,6 +303,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   decisionsSvc.setSelfDeployHook(selfDeploy);
   decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
+  decisionsSvc.setModelChangeHook((ctx, companyId, config) => agentsSvc.applyModelChange(ctx, companyId, config));
   decisionsSvc.setTeamPlanHook((ctx, companyId, picks) => agentsSvc.hireTeam(companyId, picks.map((i) => ctx.hires[i]!), ctx.byAgentId, (agentId, skill) => skillsSvc.give(companyId, skill, agentId, ctx.byAgentId)));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   const WINDOW_NAME: Record<string, string> = { five_hour: "5-hour", seven_day: "weekly" };
@@ -1960,11 +1962,20 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, custom, picks } = z
-        .object({ answer: z.string().trim().min(1).max(4000), assigneeAgentId: Uuid.optional(), note: z.string().trim().max(2000).optional(), custom: z.boolean().optional(), picks: z.array(z.number().int().min(0)).max(20).optional() })
+      const { answer, assigneeAgentId, note, custom, picks, modelConfig } = z
+        .object({
+          answer: z.string().trim().min(1).max(4000),
+          assigneeAgentId: Uuid.optional(),
+          note: z.string().trim().max(2000).optional(),
+          custom: z.boolean().optional(),
+          picks: z.array(z.number().int().min(0)).max(20).optional(),
+          modelConfig: z
+            .object({ harness: z.string().trim().min(1).max(40), provider: z.string().trim().min(1).max(40), model: z.string().trim().min(1).max(200), fundingSourceId: Uuid })
+            .optional(),
+        })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, modelConfig });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });

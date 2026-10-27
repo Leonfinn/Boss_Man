@@ -239,10 +239,26 @@ describe("Boss Man MCP server", () => {
   it("exposes a small, described tool set", async () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const { tools } = await c.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_rule", "propose_team", "raise_decision", "report_key_result", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "set_ticket_risk", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "raise_decision", "report_key_result", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "set_ticket_risk", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
     expect(tools.find((t) => t.name === "ticket_reply")!.description).toContain("Details:");
     expect(tools.find((t) => t.name === "set_ticket_state")!.description).toContain("plain words");
+
+    // BOS-128: only the model-setup tools may carry these fields, and each of those goes through
+    // the owner's approval. No other tool can change an agent's model, harness or funding.
+    const modelFields = new Set(["model", "agentKind", "fundingSourceId", "harness", "provider"]);
+    const keysIn = (schema: unknown): string[] => {
+      const s = schema as { properties?: Record<string, unknown>; items?: unknown; anyOf?: unknown[] };
+      if (!s || typeof s !== "object") return [];
+      const here = Object.keys(s.properties ?? {});
+      const nested = [...Object.values(s.properties ?? {}), s.items, ...(s.anyOf ?? [])].flatMap(keysIn);
+      return [...here, ...nested];
+    };
+    const modelTools = new Set(["propose_hire", "propose_team", "propose_model_change"]);
+    for (const t of tools) {
+      const found = keysIn(t.inputSchema).filter((k) => modelFields.has(k));
+      if (!modelTools.has(t.name)) expect(found, `${t.name} can change model settings outside owner approval`).toEqual([]);
+    }
     await c.close();
   });
 

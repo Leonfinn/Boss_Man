@@ -2,7 +2,7 @@
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
-import { THINKING_LEVELS } from "@boss-man/shared";
+import { HARNESSES, THINKING_LEVELS } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource } from "../api";
 import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -40,7 +40,7 @@ type Change = { c: { id: string; field: string; before: unknown; after: unknown;
 type ModelChoice = { value: string; name: string; description?: string | null };
 type ModelLists = { runner: Record<string, { models: ModelChoice[]; observedAt: string }>; api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }> };
 const OTHER = "__other__";
-const KINDS: Array<[string, string]> = [["claude", "Claude Code"], ["codex", "Codex"], ["opencode", "OpenCode"]];
+const KINDS: Array<[string, string]> = HARNESSES.map((h) => [h.value, h.label]);
 function KindSelect({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
   return (
     <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
@@ -638,7 +638,7 @@ function CeoApprovals({ companyId }: { companyId: string }) {
           </option>
         ))}
       </select>
-      <small className="muted">The CEO can propose hires from the templates and tailor agents' instructions. What waits for you shows in Decisions; anything else you're told about, and can undo from the agent's history.</small>
+      <small className="muted">The CEO can propose hires from the templates and propose model changes for agents already hired. Every hire and model change shows all four fields (harness, provider, model and paid from) on a card in Decisions for you to approve, edit or reject. It can also tailor agents' instructions; anything else you're told about, and can undo from the agent's history.</small>
       {error && (
         <p className="error" role="alert">
           {error}
