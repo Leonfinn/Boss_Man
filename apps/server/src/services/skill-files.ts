@@ -40,12 +40,21 @@ export function hasHiddenChars(text: string): boolean {
   return text.split(/\s+/).some((w) => /[A-Za-z]/.test(w) && /[\p{Script=Cyrillic}\p{Script=Greek}\p{Script=Armenian}\p{Script=Cherokee}]/u.test(w));
 }
 
+/** Any letter outside the ordinary Latin alphabet. A command can be spelled entirely in lookalikes (a Cyrillic "ѕср" for "scp") or with a rarer Latin letter (a dotless "ı"), and still read as a normal command, so any such letter means "unsure: review". */
+export function hasForeignLetters(text: string): boolean {
+  for (const ch of text) if (ch.charCodeAt(0) > 0x7f && /\p{L}/u.test(ch)) return true;
+  return false;
+}
+
 /** Does this instructions text hold a code block, a #! line, or a line an agent could run? */
 function runnableText(text: string): boolean {
   if (text.startsWith("#!")) return true;
   // Invisible format characters (zero-width, bidi) can hide a command from the patterns below: unsure, so review.
   if (hasHiddenChars(text)) return true;
-  for (const line of text.normalize("NFKC").split(/\r?\n/)) {
+  const normalised = text.normalize("NFKC");
+  // Letters from another alphabet (or a dotless "ı") can spell a command the patterns below would not recognise.
+  if (hasForeignLetters(normalised)) return true;
+  for (const line of normalised.split(/\r?\n/)) {
     if (/^\s*(```|~~~)/.test(line)) return true; // any fenced block
     if (/^( {4}|\t)\S/.test(line)) return true; // an indented block
     if (/^#!/.test(line) || SHELL_CMD.test(line) || MAKE_CMD.test(line) || INLINE_RUN.test(line) || INLINE_CODE.test(line) || WORD_CMD.test(line) || TERMINAL.test(line) || (URL_ACTION.test(line) && ACTION_WORD.test(line)) || ONE_LINER.test(line)) return true;

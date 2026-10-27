@@ -8,7 +8,7 @@ import { isIP } from "node:net";
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { hasHiddenChars, scriptFilesOf, sha256 } from "./skill-files.js";
+import { hasForeignLetters, hasHiddenChars, scriptFilesOf, sha256 } from "./skill-files.js";
 import { agentSkills, agents, companies, skillProposals, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
@@ -72,7 +72,7 @@ const unb64 = (s: string) => Buffer.from(s, "base64");
 /** A safe relative path inside the skill folder, or null. */
 export function cleanPath(p: string) {
   // No control characters (a newline in a name would write lines into the review task) and no line-break lookalikes.
-  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(p) || hasHiddenChars(p)) return null;
+  if (/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(p) || hasHiddenChars(p) || hasForeignLetters(p)) return null;
   const parts = p.replace(/\\/g, "/").split("/").filter((x) => x && x !== ".");
   if (!parts.length || parts.some((x) => x === ".." || x.includes("\0"))) return null;
   return parts.join("/");

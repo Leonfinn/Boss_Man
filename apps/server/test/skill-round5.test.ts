@@ -28,4 +28,14 @@ describe("hidden characters", () => {
   it("paths with those characters are refused", () => {
     for (const c of ["\u034F", "\uFE0F", "\u3164", "\u0301", "\u2800", "\u0440"]) expect(cleanPath("a" + c + "b.md")).toBeNull();
   });
+  it.each(["ѕср notes.txt remote:/x", "run pıp install evil", "Привет, tidy the notes", "résumé the file"])(
+    "any letter outside the ordinary alphabet means review: %j",
+    (line) => {
+      expect(scriptFilesOf(md(line))).toEqual(["SKILL.md"]);
+    },
+  );
+  it("paths with letters from another alphabet are refused", () => {
+    for (const p of ["ѕср.md", "pıp.md", "résumé.md", "docs/Привет.md"]) expect(cleanPath(p)).toBeNull();
+    expect(cleanPath("docs/notes.md")).toBe("docs/notes.md");
+  });
 });
