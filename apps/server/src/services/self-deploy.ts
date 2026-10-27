@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { companies, decisions, owners, settings } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, DEPLOY, NOT_NOW, UPDATE_RUNNERS, type DecisionContext } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -77,7 +77,19 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const infra = target === "server" && (a?.infraPaths.length ?? 0) > 0;
     // Merge commits only repeat the ticket's title; the commits under them say what changed.
     const changes = (a?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
+    // An infra change can only be applied by hand on the host. The steps, the check and the rollback
+    // are kept structured so the approval card and the to-do it leaves behind both show them (BOS-122).
+    const handSteps = infra
+      ? [
+          "Check your setup first: Settings → Server and runner → Server. \"Blue/green: On\" or Live/Standby means blue/green; anything else is a single server.",
+          "On the server that runs Boss Man, bring the code up to date to the commit shown above (git checkout main, git merge --ff-only origin/main).",
+          "Apply it: on blue/green run scripts/rebuild-live.sh; on a single server run scripts/deploy.sh. Copy the deployer's host-deployer.sh to its folder if the change touches it.",
+          "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners.",
+        ]
+      : [];
+    const check = infra ? "Open Settings → Server and runner → Updates: it should show the new commit, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on." : undefined;
+    const rollback = infra ? "Blue/green: git checkout the previous commit shown above and run scripts/rebuild-live.sh. Single server: scripts/deploy.sh --rollback. Database restore isn't a fallback yet." : undefined;
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
     const subjects = changes.slice(0, 5).map((c) => `- ${c}`).join("\n");
     const n = a?.paths.length ?? 0;
     const migrations = (a?.paths ?? []).filter((p) => /^apps\/server\/drizzle\/[^/]+\.sql$/.test(p)).length;
@@ -86,9 +98,11 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       target === "runner"
         ? `Update the runners to ${short(commit)}? The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
-          ? `Main has moved to ${short(commit)}, but the change touches deployment files (${a!.infraPaths.slice(0, 5).join(", ")}), so Boss Man cannot deploy it. Apply it by hand on the machine that runs Boss Man: scripts/deploy.sh, or with blue/green, the steps in docs/06-install-truenas.md section 9d ("What the deployer will not do for you").`
+          ? `Main has moved to ${short(commit)}, but the change touches deployment files (${a!.infraPaths.slice(0, 5).join(", ")}), so Boss Man cannot deploy it. Approve this and a to-do stays on your queue with the steps to apply it by hand on the machine that runs Boss Man (scripts/deploy.sh, or the blue/green steps in docs/06-install-truenas.md section 9d), how to check it worked and how to roll back. It clears when you mark it done or the live commit changes.`
           : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}.${subjects ? `\n${subjects}` : ""}\nThe database is backed up first, then Boss Man restarts (a minute or two).`;
-    const options = infra ? ["Got it"] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
+    // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
+    // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
+    const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
     const [row] = await db
       .insert(decisions)
       .values({
@@ -138,12 +152,34 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   return {
     enabled: !!dir,
 
+    /**
+     * The owner's hand-apply to-dos whose commit is now what runs (BOS-122): once the host reports the
+     * deploy reached the commit, the to-do clears without the owner doing anything.
+     */
+    async clearDoneOwnerTodos(a: Available | null) {
+      if (!a?.deployed) return 0;
+      const todos = await db
+        .select({ id: decisions.id, context: decisions.context })
+        .from(decisions)
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'owner_todo'`, sql`${decisions.context}->>'target' = 'server'`));
+      let cleared = 0;
+      for (const todo of todos) {
+        const ctx = todo.context as Extract<DecisionContext, { type: "owner_todo" }>;
+        if (ctx.commit !== a.deployed) continue;
+        const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${ctx.commit}`, `The approved change to ${short(a.deployed)} is applied: the host reports it running. Marked done.`);
+        if (r) cleared++;
+      }
+      return cleared;
+    },
+
     /** One pass of the poller. // leader-only: phase 3 runs this on the leader alone. */
     async sync() {
       if (!dir) return;
       const s = await status();
       if (s && s.result !== "running") await finished(s);
       const a = await available();
+      // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
+      if (a) await this.clearDoneOwnerTodos(a);
       if (!a || !a.tip || s?.result === "running" || (await pending())) return;
       // The host just refused or deployed this very commit: the offer is stale until the host rewrites it.
       if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return;

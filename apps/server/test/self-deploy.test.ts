@@ -36,7 +36,8 @@ async function setup(opts: { deployer?: boolean } = {}) {
   const status = (over: Record<string, unknown>) =>
     outbox("status.json", { id: "", target: "server", result: "deployed", message: "Deployed.", from_commit: A, to_commit: B, started: "2026-10-20T12:01:00Z", ended: "2026-10-20T12:03:00Z", backup: "", ...over });
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "self_deploy");
-  return { ...built, db, close, dir, req, available, status, open };
+  const todos = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "owner_todo");
+  return { ...built, db, close, dir, req, available, status, open, todos };
 }
 
 describe("self-deploy (docs/09-self-deploy.md)", () => {
@@ -132,15 +133,75 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.db.select().from(notifications)).map((n) => n.level).sort()).toEqual(["flag", "page"]);
   });
 
-  it("only alerts for a change to deployment files: the owner deploys those by hand on the host", async () => {
+  it("leaves an owner to-do with the steps, the check and the rollback when a hand-apply change is approved", async () => {
     const c = (ctx = await setup());
     await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
     await c.selfDeploy.sync();
     const [d] = await c.open();
-    expect(d).toMatchObject({ options: ["Got it"], context: { infra: true } });
+    expect(d).toMatchObject({ options: ["Approve", "Not now"], context: { infra: true } });
     expect(d!.question).toContain("scripts/deploy.sh");
-    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Got it" })).statusCode).toBe(200);
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" })).statusCode).toBe(200);
+    // Nothing goes to the host: the change can only be applied by hand.
     expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
+    // The approval clears, and an owner to-do takes its place on the queue.
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("answered");
+    const [todo] = await c.todos();
+    expect(todo).toMatchObject({ kind: "question", tier: "owner", options: ["Done, it's applied", "A step failed"], recommendedOption: "Done, it's applied" });
+    expect(todo!.context).toMatchObject({ type: "owner_todo", ofDecisionId: d!.id, target: "server", commit: B });
+    expect((todo!.context as { steps: string[] }).steps.length).toBeGreaterThan(1);
+    expect(todo!.context).toMatchObject({ check: expect.any(String), rollback: expect.any(String) });
+    expect(todo!.question).toContain("waiting for you to apply it by hand");
+  });
+
+  it("clears the owner to-do when the owner marks it done", async () => {
+    const c = (ctx = await setup());
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    expect((await c.req("POST", `/api/decisions/${todo!.id}/answer`, { answer: "Done, it's applied" })).statusCode).toBe(200);
+    expect(await c.open()).toHaveLength(0);
+    expect(await c.todos()).toHaveLength(0);
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, todo!.id)))[0]!.status).toBe("answered");
+  });
+
+  it("clears the owner to-do once the live commit changes, without the owner doing anything", async () => {
+    const c = (ctx = await setup());
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    expect(await c.todos()).toHaveLength(1);
+    // The host reports the approved commit is what runs now: the to-do clears itself.
+    await c.available({ deployed: B, tip: B, infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    await c.selfDeploy.sync();
+    expect((await c.open()).some((x) => (x.context as { type: string }).type === "owner_todo")).toBe(false);
+  });
+
+  it("keeps the owner to-do when a step failed, so it is still on their queue", async () => {
+    const c = (ctx = await setup());
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    const res = await c.req("POST", `/api/decisions/${todo!.id}/answer`, { answer: "A step failed", note: "rebuild-live.sh stopped: disk full" });
+    expect(res.statusCode).toBe(200);
+    // The change is not applied, so the card stays open for another try.
+    const [after] = await c.todos();
+    expect(after).toMatchObject({ id: todo!.id, status: "open", answer: null });
+  });
+
+  it("keeps an approved one-click deploy closing as before: no to-do is left", async () => {
+    const c = (ctx = await setup());
+    await c.available();
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Deploy" })).statusCode).toBe(200);
+    // The approval clears and nothing is left on the queue.
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("answered");
+    expect(await c.todos()).toHaveLength(0);
   });
 
   it("does not ask again about a commit the owner put off, until they press Deploy latest", async () => {
