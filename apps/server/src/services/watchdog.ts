@@ -12,6 +12,7 @@ import { checkAsk } from "./decisions.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
+import { buildSummary } from "./watchdog-summary.js";
 import { evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
 
 /** Why the Scrum Master is woken: the note lists the due flags. */
@@ -60,8 +61,10 @@ export type WatchdogDeps = {
   restoreState: (ticketId: string, state: SnapTicket["state"]) => Promise<unknown>;
   /** A "Got it" decision for the owner: reaches their queue and their phone. */
   alert: (companyId: string, question: string) => Promise<unknown>;
-  notifyOwner: (n: { companyId: string; level: "note" | "flag"; title: string; body?: string; link: string }) => Promise<unknown>;
+  notifyOwner: (n: { companyId: string; level: "note" | "flag" | "page"; title: string; body?: string; link: string }) => Promise<unknown>;
   now?: () => Date;
+  /** The owner's local hour (0-23) at a moment; the daily summary goes out from 8. Defaults to UTC. */
+  localHour?: (t: Date) => number;
   log?: (msg: string) => void;
 };
 
@@ -183,6 +186,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     if (!done.length) return;
     await log({ companyId, kind: "tripped", reason, summary: `The watchdog switched itself off: ${reason}` });
     await deps.alert(companyId, `The Scrum Master watchdog switched itself off: ${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog. Look at its recent actions first; this usually means something kept tripping the same rule.`);
+    // The Page-level problem: the "Got it" decision above is only a quiet flag, so the owner is also paged once per trip.
+    await deps.notifyOwner({ companyId, level: "page", title: "The watchdog switched itself off", body: `${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog.`, link: "#/settings" });
   }
 
   /**
@@ -457,6 +462,103 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     return { flagged: list.length };
   }
 
+  // ---------- Telling the owner (BOS-60) ----------
+
+  /** Most tickets one owner decision may hold back before the owner is paged. */
+  const URGENT_BLOCKED = 3;
+  /** The daily summary goes out at or after this local hour, and at most once a day. */
+  const SUMMARY_HOUR = 8;
+
+  /** Open owner decisions that hold unfinished tickets back, with the tickets they hold. */
+  async function ownerDecisions(companyId: string) {
+    const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+    const rows = await db
+      .select({ id: decisions.id, question: decisions.question, askedAt: decisions.createdAt, ticketId: tickets.id, number: tickets.number })
+      .from(ticketDependencies)
+      .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+      .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
+      .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), eq(decisions.tier, "owner"), ne(tickets.systemState, "done")))
+      .orderBy(decisions.createdAt);
+    // A decision holds the ticket it blocks and every unfinished ticket waiting on that one, however far down the chain.
+    const waits = await db
+      .select({ blocked: ticketDependencies.blockedTicketId, holder: ticketDependencies.blockerTicketId, number: tickets.number })
+      .from(ticketDependencies)
+      .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
+      .where(and(eq(tickets.companyId, companyId), isNotNull(ticketDependencies.blockerTicketId), ne(tickets.systemState, "done")));
+    const downstream = new Map<string, { id: string; number: number }[]>();
+    for (const w of waits) downstream.set(w.holder!, [...(downstream.get(w.holder!) ?? []), { id: w.blocked, number: w.number ?? 0 }]);
+    const by = new Map<string, { id: string; question: string; askedAt: Date; blocks: string[] }>();
+    for (const r of rows) {
+      const d = by.get(r.id) ?? { id: r.id, question: r.question, askedAt: r.askedAt, blocks: [] };
+      const seen = new Set<string>([r.ticketId]);
+      const numbers = [r.number];
+      for (const queue = [r.ticketId]; queue.length; ) {
+        for (const n of downstream.get(queue.shift()!) ?? []) if (!seen.has(n.id)) (seen.add(n.id), numbers.push(n.number), queue.push(n.id));
+      }
+      for (const n of numbers) {
+        const ref = ticketRef(c?.prefix, n) ?? `#${n}`;
+        if (!d.blocks.includes(ref)) d.blocks.push(ref);
+      }
+      by.set(r.id, d);
+    }
+    return [...by.values()];
+  }
+
+  /**
+   * The two things that interrupt the owner straight away: an owner decision holding several tickets (a Page, once per decision), and the watchdog
+   * switching itself off at its safety cap (the Page-level problem; trip() pages the owner once per trip). Nothing else here pings.
+   */
+  async function urgentCheck(companyId: string) {
+    for (const d of (await ownerDecisions(companyId)).filter((x) => x.blocks.length >= URGENT_BLOCKED)) {
+      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "urgent_alert"), sql`${watchdogActions.after}->>'decisionId' = ${d.id}`)).limit(1);
+      if (told) continue;
+      const q = d.question.replace(/\s+/g, " ").trim().slice(0, 140);
+      await deps.notifyOwner({ companyId, level: "page", title: `Your decision is holding up ${d.blocks.length} tickets`, body: `"${q}" blocks ${d.blocks.join(", ")}. It is in Your Review.`, link: "#/decisions" });
+      await log({ companyId, kind: "urgent_alert", reason: `one decision holds ${d.blocks.length} tickets`, after: { decisionId: d.id, tickets: d.blocks }, summary: `Boss Man paged the owner: one decision holds ${d.blocks.length} tickets (${d.blocks.join(", ")})` });
+    }
+  }
+
+  /** Once a day, only if something happened since the last one. Returns whether it was sent. */
+  async function dailySummary(companyId: string, force = false) {
+    const t = now();
+    if (!force && (deps.localHour?.(t) ?? t.getUTCHours()) < SUMMARY_HOUR) return false;
+    const [last] = await db.select({ at: watchdogActions.createdAt }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "daily_summary"))).orderBy(desc(watchdogActions.createdAt)).limit(1);
+    if (!force && last && t.getTime() - last.at.getTime() < 20 * H) return false;
+    const since = last?.at ?? new Date(t.getTime() - 24 * H);
+    const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+    const opened = await db.select({ id: watchdogFlags.id, closedAt: watchdogFlags.closedAt }).from(watchdogFlags).where(and(eq(watchdogFlags.companyId, companyId), gte(watchdogFlags.openedAt, since)));
+    const acts = await db
+      .select({ kind: watchdogActions.kind, n: sql<number>`count(*)::int` })
+      .from(watchdogActions)
+      .where(and(eq(watchdogActions.companyId, companyId), gte(watchdogActions.createdAt, since), isNull(watchdogActions.undoneAt)))
+      .groupBy(watchdogActions.kind);
+    const cleared = await db.select({ n: sql<number>`count(*)::int` }).from(watchdogFlags).where(and(eq(watchdogFlags.companyId, companyId), eq(watchdogFlags.status, "closed"), gte(watchdogFlags.closedAt, since)));
+    const openRows = await db
+      .select({ flag: watchdogFlags, number: tickets.number, title: tickets.title, assignee: agents.name, assignedToOwner: tickets.assignedToOwner })
+      .from(watchdogFlags)
+      .innerJoin(tickets, eq(tickets.id, watchdogFlags.ticketId))
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(eq(watchdogFlags.companyId, companyId), eq(watchdogFlags.status, "open")));
+    const s = buildSummary({
+      now: t,
+      caught: opened.length,
+      fixed: cleared[0]?.n ?? 0,
+      actions: Object.fromEntries(acts.map((a) => [a.kind, a.n])),
+      open: openRows.map((r) => ({
+        ref: ticketRef(c?.prefix, r.number) ?? `#${r.number}`,
+        title: r.title.replace(/\s+/g, " ").slice(0, 80),
+        rule: r.flag.rule as WatchdogRule,
+        waitingOn: r.flag.rule === "owner_decision_waiting" || r.assignedToOwner ? "you" : r.flag.escalatedAt ? "the CEO" : (r.assignee ?? "nobody (unassigned)"),
+        openedAt: r.flag.openedAt,
+      })),
+      decisions: await ownerDecisions(companyId),
+    });
+    if (!s) return false;
+    await deps.notifyOwner({ companyId, level: "note", title: s.title, body: s.body, link: "#/scrum-master" });
+    await log({ companyId, kind: "daily_summary", reason: s.title, after: { stuck: s.stuck, oldest: s.oldestRef }, summary: "Boss Man sent the owner the Scrum Master's daily summary" });
+    return true;
+  }
+
   // ---------- Undo helpers ----------
 
   /** Takes back wakes this action created that haven't started; a delivered or merged one can't be. */
@@ -483,6 +585,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         for (const c of on) {
           try {
             flagged += (await sweepCompany(c)).flagged;
+            await urgentCheck(c.id);
+            await dailySummary(c.id);
           } catch (err) {
             deps.log?.(`watchdog sweep for ${c.id} failed: ${(err as Error).message}`);
           }
@@ -494,6 +598,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     },
 
     snapshot,
+    urgentCheck,
+    dailySummary,
     // The alert ladder (BOS-64) checks its Scrum Master actions with the same guard and cap.
     actor,
     capOrFail,
@@ -762,12 +868,12 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         .then((rows) => rows.map((r) => ({ ...r.flag, ticketNumber: r.ticketNumber, ticketTitle: r.ticketTitle })));
     },
 
-    async actions(companyId: string, q: { ticketId?: string; since?: Date; limit?: number }) {
+    async actions(companyId: string, q: { ticketId?: string; since?: Date; limit?: number; excludeKind?: string }) {
       return db
         .select({ action: watchdogActions, actor: agents.name })
         .from(watchdogActions)
         .leftJoin(agents, eq(agents.id, watchdogActions.actorAgentId))
-        .where(and(eq(watchdogActions.companyId, companyId), q.ticketId ? eq(watchdogActions.ticketId, q.ticketId) : undefined, q.since ? gte(watchdogActions.createdAt, q.since) : undefined))
+        .where(and(eq(watchdogActions.companyId, companyId), q.ticketId ? eq(watchdogActions.ticketId, q.ticketId) : undefined, q.since ? gte(watchdogActions.createdAt, q.since) : undefined, q.excludeKind ? ne(watchdogActions.kind, q.excludeKind) : undefined))
         .orderBy(desc(watchdogActions.createdAt))
         .limit(Math.min(q.limit ?? 200, 500))
         .then((rows) => rows.map((r) => ({ ...r.action, actorName: r.actor ?? (r.action.actorAgentId ? null : "Boss Man") })));

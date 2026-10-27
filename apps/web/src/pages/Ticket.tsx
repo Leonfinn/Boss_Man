@@ -6,6 +6,7 @@ import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAtt
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
+import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { readVerdicts } from "@boss-man/shared";
 import { usePoll } from "../hooks";
@@ -555,6 +556,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </p>
           )}
 
+          <ScrumMasterLog companyId={t.companyId} ticketId={t.id} heading="Scrum Master" />
           <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
         </div>
 

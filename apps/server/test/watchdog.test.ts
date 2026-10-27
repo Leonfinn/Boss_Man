@@ -441,6 +441,9 @@ describe("the hourly cap (BOS-58)", () => {
     expect(st.settings.enabled).toBe(false);
     expect(st.trippedReason).toContain("more than 2 actions");
     expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
+    // The trip is the Page-level problem: the owner is paged straight away, once.
+    const pages = (await ctx.db.select().from(notifications)).filter((n) => n.level === "page");
+    expect(pages.map((n) => n.title)).toEqual(["The watchdog switched itself off"]);
     expect(textOf(await call({ action: "nudge", ticketId: ts[2]!.id, reason: "after the trip" }))).toContain("switched off");
     expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
     // The sweep stays off too.

@@ -390,6 +390,7 @@ export async function buildApp(opts: AppOptions) {
     // A trip means the Scrum Master is the problem: straight to the owner.
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
+    localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
     now: opts.now,
     log: (m) => app.log.error(m),
   });
@@ -1833,7 +1834,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.get("/api/companies/:id/watchdog/actions", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const q = z.object({ ticketId: Uuid.optional(), since: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
+      const q = z.object({ ticketId: Uuid.optional(), since: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(500).optional(), excludeKind: z.string().max(40).optional() }).parse(req.query);
       return watchdog.actions(id, q).catch(watchdogErrors(reply));
     });
     owner.get("/api/companies/:id/watchdog/backtest", async (req, reply) => {
