@@ -7,17 +7,17 @@
 // words from that chat (text read from a ticket or feedback can't pass); other agents can only
 // ask, and only the CEO's explicit accept turns a request into a note; every note keeps its
 // source; and the owner is told in the chat and can edit or delete any note on the Agents page.
-import { and, asc, count, desc, eq, gt } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, notExists } from "drizzle-orm";
 import { ticketRef, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentNotes, agents, companies, noteRequests, ownerChatMessages, tickets } from "../db/schema.js";
+import { agentNotes, agents, companies, noteRequests, ownerChatMessages, paAnswers, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 
 export const NOTE_LIMITS = { count: 20, title: 80, text: 500, why: 300 } as const;
 /** How many note requests one agent may send, and how many may wait for the CEO at once. */
 export const REQUEST_LIMITS = { perHour: 3, perDay: 10, pending: 20 } as const;
-/** The shortest owner quote accepted as a note's why. */
-const MIN_QUOTE = 8;
+/** The shortest owner quote accepted as a note's why: long enough that "deploy now" or "no review" can't back a note. */
+export const MIN_QUOTE = 20;
 /** How far back in the chat the owner's words are looked for. */
 const QUOTE_LOOKBACK = 50;
 const HOUR = 3_600_000;
@@ -122,7 +122,15 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
         const said = await db
           .select({ text: ownerChatMessages.text })
           .from(ownerChatMessages)
-          .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId), eq(ownerChatMessages.role, "owner")))
+          .where(
+            and(
+              eq(ownerChatMessages.companyId, companyId),
+              eq(ownerChatMessages.agentId, agentId),
+              eq(ownerChatMessages.role, "owner"),
+              // A PA escalation is stored as an owner row in the CEO chat, but its text includes the PA's own summary.
+              notExists(db.select({ id: paAnswers.id }).from(paAnswers).where(eq(paAnswers.ceoMessageId, ownerChatMessages.id))),
+            ),
+          )
           .orderBy(desc(ownerChatMessages.createdAt))
           .limit(QUOTE_LOOKBACK);
         if (said.some((m) => plain(m.text).includes(q))) return;
