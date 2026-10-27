@@ -1,6 +1,6 @@
 # Scrum Master watchdog (BOS-58)
 
-Every few minutes Boss Man runs rule checks over each company's board, with no model and no tokens. It wakes the company's Scrum Master only when a rule trips: once per sweep, with the list of problems. It is **off by default**. The owner picks the Scrum Master and switches it on in Settings → Watchdog.
+Every few minutes Boss Man runs rule checks over each company's board, with no model and no tokens. It wakes the company's Scrum Master only when a rule trips: once per sweep, with the whole list of problems (about 30,000 characters of it; anything beyond waits for the next sweep), so a busy board costs one run, not several. A wake the scheduler drops leaves the flags due and is tried again after 15 minutes. If more than three tickets wait on the owner, they get one summary notification. It is **off by default**. The owner picks the Scrum Master and switches it on in Settings → Watchdog.
 
 The plan, with the agreed data shapes, is on the wiki: `product/analysis/scrum-master-watchdog-plan-bos-58`.
 
@@ -43,7 +43,7 @@ All limits are in settings. A rule never trips while a run works on the ticket; 
 | `owner_decision_waiting` | an open owner decision has held it for `ownerDecisionHours`; Boss Man reminds the owner once and the Scrum Master is never woken |
 
 - **Why 45 minutes:** Boss Man's own free fixes get the first go: recovery of an interrupted run, the 15-minute "carry on" check, and the missed-work nudge after 30 minutes. The Scrum Master is told only when those didn't move the ticket.
-- **Scheduled work:** a scheduled check or a queued wake on an in-progress ticket is a plan, not a stall.
+- **Scheduled work:** a scheduled check, or a queued wake that will happen, on an in-progress ticket is a plan, not a stall. A wake parked behind a paused agent is not a plan: the ticket is still checked.
 - **Held by another ticket or an engagement:** the held ticket is never flagged. The holder is judged on its own, and its flag says how many tickets it holds.
 - **Coming back soon after clearing:** a problem that clears and comes straight back waits out the rest of its limit since the last hand-off, snooze or escalation.
 
@@ -64,7 +64,7 @@ The `watchdog` tool's actions are:
 **Limits on every action:**
 - Each needs a one-line reason.
 - It acts only on an open flag the watchdog handed over.
-- Each kind can be used at most once per flag per hand-off. An undone or refused attempt still counts.
+- One action per flag per hand-off, of any kind (snooze, nudge, escalate and the rest). An undone or refused attempt still counts. Escalating takes only the flag it was given.
 - A flag snoozed twice that comes due again goes to the CEO, through Boss Man. The count is per episode (per open flag), not strictly consecutive: a snooze undone by the owner takes one off, nothing else resets it while the flag stays open.
 - An escalated flag (by the Scrum Master, or automatically after two snoozes) belongs to the CEO for one rule limit. If it is still open after that, it starts over: the escalation mark and the snooze count are cleared and the Scrum Master gets it again.
 - **Wake limit:** the Scrum Master's sweep wake (reason `watchdog`) is exempt from the scheduler's 6-per-hour limit on wakes with no ticket, and doesn't count toward it. The watchdog has its own hourly cap on runs and nudges, so a busy hour can't silently drop a sweep and push every listed flag back by its limit.
@@ -81,7 +81,7 @@ Counted from `watchdog_actions` over a rolling hour:
 - sweep wakes, against `maxSmRunsPerHour`;
 - actions that reach someone, against `maxNudgesPerHour`. These are nudge, assign, rewake, chase review, escalate, auto-escalate and raise decision.
 
-The next one over the cap switches the watchdog off. It sets `watchdog_tripped_at`, logs `tripped`, and sends one "Got it" decision to the owner. Only the owner switching it back on clears the trip. The watchdog's wakes also stay under every scheduler limit, including the ticketless-wakes limit (6 an hour per agent). That limit is deliberately not lifted for them, at the security review's request (BOS-62).
+The next one over the cap switches the watchdog off. It sets `watchdog_tripped_at`, logs `tripped`, and sends one "Got it" decision to the owner. Only the owner switching it back on clears the trip. The sweep wake is exempt from the ticketless-wakes limit (6 an hour per agent); the other scheduler limits still apply. When the run cap trips, the owner's notice says how many problems were due and from which rules. The backtest uses the same one-wake-per-sweep count and reports when the cap would first trip.
 
 ## Read API (owner)
 
