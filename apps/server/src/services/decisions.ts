@@ -45,9 +45,11 @@ export type DecisionContext =
    * An approved decision whose next step is the owner's own (BOS-122): a deploy whose target has to be
    * applied by hand. It stays open as a to-do on the owner's queue until they mark it done or the live
    * commit is confirmed to have changed. `ofDecisionId` names the approval it came from; `steps`, `check`
-   * and `rollback` are shown on the card.
+   * and `rollback` are shown on the card. `fromCommit` is what ran when it was approved: once the live
+   * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
+   * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; deployId?: string }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string } }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
@@ -124,7 +126,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; deployId?: string },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -137,7 +139,7 @@ export async function raiseOwnerTodo(
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -1090,6 +1092,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             raisedByAgentId: d.raisedByAgentId,
             target: ctx.target,
             commit: ctx.commit,
+            fromCommit: ctx.fromCommit,
           });
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
           try {
@@ -1102,10 +1105,25 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       } else if (ctx.type === "owner_todo") {
         // The approved deploy's hand-apply to-do (BOS-122). Only "Done" clears it: "A step failed" means
-        // the change isn't applied yet, so the card stays on the owner's queue while the agent that
-        // raised it (woken below) triages. The live commit changing clears it too (self-deploy sync).
+        // the change isn't applied yet, so the card stays on the owner's queue. Keep what the owner said
+        // so it shows on the card, and tell someone who can help: the agent that raised it is woken below;
+        // a to-do raised by the system itself goes to the CEO.
         if (answer === TODO_FAILED) {
-          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          const note = (extra.note ?? "").trim() || "No details given.";
+          await db
+            .update(decisions)
+            .set({ status: "open", answer: null, answeredAt: null, context: { ...ctx, lastFailure: { note, at: now().toISOString() } } })
+            .where(eq(decisions.id, id));
+          if (!d.raisedByAgentId && wake) {
+            const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
+            if (ceo) {
+              await wake({
+                agentId: ceo.id,
+                reason: "decision",
+                note: `The owner tried to apply an approved change by hand and a step failed: ${note} The "Waiting for you" card is still on their queue: "${d.question}". Work out what went wrong, fix what you can, and either tell the owner on the ticket or raise a decision with the next step.`,
+              });
+            }
+          }
         }
       } else if (ctx.type === "maintenance") {
         await maintenance?.answered(answer);

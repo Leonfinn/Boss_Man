@@ -79,16 +79,18 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const changes = (a?.commits ?? []).flatMap((c) => (c.subject && !c.subject.startsWith("Merge ") ? [c.subject] : [])).slice(0, 10);
     // An infra change can only be applied by hand on the host. The steps, the check and the rollback
     // are kept structured so the approval card and the to-do it leaves behind both show them (BOS-122).
+    // The approved commit is pinned in every step (BOS-124): `main` may have moved on by the time the
+    // owner applies it, and an unpinned step would bring in changes they never approved.
     const handSteps = infra
       ? [
           "Check your setup first: Settings → Server and runner → Server. \"Blue/green: On\" or Live/Standby means blue/green; anything else is a single server.",
-          "On the server that runs Boss Man, bring the code up to date to the commit shown above (git checkout main, git merge --ff-only origin/main).",
-          "Apply it: on blue/green run scripts/rebuild-live.sh; on a single server run scripts/deploy.sh. Copy the deployer's host-deployer.sh to its folder if the change touches it.",
+          `On the server that runs Boss Man, in the folder it deploys from, pin the approved commit: git checkout main; git fetch origin; git merge --ff-only ${commit}; git rev-parse HEAD. The last command must print ${commit}; if it prints anything else, stop and tell us.`,
+          `Apply it: on blue/green run scripts/rebuild-live.sh; on a single server run scripts/deploy.sh --commit ${commit}. Copy the deployer's host-deployer.sh to its folder if the change touches it.`,
           "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners.",
         ]
       : [];
-    const check = infra ? "Open Settings → Server and runner → Updates: it should show the new commit, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on." : undefined;
-    const rollback = infra ? "Blue/green: git checkout the previous commit shown above and run scripts/rebuild-live.sh. Single server: scripts/deploy.sh --rollback. Database restore isn't a fallback yet." : undefined;
+    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
+    const rollback = infra ? `Blue/green: git checkout ${fromCommit} and run scripts/rebuild-live.sh. Single server: scripts/deploy.sh --rollback. Database restore isn't a fallback yet.` : undefined;
     const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
     const subjects = changes.slice(0, 5).map((c) => `- ${c}`).join("\n");
     const n = a?.paths.length ?? 0;
@@ -153,8 +155,10 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     enabled: !!dir,
 
     /**
-     * The owner's hand-apply to-dos whose commit is now what runs (BOS-122): once the host reports the
-     * deploy reached the commit, the to-do clears without the owner doing anything.
+     * The owner's hand-apply to-dos the host has caught up with (BOS-122): once the live commit is no
+     * longer the one that ran at approval, the hand-apply reached the host and the to-do clears without
+     * the owner doing anything. (It may land on a later commit than the approved one, per BOS-124.)
+     * Rows from before `fromCommit` existed fall back to an exact match on the approved commit.
      */
     async clearDoneOwnerTodos(a: Available | null) {
       if (!a?.deployed) return 0;
@@ -165,7 +169,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       let cleared = 0;
       for (const todo of todos) {
         const ctx = todo.context as Extract<DecisionContext, { type: "owner_todo" }>;
-        if (ctx.commit !== a.deployed) continue;
+        const caughtUp = ctx.fromCommit ? a.deployed !== ctx.fromCommit : ctx.commit === a.deployed;
+        if (!caughtUp) continue;
         const r = await clearOwnerTodo(db, `owner-todo:self-deploy:${ctx.commit}`, `The approved change to ${short(a.deployed)} is applied: the host reports it running. Marked done.`);
         if (r) cleared++;
       }

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications } from "../src/db/schema.js";
+import { decisions, notifications, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -147,9 +147,13 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("answered");
     const [todo] = await c.todos();
     expect(todo).toMatchObject({ kind: "question", tier: "owner", options: ["Done, it's applied", "A step failed"], recommendedOption: "Done, it's applied" });
-    expect(todo!.context).toMatchObject({ type: "owner_todo", ofDecisionId: d!.id, target: "server", commit: B });
-    expect((todo!.context as { steps: string[] }).steps.length).toBeGreaterThan(1);
-    expect(todo!.context).toMatchObject({ check: expect.any(String), rollback: expect.any(String) });
+    expect(todo!.context).toMatchObject({ type: "owner_todo", ofDecisionId: d!.id, target: "server", commit: B, fromCommit: A });
+    const steps = (todo!.context as { steps: string[] }).steps;
+    expect(steps.length).toBeGreaterThan(1);
+    // The approved commit is pinned in every step: main may have moved on by the time it is applied (BOS-124).
+    expect(steps.join("\n")).toContain(B);
+    expect(steps.join("\n")).not.toContain("origin/main");
+    expect(todo!.context).toMatchObject({ check: expect.stringContaining(B.slice(0, 8)), rollback: expect.stringContaining(A) });
     expect(todo!.question).toContain("waiting for you to apply it by hand");
   });
 
@@ -166,6 +170,18 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.db.select().from(decisions).where(eq(decisions.id, todo!.id)))[0]!.status).toBe("answered");
   });
 
+  it("keeps the owner to-do while the live commit is still what ran at approval", async () => {
+    const c = (ctx = await setup());
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    // The host still reports the old commit: nothing has been applied yet.
+    await c.available({ deployed: A, tip: A, infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    await c.selfDeploy.sync();
+    expect(await c.todos()).toHaveLength(1);
+  });
+
   it("clears the owner to-do once the live commit changes, without the owner doing anything", async () => {
     const c = (ctx = await setup());
     await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
@@ -173,8 +189,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const [d] = await c.open();
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
     expect(await c.todos()).toHaveLength(1);
-    // The host reports the approved commit is what runs now: the to-do clears itself.
-    await c.available({ deployed: B, tip: B, infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    // The hand-apply landed on a later commit than the approved one (BOS-124): the live commit is no
+    // longer what ran at approval, so the to-do clears itself.
+    await c.available({ deployed: C, tip: C, infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
     await c.selfDeploy.sync();
     expect((await c.open()).some((x) => (x.context as { type: string }).type === "owner_todo")).toBe(false);
   });
@@ -188,9 +205,13 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const [todo] = await c.todos();
     const res = await c.req("POST", `/api/decisions/${todo!.id}/answer`, { answer: "A step failed", note: "rebuild-live.sh stopped: disk full" });
     expect(res.statusCode).toBe(200);
-    // The change is not applied, so the card stays open for another try.
+    // The change is not applied, so the card stays open for another try, with the owner's note kept.
     const [after] = await c.todos();
     expect(after).toMatchObject({ id: todo!.id, status: "open", answer: null });
+    expect((after!.context as { lastFailure: { note: string } }).lastFailure.note).toBe("rebuild-live.sh stopped: disk full");
+    // No agent raised the to-do, so the CEO is told what went wrong.
+    const ws = await c.db.select().from(wakes);
+    expect(ws.some((w) => w.reason === "decision" && (w.note ?? "").includes("disk full"))).toBe(true);
   });
 
   it("keeps an approved one-click deploy closing as before: no to-do is left", async () => {

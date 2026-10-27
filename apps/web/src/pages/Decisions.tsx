@@ -390,6 +390,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontSize: 14 }}>{d.context.rollback}</p>
                       </div>
                     )}
+                    {d.context?.lastFailure && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>Last step failed</p>
+                        <p style={{ fontSize: 14 }}>{d.context.lastFailure.note}</p>
+                        <p className="muted" style={{ fontSize: 12 }}>Reported {when(d.context.lastFailure.at)}</p>
+                      </div>
+                    )}
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>
