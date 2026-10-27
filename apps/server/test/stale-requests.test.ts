@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { stateNoteLine } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, tickets, wakes } from "../src/db/schema.js";
+import { decisions, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -163,5 +163,45 @@ describe("stale requests (BOS-123)", () => {
     });
     expect(isError(asked)).toBe(false);
     expect(textOf(asked)).toMatch(/in the owner's queue/i);
+  });
+
+  it("refuses to withdraw an owner sign-off card and keeps its dependency (security review)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Ship the risky change", c.worker.id);
+    const [card] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "approval",
+        question: "Reviewer approved it, which is high risk. Merge it, or send it back?",
+        options: ["Approve and merge", "Send it back"],
+        recommendedOption: "Approve and merge",
+        raisedByAgentId: c.other.id,
+        tier: "owner",
+        context: { type: "risk_review", ticketId: t.id, reviewer: "Reviewer" },
+      })
+      .returning();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: card!.id });
+
+    const mcp = await c.mcp(c.other.id);
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: card!.id, reason: "The owner already approved" } });
+    expect(isError(r)).toBe(true);
+    expect(textOf(r)).toMatch(/another flow/i);
+
+    const [after] = await c.db.select().from(decisions).where(eq(decisions.id, card!.id));
+    expect(after!.status).toBe("open");
+    const deps = await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, card!.id));
+    expect(deps).toHaveLength(1);
+  });
+
+  it("still lets an agent withdraw its own question card", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Pick a colour", c.worker.id);
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Blue or navy?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Read the brand guide" });
+    const mcp = await c.mcp(c.worker.id);
+    const r = await mcp.callTool({ name: "withdraw_decision", arguments: { decisionId: d.id, reason: "The owner already chose blue" } });
+    expect(isError(r)).toBe(false);
+    const [after] = await c.db.select().from(decisions).where(eq(decisions.id, d.id));
+    expect(after!.status).toBe("withdrawn");
   });
 });

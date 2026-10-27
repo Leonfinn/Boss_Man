@@ -1237,6 +1237,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
       if (!d) return null;
       if (!actor.agentId || d.raisedByAgentId !== actor.agentId) throw new AnswerError("You can only withdraw a decision you raised.");
+      // Only a question asked through raise_decision may be taken back. System cards that also
+      // record an agent (owner sign-off, permission, deploy, engagement, lesson, review loop,
+      // ticket cap, stalled run) must go through their own answer path: withdrawing a risk_review
+      // card would delete the dependency and let the ticket merge without the owner's sign-off.
+      const type = (d.context as { type?: string } | null)?.type;
+      if (d.kind !== "question" || type !== "question") throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
       const [closed] = await db.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
       if (!closed) return null;
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));

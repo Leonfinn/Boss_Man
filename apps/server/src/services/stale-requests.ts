@@ -103,7 +103,7 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
         note: [
           `The owner acted (${input.reason}), so a decision card or the state note you left may now be out of date.`,
           "Check the live state before you repeat anything to them: their latest answers, what's deployed, and whether the tickets involved are done.",
-          "If what you asked for is done, take the card back with withdraw_decision and update the ticket's state note in this run. If it still needs them, say so plainly and don't repeat an old \"waiting on you\" note.",
+          "If what you asked for is done, take the card back (a question card you raised can be withdrawn with withdraw_decision) and update the ticket's state note in this run. If it still needs them, say so plainly and don't repeat an old \"waiting on you\" note.",
         ].join("\n"),
       });
       if (!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped")) continue;
