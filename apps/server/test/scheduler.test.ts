@@ -153,6 +153,15 @@ describe("scheduler", () => {
     expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "assigned", ticketId: t.id })).toMatchObject({ status: "queued" });
   });
 
+  it("never counts or drops the watchdog's sweep wake against the no-ticket limit", async () => {
+    ctx = await setup();
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: `d${i}` });
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "watchdog", note: "sweep" })).toMatchObject({ status: "queued" });
+    // The sweeps don't use up the agent's other no-ticket wakes either.
+    const other = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d6" });
+    expect(other).toMatchObject({ status: "dropped" });
+  });
+
   it("defers when a pausing budget is exceeded, failing closed", async () => {
     ctx = await setup();
     const fs = (await ctx.req("POST", "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json();

@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
@@ -19,12 +19,14 @@ import { effectivePolicy } from "./review-policy.js";
 import { handOverReviews, REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
+import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
+import type { AlertInput } from "./alert-ladder.js";
 
 export type Limits = {
   instance: number;
@@ -104,7 +106,8 @@ export type WakeInput = {
   steerRunId?: string | null;
 };
 
-type Alert = (companyId: string, question: string) => Promise<unknown>;
+/** Boss Man's own alerts go up the alert ladder (BOS-64): the Scrum Master, then the CEO, then the owner. */
+type Alert = (companyId: string, question: string, opts?: Omit<AlertInput, "companyId" | "question">) => Promise<unknown>;
 
 export function schedulerService(
   db: Db,
@@ -398,7 +401,7 @@ export function schedulerService(
       if (x.monitorAttempts >= x.monitorMax) {
         const [{ name: agent } = { name: "The agent" }] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, x.assigneeAgentId));
         await log(`Checked ${x.monitorMax} times and still not resolved: ${x.monitorNote}`);
-        await deps.alert(x.companyId, `${agent} has checked '${x.monitorNote}' ${x.monitorMax} times on '${x.title}' and it still isn't resolved.`);
+        await deps.alert(x.companyId, `${agent} has checked '${x.monitorNote}' ${x.monitorMax} times on '${x.title}' and it still isn't resolved.`, { ticketId: x.id, about: [x.assigneeAgentId] });
         continue;
       }
       const n = x.monitorAttempts + 1;
@@ -565,7 +568,11 @@ export function schedulerService(
     for (const h of withheld) {
       // Told once per skill and missing set. shortcut: never re-told after the add-on recovers and breaks again; clear the key on a healthy report (docs/12 step 2).
       const told = await db.insert(settings).values({ key: `addon-missing:${runner.id}:${h.name}:${h.missing.join(",")}`, value: true }).onConflictDoNothing().returning();
-      if (told.length) await deps.alert(w.companyId, `${agent.name}'s skill "${h.name}" is left out of its runs: it needs the ${h.missing.join(" and ")} add-on, which this company's runner doesn't have working. See Settings → Server and runner.`);
+      if (told.length) await deps.alert(w.companyId, `${agent.name}'s skill "${h.name}" is left out of its runs: it needs the ${h.missing.join(" and ")} add-on, which this company's runner doesn't have working. See Settings → Server and runner.`, {
+          // Fixing the runner needs host access: past the Scrum Master's actions, so the CEO first.
+          from: "ceo",
+          ticketId: w.ticketId,
+        });
     }
     const toolServers = chat ? [] : await db.select({ name: mcpServers.name, url: mcpServers.url, transport: mcpServers.transport, headerName: mcpServers.headerName, headerValue: mcpServers.headerValue, secretEnv: mcpServers.secretEnv }).from(mcpServers).where(eq(mcpServers.companyId, w.companyId));
     const sent = deps.runners.send(runner.id, {
@@ -665,7 +672,13 @@ export function schedulerService(
 
       if (depth > limits.maxDepth) {
         const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `chain of ${depth} wake-ups exceeds ${limits.maxDepth}` }).returning();
-        await deps.alert(agent.companyId, `${agent.name} was woken ${depth} times in a chain, which looks like a loop. The last wake ("${input.reason}") was dropped. Look into it, then wake the agent again if it's fine.`);
+        await deps.alert(agent.companyId, `${agent.name} was woken ${depth} times in a chain, which looks like a loop. The last wake ("${input.reason}") was dropped. Look into it, then wake the agent again if it's fine.`, {
+          ticketId: base.ticketId,
+          about: [agent.id, causedByAgentId],
+          // One climbing alert per looping agent while it is open, not one (and one CEO run) per dropped wake.
+          dedupeKey: `alert:chain:${agent.id}`,
+          rewake: { agentId: agent.id, ticketId: base.ticketId, reason: input.reason },
+        });
         return row!;
       }
       if (causedByAgentId === agent.id) {
@@ -676,14 +689,14 @@ export function schedulerService(
           .where(and(eq(wakes.agentId, agent.id), eq(wakes.causedByAgentId, agent.id), gt(wakes.createdAt, since)));
         if ((recent[0]?.n ?? 0) >= limits.selfWakesPer10Min) {
           const [row] = await db.insert(wakes).values({ ...base, status: "dropped", statusReason: `woke itself more than ${limits.selfWakesPer10Min} times in 10 minutes` }).returning();
-          await deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are being dropped.`);
+          await deps.alert(agent.companyId, `${agent.name} keeps waking itself (more than ${limits.selfWakesPer10Min} times in 10 minutes). New self-wakes are being dropped.`, { ticketId: base.ticketId, about: [agent.id], dedupeKey: `alert:self:${agent.id}` });
           return row!;
         }
       }
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -699,6 +712,7 @@ export function schedulerService(
               sql`${wakes.reason} <> ${TREE_REASON}`,
               sql`${wakes.reason} <> ${REVIEW_REASON}`,
               sql`${wakes.reason} <> ${ANSWER_REASON}`,
+              sql`${wakes.reason} <> ${WATCHDOG_REASON}`,
             ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
@@ -714,6 +728,7 @@ export function schedulerService(
             await deps.alert(
               agent.companyId,
               `${agent.name} has been started ${limits.ticketlessPerHour} times in the last hour with no ticket (the latest for "${input.reason}"). Further wakes like that are being dropped for the rest of the hour. See Runs for why each one started.`,
+              { about: [agent.id], dedupeKey: `alert:ticketless:${agent.id}` },
             );
           }
           return row!;
@@ -833,6 +848,19 @@ export function schedulerService(
         const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
         if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
       }
+      // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
+      // Master's nudges come only from the watchdog, which has its own hourly cap, so they neither count nor are refused:
+      // a chatty team can't silence the watchdog.
+      const sm = team.filter((a) => a.duty === SCRUM_MASTER_DUTY).map((a) => a.id);
+      if (from.duty !== SCRUM_MASTER_DUTY) {
+        const [c] = await db.select({ cap: companies.nudgesPerHour }).from(companies).where(eq(companies.id, from.companyId));
+        const cap = c?.cap ?? 30;
+        const [hour] = await db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(nudges)
+          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, new Date(now().getTime() - 60 * 60_000)), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
+        if ((hour?.n ?? 0) >= cap) return { ok: false, error: `Your company has sent its limit of ${cap} nudges in the last hour, so this one wasn't sent. ${ticketId ? "Write it on the ticket with ticket_reply" : "Write it on a ticket with ticket_reply (create one if needed)"}; ${to.name} reads it there.` };
+      }
       const since = new Date(now().getTime() - 10 * 60_000);
       const [sent] = await db.select({ n: sql<number>`count(*)::int` }).from(nudges).where(and(eq(nudges.fromAgentId, from.id), eq(nudges.toAgentId, to.id), eq(nudges.dropped, false), gt(nudges.createdAt, since)));
       if ((sent?.n ?? 0) >= limits.nudgesPerPairPer10Min) return { ok: false, error: `You've nudged ${to.name} ${limits.nudgesPerPairPer10Min} times in 10 minutes. Wait for them, or put it on the ticket.` };
@@ -868,11 +896,14 @@ export function schedulerService(
               `${from.name} to ${to.name} (not delivered): ${quote(input.why)}`,
               t ? `Usually one of them is waiting on something only you can give. Answer on ${ref}, or tell one of them in chat what to do.` : "Usually the work has no ticket yet. Create one and assign it, or tell one of them in chat what to do.",
             ].join("\n\n"),
+            { ticketId, about: [from.id, to.id], dedupeKey: `alert:nudges:${[from.id, to.id].sort().join(":")}` },
           );
         }
         return { ok: false, error: `You and ${to.name} have nudged each other ${LOOP_EXCHANGES} times about this in 10 minutes. ${ticketId ? "Put the rest on the ticket" : "Put it on a ticket (create one if needed)"} instead of nudging again.` };
       }
       await db.insert(nudges).values(row);
+      // On the ticket's timeline (or the company's log without one). The watchdog logs its own nudges.
+      if (from.duty !== SCRUM_MASTER_DUTY) await record(db, { companyId: from.companyId, agentId: from.id, ticketId, kind: "nudge", summary: `${from.name} nudged ${to.name}: ${input.why.trim()}`, at: now() });
       const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });
       return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it", wakeId: w.id };
     },

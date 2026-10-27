@@ -19,6 +19,10 @@ export const WatchdogSettings = z.object({
   /** Hard caps per rolling hour; crossing one switches the watchdog off and tells the owner. */
   maxSmRunsPerHour: z.number().int().min(1).max(30),
   maxNudgesPerHour: z.number().int().min(1).max(100),
+  /** Boss Man's own alerts (BOS-64): how long the Scrum Master, then the CEO, has to settle one before it moves up a rung. */
+  alertMinutes: z.number().int().min(5).max(24 * 60),
+  /** Alerts handed to the CEO in a rolling hour; past it they go to the owner, so a loop can't keep starting CEO runs. */
+  maxCeoAlertsPerHour: z.number().int().min(1).max(30),
 });
 export type WatchdogSettings = z.infer<typeof WatchdogSettings>;
 
@@ -34,6 +38,8 @@ export const DEFAULT_WATCHDOG: WatchdogSettings = {
   maxSnoozeHours: 48,
   maxSmRunsPerHour: 4,
   maxNudgesPerHour: 12,
+  alertMinutes: 30,
+  maxCeoAlertsPerHour: 6,
 };
 
 /** Reads a stored value defensively: unknown or bad fields fall back to the defaults. */
@@ -62,7 +68,7 @@ export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   owner_decision_waiting: "it waits on the owner's decision",
 };
 
-export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert"] as const;
+export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert", "alert_hop", "alert_resolved"] as const;
 export type WatchdogActionKind = (typeof WATCHDOG_ACTIONS)[number];
 
 /** Actions that reach another agent or the owner; they count toward maxNudgesPerHour (an undone one still counts, so undo can't refill the cap). */
@@ -70,3 +76,7 @@ export const WATCHDOG_NUDGE_KINDS: readonly WatchdogActionKind[] = ["nudge", "as
 
 /** The "blocked until" reason: one line, at most this long (BOS-59). */
 export const BLOCKED_UNTIL_REASON_MAX = 240;
+
+/** "Blocked until" may be at most this many days ahead, so a ticket can't hide from the watchdog (BOS-77). */
+export const BLOCKED_UNTIL_MAX_DAYS = 30;
+export const BLOCKED_UNTIL_MAX_MS = BLOCKED_UNTIL_MAX_DAYS * 24 * 3_600_000;

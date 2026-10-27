@@ -9,7 +9,7 @@ export type SnapTicket = {
   assignedToOwner: boolean;
   stateChangedAt: Date;
   blockedUntil: Date | null;
-  /** Something is set to wake the assignee: a scheduled check or a queued wake. */
+  /** Something is set to wake the assignee and will happen: a scheduled check or a wake that is not parked behind a paused agent. */
   scheduled: boolean;
   /** Plan-first and its plan isn't approved yet: it waits on the approver, not the assignee. */
   awaitingPlan: boolean;
