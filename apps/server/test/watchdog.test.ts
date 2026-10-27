@@ -482,6 +482,15 @@ describe("the read API and backtest (BOS-58)", () => {
     expect(bt.scrumMasterWakes).toBeGreaterThan(0);
     expect(bt.caveats.length).toBeGreaterThan(0);
   });
+
+  it("the backtest counts one wake per sweep, however many flags the sweep hands over", async () => {
+    await ctx.switchOn();
+    for (let i = 0; i < 5; i++) await ctx.ticket({ title: `Loose ${i}`, assigneeAgentId: null, stateChangedAt: ctx.ago(60), createdAt: ctx.ago(60) });
+    const bt = (await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/backtest?days=1`)).json();
+    expect(bt.flags.length).toBeGreaterThanOrEqual(5);
+    expect(bt.scrumMasterWakes).toBeLessThan(bt.flags.length);
+    expect(bt.busiestHourWakes).toBeLessThanOrEqual(bt.scrumMasterWakes);
+  });
 });
 
 describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
