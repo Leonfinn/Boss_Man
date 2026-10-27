@@ -7,7 +7,7 @@ T="$(mktemp -d)"; trap 'kill "${hook_pid:-0}" 2>/dev/null || true; rm -rf "$T"' 
 fail() { echo "FAIL: $*"; [[ -z ${DEBUG:-} ]] || { cat "${DL:-/dev/null}" "$D/deployer.log"; }; exit 1; }
 has() { grep -qF -- "$2" "$1" || fail "$1 lacks: $2 (has: $(cat "$1" 2>/dev/null))"; }
 hasnt() { ! grep -qF -- "$2" "$1" 2>/dev/null || fail "$1 should not have: $2"; }
-jget() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+jget() { node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(o[process.argv[2]]))' "$1" "$2"; }
 
 # --- fixture: origin, a working clone that moves main, and the checkout the host deploys ---
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -44,24 +44,24 @@ unset COMPOSE_FILE
 export BOSSMAN_DEPLOYER="$D" STUB_LOG="$T/stub.log" BOSSMAN_DEPLOY_STATUS="$T/deploy-status.json" BOSSMAN_BACKUP_DIR="$T/backups"
 : >"$STUB_LOG"
 # A webhook listener that appends each POST body to a file, on a free port.
-cat >"$T/hook.py" <<'PY'
-import http.server, sys
-class H(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        open(sys.argv[1], "ab").write(self.rfile.read(int(self.headers["Content-Length"])) + b"\n")
-        self.send_response(200); self.end_headers()
-    def log_message(self, *a): pass
-s = http.server.HTTPServer(("127.0.0.1", 0), H)
-print(s.server_address[1], flush=True)
-s.serve_forever()
-PY
-python3 -I "$T/hook.py" "$T/hook.out" >"$T/hook.port" & hook_pid=$!
+cat >"$T/hook.mjs" <<'JS'
+import http from "node:http";
+import { appendFileSync } from "node:fs";
+const out = process.argv[2];
+const s = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (d) => (body += d));
+  req.on("end", () => { appendFileSync(out, body + "\n"); res.writeHead(200); res.end(); });
+});
+s.listen(0, "127.0.0.1", () => { console.log(s.address().port); });
+JS
+node "$T/hook.mjs" "$T/hook.out" >"$T/hook.port" & hook_pid=$!
 for _ in $(seq 50); do [[ -s $T/hook.port ]] && break; sleep 0.1; done
 conf() { printf 'REPO=%s\nWEBHOOK_URL=http://127.0.0.1:%s/hook\nWEBHOOK_ON_SUCCESS=%s\nAVAILABLE_REFRESH_SECONDS=0\n' "$T/src" "$(cat "$T/hook.port")" "${1:-0}" >"$D/host.conf"; chmod 600 "$D/host.conf"; }
 conf 0
 host() { "$here/host-deployer.sh" "$@" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer exited non-zero"; }; }
 req() { # target commit [id]: write a request the way the server does
-  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${3:-$(python3 -c 'import uuid;print(uuid.uuid4())')}" "$1" "$2" >"$D/inbox/request.json"
+  printf '{"id":"%s","target":"%s","commit":"%s","requestedAt":"2026-10-20T12:00:00.000Z","approvedBy":"owner-1"}\n' "${3:-$(node -e 'console.log(crypto.randomUUID())')}" "$1" "$2" >"$D/inbox/request.json"
 }
 status() { jget "$D/outbox/status.json" "$1"; }
 calls() { wc -l <"$STUB_LOG" | tr -d ' '; }
@@ -105,11 +105,11 @@ host
 has "$D/outbox/status.json" "only one server deploy every 10 minutes"
 [[ $(calls) == 1 ]] || fail "deploy ran despite the rate limit"
 has "$T/hook.out" '"result": "rejected"'
-python3 -I - "$T/hook.out" <<'PY' || fail "webhook payload keys"
-import json, sys
-p = json.loads([l for l in open(sys.argv[1]).read().splitlines() if l.strip()][-1])
-assert sorted(p) == ["at", "from_commit", "message", "result", "to_commit"], sorted(p)
-PY
+node -e '
+const fs=require("fs");const lines=fs.readFileSync(process.argv[1],"utf8").split("\n").filter(l=>l.trim());
+const p=JSON.parse(lines[lines.length-1]);const got=Object.keys(p).sort().join(",");const want="at,from_commit,message,result,to_commit";
+if(got!==want){console.error("keys: "+got);process.exit(1)}
+' "$T/hook.out" || fail "webhook payload keys"
 
 # 5. Not the tip of main: refused (the old commit is real, but main has moved).
 rm "$D/state/last-server"
