@@ -16,7 +16,8 @@ grep -q "lock held" <<<"$out" || fail "free lock: not acquired"
 sleep 0.5
 rc=0; out=$(CHECK_ALL_LOCK_WAIT=1 scripts/check-all.sh 2>&1) || rc=$?
 [ "$rc" = 1 ] || fail "busy lock: expected exit 1, got $rc"
-grep -q "waiting for it" <<<"$out" && grep -q "gave up" <<<"$out" || fail "busy lock: messages missing: $out"
+grep -q "waiting for it" <<<"$out" || fail "busy lock: no waiting message: $out"
+grep -q "gave up" <<<"$out" || fail "busy lock: messages missing: $out"
 kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
 
 # Once the holder lets go, the waiter gets in.
