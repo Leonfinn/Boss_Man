@@ -30,6 +30,8 @@ export type BacktestReport = {
   scrumMasterWakes: number;
   busiestHourWakes: number;
   wouldTripCap: boolean;
+  /** When the hourly cap would first have switched the watchdog off, if it would. */
+  tripAt: string | null;
   caveats: string[];
 };
 
@@ -71,7 +73,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
   const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
   const all = await db.select().from(tickets).where(eq(tickets.companyId, companyId));
   const ids = all.map((t) => t.id);
-  const empty: BacktestReport = { from: new Date(from).toISOString(), to: now.toISOString(), stepMinutes: STEP_MS / 60_000, settings: s, flags: [], byRule: {}, scrumMasterWakes: 0, busiestHourWakes: 0, wouldTripCap: false, caveats: [] };
+  const empty: BacktestReport = { from: new Date(from).toISOString(), to: now.toISOString(), stepMinutes: STEP_MS / 60_000, settings: s, flags: [], byRule: {}, scrumMasterWakes: 0, busiestHourWakes: 0, wouldTripCap: false, tripAt: null, caveats: [] };
   if (!ids.length) return empty;
 
   const team = await db.select({ id: agents.id, name: agents.name }).from(agents).where(eq(agents.companyId, companyId));
@@ -218,10 +220,13 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
     if (handed) wakesAt.push(t);
   }
 
+  // One sweep is one wake however many flags it lists, as in the live sweep; the live cap trips on the wake that would be one too many.
   let busiest = 0;
+  let tripAt: number | null = null;
   for (let i = 0, j = 0; i < wakesAt.length; i++) {
     while (wakesAt[i]! - wakesAt[j]! >= 3_600_000) j++;
     busiest = Math.max(busiest, i - j + 1);
+    if (tripAt === null && i - j + 1 > s.maxSmRunsPerHour) tripAt = wakesAt[i]!;
   }
   const titles = new Map(all.map((t) => [t.id, { ref: ticketRef(c?.prefix, t.number) ?? t.id, title: t.title }]));
   const flags: BacktestFlag[] = episodes.map((e) => ({
@@ -242,12 +247,15 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
     byRule,
     scrumMasterWakes: wakesAt.length,
     busiestHourWakes: busiest,
-    wouldTripCap: busiest > s.maxSmRunsPerHour,
+    wouldTripCap: tripAt !== null,
+    tripAt: tripAt === null ? null : new Date(tripAt).toISOString(),
     caveats: [
       "State history is rebuilt from the activity log; changes made by a run starting, a decision blocking or freeing a ticket, and review requests are inferred, so times can be a few minutes off.",
       "Dependencies on other tickets that were deleted when they resolved are not in the history; such tickets may show as stale_blocked instead of held.",
       "Scheduled checks other than Boss Man's 'carry on' leave no history, so a ticket waiting on one may be flagged when the live watchdog would not.",
       "'blocked until' did not exist before BOS-59, so no ticket in the history has one.",
+      "Parked wakes of paused agents are not in the history, so a ticket whose assignee was paused may show as a plan instead of a stall.",
+      "A very long problem list is split over several wakes live (about 30,000 characters each); here every sweep counts as one wake.",
       "'cleared within 30 min' is a hint, not a verdict: each flag still needs a look at its ticket to call it a true or false alarm.",
     ],
   };

@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
@@ -19,6 +19,7 @@ import { effectivePolicy } from "./review-policy.js";
 import { handOverReviews, REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
+import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
@@ -695,7 +696,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -711,6 +712,7 @@ export function schedulerService(
               sql`${wakes.reason} <> ${TREE_REASON}`,
               sql`${wakes.reason} <> ${REVIEW_REASON}`,
               sql`${wakes.reason} <> ${ANSWER_REASON}`,
+              sql`${wakes.reason} <> ${WATCHDOG_REASON}`,
             ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
@@ -846,6 +848,19 @@ export function schedulerService(
         const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
         if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
       }
+      // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
+      // Master's nudges come only from the watchdog, which has its own hourly cap, so they neither count nor are refused:
+      // a chatty team can't silence the watchdog.
+      const sm = team.filter((a) => a.duty === SCRUM_MASTER_DUTY).map((a) => a.id);
+      if (from.duty !== SCRUM_MASTER_DUTY) {
+        const [c] = await db.select({ cap: companies.nudgesPerHour }).from(companies).where(eq(companies.id, from.companyId));
+        const cap = c?.cap ?? 30;
+        const [hour] = await db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(nudges)
+          .where(and(eq(nudges.companyId, from.companyId), eq(nudges.dropped, false), gt(nudges.createdAt, new Date(now().getTime() - 60 * 60_000)), sm.length ? notInArray(nudges.fromAgentId, sm) : undefined));
+        if ((hour?.n ?? 0) >= cap) return { ok: false, error: `Your company has sent its limit of ${cap} nudges in the last hour, so this one wasn't sent. ${ticketId ? "Write it on the ticket with ticket_reply" : "Write it on a ticket with ticket_reply (create one if needed)"}; ${to.name} reads it there.` };
+      }
       const since = new Date(now().getTime() - 10 * 60_000);
       const [sent] = await db.select({ n: sql<number>`count(*)::int` }).from(nudges).where(and(eq(nudges.fromAgentId, from.id), eq(nudges.toAgentId, to.id), eq(nudges.dropped, false), gt(nudges.createdAt, since)));
       if ((sent?.n ?? 0) >= limits.nudgesPerPairPer10Min) return { ok: false, error: `You've nudged ${to.name} ${limits.nudgesPerPairPer10Min} times in 10 minutes. Wait for them, or put it on the ticket.` };
@@ -887,6 +902,8 @@ export function schedulerService(
         return { ok: false, error: `You and ${to.name} have nudged each other ${LOOP_EXCHANGES} times about this in 10 minutes. ${ticketId ? "Put the rest on the ticket" : "Put it on a ticket (create one if needed)"} instead of nudging again.` };
       }
       await db.insert(nudges).values(row);
+      // On the ticket's timeline (or the company's log without one). The watchdog logs its own nudges.
+      if (from.duty !== SCRUM_MASTER_DUTY) await record(db, { companyId: from.companyId, agentId: from.id, ticketId, kind: "nudge", summary: `${from.name} nudged ${to.name}: ${input.why.trim()}`, at: now() });
       const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });
       return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it", wakeId: w.id };
     },
