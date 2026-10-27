@@ -455,6 +455,154 @@ function Edit({ a, sources, lists, refresh, onSaved, template }: { a: AgentRow; 
   );
 }
 
+type AgentNote = { id: string; title: string; text: string; why: string; source: "chat" | "owner" | "request"; requestedBy: string | null; ticketId: string | null; ticketRef: string | null; updatedAt: string };
+type NoteRequest = { id: string; title: string; text: string; why: string; from: string; ticketId: string; ticketRef: string | null; status: "pending" | "accepted" | "declined"; declineReason: string | null; createdAt: string };
+
+/** Where a note came from, for the owner. */
+function NoteOrigin({ n }: { n: AgentNote }) {
+  if (n.source === "owner") return <>written by you</>;
+  if (n.source === "chat") return <>saved by the CEO from your chat</>;
+  return (
+    <>
+      asked by {n.requestedBy ?? "a former agent"}
+      {n.ticketId && (
+        <>
+          {" "}
+          on <a href={`#/tickets/${n.ticketId}`}>{n.ticketRef ?? "a task"}</a>
+        </>
+      )}
+      , accepted by the CEO
+    </>
+  );
+}
+type NoteLimits = { count: number; title: number; text: number; why: number };
+
+/** One note's fields, for adding or editing. */
+function NoteForm({ id, start, limits, onSave, onCancel }: { id: string; start: { title: string; text: string; why: string }; limits: NoteLimits; onSave: (f: { title: string; text: string; why: string }) => Promise<boolean>; onCancel?: () => void }) {
+  const [f, setF] = useState(start);
+  return (
+    <form
+      style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
+      onSubmit={(e) => {
+        e.preventDefault();
+        void onSave({ title: f.title.trim(), text: f.text.trim(), why: f.why.trim() }).then((ok) => ok && !onCancel && setF({ title: "", text: "", why: "" }));
+      }}
+    >
+      <div className="field">
+        <label htmlFor={`${id}-title`}>Title</label>
+        <input id={`${id}-title`} maxLength={limits.title} value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} required />
+      </div>
+      <div className="field">
+        <label htmlFor={`${id}-text`}>Note</label>
+        <textarea id={`${id}-text`} rows={2} maxLength={limits.text} value={f.text} onChange={(e) => setF({ ...f, text: e.target.value })} required />
+      </div>
+      <div className="field">
+        <label htmlFor={`${id}-why`}>Why (what you said)</label>
+        <input id={`${id}-why`} maxLength={limits.why} value={f.why} onChange={(e) => setF({ ...f, why: e.target.value })} required />
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button type="submit" className="btn primary">
+          {onCancel ? "Save" : "Add note"}
+        </button>
+        {onCancel && (
+          <button type="button" className="btn" onClick={onCancel}>
+            Cancel
+          </button>
+        )}
+      </div>
+    </form>
+  );
+}
+
+/** The CEO's lasting notes from the chat (BOS-85): what it keeps between chats and runs, which the owner can change. */
+function CeoNotes({ agentId }: { agentId: string }) {
+  const notes = usePoll((signal) => api<{ items: AgentNote[]; requests?: NoteRequest[]; limits: NoteLimits }>(`/api/agents/${agentId}/notes`, { signal }), 60_000, `notes-${agentId}`);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const items = notes.data?.items ?? [];
+  const limits = notes.data?.limits;
+  // Accepted requests already show as notes.
+  const open = (notes.data?.requests ?? []).filter((r) => r.status !== "accepted");
+  const waiting = open.filter((r) => r.status === "pending").length;
+  const run = async (fn: () => Promise<unknown>, done: string) => {
+    try {
+      await fn();
+      notes.reload();
+      setMsg({ ok: true, text: done });
+      return true;
+    } catch (err) {
+      setMsg({ ok: false, text: (err as Error).message });
+      return false;
+    }
+  };
+  if (!limits) return null;
+  return (
+    <details className="agent-notes">
+      <summary className="section-label">
+        CEO notes ({items.length} of {limits.count}){waiting ? ` · ${waiting} request${waiting === 1 ? "" : "s"} waiting` : ""}
+      </summary>
+      <small className="muted">
+        Corrections and preferences the CEO saved from what you told it in chat, and requests from the team it accepted. It reads them at the start of every chat and run. You're told in the chat when it saves one. Up to {limits.count} notes; when full, it must update or remove one before saving another. These are separate from its instructions.
+      </small>
+      {msg && (
+        <p role={msg.ok ? "status" : "alert"} className={msg.ok ? "muted" : "error"}>
+          {msg.text}
+        </p>
+      )}
+      {items.length ? (
+        <ul className="history">
+          {items.map((n) =>
+            editing === n.id ? (
+              <li key={n.id}>
+                <NoteForm id={`note-${n.id}`} start={n} limits={limits} onCancel={() => setEditing(null)} onSave={(f) => run(() => api(`/api/agent-notes/${n.id}`, { method: "PATCH", body: f }), "Note saved.").then((ok) => (ok && setEditing(null), ok))} />
+              </li>
+            ) : (
+              <li key={n.id}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <strong>{n.title}</strong>
+                  <span style={{ display: "flex", gap: 6 }}>
+                    <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} aria-label={`Edit note: ${n.title}`} onClick={() => setEditing(n.id)}>
+                      Edit
+                    </button>
+                    <button type="button" className="btn" style={{ minHeight: 32, padding: "4px 10px" }} aria-label={`Delete note: ${n.title}`} onClick={() => window.confirm(`Delete the note "${n.title}"?`) && void run(() => api(`/api/agent-notes/${n.id}`, { method: "DELETE" }), "Note deleted.")}>
+                      Delete
+                    </button>
+                  </span>
+                </div>
+                <div>{n.text}</div>
+                <div className="muted" style={{ fontSize: 13 }}>
+                  Why: “{n.why}” · <NoteOrigin n={n} />, {when(n.updatedAt)}
+                </div>
+              </li>
+            ),
+          )}
+        </ul>
+      ) : (
+        <p className="muted">No notes yet.</p>
+      )}
+      {open.length > 0 && (
+        <>
+          <h4 className="section-label">Requests from the team</h4>
+          <small className="muted">Other agents can ask the CEO to keep a note; only the CEO can accept or decline. Each agent can ask at most a few times an hour.</small>
+          <ul className="history">
+            {open.map((r) => (
+              <li key={r.id}>
+                <strong>{r.title}</strong> <span className={`tag ${r.status === "pending" ? "amber" : ""}`}>{r.status === "pending" ? "Waiting for the CEO" : "Declined"}</span>
+                <div>{r.text}</div>
+                <div className="muted" style={{ fontSize: 13 }}>
+                  From {r.from} on <a href={`#/tickets/${r.ticketId}`}>{r.ticketRef ?? "a task"}</a>, {when(r.createdAt)} · Why: {r.why}
+                  {r.declineReason && <> · Declined: {r.declineReason}</>}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {items.length < limits.count && <NoteForm id={`note-new-${agentId}`} start={{ title: "", text: "", why: "" }} limits={limits} onSave={(f) => run(() => api(`/api/agents/${agentId}/notes`, { method: "POST", body: f }), "Note added.")} />}
+    </details>
+  );
+}
+
 /** What the CEO may change about the team without asking (R62). */
 const APPROVALS: Array<[string, string]> = [
   ["hires", "Hires wait for you"],
@@ -582,6 +730,7 @@ export function Agents({ company, onChanged }: { company: Company | undefined; o
             )}
           </div>
         </div>
+        {a.role === "ceo" && !a.retiredAt && <CeoNotes agentId={a.id} />}
         {open === a.id && <Edit a={a} sources={srcs} lists={models.data} refresh={refreshModels} onSaved={() => changed()} template={a.role === "ceo" ? templates.data?.ceo : templates.data?.templates.find((t) => t.id === a.template)} />}
       </li>
     );
