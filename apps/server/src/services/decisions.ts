@@ -60,6 +60,8 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
+  /** A skill the CEO proposed (services/skill-proposals.ts); the owner's answer installs or refuses it. */
+  | { type: "skill"; proposalId: string }
   | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
 
 export const CHASE = "Chase";
@@ -137,7 +139,13 @@ export type AnswerExtra = {
   note?: string;
   /** The owner wrote their own answer to an agent's question instead of picking an option. */
   custom?: boolean;
+  /** Who answered (the owner's username), for the log of a skill override. */
+  by?: string;
 };
+
+export const SKILL_ADD = "Add the skill";
+export const SKILL_REJECT = "Don't add it";
+export const SKILL_OVERRIDE = "Add it anyway, against the advice";
 
 const ALLOW = "Allow once";
 const DENY = "Deny";
@@ -160,6 +168,7 @@ export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
+type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
 
 /**
@@ -199,6 +208,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
   let onTeamPlan: TeamPlanHook | null = null;
+  let onSkill: SkillHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
   let maintenance: MaintenanceHook | null = null;
@@ -569,6 +579,25 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onTeamPlan = hook;
     },
 
+    setSkillHook(hook: SkillHook) {
+      onSkill = hook;
+    },
+
+    /** The owner's call on a proposed skill. One open decision per proposal. */
+    async raiseSkill(input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }) {
+      const [row] = await db
+        .insert(decisions)
+        .values({ companyId: input.companyId, kind: "skill", question: input.question, options: input.options, recommendedOption: input.recommended, raisedByAgentId: input.agentId, dedupeKey: `skill:${input.proposalId}`, context: { type: "skill", proposalId: input.proposalId } })
+        .onConflictDoNothing()
+        .returning();
+      return row ?? null;
+    },
+
+    /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
+    async withdraw(id: string) {
+      await db.update(decisions).set({ status: "withdrawn", answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+    },
+
     setLoopHooks(hooks: LoopHooks) {
       loopHooks = hooks;
     },
@@ -788,6 +817,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "team_plan") {
         if (answer === TEAM_HIRE) {
           await onTeamPlan?.(ctx, d.companyId, [...new Set(extra.picks ?? ctx.hires.map((_, i) => i))]);
+        }
+      } else if (ctx.type === "skill") {
+        try {
+          await onSkill?.(ctx, d.companyId, answer, extra.by ?? "the owner");
+        } catch (err) {
+          // Not an expected refusal: keep the question open so the answer can be given again.
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          throw err;
         }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
         await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");

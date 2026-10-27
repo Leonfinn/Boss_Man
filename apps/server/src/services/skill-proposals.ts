@@ -2,10 +2,11 @@
 // Security Reviewer checks it where the owner's rule requires; the owner decides every one.
 // Nothing here writes to `skills`: only the install step (below, once decided) does.
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
+import { SKILL_ADD, SKILL_OVERRIDE, SKILL_REJECT } from "./decisions.js";
 import { normalise, parseSkillMd, skillName, skillNameOf, SkillError, type SkillFile, type skillsService } from "./skills.js";
 
 type SkillsSvc = ReturnType<typeof skillsService>;
@@ -147,7 +148,22 @@ export type ProposeInput = {
   agentIds: string[];
 } & ({ source: "draft"; files: SkillFile[]; name?: string | null } | { source: "link"; url: string; skill?: string | null });
 
-export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: { createTicket: CreateTicket }) {
+export type SkillDeps = {
+  createTicket: CreateTicket;
+  /** Puts the owner's decision in the queue; returns its id. */
+  raiseDecision: (input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }) => Promise<{ id: string } | null>;
+  withdrawDecision: (id: string) => Promise<unknown>;
+  /** Tells an agent (the CEO) what happened to its proposal. */
+  tell?: (agentId: string, note: string) => Promise<unknown>;
+  now?: () => Date;
+};
+
+export const EXPIRES_AFTER_DAYS = 14;
+const VERDICT_WORDS = { recommend: "recommend", conditions: "recommend with conditions", advise_against: "advise against" } as const;
+
+export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillDeps) {
+  const now = deps.now ?? (() => new Date());
+  const patch = async (id: string, set: Partial<typeof skillProposals.$inferInsert>) => (await db.update(skillProposals).set(set).where(eq(skillProposals.id, id)).returning())[0]!;
   /** The agent marked as the company's security reviewer, never the proposer. */
   async function securityReviewer(companyId: string, not: string | null) {
     const pool = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.reviewKind, "security"), isNull(agents.retiredAt))).orderBy(asc(agents.createdAt));
@@ -262,7 +278,11 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: { crea
           throw e;
         }
       }
-      return p!;
+      if (!needsReview) {
+        await record(db, { companyId: input.companyId, agentId: input.byAgentId, kind: "skill.review_skipped", summary: `No security review for ${name}: a CEO draft with no scripts goes straight to the owner.` });
+        p = await this.toOwner(p);
+      }
+      return p;
     },
 
     /**
@@ -285,13 +305,153 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: { crea
         .returning();
       if (!row) throw new SkillError(409, "This proposal isn't waiting for a review.");
       await record(db, { companyId, ticketId: p.reviewTicketId, agentId: reviewerId, kind: "skill.reviewed", summary: `Security review of ${p.name}: ${v.verdict === "conditions" ? "recommend with conditions" : v.verdict === "advise_against" ? "advise against" : "recommend"} (${(v.findings ?? []).length} finding${(v.findings ?? []).length === 1 ? "" : "s"}).` });
-      return row;
+      return this.toOwner(row);
+    },
+
+    /**
+     * Puts a proposal in front of the owner. The one gate every route to the decision goes through:
+     * a skill that needs a security review has no decision until the review's verdict is in, for these exact files.
+     */
+    async toOwner(p: Proposal) {
+      if (p.status !== "proposed" && p.status !== "awaiting_owner") throw new SkillError(409, "This proposal isn't ready for a decision.");
+      if (p.reviewRequired && (!p.verdict || p.reviewedBundleHash !== p.bundleHash)) throw new SkillError(409, "This skill needs a security review of these exact files before the owner can decide.");
+      const names = p.proposedAgentIds.length ? await db.select({ name: agents.name }).from(agents).where(inArray(agents.id, p.proposedAgentIds)) : [];
+      const advise = p.verdict === "advise_against";
+      const source = p.source === "link" ? `${p.sourceUrl}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}` : "written by the CEO";
+      const review = !p.reviewRequired ? "No review needed: CEO draft with no scripts." : `Security review: ${VERDICT_WORDS[p.verdict!]}. ${p.verdictSummary ?? ""}${p.conditions?.length ? ` Conditions: ${p.conditions.join("; ")}.` : ""}${p.findings?.length ? ` ${p.findings.length} finding(s); open the card for each file and line.` : ""}`;
+      const question = `${advise ? "WARNING, the Security Reviewer advises against this. " : ""}The CEO wants to ${p.replacesSkillId ? "update the skill" : "add the skill"} "${p.name}" (${source}) for ${names.map((n) => n.name).join(", ") || "no one yet"}. Why: ${p.why} ${review}`;
+      const d = await deps.raiseDecision({ companyId: p.companyId, proposalId: p.id, agentId: p.proposedByAgentId, question, options: advise ? [SKILL_REJECT, SKILL_OVERRIDE] : [SKILL_ADD, SKILL_REJECT], recommended: advise ? SKILL_REJECT : SKILL_ADD });
+      const [row] = await db.update(skillProposals).set({ status: "awaiting_owner", decisionId: d?.id ?? p.decisionId, updatedAt: now() }).where(eq(skillProposals.id, p.id)).returning();
+      await record(db, { companyId: p.companyId, ticketId: p.reviewTicketId, agentId: p.proposedByAgentId, kind: "skill.awaiting_owner", summary: `The owner is asked to decide on ${p.name}. ${review}` });
+      return row!;
+    },
+
+    /** Re-reads the source at the pinned version, if it has one, and says what differs from the files that were reviewed. */
+    async sourceMatches(p: Proposal): Promise<{ ok: true } | { ok: false; reason: string }> {
+      if (hashFiles(p.files).bundleHash !== p.bundleHash) return { ok: false, reason: "the stored files no longer match their fingerprint" };
+      if (p.source !== "link") return { ok: true };
+      let again: SkillFile[] | null = null;
+      try {
+        if (p.pinnedRef) {
+          if (!/^[0-9a-f]{40}$/.test(p.pinnedRef)) return { ok: false, reason: "the pinned version isn't an exact commit" };
+          const gh = await skillsSvc.readGitHub(p.sourceUrl!, p.pinnedRef);
+          const f = gh?.found.find((x) => x.url === p.sourceUrl);
+          again = f ? normalise(f.files).files : null;
+        } else {
+          again = normalise([{ path: "SKILL.md", content: (await skillsSvc.fetchBytes(p.sourceUrl!)).toString("base64") }]).files;
+        }
+      } catch (e) {
+        // The source is gone, or no longer a skill: that is a change. Anything else (network, rate limit) is not, and can be tried again.
+        if (e instanceof SkillError && (e.status === 404 || e.status === 400)) return { ok: false, reason: "it is no longer at its link" };
+        throw e;
+      }
+      if (!again) return { ok: false, reason: "it is no longer at its link" };
+      const h = hashFiles(again);
+      if (h.bundleHash === p.bundleHash) return { ok: true };
+      const changed = [...new Set([...Object.keys(h.fileHashes), ...Object.keys(p.fileHashes)])].filter((k) => h.fileHashes[k] !== p.fileHashes[k]);
+      return { ok: false, reason: `these files changed since the review: ${changed.slice(0, 5).join(", ")}${changed.length > 5 ? ", …" : ""}` };
+    },
+
+    /**
+     * The owner's answer. Reject ends it. Add (or Add anyway after "advise against") re-checks the
+     * source against the reviewed files and installs the stored bytes; any difference installs nothing.
+     */
+    async decide(companyId: string, proposalId: string, answer: string, by: string) {
+      let p = await this.get(companyId, proposalId);
+      // Answered twice, or the proposal ended another way: nothing more to do.
+      if (p.status !== "awaiting_owner") return p;
+      const advise = p.verdict === "advise_against";
+      const adding = answer === SKILL_ADD || answer === SKILL_OVERRIDE;
+      if (!adding && answer !== SKILL_REJECT) throw new SkillError(400, "Unknown answer.");
+      // Plain Add never installs something the reviewer advised against; Add anyway is only for that case.
+      if (answer === SKILL_ADD && advise) throw new SkillError(400, "The Security Reviewer advised against this skill; adding it takes the separate \"add anyway\" answer.");
+      if (answer === SKILL_OVERRIDE && !advise) throw new SkillError(400, "There is nothing to override: the reviewer did not advise against this skill.");
+      if (p.reviewRequired && (!p.verdict || p.reviewedBundleHash !== p.bundleHash)) throw new SkillError(409, "This skill has no security verdict for these exact files.");
+      const at = now();
+      const told = async (note: string) => {
+        if (p.proposedByAgentId) await deps.tell?.(p.proposedByAgentId, note);
+      };
+      if (!adding) {
+        p = await patch(p.id, { status: "rejected", decidedBy: by, decidedAt: at, updatedAt: at });
+        await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.decided", summary: `${by} decided not to add ${p.name}.`, at });
+        await told(`The owner decided not to add the skill ${p.name}.`);
+        return p;
+      }
+      const same = await this.sourceMatches(p);
+      if (!same.ok) {
+        p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
+        await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${by} said to add ${p.name}, but ${same.reason}. Nothing was installed; it has to be proposed and reviewed again.`, at });
+        await told(`The owner said yes to ${p.name}, but ${same.reason}, so nothing was installed. Propose it again so the new version is reviewed.`);
+        return p;
+      }
+      await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.decided", summary: `${by} decided to add ${p.name}${advise ? " against the Security Reviewer's advice" : ""}.`, at });
+      if (advise) await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.overridden", summary: `OVERRIDE: ${by} added ${p.name} although the Security Reviewer advised against it (${(p.findings ?? []).length} finding(s)).`, at });
+      let skill;
+      try {
+        skill = await skillsSvc.save(companyId, { files: p.files, source: p.source === "link" ? "link" : "written", sourceUrl: p.sourceUrl, sourceRef: p.pinnedRef, name: p.name, replaceId: p.replacesSkillId });
+      } catch (e) {
+        if (!(e instanceof SkillError)) throw e;
+        p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
+        await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${p.name} could not be installed: ${e.message}` });
+        await told(`The skill ${p.name} could not be installed: ${e.message}`);
+        return p;
+      }
+      p = await patch(p.id, { status: "installed", decidedBy: by, decidedAt: at, installedSkillId: skill.id, ...(advise ? { overridden: true, overriddenBy: by, overriddenAt: at } : {}), updatedAt: at });
+      await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.installed", summary: `Installed ${skill.name}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}, ${p.files.length} files, fingerprint ${p.bundleHash.slice(0, 12)}.`, at });
+      // Who gets it: the agents asked for, on top of whoever already has it (an update takes nobody away).
+      const given: string[] = [];
+      const failed: string[] = [];
+      for (const agentId of p.proposedAgentIds) {
+        const [a] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, agentId));
+        try {
+          await skillsSvc.give(companyId, skill.name, agentId, p.proposedByAgentId);
+          given.push(a?.name ?? agentId);
+        } catch (e) {
+          if (!(e instanceof SkillError)) throw e;
+          failed.push(`${a?.name ?? agentId} (${e.message})`);
+        }
+      }
+      await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.given", summary: `${skill.name} given to ${given.join(", ") || "nobody"}${failed.length ? `; not given to ${failed.join(", ")}` : ""}.`, at });
+      await told(`The owner added the skill ${skill.name}. Given to: ${given.join(", ") || "nobody"}.${failed.length ? ` Not given: ${failed.join(", ")}.` : ""}`);
+      return p;
+    },
+
+    /** Proposals nobody decided in two weeks end, and their decision leaves the queue. */
+    async expireOld() {
+      const cutoff = new Date(now().getTime() - EXPIRES_AFTER_DAYS * 86_400_000);
+      const open = await db.select().from(skillProposals).where(and(inArray(skillProposals.status, ["proposed", "in_review", "awaiting_owner"]), lt(skillProposals.createdAt, cutoff)));
+      for (const p of open) {
+        await db.update(skillProposals).set({ status: "expired", updatedAt: now() }).where(eq(skillProposals.id, p.id));
+        if (p.decisionId) await deps.withdrawDecision(p.decisionId);
+        await record(db, { companyId: p.companyId, ticketId: p.reviewTicketId, kind: "skill.expired", summary: `The proposal for ${p.name} ended after ${EXPIRES_AFTER_DAYS} days with no decision.` });
+      }
+      return open.length;
     },
 
     async get(companyId: string, id: string): Promise<Proposal> {
       const [p] = await db.select().from(skillProposals).where(and(eq(skillProposals.id, id), eq(skillProposals.companyId, companyId)));
       if (!p) throw new SkillError(404, "No such proposal.");
       return p;
+    },
+
+    /** Everything the owner's card shows: the files as text, where it came from, who would get it, the verdict, and what an update changes. */
+    async detail(companyId: string, id: string) {
+      const p = await this.get(companyId, id);
+      const { files, ...rest } = p;
+      const scripts = new Set(p.scriptFiles);
+      const agentsNamed = p.proposedAgentIds.length ? await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, p.proposedAgentIds)) : [];
+      const had = p.replacesSkillId ? await db.select({ files: skills.files }).from(skills).where(eq(skills.id, p.replacesSkillId)) : [];
+      const before = had[0] ? hashFiles(had[0].files).fileHashes : null;
+      const changes = before ? { added: files.filter((f) => !(f.path in before)).map((f) => f.path), changed: files.filter((f) => f.path in before && before[f.path] !== p.fileHashes[f.path]).map((f) => f.path), removed: Object.keys(before).filter((k) => !(k in p.fileHashes)) } : null;
+      return {
+        ...rest,
+        agents: agentsNamed,
+        changes,
+        files: files.map((f) => {
+          const bytes = Buffer.from(f.content, "base64");
+          return { path: f.path, size: bytes.length, hash: p.fileHashes[f.path]!, script: scripts.has(f.path), text: bytes.includes(0) ? null : bytes.toString("utf8") };
+        }),
+      };
     },
 
     /** Proposals without the file bytes, newest first. */
