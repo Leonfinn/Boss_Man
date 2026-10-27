@@ -8,10 +8,10 @@
 // (agent or system text on a ticket, feedback and pages can't pass); other agents can only
 // ask, and only the CEO's explicit accept turns a request into a note; every note keeps its
 // source; and the owner is told in the chat and can edit or delete any note on the Agents page.
-import { and, asc, count, desc, eq, gt } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, notExists } from "drizzle-orm";
 import { ticketRef, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentNotes, agents, companies, noteRequests, ownerChatMessages, ticketMessages, tickets } from "../db/schema.js";
+import { agentNotes, agents, companies, noteRequests, ownerChatMessages, paAnswers, ticketMessages, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
 
 export const NOTE_LIMITS = { count: 20, title: 80, text: 500, why: 300 } as const;
@@ -133,7 +133,15 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
                 await db
                   .select({ text: ownerChatMessages.text })
                   .from(ownerChatMessages)
-                  .where(and(eq(ownerChatMessages.companyId, companyId), eq(ownerChatMessages.agentId, agentId), eq(ownerChatMessages.role, "owner")))
+                  .where(
+                    and(
+                      eq(ownerChatMessages.companyId, companyId),
+                      eq(ownerChatMessages.agentId, agentId),
+                      eq(ownerChatMessages.role, "owner"),
+                      // A PA escalation is stored as an owner row in the CEO chat, but its text includes the PA's own summary.
+                      notExists(db.select({ id: paAnswers.id }).from(paAnswers).where(eq(paAnswers.ceoMessageId, ownerChatMessages.id))),
+                    ),
+                  )
                   .orderBy(desc(ownerChatMessages.createdAt))
                   .limit(QUOTE_LOOKBACK)
               ).map((m) => ({ text: m.text, ticketId: null }))
@@ -154,7 +162,8 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
       );
     },
 
-    async update(companyId: string, id: string, f: Partial<Fields>, by: By) {
+    /** `origin` is where the new why came from, when the CEO changes a note on a fresh owner quote; owner edits keep the old source. */
+    async update(companyId: string, id: string, f: Partial<Fields>, by: By, origin?: { source: "chat" | "ticket"; ticketId: string | null }) {
       check(f);
       const before = await get(companyId, id);
       if (f.title !== undefined) {
@@ -162,10 +171,10 @@ export function notesService(db: Db, deps: { now?: () => Date } = {}) {
         if (same) throw new NoteError(409, `There's already a note called "${same.title}" (id ${same.id}).`);
       }
       const patch = Object.fromEntries(Object.entries(f).filter(([, v]) => v !== undefined).map(([k, v]) => [k, v!.trim()]));
-      // The source stays where the note came from; the activity log says who changed it.
+      // A re-quoted note now rests on that quote, so its source follows it; the activity log says who changed it.
       const [n] = await db
         .update(agentNotes)
-        .set({ ...patch, ...(by.runId ? { runId: by.runId } : {}), updatedAt: now() })
+        .set({ ...patch, ...(by.runId ? { runId: by.runId } : {}), ...(origin ? { source: origin.source, ticketId: origin.ticketId, requestedByAgentId: null } : {}), updatedAt: now() })
         .where(eq(agentNotes.id, id))
         .returning();
       await record(db, { companyId, agentId: by.owner ? null : before.agentId, kind: "note_updated", summary: `updated a note: ${n!.title}` });

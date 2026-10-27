@@ -1596,7 +1596,7 @@ function registerNotes(server: Pick<McpServer, "registerTool">, db: Db, scope: S
           // A changed note must rest on something the owner said now, like a new one.
           if (!input.why) return fail(`update needs why: the owner's words ${chat ? "from this chat" : "from one of their ticket messages"} that call for the change.`);
           const said = await quoted(input.why);
-          const { after } = await notes.update(scope.companyId, n.id, { title: input.title, text: input.text, why: input.why }, by);
+          const { after } = await notes.update(scope.companyId, n.id, { title: input.title, text: input.text, why: input.why }, by, { source: said.ticketId ? "ticket" : "chat", ticketId: said.ticketId });
           await announce(said, `Updated a note. Was ${describeNote(n)}. Now ${describeNote(after)}.`);
           return text(`Updated note ${after.id}.`);
         }
