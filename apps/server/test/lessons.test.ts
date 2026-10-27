@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { and, desc, eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, wikiRevisions, wikiPages } from "../src/db/schema.js";
+import { decisions, wakes, wikiRevisions, wikiPages } from "../src/db/schema.js";
 import { briefCommitLine, briefSlug, LESSON_DONT_ADD, LESSON_REPLACE_PREFIX, lessonsFrom } from "../src/services/project-brief.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -210,5 +210,20 @@ describe("lessons learned: QA edge cases", () => {
     const bare = await c.answer(replace!.id, "Lesson 3");
     expect(bare.statusCode).toBe(422);
     expect(lessonsFrom((await c.brief())!.body)).toHaveLength(20);
+  });
+
+  it("a lessons-cap replace answered in free text keeps the lesson pending and wakes the CEO with it", async () => {
+    const c = (ctx = await setup());
+    const lines = Array.from({ length: 20 }, (_, i) => `- Lesson ${i + 1}`).join("\n");
+    await c.writeBrief(`${briefCommitLine("abc1234", "main")}\n\n## Lessons\n\n${lines}\n`);
+    await c.sendBack("Lesson 21");
+    const d = await sendBackDecision();
+    await c.answer(d!.id, "Add");
+    const [replace] = (await c.open()).filter((x) => (x.context as { type: string }).type === "lesson_replace");
+    const r = await c.req("POST", `/api/decisions/${replace!.id}/answer`, { answer: "Check the document first, raise the cap to 25 if needed.", custom: true });
+    expect(r.statusCode).toBe(200);
+    expect(lessonsFrom((await c.brief())!.body)).toHaveLength(20);
+    const w = (await c.db.select().from(wakes)).filter((x) => x.agentId === c.ceo.id && x.reason === "decision answered");
+    expect(JSON.stringify(w)).toContain("raise the cap to 25");
   });
 });

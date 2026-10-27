@@ -268,7 +268,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
-    if (ctx.type === "lesson_replace" && answer !== LESSON_DONT_ADD && !answer.startsWith(LESSON_REPLACE_PREFIX)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
+    if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !answer.startsWith(LESSON_REPLACE_PREFIX)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
   }
 
   /** Adds the approved lesson to the project's brief, unless the section is full and a line must go first (R-review-lessons). */
@@ -303,7 +303,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** Finishes a replace: the chosen line goes, the new lesson takes its place. */
-  async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string) {
+  async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string, ownWords: boolean) {
+    if (ownWords) {
+      // The owner answered in their own words: the lesson stays pending and the CEO picks the line to drop by following them.
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
+      const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
+      const lines = page ? lessonsFrom(page.body) : [];
+      if (ceo && wake) {
+        await wake({
+          agentId: ceo.id,
+          reason: "decision answered",
+          note: `The Lessons section of ${ctx.projectName}\x27s brief is full (${LESSONS_CAP}) and the owner was asked which line the new lesson should replace. The new lesson is not in the brief yet: "${ctx.lesson}"\n\nThe owner answered in their own words: ${answer}\n\nCurrent lessons:\n${lines.map((l) => `- ${l}`).join("\n")}\n\nFollow the owner\x27s answer: drop the line it points to (or make the change it asks for) and add the new lesson, editing the brief\x27s Lessons section. If the answer is unclear, ask the owner.`,
+        });
+      }
+      return;
+    }
     if (answer === LESSON_DONT_ADD || !answer.startsWith(LESSON_REPLACE_PREFIX)) return;
     const dropped = answer.slice(LESSON_REPLACE_PREFIX.length);
     await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, ctx.lesson, dropped);
@@ -816,7 +830,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
       } else if (ctx.type === "lesson_replace") {
-        await answerLessonReplace(db, d, ctx, answer);
+        await answerLessonReplace(db, d, ctx, answer, ownWords);
       } else if (ctx.type === "budget_limit") {
         const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
         if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));
