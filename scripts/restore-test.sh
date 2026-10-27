@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Proves a backup restores: loads it into a THROWAWAY database next to the live one, counts what is in it,
 # times it, then drops the throwaway. The live database ("bossman") is never written to, dropped or locked.
-# Run it on the host from the repository, as root:  scripts/restore-test.sh   (docs: wiki "Database restore: proven procedure")
+# Run it on the host from the repository, as root:  scripts/restore-test.sh   (docs: wiki runbooks/database-restore-and-bluegreen-rollback)
 #
 #   scripts/restore-test.sh                 test the newest bossman-*.sql.gz in the backup folder
 #   scripts/restore-test.sh FILE.sql.gz     test this backup
@@ -40,7 +40,7 @@ if [[ -z $FILE ]]; then
   FILE="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'bossman-*.sql.gz' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
   [[ -n $FILE ]] || die "No bossman-*.sql.gz in $BACKUP_DIR."
 fi
-[[ -s $FILE ]] && gzip -t "$FILE" || die "$FILE is empty or damaged."
+{ [[ -s $FILE ]] && gzip -t "$FILE"; } || die "$FILE is empty or damaged."
 age=$(($(date +%s) - $(stat -c %Y "$FILE")))
 say "Backup:      $FILE ($(du -h "$FILE" | cut -f1), taken $((age / 60)) minutes ago)"
 
@@ -79,3 +79,4 @@ say "Migrations:  restored $(psql_db "$TEST_DB" -c 'SELECT count(*) FROM drizzle
 if ((KEEP)); then say "Left in place: database $TEST_DB. Drop it with: docker compose exec -T db psql -U bossman -d postgres -c 'DROP DATABASE $TEST_DB'"; fi
 if ((bad)); then die "The backup restored but the data does not look right (see FAIL above)."; fi
 say "OK: the backup restores, has accounts, projects and tickets, and took ${took}s."
+if ((FRESH && !KEEP)); then rm -f "$FILE"; fi # the dump taken for this run only; a named or older backup is never deleted

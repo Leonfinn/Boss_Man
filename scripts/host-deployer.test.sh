@@ -354,6 +354,7 @@ b5="$(push deploy/caddy/Caddyfile)"; bgreq "$b5"; bg
 has "$D/outbox/status.json" "deployment files (deploy/caddy/Caddyfile)"; hasnt "$DL" "pg_dump"
 
 # 22. Manual rollback, long after the window (no soak file, old colour stopped): back to the other colour.
+git -C "$T/w" reset -q --hard "$b5^"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop case 21 Caddyfile commit
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
 b6="$(push apps/server/bg6)"; bgreq "$b6"; bg
 [[ $(status result) == deployed ]] || fail "setup swap: $(cat "$D/outbox/status.json")"
@@ -371,7 +372,7 @@ has "$T/hook.out" '"result": "rolled_back"'
 # The rejected release is held (not offered again); a newer commit lifts the hold.
 [[ $(cat "$D/state/hold") == "$b6" && ! -e $D/state/previous ]] || fail "hold / previous not recorded after rollback"
 touch "$D/inbox/check"; bg
-[[ -z $(jget "$D/outbox/available.json" tip) ]] || fail "offered the rolled-back release again"
+[[ $(jget "$D/outbox/available.json" tip) == "$P" ]] || fail "offered the rolled-back release again"
 b7="$(push apps/server/bg7)"; touch "$D/inbox/check"; bg
 [[ $(jget "$D/outbox/available.json" tip) == "$b7" ]] || fail "a newer commit was not offered"
 # No image to go back to: nothing is touched.

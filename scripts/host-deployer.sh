@@ -338,8 +338,10 @@ do_rollback_bluegreen() {
     [[ -n $(compose ps -q "$c" 2>/dev/null) ]] || { bg_fail failed "The $c container is not running; nothing was changed."; return 1; }
   done
   docker image inspect "boss-man-server:$BG_IDLE" >/dev/null 2>&1 || { bg_fail failed "There is no image boss-man-server:$BG_IDLE, so there is nothing to go back to. Nothing was changed."; return 1; }
-  if ((DRY)); then log "[dry-run] would back up, start $BG_IDLE as a standby, hand over from $BG_LIVE, flip the proxy, verify, stop $BG_LIVE"; return 0; fi
-  rm -f "$STATE/soak"
+  if ((DRY)); then
+    [[ $(cut -d" " -f1 "$STATE/previous" 2>/dev/null) == "$BG_IDLE" ]] || { bg_fail failed "No record that $BG_IDLE holds the previous release (state/previous); a rollback would be refused. Nothing was changed."; return 1; }
+    log "[dry-run] would back up, start $BG_IDLE as a standby, hand over from $BG_LIVE, flip the proxy, verify, stop $BG_LIVE"; return 0
+  fi
   log "Rollback: $BG_LIVE is live; going back to $BG_IDLE."
   backup_database || { bg_fail failed "The backup failed. Nothing was changed."; return 1; }
   # Not recreated: the stopped container keeps its old image.
@@ -351,6 +353,7 @@ do_rollback_bluegreen() {
   # The stopped colour holds the previous release only if the last swap that went live said so. A deploy that failed
   # after its build leaves a rejected build in that image, and going "back" to it would be going forward to it.
   [[ -n $ocommit && $(cat "$STATE/previous" 2>/dev/null) == "$BG_IDLE $ocommit" ]] || { pre_fail "$BG_IDLE does not hold the previous release (it reports '${ocommit:0:8}', expected the one recorded at the last successful swap). Nothing was changed."; return 1; }
+  rm -f "$STATE/soak" # only now: a refusal above keeps the automatic switch-back for the rest of the window
   [[ $(probe "server-$BG_IDLE" 3100 /api/setup 2>/dev/null | jfield needsSetup) == False ]] || { pre_fail "The smoke test on $BG_IDLE failed (GET /api/setup)."; return 1; }
   log "Smoke test passed. Handing over: demote $BG_LIVE, promote $BG_IDLE (code ${ocommit:0:8})."
   compose kill -s USR1 "server-$BG_LIVE" >>"$LOG" 2>&1 || { pre_fail "Could not signal $BG_LIVE."; return 1; }
