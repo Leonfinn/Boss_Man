@@ -48,7 +48,7 @@ async function agent(agentId: string) {
 describe("state notes (R85)", () => {
   it("saves a note in the same state without moving the card to another column", async () => {
     const [later] = await ctx.db.insert(workflowColumns).values({ projectId: ctx.project.id, name: "Testing", systemState: "in_progress", position: 99 }).returning();
-    const t = await ctx.ticket("Add rate limiting", { columnId: later!.id });
+    const t = await ctx.ticket("Add rate limiting", { columnId: later!.id, assigneeAgentId: ctx.dev.id });
     const c = await agent(ctx.dev.id);
     await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Limiter written; tests next." } });
     expect(await row(t.id)).toMatchObject({ systemState: "in_progress", columnId: later!.id, stateNote: "Limiter written; tests next." });
@@ -58,7 +58,7 @@ describe("state notes (R85)", () => {
   });
 
   it("refuses a move to review, done or blocked without a summary", async () => {
-    const t = await ctx.ticket("Add rate limiting");
+    const t = await ctx.ticket("Add rate limiting", { assigneeAgentId: ctx.dev.id });
     const c = await agent(ctx.dev.id);
     for (const state of ["review", "done", "blocked"]) {
       const res = await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state } });
@@ -88,7 +88,7 @@ describe("state notes (R85)", () => {
   });
 
   it("does not bump the version", async () => {
-    const t = await ctx.ticket("Add rate limiting");
+    const t = await ctx.ticket("Add rate limiting", { assigneeAgentId: ctx.dev.id });
     const c = await agent(ctx.dev.id);
     await c.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "review", summary: "First." } });
     expect((await row(t.id)).version).toBe(2); // the state change, once
