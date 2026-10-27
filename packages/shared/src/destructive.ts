@@ -358,9 +358,11 @@ const SSH_VALUED = "-B -b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W 
 // Interpreters, and the options that hand them code in the command itself.
 const INLINE: Array<[RegExp, RegExp]> = [
   [/^(python[\d.]*|pypy[\d.]*)$/, /^-[a-zA-Z]*c/],
-  [/^(node|nodejs|bun)$/, /^(-[a-zA-Z]*[ep]|--eval|--print)(=|$)/],
+  // -r/--require and --import (or a loader) load a module first, which may be inline code (data: URLs).
+  [/^(node|nodejs|bun)$/, /^(-[a-zA-Z]*[epr]|--eval|--print|--require|--import|--loader|--experimental-loader)(=|$)/],
   [/^deno$/, /^eval$/],
-  [/^perl[\d.]*$/, /^-[a-zA-Z]*[eE]/],
+  // -M/-m put their value into a `use` line, so it can carry code: -M'File::Path;rmtree("/x")'.
+  [/^perl[\d.]*$/, /^-[a-zA-Z]*[eEmM]/],
   [/^ruby[\d.]*$/, /^-[a-zA-Z]*e/],
   [/^php[\d.]*$/, /^-[a-zA-Z]*r/],
   [/^[gmn]?awk$/, /^/],
@@ -470,6 +472,7 @@ export function commandRisks(command: string | string[]): Risk[] {
           return remote.length ? readScript(remote.map((a) => a.text).join(" "), depth + 1) : undefined;
         }
         if (prog === "rimraf") return destroys("deletes folders (rimraf)");
+        if (prog === "rsync" && args.some((a) => /^--(del|delete[\w-]*|remove-source-files)(=|$)/.test(a.text))) return destroys("deletes files (rsync --delete)");
 
         if (prog === "rm") {
           if (bulk) return destroys("deletes every file fed to it (xargs, find -exec)");

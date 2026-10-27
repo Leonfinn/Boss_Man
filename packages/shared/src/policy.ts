@@ -80,8 +80,38 @@ export function commandOf(rawInput: unknown): string | null {
   return null;
 }
 
-/** Quoted text is data (a sed script, a commit message) unless a shell runs it. */
-const runText = (cmd: string) => (/\b(sh|bash|zsh)\s+-c\b|\beval\b/.test(cmd) ? cmd : cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''"));
+/** Programs that only ever use their quoted arguments as text (a message, a pattern), never run them. */
+const DATA_ONLY = /^(?:echo|printf|grep|egrep|fgrep|git\s+(?:commit|tag)|(?:gh|glab)\s+(?:pr|issue|release|mr))(?=\s|$)/;
+
+/**
+ * The command for the text patterns, with quoted text blanked only where it can't run: the
+ * arguments of a DATA_ONLY program (`git commit -m 'stop rm -rf'`). Anywhere else quoted text may
+ * be run by a program the reader doesn't know (tmux new 'rm -rf x', at, docker exec, sed '1e …'),
+ * so it stays (BOS-116 review). Pipes, heredocs, substitutions and function or alias definitions
+ * can carry an echo's text to another program, so with any of them nothing is blanked.
+ */
+function dataText(cmd: string): string {
+  if (/<<|[<>]\(|`|\$\(|\(\s*\)|\bfunction\s|\balias\b|\bPATH=|\bhash\s/.test(cmd)) return cmd;
+  const segs: Array<{ start: number; quotes: Array<[number, number]> }> = [{ start: 0, quotes: [] }];
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (c === "\\") i++;
+    else if (c === "'" || c === '"') {
+      let e = i + 1;
+      for (; e < cmd.length && cmd[e] !== c; e++) if (c === '"' && cmd[e] === "\\") e++;
+      if (e >= cmd.length) return cmd;
+      segs.at(-1)!.quotes.push([i, e + 1]);
+      i = e;
+    } else if (c === "|" && cmd[i + 1] !== "|" && cmd[i - 1] !== "|") return cmd;
+    else if (/[;&|\n]/.test(c)) segs.push({ start: i + 1, quotes: [] });
+  }
+  let out = cmd;
+  for (const s of segs.reverse()) {
+    if (!DATA_ONLY.test(cmd.slice(s.start).trimStart())) continue;
+    for (const [a, b] of s.quotes.reverse()) out = out.slice(0, a) + "''" + out.slice(b);
+  }
+  return out;
+}
 
 /** What a request's shell command destroys or pushes. An argv array is read as its words, so ["bash", "-lc", "…"] keeps its script whole. */
 function risksOf(info: PermissionInfo): Risk[] {
@@ -94,7 +124,7 @@ function risksOf(info: PermissionInfo): Risk[] {
 
 const hits = (info: PermissionInfo, kind: Risk["kind"], legacy: string) => {
   const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null) ?? "";
-  return risksOf(info).some((r) => r.kind === kind) || new RegExp(legacy, "i").test(runText(cmd));
+  return risksOf(info).some((r) => r.kind === kind) || new RegExp(legacy, "i").test(dataText(cmd));
 };
 export const isDestructive = (info: PermissionInfo) => hits(info, "destroys", DESTRUCTIVE);
 export const isPushing = (info: PermissionInfo) => hits(info, "pushes", PUSHING);
@@ -197,7 +227,7 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   // Of what the reader finds (BOS-116), only a plainly written rm of build output can be vouched for.
   const found = risksOf(info).filter((r) => r.kind === "destroys");
   if (found.some((r) => !r.plain || !WORKSPACE_DELETE.test(r.text))) return "deny";
-  const run = runText(cmd);
+  const run = dataText(cmd);
   const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
   if (!hits.length && !found.length) return "allow";
   if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";

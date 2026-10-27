@@ -124,6 +124,12 @@ describe("destructive commands, however they're written (BOS-116)", () => {
     "docker volume prune -f",
     "docker -H tcp://x rm -f c",
     "zpool destroy tank",
+    "rsync -a --delete src/ /x/",
+    "rsync -a --delete-after src/ /x/",
+    "rsync -a --remove-source-files /x/ /tmp/y/",
+    "node --import 'data:text/javascript,import{rmSync}from\"fs\";rmSync(\"/x\",{recursive:true})' app.js",
+    "perl '-MFile::Path;rmtree(\"/x\")' -e 1",
+    "perl -M'File::Path;rmtree(\"/x\")' script.pl",
     // Can't be read at all.
     "echo 'unbalanced",
   ];
@@ -134,6 +140,54 @@ describe("destructive commands, however they're written (BOS-116)", () => {
       expect(evaluatePermission(exec(c), []).outcome, JSON.stringify(c)).toBe("owner");
       expect(recommendedVerdict(exec(c)), JSON.stringify(c)).toBe("deny");
     }
+  });
+
+  // Review of 67b1dfc: quoted text handed to a program the reader doesn't know may run, so the old
+  // text patterns must still see it. Every one of these went to the owner on 594f6e1.
+  it("still asks when a delete or push is handed as text to another program", () => {
+    for (const c of [
+      "tmux new -d 'rm -rf /x'",
+      "tmux send-keys 'rm -rf /x' Enter",
+      "screen -dm bash -lc 'rm -rf /x'",
+      "at now <<< 'rm -rf /x'",
+      "parallel ::: 'rm -rf /x'",
+      "tcsh -c 'rm -rf /x'",
+      "csh -c 'rm -rf /x'",
+      "sg grp -c 'rm -rf /x'",
+      "lua -e 'os.execute(\"rm -rf /x\")'",
+      "echo 'exec rm -rf /x' | tclsh",
+      "vim -es -c '!rm -rf /x'",
+      "sed '1e rm -rf /x' f",
+      "git config alias.x '!rm -rf /x' && git x",
+      "git -c diff.external='rm -rf /x' diff",
+      "GIT_EXTERNAL_DIFF='rm -rf /x' git diff",
+      "bash <(echo 'rm -rf /x')",
+      "source <(echo 'rm -rf /x')",
+      "bash /dev/stdin <<< 'rm -rf /x'",
+      "echo 'rm -rf /x' | sh -",
+      "docker exec c bash -lc 'rm -rf /x'",
+      "kubectl exec p -- sh -c 'rm -rf /x'",
+      "tar -cf /dev/null --checkpoint=1 --checkpoint-action=exec='rm -rf /x' .",
+      // A data-only program's text reaching another program.
+      "echo 'rm -rf /x' | at now",
+      'echo "rm -rf /x" |& at now',
+      "echo hi & tmux new -d 'rm -rf /x'",
+      'grep x f;tmux new -d "rm -rf /x"',
+      "gh alias set x '!rm -rf /x' && gh x",
+      "true && echo 'rm -rf /x' | at now",
+      "while true; do\necho 'rm -rf /x'\ndone | at now",
+      "echo() { tmux new -d \"$1\"; }; echo 'rm -rf /x'",
+      "X=1 echo 'rm -rf /x'",
+      "\"echo\" 'rm -rf /x'",
+      "printf -v X 'rm -rf /x'; eval $X",
+      "printf -v X 'rm -rf /x'; $X",
+      "IFS= read -r X <<< 'rm -rf /x'; $X",
+      "git commit -m 'x' && git push --force",
+    ]) {
+      expect(evaluatePermission(exec(c), []).outcome, c).toBe("owner");
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+    expect(evaluatePermission(exec("tmux new -d 'git push --force'"), []).outcome).toBe("owner");
   });
 
   it("finds pushes however they're written", () => {
@@ -153,6 +207,12 @@ describe("destructive commands, however they're written (BOS-116)", () => {
       "[[ -d x ]] || mkdir x",
       "git commit -m 'stop rm -rf in scripts'",
       'grep -rn "rm -rf" .',
+      "git tag -a v1 -m 'no more git push --force'",
+      "gh pr create --title x --body 'drops rm -rf from the script'",
+      "printf '%s\\n' 'rm -rf is gone' && git commit -m 'stop rm -rf'",
+      "rsync -a src/ /tmp/y/",
+      "node -r dotenv/config app.js",
+      "perl -Mstrict script.pl",
       "echo 'rm -rf /' > notes.txt",
       "python3 -c 'print(1)'",
       "python3 -c 'import json,sys; print(json.load(sys.stdin)[\"a\"])' < x.json",
