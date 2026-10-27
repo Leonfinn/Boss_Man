@@ -77,8 +77,9 @@ describe("watchdog hardening", () => {
     expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).toBeNull();
   });
 
-  it("A5: a queued wake does not hide a stuck ticket from the watchdog", async () => {
+  it("A5: a queued wake behind a paused agent does not hide a stuck ticket from the watchdog", async () => {
     await ctx.switchOn();
+    await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.dev.id));
     const t = await ctx.ticket({ title: "Stuck with a pending wake", stateChangedAt: ctx.ago(600) });
     await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, reason: "message", status: "queued" });
     await ctx.watchdog.run();
