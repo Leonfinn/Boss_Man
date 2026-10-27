@@ -63,7 +63,7 @@ type ActedResult = { flaggedDecisions: string[]; flaggedTickets: string[]; woken
  * waits on them) "may be out of date", mark their state notes stale, and wake each author
  * once to confirm or withdraw. Anything already flagged is left alone, so one action is one wake.
  */
-export async function ownerActed(db: Db, input: { ticketIds: string[]; reason: string; wake?: WakeFn | null; now?: Date; /** Agents already being woken for this action, so they get one note, not two. */ skipAgents?: Array<string | null> }): Promise<ActedResult> {
+export async function ownerActed(db: Db, input: { companyId: string; ticketIds: string[]; reason: string; wake?: WakeFn | null; now?: Date; /** Agents already being woken for this action, so they get one note, not two. */ skipAgents?: Array<string | null> }): Promise<ActedResult> {
   const now = input.now ?? new Date();
   const roots = [...new Set(input.ticketIds.filter((id): id is string => !!id))];
   if (!roots.length) return { flaggedDecisions: [], flaggedTickets: [], woken: [] };
@@ -74,11 +74,11 @@ export async function ownerActed(db: Db, input: { ticketIds: string[]; reason: s
   const noted = await db
     .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, state: tickets.systemState })
     .from(tickets)
-    .where(and(inArray(tickets.id, scope), isNull(tickets.stateNoteStaleAt), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
+    .where(and(eq(tickets.companyId, input.companyId), inArray(tickets.id, scope), isNull(tickets.stateNoteStaleAt), sql`${tickets.stateNote} is not null`, ne(tickets.systemState, "done")));
   const flaggedTickets = noted.map((n) => n.id);
   if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now }).where(inArray(tickets.id, flaggedTickets));
 
-  const open = await db.select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context }).from(decisions).where(and(eq(decisions.status, "open"), isNull(decisions.staleAt)));
+  const open = await db.select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context }).from(decisions).where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), isNull(decisions.staleAt)));
   const flagged: typeof open = [];
   for (const d of open) {
     const ids = await decisionTicketIds(db, d);
@@ -115,20 +115,63 @@ export async function ownerActed(db: Db, input: { ticketIds: string[]; reason: s
 
 export type OwnerAnswer = { kind: "decision" | "message"; question: string | null; answer: string; at: Date };
 
-/** The latest thing the owner said or answered on these tickets recently, for the duplicate check. */
-export async function recentOwnerAnswer(db: Db, input: { companyId: string; ticketIds: string[]; since?: Date; /** Count what the owner wrote on the ticket as well as answered decisions; off for the duplicate-ask check. */ includeMessages?: boolean }): Promise<OwnerAnswer | null> {
+const askWords = (s: string) =>
+  new Set(
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2),
+  );
+
+/** True when two asks are close enough to be the same one repeated (BOS-123). */
+export function similarQuestion(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  if (norm(a) === norm(b)) return true;
+  const x = askWords(a);
+  const y = askWords(b);
+  if (!x.size || !y.size) return false;
+  let shared = 0;
+  for (const w of x) if (y.has(w)) shared++;
+  return shared / Math.min(x.size, y.size) >= 0.6;
+}
+
+/**
+ * The latest thing the owner said or answered on these tickets recently, for the duplicate check.
+ * Pass decisionTypes to count only the kinds that answer this sort of ask; pass askerAgentId and
+ * question to count only the same agent's asks or ones close enough to be the same question, so an
+ * unrelated answer (a permission click, say) never blocks a fresh ask (BOS-123).
+ */
+export async function recentOwnerAnswer(db: Db, input: {
+  companyId: string;
+  ticketIds: string[];
+  since?: Date;
+  /** Count what the owner wrote on the ticket as well as answered decisions; off for the duplicate-ask check. */
+  includeMessages?: boolean;
+  /** Decision context types that count; default every kind. */
+  decisionTypes?: string[];
+  /** Only a decision this agent raised, or one whose question closely matches `question`, counts. */
+  askerAgentId?: string | null;
+  question?: string;
+}): Promise<OwnerAnswer | null> {
   const ids = [...new Set(input.ticketIds.filter((id): id is string => !!id))];
   if (!ids.length) return null;
   const since = input.since ?? new Date(Date.now() - 7 * 86_400_000);
   const found: OwnerAnswer[] = [];
 
   const answered = await db
-    .select({ id: decisions.id, context: decisions.context, question: decisions.question, answer: decisions.answer, answeredAt: decisions.answeredAt })
+    .select({ id: decisions.id, context: decisions.context, question: decisions.question, answer: decisions.answer, answeredAt: decisions.answeredAt, raisedByAgentId: decisions.raisedByAgentId })
     .from(decisions)
     .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "answered"), gt(decisions.answeredAt, since)))
     .orderBy(desc(decisions.answeredAt));
   for (const d of answered) {
     if (!d.answer || !d.answeredAt) continue;
+    const type = (d.context as { type?: string } | null)?.type;
+    if (input.decisionTypes && !input.decisionTypes.includes(type ?? "")) continue;
+    if (input.question !== undefined) {
+      const sameAgent = !!input.askerAgentId && d.raisedByAgentId === input.askerAgentId;
+      if (!sameAgent && !similarQuestion(input.question, d.question)) continue;
+    }
     const about = await decisionTicketIds(db, d);
     if (about.some((id) => ids.includes(id))) found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt });
   }

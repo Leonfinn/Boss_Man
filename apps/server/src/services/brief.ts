@@ -32,7 +32,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
   };
   const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null; stateNoteStaleAt?: Date | null }) => {
     if (!t.stateNote || !t.stateNoteAt) return "";
-    const stale = t.stateNoteStaleAt != null;
+    const stale = t.stateNoteStaleAt != null && (!t.stateNoteAt || t.stateNoteStaleAt > t.stateNoteAt);
     return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? " (may be out of date: the owner acted after it, so check before repeating it)" : ""}`;
   };
   const from = since ?? new Date(now.getTime() - 24 * 3_600_000);

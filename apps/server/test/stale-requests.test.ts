@@ -115,5 +115,53 @@ describe("stale requests (BOS-123)", () => {
     expect(stateNoteLine(note, now)).not.toContain("(may be out of date)");
     expect(stateNoteLine({ ...note, lastActivityAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
     expect(stateNoteLine({ ...note, stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).toContain("(may be out of date)");
+    // A flag from before the note was rewritten doesn't make the fresh note stale.
+    expect(stateNoteLine({ ...note, stateNoteAt: new Date("2026-10-27T11:30:00Z"), stateNoteStaleAt: new Date("2026-10-27T11:00:00Z") }, now)).not.toContain("(may be out of date)");
+  });
+
+  it("clears the stale flag when a fresh note is written, and flags again on the next owner action", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the footer", c.worker.id);
+    await c.work.updateTicket(t.id, { stateNote: "Waiting on the owner to pick a colour." });
+    const first = await c.decisions.raise({ companyId: c.company.id, agentId: c.other.id, question: "Which colour?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Checked the brand guide" });
+    await c.decisions.answer(first.id, "Blue");
+
+    let [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
+
+    await c.work.updateTicket(t.id, { stateNote: "Blue chosen; building it now." });
+    [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.stateNoteStaleAt).toBeNull();
+    expect(stateNoteLine({ stateNote: row!.stateNote, stateNoteAt: row!.stateNoteAt, stateNoteStaleAt: row!.stateNoteStaleAt, lastActivityAt: row!.lastActivityAt }, new Date())).not.toContain("(may be out of date)");
+
+    const second = await c.decisions.raise({ companyId: c.company.id, agentId: c.other.id, question: "Anything else for the footer?", options: ["No", "Yes"], recommended: "No", blocksTicketId: t.id, triedFirst: "Read the spec" });
+    await c.decisions.answer(second.id, "No");
+    [row] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.stateNoteStaleAt).toBeInstanceOf(Date);
+  });
+
+  it("does not refuse a fresh question because of an unrelated permission answer on the ticket", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the footer", c.worker.id);
+    await c.db.insert(decisions).values({
+      companyId: c.company.id,
+      kind: "permission",
+      question: "Allow: rm -rf build",
+      options: ["Allow", "Deny"],
+      recommendedOption: "Allow",
+      raisedByAgentId: c.worker.id,
+      context: { type: "permission", ticketId: t.id, runId: randomUUID() },
+      status: "answered",
+      answer: "Allow",
+      answeredAt: new Date(),
+    });
+
+    const mcp = await c.mcp(c.worker.id);
+    const asked = await mcp.callTool({
+      name: "raise_decision",
+      arguments: { question: "Which colour for the footer?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Checked the brand guide" },
+    });
+    expect(isError(asked)).toBe(false);
+    expect(textOf(asked)).toMatch(/in the owner's queue/i);
   });
 });

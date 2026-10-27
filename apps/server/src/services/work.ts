@@ -387,7 +387,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           ...fields,
           ...(col ? { columnId: col.id, systemState: col.systemState, outcome: col.systemState === "done" ? (patch.outcome ?? (t.systemState === "done" ? t.outcome : null) ?? "completed") : null, ...(col.systemState === "done" ? { monitorAt: null } : {}) } : {}),
           lastActivityAt: now(),
-          ...(patch.stateNote ? { stateNoteAt: now() } : {}),
+          ...(patch.stateNote ? { stateNoteAt: now(), stateNoteStaleAt: null } : {}),
         })
         .where(eq(tickets.id, ticketId))
         .returning();

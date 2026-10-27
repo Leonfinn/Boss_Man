@@ -176,12 +176,12 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
       const t = await target(d.targetId);
       if (approved) {
         const row = await startWhenApproved(d, t);
-        if (d.ticketId) await ownerActed(db, { ticketIds: [d.ticketId], reason: `the owner approved deploying ${d.ref} to ${t.name}`, wake, now: now() });
+        if (d.ticketId) await ownerActed(db, { companyId: d.companyId, ticketIds: [d.ticketId], reason: `the owner approved deploying ${d.ref} to ${t.name}`, wake, now: now() });
         return row;
       }
       const [row] = await db.update(deploys).set({ status: "rejected", finishedAt: now() }).where(eq(deploys.id, id)).returning();
       if (d.agentId && wake) await wake({ agentId: d.agentId, ticketId: d.ticketId, reason: "deploy rejected", note: `The owner rejected deploying ${d.ref} to ${t.name}. Don't deploy it; raise a decision if you need another way forward.` });
-      if (d.ticketId) await ownerActed(db, { ticketIds: [d.ticketId], reason: `the owner rejected deploying ${d.ref} to ${t.name}`, wake, now: now() });
+      if (d.ticketId) await ownerActed(db, { companyId: d.companyId, ticketIds: [d.ticketId], reason: `the owner rejected deploying ${d.ref} to ${t.name}`, wake, now: now() });
       return row!;
     },
 
@@ -206,7 +206,7 @@ export function deploysService(db: Db, deps: { now?: () => Date; /** A productio
         .where(eq(deploys.id, d.id))
         .returning();
       if (input.outcome === "succeeded" && d.ticketId) await deps.onShipped?.(d.ticketId);
-      if (d.ticketId && input.outcome === "succeeded") await ownerActed(db, { ticketIds: [d.ticketId], reason: `the deploy of ${d.ref} went live`, wake, now: now() });
+      if (d.ticketId && input.outcome === "succeeded") await ownerActed(db, { companyId: d.companyId, ticketIds: [d.ticketId], reason: `the deploy of ${d.ref} went live`, wake, now: now() });
       return row!;
     },
 

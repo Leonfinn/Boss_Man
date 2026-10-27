@@ -46,7 +46,7 @@ export function stateNoteLine(
   if (!t.stateNote || !t.stateNoteAt) return null;
   const m = Math.max(0, Math.round((now.getTime() - t.stateNoteAt.getTime()) / 60_000));
   const age = m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
-  const stale = t.stateNoteStaleAt != null || t.stateNoteAt < t.lastActivityAt;
+  const stale = (t.stateNoteStaleAt != null && t.stateNoteStaleAt > t.stateNoteAt) || t.stateNoteAt < t.lastActivityAt;
   return `State note (${age} ago): ${t.stateNote}${stale ? " (may be out of date)" : ""}`;
 }
 

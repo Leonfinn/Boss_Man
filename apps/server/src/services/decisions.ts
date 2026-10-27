@@ -1108,8 +1108,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!closed) return null;
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
-      const about = await decisionTicketIds(db, d);
-      if (about.length) await ownerActed(db, { ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+      // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
+      if (ctx.type !== "permission") {
+        const about = await decisionTicketIds(db, d);
+        if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+      }
 
       let delivered: boolean | null = null;
       let endedHere = false;
