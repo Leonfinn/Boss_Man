@@ -126,6 +126,9 @@ describe("work only in a temporary folder", () => {
     expect(scratch("cd /tmp/x && git push origin main")).toBeUndefined();
     expect(scratch("cd /tmp && git clone https://example.com/r.git r")).toBeUndefined();
     expect(scratch("cd /tmp/x && git checkout main && cd /home/node && git checkout main")).toBeUndefined();
+    // A worktree writes the repository's .git and makes its branch there (BOS-111 adversarial review).
+    expect(scratch("rm -rf /tmp/a && cd /tmp/b && git worktree add -b feature-x /tmp/c")).toBeUndefined();
+    expect(scratch("cd /tmp/b && git worktree prune > /tmp/b/log")).toBeUndefined();
     expect(scratch("rm -rf /tmp/$DIR")).toBeUndefined();
     expect(scratch("node build.js")).toBeUndefined();
     // Only reading isn't the case this line is for.
