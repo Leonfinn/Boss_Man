@@ -468,6 +468,41 @@ describe("the hourly cap (BOS-58)", () => {
     expect(await ctx.smWakes()).toHaveLength(1);
     expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).not.toBeNull();
   });
+
+  it("G6 (BOS-78): switching the watchdog off in Settings stops the next sweep acting on an already-flagged ticket, and switching it on resumes", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Stuck for a while", stateChangedAt: ctx.ago(130) });
+    // 1. On, with a due stuck ticket: the sweep acts (one wake, one open flag).
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(1);
+    expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id)))[0]!.status).toBe("open");
+    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+    // 2. The owner switches it off, with the same call Settings makes.
+    const off = await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { enabled: false });
+    expect(off.statusCode).toBe(200);
+    expect(off.json().settings.enabled).toBe(false);
+    // 3. By the next sweep the flag's limit has passed, so it would be handed on again, but nothing happens.
+    ctx.advance(130);
+    const wakesBefore = (await ctx.db.select().from(wakes)).length;
+    const activityBefore = (await ctx.db.select().from(activity)).length;
+    const actionsBefore = (await ctx.db.select().from(watchdogActions)).length;
+    const flagsBefore = await ctx.db.select().from(watchdogFlags);
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(1);
+    expect(await ctx.db.select().from(wakes)).toHaveLength(wakesBefore);
+    expect(await ctx.db.select().from(activity)).toHaveLength(activityBefore);
+    expect(await ctx.db.select().from(watchdogActions)).toHaveLength(actionsBefore);
+    expect(await ctx.db.select().from(watchdogFlags)).toEqual(flagsBefore);
+    // A nudge from the Scrum Master is refused too, and leaves no trace.
+    expect(textOf(await call({ action: "nudge", ticketId: t.id, reason: "owner switched it off" }))).toContain("switched off");
+    expect(await ctx.db.select().from(watchdogActions)).toHaveLength(actionsBefore);
+    // 4. Switched back on, the next sweep acts again.
+    expect((await ctx.switchOn()).settings.enabled).toBe(true);
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(2);
+    expect(isError(await call({ action: "nudge", ticketId: t.id, reason: "back on, chasing it" }))).toBe(false);
+    expect(await ctx.db.select().from(watchdogActions).where(and(eq(watchdogActions.ticketId, t.id), eq(watchdogActions.kind, "nudge")))).toHaveLength(1);
+  });
 });
 
 describe("the read API and backtest (BOS-58)", () => {
