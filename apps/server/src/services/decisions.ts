@@ -268,7 +268,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
-    if (ctx.type === "lesson_replace" && answer !== LESSON_DONT_ADD && !answer.startsWith(LESSON_REPLACE_PREFIX)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
+    if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !answer.startsWith(LESSON_REPLACE_PREFIX)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
   }
 
   /** Adds the approved lesson to the project's brief, unless the section is full and a line must go first (R-review-lessons). */
@@ -303,7 +303,28 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** Finishes a replace: the chosen line goes, the new lesson takes its place. */
-  async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string) {
+  async function answerLessonReplace(db: Db, d: typeof decisions.$inferSelect, ctx: Extract<DecisionContext, { type: "lesson_replace" }>, answer: string, ownWords: boolean) {
+    if (ownWords) {
+      // The owner answered in their own words. The Lessons section only changes through a lesson decision, so the CEO gets a follow-up one carrying those words.
+      const page = await lessonsPageRow(db, d.companyId, ctx.projectId);
+      const unique = [...new Set(page ? lessonsFrom(page.body) : [])];
+      const [row] = await db
+        .insert(decisions)
+        .values({
+          companyId: d.companyId,
+          kind: "question",
+          question: `The Lessons section of ${ctx.projectName}'s brief is full (${LESSONS_CAP}). The new lesson is "${ctx.lesson}". The owner was asked which line it replaces and answered in their own words: ${answer}\n\nPick the line their words point to, or "${LESSON_DONT_ADD}" if they ask for something else (then ask the owner).`,
+          options: [...unique.map((l) => `${LESSON_REPLACE_PREFIX}${l}`), LESSON_DONT_ADD],
+          recommendedOption: LESSON_DONT_ADD,
+          tier: "ceo",
+          dedupeKey: `lesson-replace-ceo:${d.id}`,
+          context: { type: "lesson_replace", projectId: ctx.projectId, projectName: ctx.projectName, lesson: ctx.lesson } satisfies DecisionContext,
+        })
+        .onConflictDoNothing()
+        .returning({ id: decisions.id, question: decisions.question });
+      if (row) await tellCeo(d.companyId, row.question);
+      return;
+    }
     if (answer === LESSON_DONT_ADD || !answer.startsWith(LESSON_REPLACE_PREFIX)) return;
     const dropped = answer.slice(LESSON_REPLACE_PREFIX.length);
     await writeLesson(db, { companyId: d.companyId, projectId: ctx.projectId, projectName: ctx.projectName }, ctx.lesson, dropped);
@@ -816,7 +837,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
       } else if (ctx.type === "lesson_replace") {
-        await answerLessonReplace(db, d, ctx, answer);
+        await answerLessonReplace(db, d, ctx, answer, ownWords);
       } else if (ctx.type === "budget_limit") {
         const [p] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.id, ctx.policyId));
         if (p && answer === RAISE_BUDGET) await db.update(budgetPolicies).set({ limitMicros: Math.ceil(p.limitMicros * 1.5) }).where(eq(budgetPolicies.id, p.id));
@@ -844,7 +865,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // The agent that asked is woken with the answer (on the ticket it blocked, if any).
       // A rule proposal answered with a button needs nothing more from the CEO.
-      if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords)) {
+      if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
         await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `The owner answered your question "${d.question}": ${answer}` });
       }
