@@ -13,8 +13,8 @@ nav: get-started
   <section>
     <h2>What you need</h2>
     <ul class="needs prose">
-      <li><strong>A 64-bit Linux machine with Docker</strong> and Docker Compose v2. A home server or a NAS (TrueNAS SCALE works) is ideal. Each agent's container uses up to 4 GB of memory.</li>
-      <li><strong>A GitHub or Gitea account,</strong> for the repositories your agents work in.</li>
+      <li><strong>A 64-bit Linux machine with Docker</strong> and Docker Compose v2. A home server or a NAS (TrueNAS SCALE works) is ideal. Each company's runner is limited to 4 GB of memory by default.</li>
+      <li><strong>A GitHub or Gitea account and an access token,</strong> for the repositories your agents work in. The guide shows how to make one.</li>
       <li><strong>An AI account for your agents:</strong> a Claude Pro or Max plan (the easiest start), an Anthropic or OpenAI key, or an OpenRouter key.</li>
       <li><strong>A browser</strong> on a computer on the same network.</li>
       <li><strong>Comfort with a command line.</strong> You copy commands from the guide, but you'll be running them yourself.</li>
@@ -24,18 +24,18 @@ nav: get-started
     <h2>What installing involves</h2>
     <ol class="install prose">
       <li><span>Get the code from GitHub and put it in a folder on your machine.</span></li>
-      <li><span>Make a secret key and a couple of settings files.</span></li>
+      <li><span>Make a master key (it encrypts your secrets) and a settings file.</span></li>
       <li><span>Start Boss Man with Docker Compose and open it in your browser.</span></li>
       <li><span>Create your owner account and your first company.</span></li>
-      <li><span>Connect your git and AI accounts, and give your first ticket to an agent.</span></li>
+      <li><span>Connect your git and AI accounts, hire an agent and give it your first ticket.</span></li>
     </ol>
-    <p class="prose mt">The guide walks you through each step, with a check after each one.</p>
+    <p class="prose mt">The guide has a check after each step, so you know it worked.</p>
   </section>
   <section>
     <h2>Is it right for you?</h2>
     <div class="fit">
       <div class="card yes"><h3><span aria-hidden="true">✓</span> Yes, if</h3><p>You want a team of agents working on your own projects, on your own hardware, and you're happy with alpha software.</p></div>
-      <div class="card no"><h3><span aria-hidden="true">✕</span> Not yet, if</h3><p>You need several people logged in, a hosted service, or something to put on the open internet.</p></div>
+      <div class="card no"><h3><span aria-hidden="true">✕</span> Not yet, if</h3><p>You need several people logged in, a hosted service, or a service to put on the open internet.</p></div>
     </div>
   </section>
 </div>
@@ -46,6 +46,6 @@ nav: get-started
     <p>The setup guide is on GitHub, with the code. It takes you from an empty machine to your first ticket.</p>
     <a class="btn" href="{{guide}}">Read the setup guide</a>
     <a href="{{repo}}">See the code on GitHub</a>
-    <p class="small">Stuck? <a href="{{issues}}">Ask on GitHub</a> and include what step you're on.</p>
+    <p class="small">Stuck? <a href="{{issues}}">Ask on GitHub</a> and say which step you're on.</p>
   </div>
 </section>
