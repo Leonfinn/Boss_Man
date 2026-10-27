@@ -148,7 +148,13 @@ ${footer(vars)}
   return { outDir, pages: paths };
 }
 
+// Cloudflare Pages sets CF_PAGES; a deploy build without SITE_URL would ship with no canonical links, og:image URL or sitemap.
+export function requireSiteUrlOnPages(env = process.env) {
+  if (env.CF_PAGES && !env.SITE_URL) throw new Error("CF_PAGES is set but SITE_URL is not: set SITE_URL to the site's https origin (for example https://example.com)");
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  requireSiteUrlOnPages();
   const { pages } = build();
   console.log(`Built ${pages.length + 1} pages to ${path.join(root, "dist")}${process.env.SITE_URL ? "" : " (SITE_URL not set: no canonical links or sitemap)"}`);
 }
