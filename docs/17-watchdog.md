@@ -65,12 +65,14 @@ The `watchdog` tool's actions are:
 - Each needs a one-line reason.
 - It acts only on an open flag the watchdog handed over.
 - Each kind can be used at most once per flag per hand-off. An undone or refused attempt still counts.
-- A flag snoozed twice in a row that comes due again goes to the CEO, through Boss Man.
+- A flag snoozed twice that comes due again goes to the CEO, through Boss Man. The count is per episode (per open flag), not strictly consecutive: a snooze undone by the owner takes one off, nothing else resets it while the flag stays open.
+- An escalated flag (by the Scrum Master, or automatically after two snoozes) belongs to the CEO for one rule limit. If it is still open after that, it starts over: the escalation mark and the snooze count are cleared and the Scrum Master gets it again.
+- **Wake limit:** the Scrum Master's sweep wake (reason `watchdog`) is exempt from the scheduler's 6-per-hour limit on wakes with no ticket, and doesn't count toward it. The watchdog has its own hourly cap on runs and nudges, so a busy hour can't silently drop a sweep and push every listed flag back by its limit.
 
 **Undo** is the owner's: `POST /api/watchdog-actions/:id/undo`.
 - A wake can be undone only before it is delivered.
 - An assignment can be undone only if the assignee hasn't changed since.
-- A decision can be withdrawn while it is open, and the ticket goes back to its earlier state if nothing else holds it.
+- A decision can be withdrawn while it is open, and the ticket goes back to its earlier state (through a normal ticket update, so it is versioned and shows in the ticket's history) if nothing else holds it.
 - A snooze is cleared.
 
 ## Safety cap

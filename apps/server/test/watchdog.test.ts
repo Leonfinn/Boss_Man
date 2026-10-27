@@ -346,11 +346,46 @@ describe("the Scrum Master's actions (BOS-58)", () => {
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.question, "Grant more memory to the runner?"));
     expect(d!.status).toBe("withdrawn");
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+    expect((await ctx.db.select().from(activity).where(eq(activity.ticketId, t.id))).map((a) => a.summary)).toContain("blocked -> in_progress");
 
     expect(isError(await call({ action: "escalate", ticketId: t.id, reason: "Crashed; needs a decision on approach." }))).toBe(false);
     expect((await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id)))[0]!.note).toContain("escalated");
     // Escalated: it's the CEO's now, so the Scrum Master's actions on it stop.
     expect(isError(await call({ action: "nudge", ticketId: t.id, reason: "One more nudge." }))).toBe(true);
+  });
+
+  it("hands an escalated ticket to the Scrum Master again once its limit passes with nobody acting, with fresh snoozes", async () => {
+    await ctx.switchOn();
+    const t = await handed();
+    expect(isError(await call({ action: "escalate", ticketId: t.id, reason: "Needs the CEO." }))).toBe(false);
+    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.ceo.id));
+    await ctx.db.update(watchdogFlags).set({ snoozeCount: 2 });
+    // Still inside the limit: the CEO has it, nothing new goes out.
+    ctx.advance(60);
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(1);
+    expect((await ctx.db.select().from(watchdogFlags))[0]!.escalatedAt).not.toBeNull();
+    // Limit passed and the ticket is still stuck: it starts over.
+    ctx.advance(70);
+    await ctx.watchdog.run();
+    const [f] = await ctx.db.select().from(watchdogFlags);
+    expect(f).toMatchObject({ escalatedAt: null, snoozeCount: 0, status: "open" });
+    expect(await ctx.smWakes()).toHaveLength(2);
+  });
+
+  it("an auto-escalation with no CEO doesn't hold back the rest of the list", async () => {
+    await ctx.switchOn();
+    const a = await ctx.ticket({ title: "Twice snoozed", stateChangedAt: ctx.ago(130) });
+    const b = await ctx.ticket({ title: "Fresh one", stateChangedAt: ctx.ago(130) });
+    await ctx.watchdog.run();
+    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+    await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, a.id));
+    await ctx.db.update(watchdogFlags).set({ dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, b.id));
+    await ctx.db.update(agents).set({ retiredAt: ctx.now() }).where(eq(agents.id, ctx.ceo.id));
+    await ctx.watchdog.run();
+    const wakesNow = await ctx.smWakes();
+    expect(wakesNow).toHaveLength(2);
+    expect(wakesNow[1]!.note).toContain("Fresh one");
   });
 
   it("doesn't re-flag a problem that cleared and came back until its limit has passed since the last hand-off", async () => {

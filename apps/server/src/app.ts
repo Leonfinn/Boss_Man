@@ -385,6 +385,7 @@ export async function buildApp(opts: AppOptions) {
     nudge: (input) => scheduler.nudge(input),
     raise: (input) => decisionsSvc.raise(input),
     assign: (ticketId, agentId) => work.updateTicket(ticketId, { assigneeAgentId: agentId }),
+    restoreState: (ticketId, state) => work.updateTicket(ticketId, { state }),
     alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
     notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     now: opts.now,
