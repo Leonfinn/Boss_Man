@@ -302,10 +302,14 @@ describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
 
   // Found in the BOS-126 run: a glob inside /tmp is recommended Allow, because the command counts as /tmp-only work.
   // The doc comment on recommendedVerdict says globs are Deny. it.fails flips to a failure once that is fixed: then make it a plain it.
-  it.fails("recommends Deny for a glob in /tmp, which would wipe other agents' checkouts", () => {
-    for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
-  });
+  // One it.fails per pattern, so fixing one of them makes exactly that test fail.
+  for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) {
+    it.fails(`recommends Deny for a glob in /tmp, which would wipe other agents' checkouts: ${c}`, () => {
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    });
+  }
 
+  // "rm /tmp/a -rf" is a plain /tmp cleanup; routing it to the owner is a deliberately conservative side effect of the widened pattern.
   it("pins the widened destructive pattern: flags after the file, and find -delete, go to the owner with Deny", () => {
     for (const c of ["rm file -rf", "rm a.txt -rf", "rm /tmp/a -rf", "find . -name x -delete", "find /tmp -name x -delete"]) {
       expect(route(c), c).toEqual(OWNER);
