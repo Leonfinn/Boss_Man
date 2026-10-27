@@ -175,6 +175,26 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
   });
 
+  it("builds runners for what runs after a rolled-back deploy, but not for the commit that failed", async () => {
+    const c = (ctx = await setup());
+    await c.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", to_commit: C });
+    await c.available({ deployed: B });
+    await c.req("POST", "/api/self-deploy/update-runners");
+    const [ok] = await c.open();
+    expect((await c.req("POST", `/api/decisions/${ok!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
+    await c.app.close();
+    await c.close();
+    await rm(c.dir, { recursive: true, force: true });
+    const d = (ctx = await setup());
+    await d.status({ id: randomUUID(), result: "rolled_back", message: "Switched back.", to_commit: C });
+    await d.available({ deployed: C });
+    await d.req("POST", "/api/self-deploy/update-runners");
+    const [bad] = await d.open();
+    const r = await d.req("POST", `/api/decisions/${bad!.id}/answer`, { answer: "Update runners" });
+    expect(r.statusCode).toBeGreaterThanOrEqual(400);
+    expect(r.json().message ?? r.body).toContain("has not succeeded");
+  });
+
   it("is off without a deployer folder, and refuses a Deploy answer", async () => {
     const c = (ctx = await setup({ deployer: false }));
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: false, status: null });
