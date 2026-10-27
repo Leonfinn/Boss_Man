@@ -184,6 +184,13 @@ export type RunRow = {
   purpose?: string | null;
   reason?: string | null;
   note?: string | null;
+  /** What started it, kept on the run (BOS-118): "nudge", "wiki upkeep", "owner_chat" and so on. */
+  origin?: string | null;
+  /** A nudge's sender and why, when a nudge started the run. */
+  originFrom?: string | null;
+  originNote?: string | null;
+  /** The ticket it was about without being on it (a nudge that named one). */
+  runTicketId?: string | null;
   /** Tokens over the run, when the agent reported them (R67). */
   inputTokens?: number | null;
   outputTokens?: number | null;
