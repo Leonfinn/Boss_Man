@@ -157,6 +157,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
   );
   // A scheduled check runs from the row that set it to its time, or to the next row on the ticket's
   // monitor (cleared, fired, replaced), whichever comes first.
+  // not state: the replay's working data, built fresh on every call.
   const checks = new Map<string, Array<[number, number]>>();
   for (const [id, rows] of group(acts.filter((a) => a.kind === "monitor"), (a) => a.ticketId)) {
     const list: Array<[number, number]> = [];
