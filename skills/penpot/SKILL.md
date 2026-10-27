@@ -54,6 +54,6 @@ In the steps below, `<skill dir>` is this skill's base directory (shown when the
 
 ## Limits
 
-- Per-board PNG export is broken on the server (BOS-55). Don't try to export; give the owner the link instead. `export FILE_ID PAGE_ID BOARD_ID OUT.png` still exists for when it is fixed (attach with `attach_image`; PNG only, max 5 MB).
+- To show a board as a picture: `export FILE_ID PAGE_ID BOARD_ID /tmp/board.png`, then attach it with `attach_image` (PNG only, max 5 MB). Give the link as well.
 - I could not see the result rendered, only read it back with `shapes`; say so, and ask the owner to open the link and tell you what looks off.
-- Needs `curl` and `jq` on the runner; the script says so if they are missing. The agent account needs the Editor role on the agent project.
+- Needs `curl` and `jq` on the runner; the script says so if they are missing. The agent account must own its drawing team (the "Agent designs" project is only accepted there).
