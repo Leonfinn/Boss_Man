@@ -8,27 +8,30 @@ import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
 import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, TOOL_KINDS, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
-import { CEO_TEMPLATE, timeZoneOr } from "@boss-man/shared";
+import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { agentAvatars, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
+import { agentAvatars, agentNotes, agents, companies, costEvents, engagements, fundingSources, mcpServers, objectives, owners, projects, runners as runnersTable, runs as runsTable, sessions, settings, tickets, wakes } from "./db/schema.js";
 import { fundingService } from "./services/funding.js";
 import { AGENT_APPROVALS, AgentError, agentsService } from "./services/agents.js";
+import { NOTE_LIMITS, NoteError, notesService } from "./services/agent-notes.js";
 import { modelsService } from "./services/models.js";
 import { modelProbeService } from "./services/model-probe.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
-import { secretGrants } from "./db/schema.js";
+import { secretGrants, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { maintenanceService } from "./services/maintenance.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
+import { WatchdogError, watchdogService } from "./services/watchdog.js";
+import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
 import { acceptanceCriteriaSchema } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
@@ -174,6 +177,7 @@ export async function buildApp(opts: AppOptions) {
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db);
   const runners = runnersService(db, funding);
+  const notesSvc = notesService(db);
   const agentsSvc = agentsService(db, {
     now: opts.now,
     notify: (n) => notes.notify(n),
@@ -252,8 +256,8 @@ export async function buildApp(opts: AppOptions) {
     quietHours: async () => (await notes.getSettings()).quietHours,
     tickOnWake: opts.tickOnWake,
     log: (m) => app.log.error(m),
-    // Loop and runaway alerts land in the owner's decision queue.
-    alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
+    // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
+    alert: (companyId, question, o) => alerts.raise({ companyId, question, ...o }),
   });
   decisionsSvc.setWakeHook((w) => scheduler.notify(w.agentId, w));
   const maintenance = maintenanceService(db, {
@@ -361,6 +365,7 @@ export async function buildApp(opts: AppOptions) {
     }
   });
   const sweeps = sweepService(db, {
+    expireAdvice: () => decisionsSvc.expireAdvice(),
     limits: opts.sweepLimits,
     now: opts.now,
     wake: (input) => scheduler.notify(input.agentId, input),
@@ -377,7 +382,22 @@ export async function buildApp(opts: AppOptions) {
     onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
   });
-  const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now });
+  const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now, alert: (input) => alerts.raise(input) });
+  // The Scrum Master watchdog (BOS-58): its sweep runs on the leader's timer (main.ts), its actions through the Scrum Master's MCP tool.
+  const watchdog = watchdogService(db, {
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    nudge: (input) => scheduler.nudge(input),
+    raise: (input) => decisionsSvc.raise(input),
+    assign: (ticketId, agentId) => work.updateTicket(ticketId, { assigneeAgentId: agentId }),
+    restoreState: (ticketId, state) => work.updateTicket(ticketId, { state, overLimit: true }),
+    // A trip means the Scrum Master is the problem: straight to the owner.
+    alert: (companyId, question) => decisionsSvc.raise({ companyId, agentId: null, question, options: ["Got it"], recommended: "Got it" }),
+    notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
+    localHour: (t) => Number(new Intl.DateTimeFormat("en-GB", { hour: "2-digit", hourCycle: "h23", timeZone: OWNER_TZ }).format(t)),
+    now: opts.now,
+    log: (m) => app.log.error(m),
+  });
+  const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer) => decisionsSvc.answer(id, answer), watchdog, now: opts.now });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
@@ -416,7 +436,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images, watchdog, alerts }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -575,7 +595,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
@@ -1476,8 +1496,12 @@ export async function buildApp(opts: AppOptions) {
     // The owner moves a ticket by hand (e.g. to unstick it). Done skips the merge: it is the owner's call.
     owner.post("/api/tickets/:id/state", async (req) => {
       const { id } = IdParam.parse(req.params);
-      const { state } = z.object({ state: State }).parse(req.body);
-      const moved = await work.updateTicket(id, { state });
+      const { state, blockedUntil, blockedUntilReason } = z.object({ state: State, blockedUntil: z.string().datetime({ offset: true }).optional(), blockedUntilReason: z.string().trim().max(BLOCKED_UNTIL_REASON_MAX).regex(/^[^\r\n]*$/, "One line, please.").optional() }).parse(req.body);
+      if ((blockedUntil || blockedUntilReason) && state !== "blocked") throw new WorkError(422, "A blocked-until time only goes with the Blocked status.");
+      if (blockedUntilReason && !blockedUntil) throw new WorkError(422, "Give the date and time you are waiting for along with the reason.");
+      if (blockedUntil && new Date(blockedUntil).getTime() <= Date.now()) throw new WorkError(422, "The blocked-until time must be in the future.");
+      if (blockedUntil && new Date(blockedUntil).getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) throw new WorkError(422, `The blocked-until time can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead.`);
+      const moved = await work.updateTicket(id, { state, ...(state === "blocked" ? { blockedUntil: blockedUntil ? new Date(blockedUntil) : null, blockedUntilReason: blockedUntil ? blockedUntilReason || null : null } : {}) });
       const label = ({ backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" } as Record<string, string>)[state] ?? state;
       await record(db, { companyId: moved.companyId, ticketId: id, kind: "state", summary: `Owner moved it to ${label}`, at: new Date() });
       // Nobody should start work on a ticket the owner has parked or closed.
@@ -1794,6 +1818,73 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/agents/:id/history", async (req, reply) => agentsSvc.history(IdParam.parse(req.params).id).catch(agentErrors(reply)));
     owner.post("/api/agent-changes/:id/undo", async (req, reply) => agentsSvc.undo(IdParam.parse(req.params).id).catch(agentErrors(reply)));
 
+    // The CEO's lasting notes (BOS-85): the owner sees, adds, edits and deletes them, within the same caps, and sees colleagues' requests.
+    const noteErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof NoteError) return reply.code(err.status).send({ error: "note", message: err.message });
+      throw err;
+    };
+    const NoteBody = z.object({ title: z.string().trim().min(1).max(NOTE_LIMITS.title), text: z.string().trim().min(1).max(NOTE_LIMITS.text), why: z.string().trim().min(1).max(NOTE_LIMITS.why) });
+    const noteOf = async (id: string) => (await db.select({ companyId: agentNotes.companyId }).from(agentNotes).where(eq(agentNotes.id, id)))[0];
+    owner.get("/api/agents/:id/notes", async (req, reply) => {
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, IdParam.parse(req.params).id));
+      if (!a) return reply.code(404).send({ error: "not_found" });
+      // Pending and declined requests from other agents show beside the notes.
+      return { items: await notesSvc.withOrigin(a.companyId, IdParam.parse(req.params).id), requests: await notesSvc.requests(a.companyId, IdParam.parse(req.params).id), limits: NOTE_LIMITS };
+    });
+    owner.post("/api/agents/:id/notes", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [a] = await db.select({ companyId: agents.companyId }).from(agents).where(eq(agents.id, id));
+      if (!a) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.save(a.companyId, id, NoteBody.parse(req.body), { source: "owner" }).then((n) => reply.code(201).send(n), noteErrors(reply));
+    });
+    owner.patch("/api/agent-notes/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const n = await noteOf(id);
+      if (!n) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.update(n.companyId, id, NoteBody.partial().parse(req.body), { owner: true }).then((r) => r.after, noteErrors(reply));
+    });
+    owner.delete("/api/agent-notes/:id", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const n = await noteOf(id);
+      if (!n) return reply.code(404).send({ error: "not_found" });
+      return notesSvc.remove(n.companyId, id, { owner: true }).then(() => ({ ok: true }), noteErrors(reply));
+    });
+
+    // The Scrum Master watchdog (BOS-58): settings and health, its flags and action log (read by the activity view and daily summary), and undo.
+    const watchdogErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof WatchdogError) return reply.code(err.status).send({ error: "watchdog", message: err.message });
+      if (err instanceof z.ZodError) return reply.code(422).send({ error: "watchdog", message: err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+      throw err;
+    };
+    owner.get("/api/companies/:id/watchdog", async (req, reply) => watchdog.status(IdParam.parse(req.params).id).catch(watchdogErrors(reply)));
+    owner.patch("/api/companies/:id/watchdog", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = WatchdogSettings.partial().extend({ scrumMasterAgentId: Uuid.nullable().optional() }).strict().parse(req.body ?? {});
+      return watchdog.update(id, b).catch(watchdogErrors(reply));
+    });
+    owner.get("/api/companies/:id/watchdog/flags", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const q = z.object({ status: z.enum(["open", "closed"]).optional(), ticketId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
+      return watchdog.flags(id, q).catch(watchdogErrors(reply));
+    });
+    owner.get("/api/companies/:id/watchdog/actions", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const q = z.object({ ticketId: Uuid.optional(), since: z.coerce.date().optional(), limit: z.coerce.number().int().min(1).max(500).optional(), excludeKind: z.string().max(40).optional() }).parse(req.query);
+      return watchdog.actions(id, q).catch(watchdogErrors(reply));
+    });
+    owner.get("/api/companies/:id/watchdog/backtest", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const q = z.object({ days: z.coerce.number().int().min(1).max(60).default(14) }).parse(req.query);
+      return watchdog.backtest(id, q.days).catch(watchdogErrors(reply));
+    });
+    owner.post("/api/watchdog-actions/:id/undo", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [a] = await db.select({ companyId: watchdogActions.companyId }).from(watchdogActions).where(eq(watchdogActions.id, id));
+      if (!a) return reply.code(404).send({ error: "not_found" });
+      const b = z.object({ reason: z.string().max(400).optional() }).parse(req.body ?? {});
+      return watchdog.undo(a.companyId, id, b).catch(watchdogErrors(reply));
+    });
+
     // Scheduling and kill switches (R30).
     owner.post("/api/agents/:id/wake", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1838,6 +1929,22 @@ export async function buildApp(opts: AppOptions) {
 
     // The decision queue (R20), ranked, with what each row holds up.
     owner.get("/api/decisions", async () => decisionsSvc.queue());
+    // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
+    owner.get("/api/decisions/with-team", async () => decisionsSvc.withTeam());
+
+    // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).
+    owner.post("/api/decisions/:id/ask-advice", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { note } = z.object({ note: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+      try {
+        const r = await decisionsSvc.askAdvice(id, note || undefined);
+        return r ?? reply.code(404).send({ error: "not_open" });
+      } catch (err) {
+        if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
+        throw err;
+      }
+    });
+    owner.get("/api/decisions/advised", async () => decisionsSvc.recentlyAdvised());
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1990,5 +2097,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, disk, rules, notes, chapters, feedback, wiki, semantic };
+  return { app, briefUpkeep, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic };
 }

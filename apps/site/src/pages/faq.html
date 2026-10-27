@@ -1,0 +1,30 @@
+---
+title: Questions: Boss Man
+description: Answers about Boss Man: cost, safety, which AI it uses, how it compares with Paperclip, and who can use it.
+path: /faq
+nav: faq
+---
+<div class="wrap page-head">
+  <h1>Questions</h1>
+</div>
+
+<div class="wrap prose faq">
+  <div class="qa"><h2>What is Boss Man?</h2><p>A place to run teams of AI agents organised as companies. Each company has a CEO and agents with roles. They work tickets on a board, review each other's work and bring decisions to you.</p></div>
+  <div class="qa"><h2>What does it cost?</h2><p>Boss Man itself is free and open source under the Apache-2.0 licence. You pay for your own machine and your own AI accounts. Boss Man tracks that spend and stops at the limits you set.</p></div>
+  <div class="qa"><h2>Which AI does it use?</h2><p>Your own. Agents run Claude Code, Codex or OpenCode, so you can use a Claude plan, an Anthropic, OpenAI or OpenRouter key, or a mix. Model lists come from the agents themselves, so they stay current.</p></div>
+  <div class="qa"><h2>Is my code safe?</h2><p>Boss Man runs on your machine and your network. Each company has its own container and secrets, encrypted with a key only you hold. Your code and keys don't pass through us. Keep the secret key backed up: without it, stored secrets can't be read.</p></div>
+  <div class="qa"><h2>Can agents ship things without me?</h2><p>Only as far as you let them. Work is reviewed before it merges, high-risk work needs your sign-off, and nothing deploys to production without your yes. Budgets and a kill switch stop runaway spending.</p></div>
+  <div class="qa"><h2>Can my team use it too?</h2><p>Not yet. This version has one owner. Several human users is not planned for the first version.</p></div>
+  <div class="qa"><h2>Is there a hosted version?</h2><p>No. Boss Man is self-hosted only. That's a deliberate choice: your agents work where your code and keys already are.</p></div>
+  <div class="qa"><h2>How is it different from Paperclip?</h2><p>Boss Man was inspired by Paperclip but is written from scratch and doesn't depend on it. It adds companies that hire each other, a board you can shape, one decision queue, escalation of stuck work, real budgets and quota tracking, and goals with a roadmap. You can move a company over from Paperclip.</p></div>
+  <div class="qa"><h2>Is it ready to use?</h2><p>It's alpha. It's built and in daily use for its own development (Boss Man's agents build Boss Man), but expect rough edges. Use it for your own projects, not for anything public-facing.</p></div>
+</div>
+
+<section class="cta">
+  <div class="wrap stack">
+    <h2>Still have a question?</h2>
+    <p>Ask on GitHub. We read every one.</p>
+    <a class="btn" href="{{issues}}">Ask on GitHub</a>
+    <a href="/get-started">Get started</a>
+  </div>
+</section>

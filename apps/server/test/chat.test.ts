@@ -95,7 +95,7 @@ describe("owner chat", () => {
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_feature", "create_ticket", "features", "link_tickets", "log_feedback", "nudge", "open_attachment", "propose_hire", "propose_rule", "propose_team", "roadmap", "set_milestone", "set_ticket_state", "skills", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_feature", "create_ticket", "features", "link_tickets", "log_feedback", "notes", "nudge", "open_attachment", "propose_hire", "propose_rule", "propose_team", "roadmap", "set_milestone", "set_ticket_state", "skills", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
     // The CEO can build the roadmap from chat too.
     expect(textOf(await client.callTool({ name: "roadmap", arguments: { action: "add_objective", title: "Grow search traffic", reason: "Owner asked in chat." } }))).toMatch(/^Added the objective "Grow search traffic"/);
     // It asks a colleague itself, rather than asking the owner to pass a message on.

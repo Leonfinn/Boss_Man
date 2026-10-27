@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, type AddonReport, type ReviewPolicy } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -60,6 +60,17 @@ export const companies = pgTable("companies", {
   reviewPolicy: jsonb("review_policy").$type<ReviewPolicy>().notNull().default(DEFAULT_REVIEW_POLICY),
   /** Days after a feature is released before the owner is asked whether it moved its goal. */
   goalCheckDays: integer("goal_check_days").notNull().default(14),
+  /** Most nudges the company's agents may send each other in an hour (BOS-73); past it they write on the ticket instead. */
+  nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
+  /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
+  adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
+  /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
+  watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
+  /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
+  watchdogTrippedAt: timestamp("watchdog_tripped_at", { withTimezone: true }),
+  watchdogTrippedReason: text("watchdog_tripped_reason"),
+  /** Written by the sweep only, so it never overwrites the owner's settings. */
+  watchdogLastSweepAt: timestamp("watchdog_last_sweep_at", { withTimezone: true }),
   /** Tickets are referred to as PREFIX-number (e.g. HOL-12); one sequence per company, handed out by a database trigger. */
   ticketPrefix: text("ticket_prefix"),
   nextTicketNumber: integer("next_ticket_number").notNull().default(1),
@@ -317,6 +328,11 @@ export const tickets = pgTable(
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
+    /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
+    stateChangedAt: timestamp("state_changed_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Optional "blocked until" time and reason (BOS-59); the same trigger clears both when the ticket leaves blocked. */
+    blockedUntil: timestamp("blocked_until", { withTimezone: true }),
+    blockedUntilReason: text("blocked_until_reason"),
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -826,6 +842,57 @@ export const ownerChatMessages = pgTable(
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],
 );
 
+/**
+ * An agent's lasting notes (BOS-85): corrections and preferences the owner gave in chat, shown
+ * in every later chat and run. Kept apart from the owner's standing instructions. Only the CEO
+ * writes them for now; keyed by agent so others can later.
+ */
+export const agentNotes = pgTable(
+  "agent_notes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    text: text("text").notNull(),
+    /** What the owner said, quoted; for an accepted request, the requester's reason. */
+    why: text("why").notNull(),
+    /** Where it came from: `chat` (saved from the owner chat), `ticket` (saved in a run from the owner's message on `ticketId`, BOS-95), `owner` (Agents page) or `request` (another agent asked, the CEO accepted). */
+    source: text("source").notNull(),
+    /** For `request`: who asked, and on which ticket; for `ticket`, the ticket the owner wrote on. */
+    requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("agent_notes_agent").on(t.agentId, t.createdAt)],
+);
+
+export const noteRequestStatus = pgEnum("note_request_status", ["pending", "accepted", "declined"]);
+
+/** Another agent asking the CEO to keep a note (BOS-85): only the CEO's accept writes one. */
+export const noteRequests = pgTable(
+  "note_requests",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** The CEO it's for. */
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    requestedByAgentId: uuid("requested_by_agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    text: text("text").notNull(),
+    why: text("why").notNull(),
+    status: noteRequestStatus("status").notNull().default("pending"),
+    declineReason: text("decline_reason"),
+    noteId: uuid("note_id").references(() => agentNotes.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [index("note_requests_agent_status").on(t.agentId, t.status), index("note_requests_requester_time").on(t.requestedByAgentId, t.createdAt)],
+);
+
 /** What the PA did with each owner question (R87): posted, or escalated to the CEO with why; the CEO may mark it right or wrong. */
 export const paAnswers = pgTable(
   "pa_answers",
@@ -1104,6 +1171,69 @@ export const activity = pgTable(
     summary: text("summary").notNull(),
   },
   (t) => [index("activity_company_at").on(t.companyId, t.at)],
+);
+
+// ---------- Scrum Master watchdog (BOS-58) ----------
+
+/**
+ * One row per episode of a rule tripping on a ticket: opened when it first trips, closed when it
+ * clears. due_at is when it may next be handed to anyone, so a handled ticket isn't re-flagged
+ * until its limit passes again. Read by the activity view, health indicator and daily summary.
+ */
+export const watchdogFlags = pgTable(
+  "watchdog_flags",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** One of WATCHDOG_RULES. */
+    rule: text("rule").notNull(),
+    /** open or closed. */
+    status: text("status").notNull().default("open"),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    dueAt: timestamp("due_at", { withTimezone: true }).notNull().defaultNow(),
+    lastFlaggedAt: timestamp("last_flagged_at", { withTimezone: true }),
+    /** Times handed to the Scrum Master. */
+    flagCount: integer("flag_count").notNull().default(0),
+    snoozedUntil: timestamp("snoozed_until", { withTimezone: true }),
+    snoozeReason: text("snooze_reason"),
+    /** Snoozes in a row in this episode; after two, the next time it is due it goes to the CEO. */
+    snoozeCount: integer("snooze_count").notNull().default(0),
+    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+    /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
+    detail: jsonb("detail").notNull().default({}),
+  },
+  (t) => [
+    uniqueIndex("watchdog_flags_one_open").on(t.ticketId, t.rule).where(sql`${t.status} = 'open'`),
+    index("watchdog_flags_company").on(t.companyId, t.status),
+  ],
+);
+
+/** Everything the watchdog and the Scrum Master did, each with a one-line reason and what undo needs. */
+export const watchdogActions = pgTable(
+  "watchdog_actions",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    flagId: uuid("flag_id").references(() => watchdogFlags.id, { onDelete: "set null" }),
+    /** The Scrum Master; null when Boss Man did it (a sweep wake, an owner reminder, a trip). */
+    actorAgentId: uuid("actor_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** The Scrum Master's run that did it. */
+    actorRunId: uuid("actor_run_id"),
+    /** One of WATCHDOG_ACTIONS. */
+    kind: text("kind").notNull(),
+    targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    reason: text("reason").notNull(),
+    before: jsonb("before"),
+    after: jsonb("after"),
+    undoable: boolean("undoable").notNull().default(false),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    undoneByActionId: uuid("undone_by_action_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("watchdog_actions_company_at").on(t.companyId, t.createdAt), index("watchdog_actions_ticket").on(t.ticketId)],
 );
 
 // ---------- Skills (R71) ----------

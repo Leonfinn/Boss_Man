@@ -20,7 +20,7 @@ async function setup() {
   const co = (await built.app.inject({ method: "POST", url: "/api/companies", headers: { cookie }, payload: { name: "App Co" } })).json() as { company: { id: string }; ceo: { id: string } };
   const [p] = await db.insert(projects).values({ companyId: co.company.id, name: "Customer app" }).returning();
   const [t] = await db.insert(tickets).values({ companyId: co.company.id, projectId: p!.id, title: "Add rate limiting", systemState: "in_progress" }).returning();
-  return { ...built, db, close, base, co, ticketId: t!.id };
+  return { ...built, cookie, db, close, base, co, ticketId: t!.id };
 }
 
 beforeEach(async () => {
@@ -115,5 +115,38 @@ describe("ticket versions (R81)", () => {
     await ctx.db.update(tickets).set({ assigneeAgentId: ctx.co.ceo.id }).where(eq(tickets.id, ctx.ticketId));
     expect(textOf(await c.callTool({ name: "list_my_work", arguments: {} }))).toContain('"version":3');
     await c.close();
+  });
+  it("keeps an optional blocked-until time and reason, and clears them when the ticket leaves blocked", async () => {
+    const c = await agent();
+    const [blocker] = await ctx.db.insert(tickets).values({ companyId: ctx.co.company.id, projectId: (await row()).projectId, title: "Other", systemState: "in_progress" }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: ctx.ticketId, blockerTicketId: blocker!.id });
+    const base = { ticketId: ctx.ticketId, state: "blocked", summary: "Waiting on the deploy." };
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    expect((await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_until: new Date(Date.now() - 1000).toISOString() } })).isError).toBe(true);
+    const tooFar = new Date(Date.now() + 31 * 86_400_000).toISOString();
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_until: tooFar } }))).toMatch(/at most 30 days/);
+    expect((await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_reason: "no date" } })).isError).toBe(true);
+    expect((await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_until: until, blocked_reason: "two\nlines" } })).isError).toBe(true);
+    expect((await c.callTool({ name: "set_ticket_state", arguments: { ticketId: ctx.ticketId, state: "review", summary: "x", blocked_until: until } })).isError).toBe(true);
+    expect(textOf(await c.callTool({ name: "set_ticket_state", arguments: { ...base, blocked_until: until, blocked_reason: "deploy window" } }))).toMatch(/now blocked/);
+    expect(await row()).toMatchObject({ systemState: "blocked", blockedUntil: new Date(until), blockedUntilReason: "deploy window" });
+    expect(textOf(await c.callTool({ name: "tickets", arguments: { action: "read", ticketId: ctx.ticketId } }))).toContain("deploy window");
+    // Blocking again without a time puts back the normal limit.
+    await c.callTool({ name: "set_ticket_state", arguments: base });
+    expect(await row()).toMatchObject({ blockedUntil: null, blockedUntilReason: null });
+    await c.close();
+  });
+
+  it("lets the owner block with a time and reason", async () => {
+    await ctx.db.insert(workflowColumns).values([{ projectId: (await row()).projectId, name: "Blocked", systemState: "blocked", position: 0 }, { projectId: (await row()).projectId, name: "Ready", systemState: "ready", position: 1 }]);
+    const until = new Date(Date.now() + 3_600_000).toISOString();
+    const res = await ctx.app.inject({ method: "POST", url: `/api/tickets/${ctx.ticketId}/state`, headers: { cookie: ctx.cookie }, payload: { state: "blocked", blockedUntil: until, blockedUntilReason: "Friday release" } });
+    expect(res.statusCode).toBe(200);
+    expect(await row()).toMatchObject({ systemState: "blocked", blockedUntilReason: "Friday release" });
+    const far = await ctx.app.inject({ method: "POST", url: `/api/tickets/${ctx.ticketId}/state`, headers: { cookie: ctx.cookie }, payload: { state: "blocked", blockedUntil: new Date(Date.now() + 31 * 86_400_000).toISOString() } });
+    expect(far.statusCode).toBe(422);
+    expect(far.body).toMatch(/at most 30 days/);
+    const bad = await ctx.app.inject({ method: "POST", url: `/api/tickets/${ctx.ticketId}/state`, headers: { cookie: ctx.cookie }, payload: { state: "ready", blockedUntil: until } });
+    expect(bad.statusCode).toBe(422);
   });
 });
