@@ -149,7 +149,7 @@ export type AnswerExtra = {
  * decision stays open and answerable by the owner the whole time.
  */
 export type Advice = {
-  state: "asking" | "reissued" | "handled" | "timed_out" | "replacement";
+  state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement";
   /** The owner's one-line "what's unclear". */
   note?: string;
   askedAt?: string;
@@ -754,7 +754,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}) };
       const [claimed] = await db
         .update(decisions)
-        .set({ context: { ...(d.context as object), advice } })
+        .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify(advice)}::jsonb)` })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'advice'->>'state', '') <> 'asking'`))
         .returning({ id: decisions.id });
       if (!claimed) return null;
@@ -772,7 +772,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         ...(ctx.type === "question" && ctx.steps?.length ? [`Steps given: ${ctx.steps.join(" / ")}`] : []),
         ...(held ? [`It holds up the ticket "${held.title}" (${held.ticketId}).`] : []),
         note ? `What's unclear, in the owner's words: ${note}` : "The owner didn't say what is unclear.",
-        "Use the decisions tool, action advise. outcome reissue: post a clearer replacement (question, options, recommended, triedFirst, and numbered steps when the owner must act). outcome handled: only if the team can settle it without a secret, host step, sign-off or owner-only choice. If it needs the owner, reissue it. Do this within the time limit or it returns to the owner as it was.",
+        "Use the decisions tool, action advise. outcome reissue: post a clearer replacement (question, options, recommended, triedFirst, and numbered steps when the owner must act). outcome handled: only if the team can settle it without a secret, host step, sign-off or owner-only choice. If it needs the owner, use reissue: a plain question is replaced by a clearer one; any other kind is rewritten in place (new question, triedFirst, steps; options stay). Do this within the time limit or it returns to the owner as it was.",
       ];
       await wake({ agentId: ceo.id, reason: "decision", note: lines.join("\n").slice(0, 4000) });
       await record(db, { companyId: d.companyId, ticketId: held?.ticketId, kind: "decision_advice_asked", summary: `Owner asked the CEO for advice on "${d.question}"${note ? `: ${note}` : ""}`, at: now() });
@@ -794,15 +794,28 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const at = now().toISOString();
       if (input.outcome === "reissue") {
         const ctx = d.context as DecisionContext;
-        // A question can be re-posted; a permission, plan or deploy can't be rewritten into one.
-        if (!(d.kind === "question" && ctx.type === "question")) throw new AnswerError("Only an agent's question can be reissued. This kind can only be handled by the team or answered by the owner.");
+        const asking = sql`${decisions.context}->'advice'->>'state' = 'asking'`;
+        if (!(d.kind === "question" && ctx.type === "question")) {
+          // An approval, plan, hire, deploy and the like keep their id, kind, options and context, so what resumes on
+          // them still works: the CEO only rewrites the question and adds what was tried and the steps.
+          const clarified = { ...(d.context as object), triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), advice: { ...advice, state: "clarified", at } };
+          const [done] = await db
+            .update(decisions)
+            .set({ question: input.question, context: clarified })
+            .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), asking))
+            .returning({ id: decisions.id });
+          if (!done) return null;
+          const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
+          await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO rewrote "${d.question}" with more detail${via}`, at: now() });
+          return { outcome: "reissue" as const, id: d.id, inPlace: true };
+        }
         if (!input.options.includes(input.recommended)) throw new AnswerError("The recommended answer must be one of the options.");
         const newId = randomUUID();
         const made = await db.transaction(async (tx) => {
           const [claimed] = await tx
             .update(decisions)
             .set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, context: { ...(d.context as object), advice: { ...advice, state: "reissued", at, replacedBy: newId } } })
-            .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+            .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), asking))
             .returning({ id: decisions.id });
           if (!claimed) return false;
           await tx.insert(decisions).values({
@@ -822,10 +835,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (!made) return null;
         const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, newId));
         await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO reissued "${d.question}" with more detail${via}`, at: now() });
-        return { outcome: "reissue" as const, id: newId };
+        return { outcome: "reissue" as const, id: newId, inPlace: false };
       }
       const raiser = d.raisedByAgentId ? (await db.select({ role: agents.role }).from(agents).where(eq(agents.id, d.raisedByAgentId)))[0] : undefined;
-      if (!ceoCanHandle(d, raiser?.role === "ceo" || d.raisedByAgentId === input.agentId)) throw new AnswerError("Only the owner can settle this one: only an agent's plain question can be handled by the CEO, never the CEO's own request, an approval, a permission, or anything with steps for the owner. Reissue it instead, or leave it for the owner.");
+      if (!ceoCanHandle(d, raiser?.role === "ceo" || d.raisedByAgentId === input.agentId)) throw new AnswerError("Only the owner can settle this one: only an agent's plain question can be handled by the CEO, never the CEO's own request, an approval, a permission, or anything with steps for the owner. Rewrite it with reissue instead, or leave it for the owner.");
       const summary = input.summary.trim();
       const options = d.options as string[];
       let r;
@@ -856,7 +869,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (new Date(advice.askedAt ?? 0).getTime() + (minutes ?? ADVICE_DEFAULT_MINUTES) * 60_000 > t.getTime()) continue;
         const [done] = await db
           .update(decisions)
-          .set({ context: { ...(d.context as object), advice: { ...advice, state: "timed_out", at: t.toISOString() } } })
+          .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify({ ...advice, state: "timed_out", at: t.toISOString() })}::jsonb)` })
           .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' = 'asking'`))
           .returning({ id: decisions.id });
         if (!done) continue;

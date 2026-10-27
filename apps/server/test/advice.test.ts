@@ -149,9 +149,32 @@ describe("ask the CEO for advice", () => {
     await c.req("POST", `/api/decisions/${own.id}/ask-advice`, {});
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: own.id, outcome: "handled", summary: "I answered my own question.", answer: "Yes" } }))).toBe(true);
     expect((await row(c, own.id)).status).toBe("open");
-    // Nor can an approval be reissued as a question.
-    const [p] = await c.db.select().from(decisions).where(eq(decisions.question, "Owner only permission"));
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: p!.id, ...reissue } }))).toBe(true);
+  });
+
+  it("rewrites a decision that isn't a plain question in place, keeping its id, options and context", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Hire a designer?", options: ["Approve", "Decline"], recommendedOption: "Approve", context: { type: "hire", marker: 1 } }).returning();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/ask-advice`, {})).statusCode).toBe(200);
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, ...reissue } }))).toBe(false);
+    const after = await row(c, d!.id);
+    expect(after.status).toBe("open");
+    expect(after.question).toBe(reissue.question);
+    expect(after.options).toEqual(["Approve", "Decline"]);
+    expect(after.context).toMatchObject({ type: "hire", marker: 1, advice: { state: "clarified" } });
+    // Once clarified, the CEO can't act on it again.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, ...reissue } }))).toBe(true);
+  });
+
+  it("a reissue after the time ran out is refused and moves nothing", async () => {
+    const c = (ctx = await setup());
+    const { d } = await c.question();
+    await c.req("POST", `/api/decisions/${d.id}/ask-advice`, {});
+    c.advance(200 * MIN);
+    await c.req("POST", "/api/sweep");
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d.id, ...reissue } }))).toBe(true);
+    expect((await row(c, d.id)).status).toBe("open");
   });
 
   it("has no ask for a permission request", async () => {
