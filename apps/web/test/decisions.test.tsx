@@ -244,3 +244,22 @@ describe("owner asks with steps", () => {
     expect(tried.textContent).toMatch(/no host access/);
   });
 });
+
+describe("references in steps and folded text", () => {
+  it("links a reference inside a step and inside the folded part of a long question", () => {
+    const refs = { "BOS-70": { ticketId: "t70", title: "Restore proof", ref: "BOS-70" } };
+    const long = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+    const d = decision({
+      kind: "question",
+      question: `Run it.\n\n${long}\nSee BOS-70.`,
+      options: ["Done"],
+      recommendedOption: "Done",
+      context: { type: "question", steps: ["Follow the steps on BOS-70."] },
+      refs,
+    } as never);
+    const { container } = render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(container.querySelector("ol[data-steps] a")?.getAttribute("href")).toBe("#/tickets/t70");
+    fireEvent.click(screen.getByRole("button", { name: /Show all/ }));
+    expect(Array.from(container.querySelectorAll("a")).filter((a) => a.getAttribute("href") === "#/tickets/t70").length).toBe(2);
+  });
+});

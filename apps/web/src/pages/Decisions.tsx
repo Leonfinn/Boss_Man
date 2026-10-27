@@ -43,7 +43,7 @@ const minutesAgo = (iso: string) => {
 const PREVIEW_LINES = 8;
 
 /** Long text shows its first lines and opens in place, so a card stays short until it's read. */
-export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { text: string; label?: string; lines?: number; chars?: number }) {
+export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars, refs }: { text: string; label?: string; lines?: number; chars?: number; refs?: Decision["refs"] }) {
   const [open, setOpen] = useState(false);
   const lines = text.split("\n");
   const byLines = lines.length > keep + 2 ? lines.slice(0, keep).join("\n") : text;
@@ -52,7 +52,7 @@ export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { 
   return (
     <div>
       {label && <p style={{ fontWeight: 600, margin: "8px 0 4px" }}>{label}</p>}
-      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{long && !open ? `${preview}…` : text}</p>
+      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{long && !open ? <><Linked text={preview} refs={refs} />…</> : <Linked text={text} refs={refs} />}</p>
       {long && (
         <button type="button" className="linkish" aria-expanded={open} onClick={() => setOpen(!open)}>
           {open ? "▾ Show less" : `▸ Show all${byLines !== text ? ` (${lines.length - keep} more lines)` : ""}`}
@@ -320,14 +320,14 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
-                        <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} />
+                        <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} />
                       </>
                     ) : (
                       <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : <Linked text={rule ? d.question.split("\n\n")[0]! : d.question} refs={d.refs} />}</h2>
                     )}
                     {rule && (
                       <>
-                        <p style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n").slice(1).join("\n\n")}</p>
+                        <p style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} /></p>
                         <details>
                           <summary>The exact rule</summary>
                           <ul style={{ paddingLeft: 18 }}>
@@ -407,7 +407,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
-                            <li key={i}>{s}</li>
+                            <li key={i}><Linked text={s} refs={d.refs} /></li>
                           ))}
                         </ol>
                       </div>

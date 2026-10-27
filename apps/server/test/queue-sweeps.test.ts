@@ -83,6 +83,20 @@ describe("ranked decision queue (R20)", () => {
     expect(row.refs[ref]!.ticketId).toBe(restore.id);
   });
 
+  it("links the ticket a ticket_cap or lesson card is about, even when it holds nothing up or is done", async () => {
+    ctx = await setup();
+    const capped = await ctx.ticket({ title: "Capped work" });
+    const finished = await ctx.ticket({ title: "Finished work" });
+    await ctx.db.update(tickets).set({ systemState: "done" }).where(eq(tickets.id, finished.id));
+    const mk = async (question: string, context: Record<string, unknown>) =>
+      (await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", question, options: ["Yes", "No"], recommendedOption: "Yes", context: context as never }).returning())[0]!;
+    const cap = await mk("Raise the cap?", { type: "ticket_cap", ticketId: capped.id });
+    const deployed = await mk("Review the result?", { type: "risk_review", ticketId: finished.id, reviewer: "x" });
+    const q = (await ctx.queue()) as Array<Row & { about: Array<{ ticketId: string; title: string }> }>;
+    expect(q.find((r) => r.id === cap.id)!.about.map((a) => a.ticketId)).toEqual([capped.id]);
+    expect(q.find((r) => r.id === deployed.id)!.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished work" })]);
+  });
+
   it("keeps a ticket blocked while it still waits on something else", async () => {
     ctx = await setup();
     const design = await ctx.ticket({ title: "Design" });

@@ -46,6 +46,7 @@ function cardText(d: typeof decisions.$inferSelect): string {
 async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string; text: string }>) {
   const wanted = cards.map((c) => ({ ...c, found: [...new Set([...c.text.matchAll(/\b([A-Za-z][A-Za-z0-9]{0,9})-(\d{1,9})\b/g)].map((m) => `${m[1]!.toUpperCase()}-${m[2]}`))] }));
   const numbers = [...new Set(wanted.flatMap((w) => w.found.map((r) => Number(r.slice(r.lastIndexOf("-") + 1)))))];
+  // lost on restart, harmless because it only lives for this one call
   const byCompany = new Map<string, Map<string, { ticketId: string; title: string; ref: string }>>();
   if (numbers.length) {
     const rows = await db
@@ -813,6 +814,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       };
 
+      // The ticket a card is about: what it holds up, plus the ticket named in its context (which may be done, or hold nothing up).
+      const aboutIds = (d: typeof decisions.$inferSelect): string[] => {
+        const own = (d.context as { ticketId?: unknown }).ticketId;
+        return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : [])])];
+      };
+      const wantedAbout = [...new Set(open.flatMap(({ d }) => aboutIds(d)))];
+      const aboutRows = wantedAbout.length
+        ? await db
+            .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
+            .from(tickets)
+            .innerJoin(companies, eq(companies.id, tickets.companyId))
+            .where(inArray(tickets.id, wantedAbout))
+        : [];
+      const aboutInfo = new Map(aboutRows.map((r) => [r.id, r]));
+
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
         const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
@@ -831,7 +847,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           frontier = next;
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
-        const about = direct(d).flatMap((id) => (info.has(id) ? [{ ticketId: id, title: info.get(id)!.title, ref: info.get(id)!.ref }] : []));
+        const about = aboutIds(d).flatMap((id) => { const r = aboutInfo.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
         return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
