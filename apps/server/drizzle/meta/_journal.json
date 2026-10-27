@@ -453,8 +453,22 @@
     {
       "idx": 64,
       "version": "7",
-      "when": 1793097600528,
-      "tag": "0064_skill_proposals",
+      "when": 1793093796972,
+      "tag": "0064_company_advice_timeout",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1793180196972,
+      "tag": "0065_lessons_to_ceo",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "7",
+      "when": 1793109681241,
+      "tag": "0066_skill_proposals",
       "breakpoints": true
     }
   ]

@@ -366,6 +366,7 @@ export async function buildApp(opts: AppOptions) {
     }
   });
   const sweeps = sweepService(db, {
+    expireAdvice: () => decisionsSvc.expireAdvice(),
     limits: opts.sweepLimits,
     now: opts.now,
     wake: (input) => scheduler.notify(input.agentId, input),
@@ -612,7 +613,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
@@ -1956,6 +1957,20 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/decisions", async () => decisionsSvc.queue());
     // Boss Man's alerts still with the Scrum Master or the CEO (BOS-64), for a collapsed line under the queue.
     owner.get("/api/decisions/with-team", async () => decisionsSvc.withTeam());
+
+    // "Ask the CEO for advice": the decision stays open while the CEO looks at it (it returns to the owner after the company's time limit).
+    owner.post("/api/decisions/:id/ask-advice", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const { note } = z.object({ note: z.string().trim().max(500).optional() }).parse(req.body ?? {});
+      try {
+        const r = await decisionsSvc.askAdvice(id, note || undefined);
+        return r ?? reply.code(404).send({ error: "not_open" });
+      } catch (err) {
+        if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
+        throw err;
+      }
+    });
+    owner.get("/api/decisions/advised", async () => decisionsSvc.recentlyAdvised());
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);

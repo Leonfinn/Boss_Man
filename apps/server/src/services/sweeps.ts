@@ -34,7 +34,7 @@ const MISSED_NUDGES_PER_DAY = 2;
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; expireSkills?: () => Promise<unknown> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; expireSkills?: () => Promise<unknown> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -411,6 +411,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const goalChecks = await raiseDueGoalChecks(db, t);
       await opts.expireSkills?.();
       await opts.endUnconfirmedCancels(t);
+      await opts.expireAdvice?.();
       const lost = await lostRuns(t);
       const staleB = await staleBlockers(t);
       const stalled = await stalledRuns(t);

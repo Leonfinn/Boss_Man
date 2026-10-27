@@ -122,6 +122,8 @@ importers:
         specifier: 0.31.11
         version: 0.31.11
 
+  apps/site: {}
+
   apps/web:
     dependencies:
       '@boss-man/shared':
