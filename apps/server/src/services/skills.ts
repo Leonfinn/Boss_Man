@@ -112,7 +112,7 @@ export function parseGitHub(url: string): { owner: string; repo: string; ref: st
 }
 
 /** The name a fetched skill will have: its frontmatter name, else its folder. */
-const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillName(parseSkillMd(Buffer.from(f.files.find((x) => x.path === "SKILL.md")!.content, "base64").toString("utf8")).name ?? f.folder);
+export const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillName(parseSkillMd(Buffer.from(f.files.find((x) => x.path === "SKILL.md")!.content, "base64").toString("utf8")).name ?? f.folder);
 
 export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   const get = deps.fetch ?? fetch;
@@ -150,12 +150,12 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   }
 
   /** Reads every skill under a GitHub link, pinned to the commit the link points at now. */
-  async function readGitHub(url: string) {
+  async function readGitHub(url: string, at?: string) {
     const gh = parseGitHub(url);
     if (!gh) return null;
     const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
     const ref = gh.ref ?? ((await fetchOk(api, "json")) as { default_branch: string }).default_branch;
-    const commit = ((await fetchOk(`${api}/commits/${encodeURIComponent(ref)}`, "json")) as { sha: string }).sha;
+    const commit = at ?? ((await fetchOk(`${api}/commits/${encodeURIComponent(ref)}`, "json")) as { sha: string }).sha;
     const tree = (await fetchOk(`${api}/git/trees/${commit}?recursive=1`, "json")) as { tree: Array<{ path: string; type: string; size?: number }>; truncated?: boolean };
     const under = (p: string) => !gh.path || p === gh.path || p.startsWith(`${gh.path}/`);
     const all = tree.tree.filter((e) => e.type === "blob" && (e.path === "SKILL.md" || e.path.endsWith("/SKILL.md"))).map((e) => e.path.slice(0, -"SKILL.md".length).replace(/\/$/, ""));
@@ -210,6 +210,12 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   }
 
   return {
+    /** For the proposals flow: read a link, optionally at an exact commit (never re-resolving a branch). */
+    readGitHub,
+    /** For the proposals flow: the bytes at a non-GitHub link. */
+    fetchBytes: (url: string) => fetchOk(url, "bytes") as Promise<Buffer>,
+    save,
+
     async list(companyId: string) {
       const rows = await db
         .select({ id: skills.id, name: skills.name, description: skills.description, source: skills.source, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef, pack: skills.pack, packUrl: skills.packUrl, sizeBytes: skills.sizeBytes, files: skills.files, requiresAddons: skills.requiresAddons, updatedAt: skills.updatedAt })
