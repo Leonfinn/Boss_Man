@@ -118,7 +118,7 @@ jobs:
       - name: Shell script tests (deploy.sh, the host deployer, backup and Penpot)
         run: |
           sudo apt-get install -y shellcheck >/dev/null
-          shellcheck scripts/deploy.sh scripts/deploy.test.sh scripts/host-deployer.sh scripts/host-deployer.test.sh scripts/update-runner.sh scripts/update-runner.test.sh scripts/rebuild-live.sh scripts/rebuild-live.test.sh scripts/backup-penpot.sh scripts/backup-penpot.test.sh skills/penpot/scripts/penpot.sh skills/penpot/scripts/penpot.test.sh skills/penpot/scripts/penpot.write.test.sh
+          scripts/check-shell.sh
           scripts/deploy.test.sh
           scripts/host-deployer.test.sh
           scripts/update-runner.test.sh

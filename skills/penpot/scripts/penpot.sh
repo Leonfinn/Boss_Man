@@ -299,7 +299,7 @@ upload_images() { # upload_images FILE_ID LAYOUT_JSON
   local f="$1" media='{}' id path ext mime size dir tmp code entry
   while IFS=$'\t' read -r id path; do
     [ -n "$id" ] || continue
-    ext="$(printf '%s' "${path##*.}" | tr 'A-Z' 'a-z')"
+    ext="$(printf '%s' "${path##*.}" | tr '[:upper:]' '[:lower:]')"
     case "$ext" in png) mime=image/png ;; jpg|jpeg) mime=image/jpeg ;; gif) mime=image/gif ;; webp) mime=image/webp ;;
       *) echo "note: image '$path' is not a png, jpg, gif or webp; drawn as a grey Image placeholder." >&2; continue ;; esac
     if [ ! -f "$path" ] || [ ! -r "$path" ]; then echo "note: can't read image '$path'; drawn as a grey Image placeholder." >&2; continue; fi
