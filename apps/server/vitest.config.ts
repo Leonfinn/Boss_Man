@@ -15,7 +15,8 @@ const GB = 2 ** 30;
 function readNum(path: string) {
   try {
     const v = readFileSync(path, "utf8").trim();
-    return v === "max" ? undefined : Number(v);
+    const n = Number(v);
+    return v === "max" || !Number.isFinite(n) ? undefined : n;
   } catch {
     return undefined;
   }
