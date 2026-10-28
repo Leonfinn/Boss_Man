@@ -370,6 +370,13 @@ export function reviewService(
         ctx = await ticketWithRepo(ticketId);
       } catch (err) {
         landings.delete(ticketId);
+        // The approval is already recorded: leave a trail and a card, as land() does, so the ticket is not silently stuck.
+        const message = err instanceof Error ? err.message : String(err);
+        const [row] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+        if (row) {
+          await record(db, { companyId: row.companyId, ticketId, kind: "merge_failed", summary: `Approved, but the merge couldn't start: ${message}` });
+          await raiseMergeStuck(db, row, message);
+        }
         throw err;
       }
       const { t, defaultBranch, verifyCommand, deepVerifyCommand, repoUrl } = ctx;
