@@ -77,7 +77,7 @@ describe("board filters", () => {
     expect(shown()).toEqual(["Delta"]);
     fireEvent.change(select, { target: { value: "any" } });
 
-    const working = screen.getByRole("button", { name: "Working now" });
+    const working = screen.getByRole("button", { name: /^Working now/ });
     fireEvent.click(working);
     expect(working.getAttribute("aria-pressed")).toBe("true");
     expect(shown()).toEqual(["Alpha", "Gamma"]);
@@ -105,11 +105,11 @@ describe("board filters", () => {
     open();
     await screen.findByRole("option", { name: "Export" });
     fireEvent.change(screen.getByLabelText("Feature"), { target: { value: "f2" } });
-    fireEvent.click(screen.getByRole("button", { name: "Working now" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Working now/ }));
     cleanup();
     open();
     await screen.findByText("Gamma task", { selector: "h3 a" });
     expect(shown()).toEqual(["Gamma"]);
-    expect(screen.getByRole("button", { name: "Working now" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: /^Working now/ }).getAttribute("aria-pressed")).toBe("true");
   });
 });
