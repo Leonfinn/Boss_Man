@@ -71,7 +71,7 @@ describe("round 10", () => {
     const p = await propose(c, "Steps.");
     const reviewId = p.reviewTicketId!;
     const before = (await ticketOf(c, reviewId)).systemState;
-    const res = await (await c.mcp(c.ceo.id)).callTool({ name: "create_ticket", arguments: { title: "Help the review", body: STEER, parent: reviewId, assignee: "Security Reviewer" } });
+    const res = await (await c.mcp(c.ceo.id)).callTool({ name: "create_ticket", arguments: { title: "Help the review", body: STEER, parent: reviewId, assignee: "Security Reviewer", size: 1 } });
     const all = await c.db.select().from(tickets).where(eq(tickets.companyId, c.company.id));
     // Refused by the shared review-task guard: an error, and no ticket was created at all.
     expect(res.isError).toBe(true);
