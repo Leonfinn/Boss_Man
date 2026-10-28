@@ -81,10 +81,14 @@ Not built yet: plan-first (there is no per-company setting for it; it follows th
 
 ## 4. Check the result
 
-- Fourteen days or 10 relevant done tickets after Apply (whichever comes later, capped at 30 days), Boss Man measures the metric again.
-- It raises **Keep / Revert** with the before and after numbers. The decision goes to whoever approved the change.
-- Revert restores the saved old value.
-- A playbook that is reverted is archived, not deleted.
+- A change is checked once it is at least 14 days old and 10 relevant tickets have been done since Apply. The cap is 30 days: then it is checked with however many there are, and the question says how few.
+  - Relevant means the measure's own scope: that role's or agent's done tickets, the handoffs of that pair, or any done ticket for the company-wide measure.
+- Boss Man measures the metric again over the time since Apply. It raises one **Keep / Revert** decision with the before and after numbers, saying whether the number moved the right way. The decision goes to whoever approved the change.
+  - Higher is better for first-time pass rate. Lower is better for every other measure.
+  - Keep is recommended if it improved or held, or if either number can't be measured. Revert is recommended if it got worse.
+- Revert puts the saved old value back through the same code the Apply used. If the value has changed again since, Revert is refused and the decision stays open: Boss Man never overwrites a newer change.
+- A playbook that is reverted is taken away from the agents Apply gave it to, and stays in the library. Boss Man has no archive for skills, so "nobody uses it" is the archive.
+- A lesson that is reverted is dropped from the brief's Lessons section.
 
 ## Skipped
 
@@ -127,8 +131,10 @@ Each task gets a relative size, **1, 2, 3, 5 or 8**, set by whoever creates it (
   - `update_ticket` lets the CEO and managers change it.
   - The owner can set it on the ticket page.
   - The Board shows it.
-- **Reference tickets.** `sizing_guide` gives the planner, for each size, 2–3 recent finished tickets with their actual time, cost and rework, plus the approved sizing playbook if there is one. The planner sizes by comparison: "like BOS-42, which was a 3".
+  - The owner's chat assistant may give a size but isn't made to: the CEO sizes the tickets it plans.
+- **Reference tickets.** `sizing_guide` gives the planner, for each size, 2–3 recent finished tickets with their actual time, cost and rework, plus the sizing playbook if there is one. That is any skill a retro made whose name starts with "sizing" and that some agent still has, so a reverted playbook drops out. The planner sizes by comparison: "like BOS-42, which was a 3".
 - **Scorecard.** A **Sizes** table shows, for each role and size, the median and 85th-percentile cycle time, cost and rework.
+  - It covers the last 90 days, whatever period the page shows.
   - The critical path uses size-and-role times once a pair has 10 finished tickets.
   - Before that it falls back to the role's times, then to the company's.
 - **Retro.** The scorecard digest says where sizes don't match actuals, for example 3s that behave like 5s, or a kind of work that is always undersized. The retro fixes this with a **playbook** for the planners, which the CEO approves.

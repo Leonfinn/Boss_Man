@@ -20,8 +20,10 @@ type Feature = {
 };
 type Finding = { failure: string; failureLabel: string; handoff?: { from: string; to: string }; tickets: string[]; count: number; note: string };
 type RetroInfo = { retro: { id: string; startedAt: string; since: string; until: string; doneCount: number; savedAt: string | null; agentName: string | null; findings: Finding[] } | null; changes: ChangeRow[] };
-type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped"; metricLabel: string; baselineText: string; target: string | null; appliedAt: string | null; evidence: string[] };
-type Scorecard = { days: number; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[] };
+type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[] };
+type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
+type SizeNote = { role: string; size: number; likeSize: number };
+type Scorecard = { days: number; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
 export function span(ms: number | null) {
@@ -35,7 +37,7 @@ export function span(ms: number | null) {
 const pct = (n: number | null) => (n === null ? "–" : `${Math.round(n * 100)}%`);
 const dollars = (micros: number | null) => (micros === null ? "–" : `$${(micros / 1_000_000).toFixed(2)}`);
 const LEVER: Record<string, string> = { playbook: "Playbook", lesson: "Brief lesson", instructions: "Instructions", review_policy: "Review policy", watchdog: "Watchdog", model: "Model", thinking: "Thinking level" };
-const STATUS: Record<ChangeRow["status"], string> = { proposed: "Waiting for an answer", applied: "Applied", skipped: "Skipped" };
+const STATUS: Record<ChangeRow["status"], string> = { proposed: "Waiting for an answer", applied: "Applied", skipped: "Skipped", kept: "Kept", reverted: "Reverted" };
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 const label = (s: string) => s.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
 
@@ -100,7 +102,7 @@ function Retro({ companyId }: { companyId: string }) {
       <section>
         <h2>Changes</h2>
         <p className="muted" style={{ fontSize: 14 }}>
-          Changes a retro suggested. Nothing changes until it is approved: the CEO approves playbooks and lessons, and you approve the rest. The number is where the measure stood when it was suggested.
+          Changes a retro suggested. Nothing changes until it is approved: the CEO approves playbooks and lessons, and you approve the rest. Once a change has had time to work, you or the CEO get a Keep or Revert question. "Was" is where the measure stood when it was suggested; "now" is what the check found.
         </p>
         {data.changes.length ? (
           <div className="table-wrap">
@@ -122,7 +124,7 @@ function Retro({ companyId }: { companyId: string }) {
                     <td>{c.approver === "ceo" ? "CEO" : "You"}</td>
                     <td>{STATUS[c.status]}{c.appliedAt ? ` ${day(c.appliedAt)}` : ""}</td>
                     <td>
-                      {c.metricLabel} <small className="muted">was {c.baselineText}</small>
+                      {c.metricLabel} <small className="muted">was {c.baselineText}{c.afterText !== null ? `, now ${c.afterText}` : ""}</small>
                     </td>
                   </tr>
                 ))}
@@ -303,6 +305,50 @@ export function Workflow({ company }: { company: Company | undefined }) {
               ))
             ) : (
               <p className="muted">No features in progress.</p>
+            )}
+          </section>
+
+          <section>
+            <h2>Sizes</h2>
+            <p className="muted" style={{ fontSize: 14 }}>
+              Each task has a size (1, 2, 3, 5 or 8) set by whoever made it. This shows what finished tasks of each size really took over the last 90 days, whatever period is chosen above. The critical path uses these times once a role and size has 10 finished tasks.
+            </p>
+            {d.sizeNotes.map((n) => (
+              <p key={`${n.role}|${n.size}`} style={{ fontSize: 14, margin: "4px 0" }}>
+                <span className="tag amber">{label(n.role)}</span> Size {n.size} tasks take about as long as size {n.likeSize}. They may be sized too low.
+              </p>
+            ))}
+            {d.sizes.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Role</th>
+                      <th>Size</th>
+                      <th>Done</th>
+                      <th>Typical time</th>
+                      <th>Slow time</th>
+                      <th>Cost</th>
+                      <th>Sent back</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.sizes.map((r) => (
+                      <tr key={`${r.role}|${r.size}`}>
+                        <td>{label(r.role)}</td>
+                        <td>{r.size}</td>
+                        <td>{r.done}</td>
+                        <td>{span(r.p50CycleMs)}</td>
+                        <td>{span(r.p85CycleMs)}</td>
+                        <td>{dollars(r.meanCostMicros)}</td>
+                        <td>{r.meanRework === null ? "–" : r.meanRework.toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted">No finished task has a size yet.</p>
             )}
           </section>
 

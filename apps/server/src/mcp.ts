@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -38,6 +38,7 @@ import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
 import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
+import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
@@ -231,11 +232,13 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass waitsOn (a task's id) to make this task wait until that one is done, such as a QA task waiting on its build task: it starts, and its assignee is woken, when that task is done. Set noCode to true for research, wiki, docs or deploy-only work that changes nothing in the repository; a ticket without it can't go to review until the repository has changed. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass waitsOn (a task's id) to make this task wait until that one is done, such as a QA task waiting on its build task: it starts, and its assignee is woken, when that task is done. Set noCode to true for research, wiki, docs or deploy-only work that changes nothing in the repository; a ticket without it can't go to review until the repository has changed. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that. Size is required: 1, 2, 3, 5 or 8, relative to the tickets your team has finished. Size by comparison with the reference tickets sizing_guide gives you (\"like BOS-42, which was a 3\"), not by guessing hours. Developers don't change a size once it is set.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
         project: z.string().optional(),
+        // Checked in the handler so the refusal can name the scale and point at sizing_guide.
+        size: z.number().optional().describe("Required. 1, 2, 3, 5 or 8. Call sizing_guide first and compare."),
         engagementId: z.string().uuid().optional(),
         risk: z.enum(RISK_TIERS).optional(),
         planFirst: z.boolean().optional(),
@@ -248,7 +251,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         noCode: z.boolean().optional().describe("true for research, wiki, docs or deploy-only work that changes nothing in the repository; such a ticket can reach review and be closed with an empty diff. Leave it off for anything that changes code."),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, noCode, ...rest }) => {
+    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, noCode, ...rest }) => {
+      if (scope.agentId && !isTaskSize(size)) return fail(`${size === undefined ? "A ticket you create needs a size" : `${size} is not a size`}: ${SIZE_SCALE}, relative to the tickets your team has finished. Call sizing_guide to see finished tickets of each size, pick the one yours is most like, then call create_ticket again with size.`);
       const out = await outsideTree(parent);
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
       const to = assignee ? await delegateTarget(assignee) : null;
@@ -305,7 +309,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}) })
         .returning({ id: tickets.id });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id);
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn });
@@ -314,6 +318,15 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
       return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
     },
+  );
+
+  server.registerTool(
+    "sizing_guide",
+    {
+      description: "Before create_ticket: finished tickets of each size (1, 2, 3, 5, 8) with their real time, cost and send-backs, the typical figures per role, and the company's sizing playbook if it has one. Size a new task by comparing it with these.",
+      inputSchema: {},
+    },
+    async () => text(await sizingGuideText(db, scope.companyId)),
   );
 
   server.registerTool(
@@ -1349,7 +1362,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     "update_ticket",
     {
       description:
-        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
+        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it), or change its size (1, 2, 3, 5 or 8; null to clear it; compare with sizing_guide first). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
       inputSchema: {
         ticketId: z.string().uuid(),
         project: z.string().min(1).optional(),
@@ -1359,15 +1372,17 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         body: z.string().max(10_000).optional(),
         assignee: z.string().min(1).nullable().optional(),
         noCode: z.boolean().optional(),
+        size: z.number().nullable().optional(),
         reason: z.string().trim().min(1).max(240),
         expected_version: z.number().int().optional(),
       },
     },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, reason, expected_version }) => {
+    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, size, reason, expected_version }) => {
       if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
+      if (size !== undefined && size !== null && !isTaskSize(size)) return fail(`${size} is not a size: ${SIZE_SCALE}, or null to clear it.`);
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
-      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee or noCode.");
+      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && size === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode or size.");
       const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
@@ -1382,9 +1397,9 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         assigneeId = a.id;
       } else if (assignee === null) assigneeId = null;
       try {
-        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}) });
+        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(size !== undefined ? { size } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}: ${reason}` });
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}: ${reason}` });
         return text(`Ticket ${ticketId} updated (version ${u.version}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -1966,11 +1981,12 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
     "create_ticket",
     {
       description:
-        "Create a ticket for the owner. Give the project by name when there's more than one. Rate its risk: trivial, low, medium (the default), high or critical. Optionally put it in a milestone, assign it to an agent by name, and list tickets it waits on.",
+        "Create a ticket for the owner. Give the project by name when there's more than one. Rate its risk: trivial, low, medium (the default), high or critical. Optionally put it in a milestone, assign it to an agent by name, and list tickets it waits on. Size (1, 2, 3, 5 or 8) is optional here; the CEO sizes the tickets it plans.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
         project: z.string().optional(),
+        size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).optional(),
         risk: z.enum(RISK_TIERS).optional(),
         planFirst: z.boolean().optional(),
         milestoneId: z.string().uuid().optional(),
@@ -1993,7 +2009,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
       try {
-        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
+        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id });
         return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
       } catch (err) {

@@ -33,7 +33,7 @@ import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
-import { acceptanceCriteriaSchema } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
@@ -1049,6 +1049,7 @@ export async function buildApp(opts: AppOptions) {
       acceptanceCriteria: acceptanceCriteriaSchema,
       noCode: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
+      size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).nullable(),
       planFirst: z.boolean(),
       featureId: Uuid.nullable(),
       overLimit: z.boolean(),

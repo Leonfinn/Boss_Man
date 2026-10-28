@@ -188,3 +188,73 @@ describe("GET /api/companies/:id/workflow", () => {
     expect(anon.statusCode).toBe(401);
   });
 });
+
+describe("sizes (docs/19 part 6)", () => {
+  /** A developer's finished ticket of a size: it took `cycle`, and finished `doneAgo` ago. */
+  async function setupSized() {
+    const c = await setup();
+    const dee = await c.agent("Dee", "developer");
+    const done = (size: number | null, cycle: number, doneAgo: number, patch: Partial<typeof tickets.$inferInsert> = {}) =>
+      c.ticket([["backlog", doneAgo + cycle + D], ["in_progress", doneAgo + cycle], ["done", doneAgo]], { assigneeAgentId: dee.id, size, ...patch });
+    return { ...c, dee, done };
+  }
+
+  it("tabulates role and size, and says which sizes behave like the next one", async () => {
+    const c = await setupSized();
+    for (const ago_ of [5, 6, 7, 8]) await c.done(2, D, ago_ * D);
+    const threes = [];
+    for (const ago_ of [3, 4, 9]) threes.push(await c.done(3, 3 * D, ago_ * D));
+    for (const ago_ of [1, 2, 10]) await c.done(5, 3.2 * D, ago_ * D);
+    await c.done(null, D, 2 * D);
+    await c.db.insert(ticketReviews).values({ ticketId: threes[0]!.id, reviewer: "Rae", verdict: "changes_requested" });
+    const [src] = await c.db.insert(fundingSources).values({ name: "Pay as you go", kind: "api_payg", provider: "anthropic" }).returning();
+    const [run] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.dee.id, ticketId: threes[0]!.id, startedAt: ago(4 * D) }).returning();
+    await c.db.insert(costEvents).values({ runId: run!.id, fundingSourceId: src!.id, companyId: c.company.id, agentId: c.dee.id, costMicros: 3_000_000 });
+
+    // The sizes table covers 90 days whatever the scorecard's own window is.
+    const card = await c.svc.scorecard(c.company.id, 1);
+    expect(card.sizes).toEqual([
+      { role: "developer", size: 2, done: 4, p50CycleMs: D, p85CycleMs: D, meanCostMicros: 0, meanRework: 0 },
+      { role: "developer", size: 3, done: 3, p50CycleMs: 3 * D, p85CycleMs: 3 * D, meanCostMicros: 1_000_000, meanRework: 1 / 3 },
+      { role: "developer", size: 5, done: 3, p50CycleMs: 3.2 * D, p85CycleMs: 3.2 * D, meanCostMicros: 0, meanRework: 0 },
+    ]);
+    // 3s take 3 days: 0.2 from the 5s and 2 from the 2s.
+    expect(card.sizeNotes).toEqual([expect.objectContaining({ role: "developer", size: 3, likeSize: 5 })]);
+    // Three newest tickets per size, newest first, as reference points.
+    const twos = card.sizeExamples.filter((e) => e.size === 2);
+    expect(twos.map((e) => e.cycleMs)).toEqual([D, D, D]);
+    expect(card.sizeExamples.filter((e) => e.size === 3)[0]).toMatchObject({ role: "developer", cycleMs: 3 * D, costMicros: 3_000_000, rework: 1 });
+  });
+
+  it("stays quiet when the sizes are spread out, or too thin to judge", async () => {
+    const c = await setupSized();
+    for (const [size, cycle] of [[2, 1], [3, 2], [5, 4]] as const) for (const n of [1, 2, 3]) await c.done(size, cycle * D, n * D);
+    expect((await c.svc.scorecard(c.company.id, 14)).sizeNotes).toEqual([]);
+    const thin = await setupSized();
+    await thin.done(2, D, D);
+    await thin.done(3, 3 * D, D);
+    await thin.done(5, 3.2 * D, D);
+    expect((await thin.svc.scorecard(thin.company.id, 14)).sizeNotes).toEqual([]);
+  });
+
+  it("times the critical path by role and size once that pair has 10 finished tickets, else by role", async () => {
+    const c = await setupSized();
+    for (let i = 1; i <= 14; i++) await c.done(2, D, i * D);
+    for (let i = 1; i <= 10; i++) await c.done(5, 4 * D, i * D);
+    // Three 3s are too few for their own 10 days: the role's times apply.
+    for (let i = 1; i <= 3; i++) await c.done(3, 10 * D, i * D);
+    const open = async (title: string, size: number | null) => {
+      const f = await c.feature(title);
+      await c.ticket([["ready", D]], { featureId: f.id, assigneeAgentId: c.dee.id, size, title });
+      return f.id;
+    };
+    const [big, small, mid, unsized] = [await open("Big", 5), await open("Small", 2), await open("Mid", 3), await open("Unsized", null)];
+    const card = await c.svc.scorecard(c.company.id, 14);
+    const path = (id: string) => card.features.find((f) => f.id === id)!.criticalPath!;
+    expect(path(big).p50Ms).toBe(4 * D);
+    expect(path(small).p50Ms).toBe(D);
+    // 27 timed tickets role-wide (fourteen 1-day, ten 4-day, three 10-day): the middle is 1 day.
+    expect(path(mid).p50Ms).toBe(D);
+    expect(path(unsized).p50Ms).toBe(D);
+  });
+});

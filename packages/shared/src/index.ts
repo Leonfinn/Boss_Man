@@ -23,3 +23,4 @@ export * from "./explain.js";
 export * from "./addons.js";
 export * from "./watchdog.js";
 export * from "./retro.js";
+export * from "./sizing.js";

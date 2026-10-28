@@ -27,7 +27,7 @@ import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
-import { APPLY_CHANGE } from "./retro.js";
+import { APPLY_CHANGE, REVERT_CHANGE } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
@@ -113,7 +113,9 @@ export type DecisionContext =
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
   | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } }
   /** A change a workflow retro proposed (workflow_changes); Apply carries it out, Skip leaves things as they are. */
-  | { type: "workflow_change"; changeId: string };
+  | { type: "workflow_change"; changeId: string }
+  /** The check on an applied change (part 4): Keep it or Revert it, with the measured result. */
+  | { type: "workflow_check"; changeId: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -309,6 +311,9 @@ type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, compa
 export type RetroHook = {
   problemApplying(changeId: string): Promise<string | null>;
   answered(changeId: string, answer: string): Promise<unknown>;
+  /** Why Revert can't go ahead now (the value was changed again since), or null. */
+  problemReverting(changeId: string): Promise<string | null>;
+  checked(changeId: string, answer: string): Promise<unknown>;
   lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
 };
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
@@ -421,6 +426,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
       const problem = await retroHook?.problemApplying(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
+    }
+    if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
+      const problem = await retroHook?.problemReverting(ctx.changeId);
       if (problem) throw new AnswerError(problem);
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
@@ -1297,6 +1306,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await retroHook?.lessonAnswered(id, answer, extra.note);
       } else if (ctx.type === "workflow_change") {
         await retroHook?.answered(ctx.changeId, answer);
+      } else if (ctx.type === "workflow_check") {
+        await retroHook?.checked(ctx.changeId, answer);
       } else if (ctx.type === "lesson_replace") {
         await answerLessonReplace(db, d, ctx, answer, ownWords, extra.note);
       } else if (ctx.type === "budget_limit") {

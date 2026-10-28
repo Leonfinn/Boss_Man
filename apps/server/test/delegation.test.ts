@@ -88,14 +88,14 @@ describe("CEO delegation", () => {
     const res = await dev.callTool({ name: "assign_ticket", arguments: { ticketId: t.id, agent: "Dev", note: "x" } });
     expect(res.isError).toBe(true);
     expect(textOf(res)).toMatch(/Only your company's CEO or a manager/);
-    const made = await dev.callTool({ name: "create_ticket", arguments: { title: "Sub task", assignee: "Dev" } });
+    const made = await dev.callTool({ name: "create_ticket", arguments: { size: 3, title: "Sub task", assignee: "Dev" } });
     expect(made.isError).toBe(true);
     await dev.close();
   });
 
   it("create_ticket with an assignee assigns and wakes", async () => {
     const c = await agent(ctx.co.ceo.id);
-    const res = await c.callTool({ name: "create_ticket", arguments: { title: "Build the limiter", assignee: "Dev" } });
+    const res = await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Build the limiter", assignee: "Dev" } });
     expect(res.isError).toBeFalsy();
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.title, "Build the limiter"));
     expect(t!.assigneeAgentId).toBe(ctx.dev.id);
@@ -106,8 +106,8 @@ describe("CEO delegation", () => {
   it("a QA task that waitsOn its build waits blocked and wakes its assignee when the build is done", async () => {
     const build = await ctx.ticket({ assigneeAgentId: ctx.co.ceo.id });
     const c = await agent(ctx.co.ceo.id);
-    expect((await c.callTool({ name: "create_ticket", arguments: { title: "x", waitsOn: randomUUID() } })).isError).toBe(true);
-    const res = await c.callTool({ name: "create_ticket", arguments: { title: "QA the limiter", assignee: "Dev", waitsOn: build.id } });
+    expect((await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "x", waitsOn: randomUUID() } })).isError).toBe(true);
+    const res = await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "QA the limiter", assignee: "Dev", waitsOn: build.id } });
     expect(res.isError).toBeFalsy();
     const [qa] = await ctx.db.select().from(tickets).where(eq(tickets.title, "QA the limiter"));
     expect(qa).toMatchObject({ systemState: "blocked", assigneeAgentId: ctx.dev.id });

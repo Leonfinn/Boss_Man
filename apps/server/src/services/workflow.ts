@@ -13,6 +13,10 @@ const HISTORY_DAYS = 90;
 const MIN_SAMPLES = 10;
 const TAIL_FROM = 0.75;
 const TAIL_FLAG_TIMES = 2;
+/** A size needs this many timed tickets before the "behaves like the next size" note will lean on its median. */
+const SIGNAL_MIN = 3;
+/** Reference tickets kept per size for the sizing guide. */
+const EXAMPLES_PER_SIZE = 3;
 
 /** Linear-interpolated percentile (p from 0 to 1); null for no values. */
 export function percentile(values: number[], p: number): number | null {
@@ -64,6 +68,21 @@ export function longestPath(nodes: { id: string; weight: number }[], edges: [str
 type Cycles = { p50: number | null; p85: number | null; samples: number };
 const spread = (ms: number[]): Cycles => ({ p50: median(ms), p85: percentile(ms, 0.85), samples: ms.length });
 
+export type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
+
+/** Sizes whose median cycle time sits closer to the next size's than to the one below: "3s that behave like 5s". Needs both neighbours, each with enough timed tickets. */
+export function sizeSignals(rows: SizeRow[], timed: (r: SizeRow) => number = (r) => r.done): Array<{ role: string; size: number; likeSize: number; p50CycleMs: number; nextP50Ms: number; prevP50Ms: number }> {
+  const out = [];
+  for (const role of new Set(rows.map((r) => r.role))) {
+    const mine = rows.filter((r) => r.role === role && r.p50CycleMs !== null && timed(r) >= SIGNAL_MIN).sort((a, b) => a.size - b.size);
+    for (let i = 1; i < mine.length - 1; i++) {
+      const [prev, r, next] = [mine[i - 1]!, mine[i]!, mine[i + 1]!];
+      if (Math.abs(next.p50CycleMs! - r.p50CycleMs!) < Math.abs(r.p50CycleMs! - prev.p50CycleMs!)) out.push({ role, size: r.size, likeSize: next.size, p50CycleMs: r.p50CycleMs!, nextP50Ms: next.p50CycleMs!, prevP50Ms: prev.p50CycleMs! });
+    }
+  }
+  return out;
+}
+
 export type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
 type Done = { agentId: string; cycleMs: number | null; rework: number; reviewed: boolean; costMicros: number };
 
@@ -92,6 +111,13 @@ export function metricValue(sc: Awaited<ReturnType<ReturnType<typeof workflowSer
   return (row?.[metric] as number | null | undefined) ?? null;
 }
 
+/** How many finished tickets (or handoffs, for a handoff measure) the scorecard behind `metricValue` rests on. */
+export function metricSample(sc: Awaited<ReturnType<ReturnType<typeof workflowService>["scorecard"]>>, metric: string, scope: Record<string, unknown>): number {
+  if (metric === "tailLagMs") return sc.byRole.reduce((n, r) => n + r.done, 0);
+  if (metric === "medianWaitMs" || metric === "bounceRate") return sc.handoffs.find((x) => x.from === scope.from && x.to === scope.to && x.kind === scope.kind)?.count ?? 0;
+  return (scope.agentId ? sc.byAgent.find((x) => x.agentId === scope.agentId) : sc.byRole.find((x) => x.role === scope.role))?.done ?? 0;
+}
+
 export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
   const now = deps.now ?? (() => new Date());
   return {
@@ -109,7 +135,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
 
       // Done tickets (cancelled ones never finished) and their start and finish, from the transitions.
       const doneRows = await db
-        .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, stateChangedAt: tickets.stateChangedAt })
+        .select({ id: tickets.id, number: tickets.number, title: tickets.title, size: tickets.size, assigneeAgentId: tickets.assigneeAgentId, stateChangedAt: tickets.stateChangedAt })
         .from(tickets)
         .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), or(sql`${tickets.outcome} is null`, ne(tickets.outcome, "cancelled")), gte(tickets.stateChangedAt, since90), lte(tickets.stateChangedAt, t)));
       const ids = doneRows.map((r) => r.id);
@@ -138,6 +164,47 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         const own = role ? spread(cyclesByRole.get(role) ?? []) : null;
         return own && own.samples >= MIN_SAMPLES ? own : trusted ? company90 : { p50: null, p85: null, samples: company90.samples };
       };
+
+      // ----- Sizes (docs/19 part 6): the same 90 days, by role and size -----
+      const sizedRows = doneRows.filter((r) => r.size !== null);
+      const sizedIds = sizedRows.map((r) => r.id);
+      const sizedReviews = sizedIds.length ? await db.select({ ticketId: ticketReviews.ticketId }).from(ticketReviews).where(and(inArray(ticketReviews.ticketId, sizedIds), eq(ticketReviews.verdict, "changes_requested"))) : [];
+      const sizedRework = new Map<string, number>();
+      for (const r of sizedReviews) sizedRework.set(r.ticketId, (sizedRework.get(r.ticketId) ?? 0) + 1);
+      const sizedCosts = sizedIds.length
+        ? await db.select({ ticketId: runs.ticketId, micros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8` }).from(costEvents).innerJoin(runs, eq(runs.id, costEvents.runId)).where(inArray(runs.ticketId, sizedIds)).groupBy(runs.ticketId)
+        : [];
+      const sizedCost = new Map(sizedCosts.map((c) => [c.ticketId, Number(c.micros)]));
+      const cellKey = (role: string, size: number) => `${role}|${size}`;
+      const cells = new Map<string, { role: string; size: number; rows: typeof sizedRows }>();
+      for (const r of sizedRows) {
+        const role = roleOf(r.assigneeAgentId);
+        if (!role) continue;
+        const k = cellKey(role, r.size!);
+        cells.set(k, { role, size: r.size!, rows: [...(cells.get(k)?.rows ?? []), r] });
+      }
+      const cycleList = (rows: typeof sizedRows) => rows.flatMap((r) => (cycleOf.has(r.id) ? [cycleOf.get(r.id)!] : []));
+      const sizes: SizeRow[] = [...cells.values()]
+        .map(({ role, size, rows }) => ({ role, size, done: rows.length, p50CycleMs: median(cycleList(rows)), p85CycleMs: percentile(cycleList(rows), 0.85), meanCostMicros: mean(rows.map((r) => sizedCost.get(r.id) ?? 0)), meanRework: mean(rows.map((r) => sizedRework.get(r.id) ?? 0)) }))
+        .sort((x, y) => x.role.localeCompare(y.role) || x.size - y.size);
+      // Timed tickets per cell, for the "behaves like" note and the critical path.
+      const timedIn = (role: string, size: number) => cycleList(cells.get(cellKey(role, size))?.rows ?? []);
+      /** Role and size times once that pair has enough history, else the role's. */
+      const sizeCycles = (role: string | null, size: number | null): Cycles => {
+        const pair = role && size !== null ? spread(timedIn(role, size)) : null;
+        return pair && pair.samples >= MIN_SAMPLES ? pair : roleCycles(role);
+      };
+      const sizeNotes = sizeSignals(sizes, (r) => timedIn(r.role, r.size).length);
+      // The newest finished tickets of each size, as reference points for whoever sizes the next task.
+      const examples = [...new Set(sizedRows.map((r) => r.size!))]
+        .sort((a, b) => a - b)
+        .flatMap((size) =>
+          sizedRows
+            .filter((r) => r.size === size)
+            .sort((a, b) => b.stateChangedAt.getTime() - a.stateChangedAt.getTime())
+            .slice(0, EXAMPLES_PER_SIZE)
+            .map((r) => ({ size, ref: ticketRef(company?.prefix, r.number), title: r.title, role: roleOf(r.assigneeAgentId), cycleMs: cycleOf.get(r.id) ?? null, costMicros: sizedCost.get(r.id) ?? 0, rework: sizedRework.get(r.id) ?? 0 })),
+        );
 
       // ----- Roles and agents -----
       const inWindow = doneRows.filter((r) => r.assigneeAgentId && r.stateChangedAt >= since);
@@ -229,7 +296,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         .where(and(eq(features.companyId, companyId), or(and(ne(features.status, "released"), ne(features.status, "declined")), and(eq(features.status, "released"), gte(features.releasedAt, since)))));
       const tasks = feats.length
         ? await db
-            .select({ id: tickets.id, featureId: tickets.featureId, number: tickets.number, title: tickets.title, state: tickets.systemState, assigneeAgentId: tickets.assigneeAgentId, stateChangedAt: tickets.stateChangedAt, createdAt: tickets.createdAt })
+            .select({ id: tickets.id, featureId: tickets.featureId, number: tickets.number, title: tickets.title, size: tickets.size, state: tickets.systemState, assigneeAgentId: tickets.assigneeAgentId, stateChangedAt: tickets.stateChangedAt, createdAt: tickets.createdAt })
             .from(tickets)
             .where(and(inArray(tickets.featureId, feats.map((f) => f.id)), or(sql`${tickets.outcome} is null`, ne(tickets.outcome, "cancelled"))))
         : [];
@@ -265,7 +332,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
           row.tailLagMs = p75 === null ? null : Math.max(...finished) - p75;
         } else if (open.length) {
           const by = new Map(open.map((x) => [x.id, x]));
-          const cyc = (x: (typeof open)[number]) => roleCycles(roleOf(x.assigneeAgentId));
+          const cyc = (x: (typeof open)[number]) => sizeCycles(roleOf(x.assigneeAgentId), x.size);
           const chainIds = longestPath(
             open.map((x) => ({ id: x.id, weight: cyc(x).p50 ?? 1 })),
             deps_.map((d) => [d.blocker!, d.blocked]),
@@ -286,7 +353,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         featureRows.push(row);
       }
 
-      return { days, since: since.toISOString(), byRole, byAgent, handoffs, features: featureRows };
+      return { days, since: since.toISOString(), byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
     },
   };
 }

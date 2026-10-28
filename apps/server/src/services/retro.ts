@@ -7,6 +7,8 @@ import { and, asc, desc, eq, gt, gte, inArray, isNull, lte, ne, or, sql } from "
 import { z } from "zod";
 import {
   CHECK_AFTER_DAYS,
+  CHECK_CAP_DAYS,
+  CHECK_MIN_SAMPLES,
   COMPANY_METRICS,
   HANDOFF_METRICS,
   RETRO_FAILURES,
@@ -28,20 +30,22 @@ import {
   type WorkflowLever,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agentSkills, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skills as skillsTable, ticketReviews, tickets, watchdogFlags, workflowChanges } from "../db/schema.js";
+import { activity, agentSkills, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skills as skillsTable, ticketReviews, tickets, watchdogFlags, wikiPages, wikiRevisions, workflowChanges } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkPolicy } from "./review-policy.js";
-import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson } from "./project-brief.js";
+import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
 import { skillName, type skillsService } from "./skills.js";
 import type { agentsService } from "./agents.js";
 import type { watchdogService } from "./watchdog.js";
 import { backtest } from "./watchdog-backtest.js";
-import { metricValue, workflowService } from "./workflow.js";
+import { metricSample, metricValue, workflowService } from "./workflow.js";
 
 /** Why the retro agent is woken. */
 export const RETRO_REASON = "retro";
 export const APPLY_CHANGE = "Apply";
 export const SKIP_CHANGE = "Skip";
+export const KEEP_CHANGE = "Keep";
+export const REVERT_CHANGE = "Revert";
 /** Done tickets that start a retro, days that start one if anything was done, and what the very first one waits for. */
 export const RETRO_EVERY_DONE = 20;
 export const RETRO_EVERY_DAYS = 7;
@@ -102,10 +106,10 @@ const PlaybookIn = z.object({ name: Str(64), description: Str(1024), body: Str(2
 const PolicyPatch = z.object({ planApprover: z.string().min(1).optional(), reviewer: z.string().min(1).optional(), ownerSignoff: z.boolean().optional() }).strict();
 const WatchdogPatch = WatchdogSettings.omit({ enabled: true }).partial().strict();
 
-const hrs = (ms: number | null) => (ms === null ? "n/a" : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : ms < 48 * 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} days`);
+export const hrs = (ms: number | null) => (ms === null ? "n/a" : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : ms < 48 * 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} days`);
 const pct = (v: number | null) => (v === null ? "n/a" : `${Math.round(v * 100)}%`);
 const num = (v: number | null) => (v === null ? "n/a" : v.toFixed(1));
-const usd = (micros: number | null) => (micros === null ? "n/a" : `$${(micros / 1e6).toFixed(2)}`);
+export const usd = (micros: number | null) => (micros === null ? "n/a" : `$${(micros / 1e6).toFixed(2)}`);
 const METRIC_FORMAT: Record<string, (v: number | null) => string> = { firstPassRate: pct, bounceRate: pct, meanRework: num, watchdogFlags: num, medianCycleMs: hrs, medianWaitMs: hrs, tailLagMs: hrs, costPerDoneMicros: usd };
 const METRIC_LABEL: Record<string, string> = {
   firstPassRate: "first-time review pass rate",
@@ -117,6 +121,8 @@ const METRIC_LABEL: Record<string, string> = {
   bounceRate: "share of reviews sent back",
   tailLagMs: "how long features wait on their last tasks",
 };
+/** Which way counts as better; part 4 judges a change by it. */
+const HIGHER_IS_BETTER: Record<string, boolean> = { firstPassRate: true };
 const showMetric = (metric: string, v: number | null) => (METRIC_FORMAT[metric] ?? num)(v);
 const plain = (s: string) => s.replace(/\s+/g, " ").trim();
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -128,7 +134,7 @@ export function retroService(
   db: Db,
   deps: {
     agents: Pick<ReturnType<typeof agentsService>, "update">;
-    skills: Pick<ReturnType<typeof skillsService>, "write" | "give">;
+    skills: Pick<ReturnType<typeof skillsService>, "write" | "give" | "take">;
     watchdog: Pick<ReturnType<typeof watchdogService>, "update">;
     notify: (agentId: string, input: { reason: string; note: string; priority?: number }) => Promise<unknown>;
     now?: () => Date;
@@ -259,6 +265,11 @@ export function retroService(
           deps.log?.(`retro sweep failed for company ${c.id}: ${(err as Error).message}`);
         }
       }
+      try {
+        await self.checkSweep();
+      } catch (err) {
+        deps.log?.(`workflow check sweep failed: ${(err as Error).message}`);
+      }
       return started;
     },
 
@@ -301,9 +312,16 @@ export function retroService(
       for (const f of lags) out.push(`- Released ${clip(f.title, 80)}: its last task finished ${hrs(f.tailLagMs)} after three quarters were done`);
       if (!tails.length && !lags.length) out.push("- None.");
 
-      const changes = await db.select().from(workflowChanges).where(and(eq(workflowChanges.companyId, companyId), inArray(workflowChanges.status, ["proposed", "applied"]))).orderBy(desc(workflowChanges.createdAt)).limit(10);
-      out.push("", "## Changes already proposed or applied (don't propose these again)");
-      for (const c of changes) out.push(`- [${c.status}] ${c.lever}, ${c.targetAgentId ? (byId.get(c.targetAgentId)?.name ?? "an agent") : (c.targetRole ?? "company")}: ${plain(c.summary)}. Measure: ${METRIC_LABEL[c.metric] ?? c.metric}, was ${showMetric(c.metric, c.baseline)} when proposed${c.appliedAt ? `; applied ${day(c.appliedAt)}` : ""}`);
+      // Sizes come from the last 90 days whatever the retro's own period is.
+      const sc90 = await workflowService(db, { now: () => until }).scorecard(companyId, 90);
+      out.push("", `## Task sizes (last 90 days; role, size, finished, middle cycle time, average cost, average send-backs)`);
+      for (const r of [...sc90.sizes].sort((a, b) => b.done - a.done).slice(0, 12)) out.push(`- ${r.role}, size ${r.size}: ${r.done} done; ${hrs(r.p50CycleMs)}; ${usd(r.meanCostMicros)}; ${num(r.meanRework)}`);
+      for (const n of sc90.sizeNotes.slice(0, 5)) out.push(`- ${n.role}: size ${n.size} tickets take ${hrs(n.p50CycleMs)}, closer to size ${n.likeSize} (${hrs(n.nextP50Ms)}) than to the size below (${hrs(n.prevP50Ms)}). Sizes may be set too low.`);
+      if (!sc90.sizes.length) out.push("- No finished ticket has a size yet.");
+
+      const changes = await db.select().from(workflowChanges).where(and(eq(workflowChanges.companyId, companyId), inArray(workflowChanges.status, ["proposed", "applied", "kept", "reverted"]))).orderBy(desc(workflowChanges.createdAt)).limit(10);
+      out.push("", "## Changes already proposed, applied or checked (don't propose these again)");
+      for (const c of changes) out.push(`- [${c.status}] ${c.lever}, ${c.targetAgentId ? (byId.get(c.targetAgentId)?.name ?? "an agent") : (c.targetRole ?? "company")}: ${plain(c.summary)}. Measure: ${METRIC_LABEL[c.metric] ?? c.metric}, was ${showMetric(c.metric, c.baseline)} when proposed${c.appliedAt ? `; applied ${day(c.appliedAt)}` : ""}${c.result ? `; measured ${showMetric(c.metric, c.result.value)} after` : ""}`);
       if (!changes.length) out.push("- None.");
 
       const worst = await self.worstTickets(companyId, since, until, byId);
@@ -381,7 +399,7 @@ export function retroService(
       const [by] = retro?.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, retro.agentId)) : [];
       return {
         retro: retro ? { id: retro.id, startedAt: retro.startedAt, since: retro.since, until: retro.until, doneCount: retro.doneCount, savedAt: retro.savedAt, agentName: by?.name ?? null, findings: (retro.findings ?? []).map((f) => ({ ...f, failureLabel: RETRO_FAILURE_LABEL[f.failure], tickets: f.tickets.map((t) => refs.get(t) ?? t) })) } : null,
-        changes: changes.map(({ c, agent }) => ({ id: c.id, retroId: c.retroId, lever: c.lever, summary: c.summary, approver: c.approver, status: c.status, metric: c.metric, metricLabel: METRIC_LABEL[c.metric] ?? c.metric, baseline: c.baseline, baselineText: showMetric(c.metric, c.baseline), target: agent ?? c.targetRole, appliedAt: c.appliedAt, checkDueAt: c.checkDueAt, createdAt: c.createdAt, evidence: c.evidence.map((t) => refs.get(t) ?? t), decisionId: c.decisionId })),
+        changes: changes.map(({ c, agent }) => ({ id: c.id, retroId: c.retroId, lever: c.lever, summary: c.summary, approver: c.approver, status: c.status, metric: c.metric, metricLabel: METRIC_LABEL[c.metric] ?? c.metric, baseline: c.baseline, baselineText: showMetric(c.metric, c.baseline), target: agent ?? c.targetRole, appliedAt: c.appliedAt, checkDueAt: c.checkDueAt, afterText: c.result ? showMetric(c.metric, c.result.value) : null, createdAt: c.createdAt, evidence: c.evidence.map((t) => refs.get(t) ?? t), decisionId: c.decisionId })),
       };
     },
 
@@ -649,7 +667,132 @@ export function retroService(
         const had = new Set((await db.select({ id: agentSkills.agentId }).from(agentSkills).where(eq(agentSkills.skillId, skill.id))).map((r) => r.id));
         for (const a of holders) await deps.skills.give(c.companyId, skill.name, a.id, null);
         // Which agents got it from this change, so Revert takes it back from them only.
-        await db.update(workflowChanges).set({ after: { ...after, skillId: skill.id, assignedAgentIds: holders.filter((a) => !had.has(a.id)).map((a) => a.id) } }).where(eq(workflowChanges.id, c.id));
+        await db.update(workflowChanges).set({ after: { ...after, skillId: skill.id, assignedAgentIds: holders.filter((a) => !had.has(a.id)).map((a) => a.id), skillUpdatedAt: skill.updatedAt.toISOString() } }).where(eq(workflowChanges.id, c.id));
+      }
+    },
+
+    // ---------- Part 4: check the result ----------
+
+    /** The timer's pass: every applied change whose time is up, with enough tickets since (or at the cap), gets one Keep / Revert decision. */
+    async checkSweep() {
+      const due = await db.select().from(workflowChanges).where(and(eq(workflowChanges.status, "applied"), isNull(workflowChanges.checkDecisionId), lte(workflowChanges.checkDueAt, now())));
+      let raised = 0;
+      for (const c of due) {
+        try {
+          if (await self.check(c)) raised++;
+        } catch (err) {
+          deps.log?.(`workflow check failed for change ${c.id}: ${(err as Error).message}`);
+        }
+      }
+      return raised;
+    },
+
+    /** Measures one change again over the time since Apply and raises the decision, unless too few relevant tickets have been done and the cap isn't up. */
+    async check(c: typeof workflowChanges.$inferSelect): Promise<boolean> {
+      const t = now();
+      const since = c.appliedAt!;
+      const capped = t.getTime() - since.getTime() >= CHECK_CAP_DAYS * DAY;
+      const sc = await workflowService(db, { now }).scorecard(c.companyId, Math.max((t.getTime() - since.getTime()) / DAY, 1 / 24));
+      const scope = (c.metricScope ?? {}) as Scope;
+      const sample = metricSample(sc, c.metric, scope);
+      if (sample < CHECK_MIN_SAMPLES && !capped) return false;
+      const value = metricValue(sc, c.metric, scope);
+      const days = Math.floor((t.getTime() - since.getTime()) / DAY);
+      const unit = (HANDOFF_METRICS as readonly string[]).includes(c.metric) ? "handoffs" : "finished tickets";
+      const better = HIGHER_IS_BETTER[c.metric] ? "higher" : "lower";
+      const worse = value !== null && c.baseline !== null && (HIGHER_IS_BETTER[c.metric] ? value < c.baseline : value > c.baseline);
+      const verdict =
+        value === null || c.baseline === null
+          ? "One of those can't be measured, so there is no way to tell whether it helped."
+          : worse
+            ? `It got worse (${better} is better here).`
+            : value === c.baseline
+              ? "It held steady."
+              : `It moved the right way (${better} is better here).`;
+      const question = [
+        `A workflow change made ${days} days ago is due its check: ${c.summary}`,
+        `Measured by: ${METRIC_LABEL[c.metric]}${scopeText(scope)}. Before it: ${showMetric(c.metric, c.baseline)}. Now: ${showMetric(c.metric, value)}.`,
+        `That rests on ${sample} ${unit} since it was applied${sample < CHECK_MIN_SAMPLES ? `. Fewer than ${CHECK_MIN_SAMPLES} happened in ${days} days, so treat it with care` : ""}.`,
+        `${verdict} ${worse ? "Revert" : "Keep"} is recommended.`,
+        `Keep leaves the change as it is. Revert ${revertText(c)}.`,
+      ].join("\n\n");
+      const [row] = await db
+        .insert(decisions)
+        .values({ companyId: c.companyId, kind: "approval", question, options: [KEEP_CHANGE, REVERT_CHANGE], recommendedOption: worse ? REVERT_CHANGE : KEEP_CHANGE, tier: c.approver, dedupeKey: `workflow-check:${c.id}`, context: { type: "workflow_check", changeId: c.id } })
+        .onConflictDoNothing()
+        .returning({ id: decisions.id });
+      const [made] = row ? [row] : await db.select({ id: decisions.id }).from(decisions).where(eq(decisions.dedupeKey, `workflow-check:${c.id}`));
+      await db.update(workflowChanges).set({ result: { value, measuredAt: t.toISOString(), sample, capped }, checkDecisionId: made!.id }).where(eq(workflowChanges.id, c.id));
+      if (row && c.approver === "ceo") await self.tellCeo(c.companyId, question);
+      return !!row;
+    },
+
+    /** Why Revert can't go ahead now (the setting was changed again since Apply), or null. Checked before the decision closes, so the decision stays open. */
+    async problemReverting(changeId: string): Promise<string | null> {
+      const [c] = await db.select().from(workflowChanges).where(eq(workflowChanges.id, changeId));
+      if (!c || c.status !== "applied") return "This change has already been dealt with.";
+      const after = (c.after ?? {}) as Record<string, any>;
+      const moved = (what: string) => `${what} has changed since this was applied, so reverting would overwrite someone's newer change. Choose Keep.`;
+      if (c.lever === "instructions" || c.lever === "model" || c.lever === "thinking") {
+        const [a] = c.targetAgentId ? await db.select().from(agents).where(eq(agents.id, c.targetAgentId)) : [];
+        if (!a || a.retiredAt) return "The agent this change was for has been retired, so it can't be put back. Choose Keep.";
+        if ((a[c.lever] ?? null) !== (after[c.lever] ?? null)) return moved(`${a.name}'s ${c.lever}`);
+      } else if (c.lever === "review_policy") {
+        const [co] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.companyId));
+        if (JSON.stringify(co?.policy[after.tier as (typeof RISK_TIERS)[number]]) !== JSON.stringify(after.rule)) return moved(`The review policy for ${after.tier}-risk tickets`);
+      } else if (c.lever === "watchdog") {
+        const [co] = await db.select({ watchdog: companies.watchdog }).from(companies).where(eq(companies.id, c.companyId));
+        const now_ = readWatchdogSettings(co?.watchdog);
+        const key = Object.keys(after).find((k) => now_[k as keyof WatchdogSettings] !== after[k]);
+        if (key) return moved(`The watchdog's ${key}`);
+      } else if (c.lever === "playbook") {
+        const [have] = after.skillId ? await db.select().from(skillsTable).where(eq(skillsTable.id, after.skillId)) : [];
+        if (!have) return "The playbook has been deleted since, so there is nothing to put back. Choose Keep.";
+        if (after.skillUpdatedAt && have.updatedAt.toISOString() !== after.skillUpdatedAt) return moved(`The playbook ${have.name}`);
+      } else if (c.lever === "lesson") {
+        const page = await lessonsPageRow(db, c.companyId, c.targetRole!.slice("project:".length));
+        if (!page || !lessonsFrom(page.body).includes(after.lesson)) return "The lesson is no longer in the brief's Lessons section, so there is nothing to drop. Choose Keep.";
+      }
+      return null;
+    },
+
+    /** The check was answered: Keep ends it, Revert puts the old value back (once). */
+    async checked(changeId: string, answer: string) {
+      const [c] = await db.select().from(workflowChanges).where(eq(workflowChanges.id, changeId));
+      if (!c) return;
+      const status = answer === REVERT_CHANGE ? "reverted" : "kept";
+      const [claimed] = await db.update(workflowChanges).set({ status }).where(and(eq(workflowChanges.id, changeId), eq(workflowChanges.status, "applied"))).returning();
+      if (!claimed || status === "kept") return;
+      try {
+        await self.undo(claimed);
+        await record(db, { companyId: c.companyId, kind: "workflow_change", summary: `Workflow change reverted (${c.lever}): ${plain(c.summary)}`, at: now() });
+      } catch (err) {
+        await db.update(workflowChanges).set({ status: "applied" }).where(eq(workflowChanges.id, changeId));
+        await record(db, { companyId: c.companyId, kind: "workflow_change", summary: `Workflow change not reverted (${c.lever}): ${(err as Error).message}`, at: now() });
+      }
+    },
+
+    /** Puts the saved old value back through the code path Apply used. */
+    async undo(c: typeof workflowChanges.$inferSelect) {
+      const after = (c.after ?? {}) as Record<string, any>;
+      const before = (c.before ?? {}) as Record<string, any>;
+      if (c.lever === "instructions" || c.lever === "model" || c.lever === "thinking") {
+        await deps.agents.update(c.targetAgentId!, before, null);
+      } else if (c.lever === "review_policy") {
+        const [co] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.companyId));
+        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [before.tier]: before.rule } }).where(eq(companies.id, c.companyId));
+      } else if (c.lever === "watchdog") {
+        await deps.watchdog.update(c.companyId, before);
+      } else if (c.lever === "playbook") {
+        // Boss Man has no archive for skills: the playbook stays in the library (source "retro") with nobody using it. Only the agents Apply gave it to lose it.
+        for (const id of (after.assignedAgentIds ?? []) as string[]) await deps.skills.take(c.companyId, after.name, id);
+        if (before.skillId) await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
+      } else if (c.lever === "lesson") {
+        const page = await lessonsPageRow(db, c.companyId, c.targetRole!.slice("project:".length));
+        if (!page) return;
+        const body = removeLessonLine(page.body, after.lesson);
+        await db.update(wikiPages).set({ body, updatedAt: now() }).where(eq(wikiPages.id, page.id));
+        await db.insert(wikiRevisions).values({ pageId: page.id, title: page.title, body });
       }
     },
 
@@ -667,10 +810,21 @@ export function retroService(
       // shortcut: a full Lessons section raises a "which line goes" decision and this change stays proposed; upgrade if that is common.
       if (!page || !lessonsFrom(page.body).includes(written)) return;
       const t = now();
-      await db.update(workflowChanges).set({ status: "applied", appliedAt: t, checkDueAt: new Date(t.getTime() + CHECK_AFTER_DAYS * DAY) }).where(eq(workflowChanges.id, c.id));
+      // The CEO may have edited the wording: Revert has to find the line that is in the brief.
+      await db.update(workflowChanges).set({ status: "applied", after: { lesson: written }, appliedAt: t, checkDueAt: new Date(t.getTime() + CHECK_AFTER_DAYS * DAY) }).where(eq(workflowChanges.id, c.id));
     },
   };
   return self;
+}
+
+/** What Revert does, for the check's question. */
+function revertText(c: { lever: string; after: unknown }) {
+  const after = (c.after ?? {}) as Record<string, unknown>;
+  if (c.lever === "review_policy") return `puts the old review policy for ${after.tier}-risk tickets back`;
+  if (c.lever === "watchdog") return "puts the old watchdog limits back";
+  if (c.lever === "playbook") return "takes the playbook away from the agents it was given to. It stays in the library, with nobody using it";
+  if (c.lever === "lesson") return "drops the lesson from the brief";
+  return `puts the agent's earlier ${c.lever} back`;
 }
 
 const scopeText = (s: Scope) => ("role" in s ? ` for ${s.role}` : "agentId" in s ? " for one agent" : "from" in s ? ` for ${s.from} to ${s.to}` : "");

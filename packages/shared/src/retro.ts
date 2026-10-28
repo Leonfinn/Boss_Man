@@ -40,3 +40,6 @@ export type MetricScope = { role: string } | { agentId: string } | { from: strin
 
 /** Days a change runs before part 4 checks it. */
 export const CHECK_AFTER_DAYS = 14;
+/** Part 4 checks once this many relevant tickets are done, or at the cap, whichever is first (and never before CHECK_AFTER_DAYS). */
+export const CHECK_MIN_SAMPLES = 10;
+export const CHECK_CAP_DAYS = 30;
