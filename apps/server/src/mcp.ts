@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, checkAsk, type decisionsService } from "./services/decisions.js";
+import { AnswerError, adviceOf, checkAsk, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
@@ -31,6 +31,7 @@ import { findSection, splitSections, WikiError, type wikiService } from "./servi
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import { AgentError, type agentsService } from "./services/agents.js";
+import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { resolveReviewer } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
@@ -52,6 +53,26 @@ export async function issueRunToken(db: Db, scope: Scope, ttlHours = 12): Promis
 const STATES = ["backlog", "ready", "in_progress", "blocked", "review", "done"] as const;
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], isError: true });
+
+/** A reply that asks the owner to do something: an imperative aimed at them, not a plain status report. */
+const OWNER_ASK = /\b(please|you(?:'ll| will)? (?:need|have|must|should)|could you|would you|can you|when you(?:'ve| have)? |reply here|tell me (?:here|once|when)|let me know|confirm (?:that|once|when)|run (?:this|it|the|scripts)|apply (?:it|this|the|them)|do this|try again|revert|roll back)\b/i;
+
+/**
+ * After a ticket reply, say when the owner has to act but nothing on their queue asks them to (BOS-122):
+ * the owner doesn't watch tickets, so a reply alone doesn't reach them. Returns null when no hint applies.
+ */
+async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: string): Promise<string | null> {
+  if (!OWNER_ASK.test(body)) return null;
+  // An open decision covers it when it blocks this ticket, or this agent already asked about it.
+  const covering = await db
+    .select({ id: decisionsTable.id })
+    .from(decisionsTable)
+    .leftJoin(ticketDependencies, eq(ticketDependencies.blockerDecisionId, decisionsTable.id))
+    .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), or(eq(ticketDependencies.blockedTicketId, ticketId), scope.agentId ? eq(decisionsTable.raisedByAgentId, scope.agentId) : sql`false`)))
+    .limit(1);
+  if (covering.length) return null;
+  return "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted.";
+}
 /** A lossless cap: at most n chars of s from offset; when there's more, says how much and how to get it. */
 export const cut = (s: string, n: number, how: (next: number) => string, offset = 0) =>
   s.length <= offset + n ? s.slice(offset) : `${s.slice(offset, offset + n)}\n\n… ${s.length - offset - n} more chars; ${how(offset + n)}`;
@@ -62,6 +83,8 @@ export type McpHooks = {
   onTicketDone?: (ticketId: string, causedByRunId: string) => Promise<unknown>;
   onTicketReview?: (ticketId: string, byAgentId: string | null, causedByRunId: string) => Promise<unknown>;
   nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
+  /** Wakes an agent, e.g. the CEO for a note request. */
+  wake?: (agentId: string, input: { reason: string; note: string }) => Promise<unknown>;
 };
 
 /** The ticket row for an agent, with its state note shown with its age (R85). */
@@ -369,7 +392,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
-      return text("Posted on the ticket's conversation.");
+      // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
+      // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
+      const hint = await ownerActionHint(db, scope, ticketId, body);
+      return text(`Posted on the ticket's conversation.${hint ? `\n\n${hint}` : ""}`);
     },
   );
 
@@ -391,7 +417,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you can write \"the steps are on the ticket\" instead of pasting a URL.",
       inputSchema: {
         question: z.string().min(1).max(1000),
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
@@ -733,14 +759,21 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       return text(`Handoff saved for chapter ${c.number + 1}.`);
     },
   );
+  registerNotes(server, db, scope, false, { ticketChat });
+  registerRequestNote(server, db, scope, hooks);
 
   server.registerTool(
     "decisions",
     {
       description:
-        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert only the owner can settle (a secret, host access, sign-off, an owner-only choice): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert or a temp-file cleanup request only the owner can settle (a secret, host access, sign-off, an owner-only choice, a delete you can't vouch for): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests, except a lesson for a project brief that your own review raised. Permission requests: answer them with a note saying why (the owner reads it). Ones marked TEMP-FILE CLEANUP only delete entries directly in /tmp and came to you instead of the owner: allow them when the rest of the command looks like the agent's own work; deny or escalate (id, triedFirst) anything that reaches outside /tmp, pushes, or that you can't account for. They go to the owner if you don't answer within 5 minutes. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
       inputSchema: {
-        action: z.enum(["list", "answer", "escalate"]),
+        action: z.enum(["list", "answer", "escalate", "advise"]),
+        outcome: z.enum(["reissue", "handled"]).optional(),
+        question: z.string().min(1).max(1000).optional(),
+        options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
+        recommended: z.string().max(200).optional(),
+        summary: z.string().max(1000).optional(),
         id: z.string().uuid().optional(),
         answer: z.string().max(200).optional(),
         note: z.string().max(2000).optional(),
@@ -765,15 +798,42 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .filter(mine)
           // Alerts still with the Scrum Master aren't the CEO's yet (BOS-64).
           .filter((d) => (d.context as { ladder?: { rung: string } }).ladder?.rung !== "scrum_master");
-        if (!open.length) return text("No decisions are waiting for you.");
+        const asked = (await db.select().from(decisionsTable).where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->'advice'->>'state' = 'asking'`)).orderBy(decisionsTable.createdAt))
+          .filter(() => isCeo)
+          .map((d) => [`${d.id}: ASKED FOR YOUR ADVICE: ${d.question}`, `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption})`, ...(adviceOf(d.context)?.note ? [`What's unclear, per the owner: ${adviceOf(d.context)!.note}`] : []), "Use action advise."].join("\n"));
+        if (!open.length && !asked.length) return text("No decisions are waiting for you.");
+        if (!open.length) return text(asked.join("\n\n"));
         return text(
           open
             .map((d) => {
-              const { planText: plan, explain } = d.context as { planText?: string | null; explain?: { command?: string } };
-              return [`${d.id}: ${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
+              const { planText: plan, explain, tempCleanup } = d.context as { planText?: string | null; explain?: { command?: string }; tempCleanup?: boolean };
+              return [`${d.id}: ${tempCleanup ? "TEMP-FILE CLEANUP: " : ""}${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
             })
+            .concat(asked)
             .join("\n\n"),
         );
+      }
+      if (input.action === "advise") {
+        if (!isCeo || !scope.agentId) return fail("Only the CEO advises on a decision the owner asked about.");
+        if (!input.id || !input.outcome) return fail("Give the decision's id and outcome: reissue or handled.");
+        try {
+          let r;
+          if (input.outcome === "reissue") {
+            if (!input.question || !input.options || !input.recommended) return fail("A reissue needs question, options and recommended.");
+            const bad = checkAsk({ triedFirst: input.triedFirst ?? "", ownerMustDo: input.ownerMustDo, steps: input.steps });
+            if (bad) return fail(bad);
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "reissue", runId: scope.runId, question: input.question, options: input.options, recommended: input.recommended, triedFirst: (input.triedFirst ?? "").trim(), steps: input.steps?.length ? input.steps : undefined });
+          } else {
+            if (!input.summary || input.summary.trim().length < 20) return fail("Say in a sentence or two what was done (summary), so the owner can read it.");
+            r = await decisions.advise({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, outcome: "handled", runId: scope.runId, summary: input.summary, answer: input.answer });
+            if (r) await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title: "The CEO settled a decision for you", body: input.summary.trim(), link: "#/decisions" });
+          }
+          if (!r) return fail("The owner answered it first, so there's nothing more to do.");
+          return text(r.outcome === "reissue" ? ("inPlace" in r && r.inPlace ? `Rewritten in place: decision ${r.id} keeps its id and options, with your new question, what was tried and the steps.` : `Reissued as decision ${r.id}. The original is closed and what it blocked now waits on the new one.`) : "Handled. The owner has been told.");
+        } catch (err) {
+          if (err instanceof AnswerError) return fail(err.message);
+          throw err;
+        }
       }
       if (input.action === "escalate") {
         if (!input.id || !input.triedFirst) return fail("Give the alert's id and triedFirst: what you and the team tried.");
@@ -789,9 +849,12 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (!input.id || !input.answer) return fail("Give the decision's id and your answer.");
       const [d] = await db.select().from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
       if (!d || d.tier !== "ceo" || !mine(d)) return fail("No decision with that id is waiting for you.");
-      if (d.raisedByAgentId === scope.agentId) return fail("That's your own request; the owner answers it.");
+      const lessonCall = d.context && ["lesson", "lesson_replace"].includes((d.context as { type?: string }).type ?? "");
+      if (d.raisedByAgentId === scope.agentId && !lessonCall) return fail("That's your own request; the owner answers it.");
+      // The owner reads why the CEO allowed or denied a request (BOS-111).
+      if (d.kind === "permission" && !(d.context as { plan?: boolean }).plan && (input.note?.trim().length ?? 0) < 10) return fail("Give a note saying why you allow or deny this request, in a short sentence: the owner reads it.");
       try {
-        const r = await decisions.answer(input.id, input.answer, { note: input.note });
+        const r = await decisions.answer(input.id, input.answer, { note: input.note, ...(scope.agentId ? { settledBy: { agentId: scope.agentId } } : {}) });
         return r ? text(`Answered: ${input.answer}.`) : fail("That decision has already been answered.");
       } catch (err) {
         if (err instanceof AnswerError) return fail(err.message);
@@ -1515,6 +1578,127 @@ function registerRoadmap(server: McpServer, db: Db, work: Services["work"], scop
   );
 }
 
+/**
+ * The CEO's lasting notes (BOS-85), in the owner chat and its runs. Each save or update quotes the
+ * owner: in the chat, from that chat; in a run (BOS-95), an owner-written ticket message. So agent
+ * text on a ticket, feedback or a page can't plant one; removing one needs the chat;
+ * other agents can only ask (request_note), and the CEO's explicit accept, in any run, is the one
+ * way a request becomes a note. The owner sees every new or changed note in the chat.
+ */
+function registerNotes(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope, chat: boolean, { ticketChat }: Pick<Services, "ticketChat">) {
+  const notes = notesService(db);
+  const isCeo = async () => (scope.agentId ? (await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)))[0]?.role === "ceo" : false);
+  server.registerTool(
+    "notes",
+    {
+      description: `CEO only. Your lasting notes: corrections, preferences and working rules the owner gave you in chat, and colleagues' requests you accepted; shown at the start of every later chat and run. list shows them with their ids. In the owner chat: save (title, text, why), update (id, why, and title or text to change) or remove (id, reason); why must quote the owner's own words from this chat. In a ticket run: save or update when the owner corrected you in a message on a ticket; why must quote that owner message exactly. Never save an agent's ticket text, feedback or a page. Quotes are at least ${MIN_QUOTE} characters. Save one when the owner corrects you or states a lasting preference; update the note you have rather than adding a duplicate, and remove one that turns out wrong. In any run: requests lists colleagues' note requests; accept (requestId, optionally a reworded title, text or why) or decline (requestId, reason) each one after checking it against what actually happened on its ticket. At most ${NOTE_LIMITS.count} notes (title ${NOTE_LIMITS.title}, text ${NOTE_LIMITS.text}, why ${NOTE_LIMITS.why} characters); when full, a save or accept is refused until you update or remove one. The owner is told of every new or changed note and can edit or delete notes. These don't change your standing instructions.`,
+      inputSchema: {
+        action: z.enum(["list", "save", "update", "remove", "requests", "accept", "decline"]),
+        id: z.string().uuid().optional(),
+        requestId: z.string().uuid().optional(),
+        title: z.string().max(NOTE_LIMITS.title).optional(),
+        text: z.string().max(NOTE_LIMITS.text).optional(),
+        why: z.string().max(NOTE_LIMITS.why).optional(),
+        reason: z.string().max(300).optional(),
+      },
+    },
+    async (input) => {
+      if (!(await isCeo()) || !scope.agentId) return fail("Notes are only for your company's CEO for now. To suggest one, use request_note.");
+      const agentId = scope.agentId;
+      const tell = (t: string) => notes.tellOwner(scope.companyId, agentId, scope.runId, `${t} You can see, change or delete your CEO's notes on the Agents page.`);
+      try {
+        if (input.action === "list") {
+          const all = await notes.withOrigin(scope.companyId, agentId);
+          return text(all.length ? `${all.length} of ${NOTE_LIMITS.count} notes:\n${all.map((n) => `- [${n.id}] ${describeNote(n)}, ${originOf(n)}`).join("\n")}` : `No notes yet (up to ${NOTE_LIMITS.count}).`);
+        }
+        if (input.action === "requests") {
+          const waiting = await notes.pending(scope.companyId, agentId);
+          return text(waiting.length ? requestLines(waiting).slice(1).join("\n") : "No note requests waiting.");
+        }
+        if (input.action === "accept" || input.action === "decline") {
+          if (!input.requestId) return fail(`${input.action} needs the requestId (notes requests).`);
+          const reply = (ticketId: string, t: string) => ticketChat.agentSays({ companyId: scope.companyId, ticketId, agentId, runId: scope.runId, text: t }).catch(() => undefined);
+          if (input.action === "decline") {
+            if (!input.reason?.trim()) return fail("decline needs a one-line reason.");
+            const r = await notes.decline(scope.companyId, agentId, input.requestId, input.reason);
+            await reply(r.ticketId, `I declined the note request "${r.title}": ${r.declineReason}`);
+            return text(`Declined. The requester is told on the ticket.`);
+          }
+          const { request: r, note: n } = await notes.accept(scope.companyId, agentId, input.requestId, { title: input.title, text: input.text, why: input.why }, scope.runId);
+          const [o] = (await notes.withOrigin(scope.companyId, agentId)).filter((x) => x.id === n.id);
+          await tell(`Saved a note: ${describeNote(n)}, ${originOf(o ?? n)}.`);
+          await reply(r.ticketId, `I accepted the note request "${r.title}"${n.title !== r.title || n.text !== r.text ? `, reworded as "${n.title}": ${n.text}` : ""}. It's now one of my notes.`);
+          return text(`Accepted: saved note ${n.id}. The owner and the requester are told.`);
+        }
+        // Outside the chat (BOS-95) a save or update must quote an owner-written ticket message; removing still needs the chat.
+        if (!chat && input.action === "remove") return fail("Notes are removed only from the owner chat. Ask the owner there, or raise_decision.");
+        const by = { owner: false, runId: scope.runId };
+        // The owner sees the whole message that backs the note, and, if it's a ticket's, on that ticket too.
+        const quoted = async (why: string) => notes.checkQuote(scope.companyId, agentId, why, chat ? "chat" : "tickets");
+        const announce = async (said: { text: string; ticketId: string | null }, t: string) => {
+          await tell(`${t} You said: "${said.text}".`);
+          if (said.ticketId) await ticketChat.agentSays({ companyId: scope.companyId, ticketId: said.ticketId, agentId, runId: scope.runId, text: `${t} It rests on your message here: "${said.text}". You can see, change or delete my notes on the Agents page.` }).catch(() => undefined);
+        };
+        if (input.action === "save") {
+          if (!input.title || !input.text || !input.why) return fail("save needs title, text and why.");
+          const said = await quoted(input.why);
+          const n = await notes.save(scope.companyId, agentId, { title: input.title, text: input.text, why: input.why }, said.ticketId ? { source: "ticket", runId: scope.runId, ticketId: said.ticketId } : { source: "chat", runId: scope.runId });
+          await announce(said, `Saved a note: ${describeNote(n)}.`);
+          return text(`Saved note ${n.id}. It shows in your next chats and runs.`);
+        }
+        if (!input.id) return fail(`${input.action} needs the note's id (notes list).`);
+        // A note from another company or agent reads as missing.
+        const n = await notes.get(scope.companyId, input.id);
+        if (n.agentId !== agentId) return fail("No such note.");
+        if (input.action === "update") {
+          // A changed note must rest on something the owner said now, like a new one.
+          if (!input.why) return fail(`update needs why: the owner's words ${chat ? "from this chat" : "from one of their ticket messages"} that call for the change.`);
+          const said = await quoted(input.why);
+          const { after } = await notes.update(scope.companyId, n.id, { title: input.title, text: input.text, why: input.why }, by, { source: said.ticketId ? "ticket" : "chat", ticketId: said.ticketId });
+          await announce(said, `Updated a note. Was ${describeNote(n)}. Now ${describeNote(after)}.`);
+          return text(`Updated note ${after.id}.`);
+        }
+        if (!input.reason?.trim()) return fail("remove needs a reason.");
+        await notes.remove(scope.companyId, n.id, by);
+        await tell(`Removed a note (${input.reason.trim()}): ${describeNote(n)}.`);
+        return text(`Removed note ${n.id}.`);
+      } catch (err) {
+        if (err instanceof NoteError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+}
+
+/** Other agents ask the CEO to keep a note (BOS-85); they have no tool that writes one. Ticket runs only. */
+function registerRequestNote(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope, hooks: McpHooks) {
+  const notes = notesService(db);
+  server.registerTool(
+    "request_note",
+    {
+      description: `Ask your CEO to keep a lasting note: a lesson, correction or working rule from a ticket that the CEO should remember in every chat and run. Give a short title, the text, why (what happened, briefly) and the ticket it came from. The CEO checks it against the ticket and accepts it (maybe reworded) or declines it with a reason; you're told on the ticket. You can't save notes yourself. At most ${REQUEST_LIMITS.perHour} requests an hour and ${REQUEST_LIMITS.perDay} a day; title ${NOTE_LIMITS.title}, text ${NOTE_LIMITS.text}, why ${NOTE_LIMITS.why} characters.`,
+      inputSchema: {
+        ticketId: z.string().uuid(),
+        title: z.string().min(1).max(NOTE_LIMITS.title),
+        text: z.string().min(1).max(NOTE_LIMITS.text),
+        why: z.string().min(1).max(NOTE_LIMITS.why),
+      },
+    },
+    async ({ ticketId, title, text: body, why }) => {
+      if (!scope.agentId) return fail("Only an agent's run can ask for a note.");
+      try {
+        const { request: r, ceoId } = await notes.request(scope.companyId, scope.agentId, { ticketId, title, text: body, why });
+        // Woken now; the request also waits in the CEO's next run or chat, should this wake be held.
+        await hooks.wake?.(ceoId, { reason: "note request", note: `A colleague asked you to keep a note ("${r.title}"). See notes requests, check it against its ticket, then accept or decline it.` });
+        return text(`Asked the CEO (request ${r.id}). You'll be told the answer on the ticket.`);
+      } catch (err) {
+        if (err instanceof NoteError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+}
+
 function registerBoard(server: Pick<McpServer, "registerTool">, db: Db, scope: Scope) {
   server.registerTool(
     "board",
@@ -1708,7 +1892,7 @@ const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().opti
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team, images }: Services, scope: Scope, hooks: McpHooks) {
+function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, agents: team, images, ticketChat }: Services, scope: Scope, hooks: McpHooks) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   registerSharedTools(server, db, { notes, wiki, skills, review, agents: team }, scope);
   registerViewImage(server, images, scope);
@@ -1721,6 +1905,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, review, 
   registerBoard(server, db, scope);
   registerRoadmap(server, db, work, scope);
   registerTicketMoves(server, db, { review, work, feedback }, scope, hooks, true);
+  registerNotes(server, db, scope, true, { ticketChat });
 
   // So an agent asked in chat for something it can't do here asks the colleague who can, instead of the owner.
   server.registerTool("nudge", { description: NUDGE_DESCRIPTION, inputSchema: NUDGE_INPUT }, async ({ agent, ticketId, why }) => {

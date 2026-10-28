@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
@@ -12,7 +12,7 @@ import { GitHostError, type GitHostConfig, type gitHostService } from "./git-hos
 import { effectivePolicy } from "./review-policy.js";
 import { activeRows, decide, evaluate, latestRows, reviveSkipped, setReviewOrder, skipPending, wakeReviewers, type ReviewRow } from "./review-kinds.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, raiseMergeStuck } from "./decisions.js";
-import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, normalizeLesson } from "./project-brief.js";
+import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, normalizeLesson } from "./project-brief.js";
 import { record } from "./activity.js";
 import type { notificationsService } from "./notifications.js";
 
@@ -225,22 +225,29 @@ export function reviewService(
       if (input.lesson?.trim() && !lesson) throw new ReviewError(422, "A lesson is one line, up to 240 characters.");
       const rows = input.reviewerAgentId ? await latestRows(db, ticketId) : [];
       if (input.verdict === "changes_requested" && !input.comments?.length && !input.summary?.trim()) throw new ReviewError(422, "Say what needs changing: add comments or a summary.");
-      // Each lesson becomes exactly one owner decision: nothing reaches the brief without them (R-review-lessons).
-      if (lesson)
-        await db
+      // Each lesson becomes exactly one CEO decision (BOS-105): nothing reaches the brief without it, and the owner is told the outcome.
+      if (lesson) {
+        const question = `Add this lesson to ${projectName}'s brief? "${lesson}"\n\nIt came from the review of ticket "${t.title}" (${ticketId}).\n\n${await lessonsForCeo(db, t.companyId, t.projectId)}\n\nJudge whether it overlaps a lesson already there and whether it is worth a line. Answer with a one-line reason as the note.`;
+        const [row] = await db
           .insert(decisions)
           .values({
             companyId: t.companyId,
             kind: "question",
-            question: `Add this lesson to ${projectName}'s brief? "${lesson}"`,
+            question,
             options: [LESSON_ADD, LESSON_EDIT, LESSON_DROP],
             recommendedOption: LESSON_ADD,
-            tier: "owner",
+            tier: "ceo",
             raisedByAgentId: input.reviewerAgentId ?? null,
             dedupeKey: `lesson:${ticketId}:${lesson}`,
             context: { type: "lesson", ticketId, projectId: t.projectId, projectName, lesson },
           })
-          .onConflictDoNothing();
+          .onConflictDoNothing()
+          .returning({ id: decisions.id });
+        if (row) {
+          const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, t.companyId), eq(agents.role, "ceo")));
+          if (ceo) await wake?.(ceo.id, { reason: "decision", note: `A decision is waiting for you: ${question}\nUse the decisions tool to read it and answer.` });
+        }
+      }
       let diffText = "";
       if (input.verdict === "changes_requested" && input.comments?.some((c) => !c.code)) diffText = await this.diff(ticketId).then((d) => d.diff, () => "");
       if (!rows.length) {
@@ -450,7 +457,7 @@ export function reviewService(
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
       for (const command of checks) {
-        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), 11 * 60_000);
+        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS);
         if (!v.ok) {
           const never = checkNeverFinished(v);
           if (never) {

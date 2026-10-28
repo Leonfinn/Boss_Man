@@ -132,7 +132,7 @@ cat >"$t/contrast.json" <<'JSON'
 JSON
 out="$(bash "$here/penpot.sh" validate "$t/contrast.json" 2>&1)" || fail "warnings should not fail validate: $out"
 grep -qF '"Desktop" > "Faint": the text colour #aaaaaa on #ffffff has a contrast of 2.32:1, but it needs 4.5:1' <<<"$out" || fail "no small-text contrast warning: $out"
-grep -qF '"Faint"' <<<"$out" && grep -qF '"FaintBig": the text colour #aaaaaa on #ffffff has a contrast of 2.32:1, but it needs 3:1' <<<"$out" || fail "no large-text warning"
+{ grep -qF '"Faint"' <<<"$out" && grep -qF '"FaintBig": the text colour #aaaaaa on #ffffff has a contrast of 2.32:1, but it needs 3:1' <<<"$out"; } || fail "no large-text warning"
 grep -qF '"OnBand": the text colour #222222 on #1e40af' <<<"$out" || fail "background shape not used"
 grep -q '"Ok"\|WhiteOnBand' <<<"$out" && fail "warned about readable text"
 

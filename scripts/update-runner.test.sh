@@ -27,14 +27,15 @@ logged "docker tag boss-man-runner:candidate boss-man-runner:current" || fail "i
 logged "recreate-all" && fail "default recreated the runners"
 logged "compose up" && fail "default restarted compose runners"
 [[ -s $T/deployer/inbox/drain.json ]] || fail "no drain request written"
-python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$T/deployer/inbox/drain.json" || fail "drain.json is not JSON"
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$T/deployer/inbox/drain.json" || fail "drain.json is not JSON"
 [[ $(find "$T/deployer/inbox" -type f | wc -l) == 1 ]] || fail "temp file left in the inbox"
 
 # A symlink planted at the request's name (the server can write to inbox) is replaced, never followed.
 # Also at the temp names a PID-based writer would use, since the next process IDs are guessable.
 echo "precious" >"$T/victim"
 rm -f "$T/deployer/inbox/drain.json"; ln -s "$T/victim" "$T/deployer/inbox/drain.json"
-python3 -I -c 'import os,sys; [os.symlink(sys.argv[1], f"{sys.argv[2]}/.drain.{p}.tmp") for p in range(os.getpid(), os.getpid() + 400)]' "$T/victim" "$T/deployer/inbox"
+# shellcheck disable=SC2016 # the node script's ${dir} is JavaScript, not shell
+node -e 'const fs=require("fs");const [tgt,dir]=process.argv.slice(1);for(let p=process.pid;p<process.pid+400;p++){try{fs.symlinkSync(tgt,`${dir}/.drain.${p}.tmp`)}catch(e){}}' "$T/victim" "$T/deployer/inbox"
 : >"$FAKE_LOG"; ./update-runner.sh >"$T/out" 2>&1
 [[ $(cat "$T/victim") == precious ]] || fail "the drain request followed a planted symlink"
 [[ -f $T/deployer/inbox/drain.json && ! -L $T/deployer/inbox/drain.json ]] || fail "the planted symlink was not replaced"

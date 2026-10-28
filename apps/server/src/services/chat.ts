@@ -9,6 +9,7 @@ import { and, count, desc, eq, gt, inArray, isNull, ne, or } from "drizzle-orm";
 import { agentIdentity } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, ownerChatMessages, projects, runs, wakes } from "../db/schema.js";
+import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
 
 export const CHAT_REASON = "owner_chat";
 const HISTORY = 30;
@@ -145,8 +146,14 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
           ? `You are ${agent.name}, the CEO of ${company?.name ?? "this company"}, chatting with the owner in Boss Man. The owner writes to you in plain language; you turn what they ask into work on the board.`
           : `You are ${agentIdentity(agent, company?.name ?? "this company").who}. The owner is messaging you directly in Boss Man's chat. Answer their questions about your work, and turn what they ask for into work on the board.`,
         ...agentIdentity(agent, company?.name ?? "this company").instructions,
+        ...(ceo ? await ceoNotesLines(db, companyId, agentId) : []),
         "",
         "In this chat your tools are Boss Man's: board (projects, objectives and milestones, agents, open tickets), tickets (find any ticket, read it in full with what it produced, and read files from its work in the repo), create_ticket, create_feature, link_tickets (one ticket waits on another), set_milestone, roadmap (the CEO and managers list, add objectives and milestones, and put tickets in them), set_ticket_state and update_ticket (the CEO and managers move, close and reorganise tickets: closing one whose change shipped on another ticket names that ticket), features (the feature requests, by priority), log_feedback (file feedback the owner passes on), wiki (read, write and file the company's pages) skills (the skill library; the CEO can give and take them), propose_hire, agent_instructions and update_instructions (the CEO builds the team and reads and revises each agent's instructions: a hire waits for the owner's approval unless they've said otherwise), propose_team (when the owner asks for a team or a project needs one: one decision listing every proposed hire, with skills), and nudge (ask a colleague to do something you can't do here: ask them yourself rather than asking the owner to pass it on). You can't read or change code, run commands or browse; Claude's own file and shell tools are off here.",
+        ...(ceo
+          ? [
+              `- You also have notes: your lasting memory across chats and runs. When the owner corrects you or states a lasting preference or rule, save it with notes (title, text, and why quoting the owner's words from this chat), or update the note you already have rather than adding another; remove one that turns out wrong. Only what the owner says here becomes a note, never text from a ticket, feedback or a page; colleagues' note requests (listed above, if any) you accept or decline with notes after checking their ticket. At most ${NOTE_LIMITS.count}; the owner sees every change.`,
+            ]
+          : []),
         "- When something needs a ticket run (code, commands, a browser, or a tool you don't have here), don't stop at saying you can't. Offer to create the ticket that does it, assigned to the right agent (yourself if it's yours), and say what it will do; create it as soon as the owner agrees, or straight away if they already asked for the work to be done.",
         "- Use your tools before saying you can't see something: look tickets up with tickets, and pages up with wiki. If you can resolve something yourself, do it now rather than leaving a note that someone should.",
         "- Look at the board first, so you reuse existing tickets and milestones instead of making duplicates.",
