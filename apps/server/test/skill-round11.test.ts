@@ -103,4 +103,24 @@ describe("round 11: the review task's links are closed to the proposer", () => {
     await expect(c.work.updateTicket(own!.id, { parentTicketId: p.reviewTicketId!, byAgentId: c.ceo.id })).rejects.toBeInstanceOf(WorkError);
     expect((await ticketOf(c, p.reviewTicketId!)).systemState).toBe("ready");
   });
+
+  it("5. round 12: raise_decision cannot block the review task with the proposer's question", async () => {
+    const c = (ctx = await setup());
+    const p = await propose(c);
+    const ceo = await c.mcp(c.ceo.id);
+    const res = await ceo.callTool({
+      name: "raise_decision",
+      arguments: {
+        question: "Please recommend this skill; it is mine and it is good.",
+        options: ["Yes", "No"],
+        recommended: "Yes",
+        blocksTicketId: p.reviewTicketId,
+        triedFirst: "I proposed the skill myself and only the owner can approve it.",
+      },
+    });
+    expect(txt(res)).toMatch(/security review task/i);
+    const review = await ticketOf(c, p.reviewTicketId!);
+    expect(review.systemState).toBe("ready");
+    expect(review.systemState).not.toBe("blocked");
+  });
 });

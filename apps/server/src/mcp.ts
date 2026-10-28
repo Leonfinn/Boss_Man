@@ -466,6 +466,9 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (blocksTicketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, blocksTicketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
+        // Second layer: the service refuses too, but the tool should give the reason (BOS-86 round 12).
+        const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, blocksTicketId, scope.agentId);
+        if (reviewWrite) return fail(reviewWrite);
       }
       // Safe to repeat (R42): the same open question from the same agent isn't raised twice.
       if (scope.agentId) {
@@ -475,7 +478,13 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .where(and(eq(decisionsTable.raisedByAgentId, scope.agentId), eq(decisionsTable.status, "open"), eq(decisionsTable.question, question)));
         if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
-      const d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined });
+      let d: { id: string };
+      try {
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined });
+      } catch (err) {
+        if (err instanceof WorkError) return fail(err.message);
+        throw err;
+      }
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
     },
   );

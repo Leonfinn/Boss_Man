@@ -27,6 +27,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { APPLY_CHANGE, REVERT_CHANGE } from "./retro.js";
@@ -787,8 +788,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           })
           .returning();
         if (input.blocksTicketId) {
-          await tx.insert(ticketDependencies).values({ blockedTicketId: input.blocksTicketId, blockerDecisionId: row!.id });
-          await tx.update(tickets).set({ systemState: "blocked", lastActivityAt: new Date() }).where(eq(tickets.id, input.blocksTicketId));
+          // The same guarded writer every other link uses (BOS-86 round 12): a proposer can't block
+          // the Security Reviewer's task with a question, on any route.
+          await addTicketDependency(tx as unknown as Db, {
+            companyId: input.companyId,
+            blockedTicketId: input.blocksTicketId,
+            blockerDecisionId: row!.id,
+            actor: { type: "agent", agentId: input.agentId },
+            hold: true,
+            now,
+          });
         }
         return row!;
       });

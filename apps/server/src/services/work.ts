@@ -5,16 +5,10 @@ import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { reviewWaits } from "./review-kinds.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
+import { addTicketDependency, WorkError } from "./ticket-links.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
-export class WorkError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+export { WorkError };
 
 type TicketPatch = {
   /** Who made the change, for the activity log (the assigner on an assignment). */
@@ -301,8 +295,12 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
 
     /** The parent waits on its new sub-task; the existing unblocked note hands it back when the sub-task is done. */
     async waitOnSubtask(parent: typeof tickets.$inferSelect, childId: string, byAgentId: string | null = null) {
-      await assertLinkWriteAllowed(parent.companyId, [parent.id, childId], byAgentId);
-      await db.insert(ticketDependencies).values({ blockedTicketId: parent.id, blockerTicketId: childId });
+      await addTicketDependency(db, {
+        companyId: parent.companyId,
+        blockedTicketId: parent.id,
+        blockerTicketId: childId,
+        actor: { type: "agent", agentId: byAgentId },
+      });
       if (parent.systemState === "ready" || parent.systemState === "in_progress") await this.updateTicket(parent.id, { state: "blocked", overLimit: true, byAgentId });
     },
 
@@ -450,7 +448,6 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (!!blocker.ticketId === !!blocker.engagementId) throw new WorkError(422, "Give exactly one blocker: a ticket or an engagement.");
       if (blocker.ticketId) {
         if (blocker.ticketId === ticketId) throw new WorkError(422, "A ticket can't block itself.");
-        await assertLinkWriteAllowed(t.companyId, [ticketId, blocker.ticketId], byAgentId);
         const [b] = await db.select().from(tickets).where(and(eq(tickets.id, blocker.ticketId), eq(tickets.companyId, t.companyId)));
         if (!b) throw new WorkError(422, "The blocking ticket must be in the same company. Use an engagement to wait on another company.");
         if (await this.wouldCycle(ticketId, blocker.ticketId)) throw new WorkError(422, "That would make the tickets wait on each other.");
@@ -458,12 +455,15 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         const [e] = await db.select().from(engagements).where(and(eq(engagements.id, blocker.engagementId!), eq(engagements.requesterCompanyId, t.companyId)));
         if (!e) throw new WorkError(422, "Only an engagement this company requested can block its tickets.");
       }
-      const [dep] = await db
-        .insert(ticketDependencies)
-        .values({ blockedTicketId: ticketId, blockerTicketId: blocker.ticketId ?? null, blockerEngagementId: blocker.engagementId ?? null })
-        .returning();
+      const dep = await addTicketDependency(db, {
+        companyId: t.companyId,
+        blockedTicketId: ticketId,
+        blockerTicketId: blocker.ticketId ?? null,
+        blockerEngagementId: blocker.engagementId ?? null,
+        actor: { type: "agent", agentId: byAgentId },
+      });
       await record(db, { companyId: t.companyId, ticketId, kind: "dependency", summary: blocker.ticketId ? `Now waits on ticket ${blocker.ticketId}` : `Now waits on engagement ${blocker.engagementId}`, at: now() });
-      return dep!;
+      return dep;
     },
 
     /** True if `blocker` already (transitively) waits on `ticket`. */
