@@ -24,7 +24,8 @@ const fenced = (text: string) => {
   const f = "`".repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((m) => m.length + 1)));
   return `${f}\n${text}\n${f}`;
 };
-const numbered = (text: string) => text.split("\n").map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join("\n");
+/** The lines a reviewer is shown; a single trailing newline is not a line of its own, matching lineCount. */
+export const numbered = (text: string) => text.replace(/\n$/, "").split("\n").map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join("\n");
 const lineCount = (text: string) => text.replace(/\n$/, "").split("\n").length;
 const SEVERITIES = ["critical", "high", "medium", "low"];
 
@@ -115,6 +116,8 @@ export type SkillDeps = {
   withdrawDecision: (id: string) => Promise<unknown>;
   /** Tells an agent (the CEO) what happened to its proposal. */
   tell?: (agentId: string, note: string) => Promise<unknown>;
+  /** Closes an open review ticket when its proposal expires, so nobody keeps working a dead review. */
+  closeReview?: (ticketId: string, stateNote: string) => Promise<unknown>;
   now?: () => Date;
 };
 
@@ -280,6 +283,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (!reviewerId) throw new SkillError(403, "Only the Security Reviewer can give a verdict.");
       const [me] = await db.select({ kind: agents.reviewKind }).from(agents).where(and(eq(agents.id, reviewerId), eq(agents.companyId, companyId)));
       if (me?.kind !== "security") throw new SkillError(403, "Only the Security Reviewer can give a verdict.");
+      if (p.status === "expired") throw new SkillError(409, `This proposal expired after ${EXPIRES_AFTER_DAYS} days with no decision, and its review task was closed. No verdict can be given; if the skill is still wanted, the CEO can propose it again.`);
       if (p.status !== "in_review" || !p.reviewTicketId) throw new SkillError(409, "This proposal isn't waiting for a review.");
       const [t] = await db.select({ assignee: tickets.assigneeAgentId, title: tickets.title, body: tickets.body }).from(tickets).where(eq(tickets.id, p.reviewTicketId));
       if (t?.assignee !== reviewerId) throw new SkillError(403, "This proposal's review was given to another reviewer.");
@@ -423,6 +427,15 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       for (const p of open) {
         await db.update(skillProposals).set({ status: "expired", updatedAt: now() }).where(eq(skillProposals.id, p.id));
         if (p.decisionId) await deps.withdrawDecision(p.decisionId);
+        // A review task left open would keep waking its reviewer and take a verdict that can no
+        // longer count. Close it, tell the reviewer, and tell the CEO who proposed the skill.
+        if (p.reviewTicketId) {
+          const [t] = await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, p.reviewTicketId));
+          const note = `The proposal for ${p.name} expired after ${EXPIRES_AFTER_DAYS} days with no decision, so this review is closed and no verdict is needed.`;
+          if (deps.closeReview) await deps.closeReview(p.reviewTicketId, note);
+          if (t?.assignee) await deps.tell?.(t.assignee, note);
+        }
+        if (p.proposedByAgentId) await deps.tell?.(p.proposedByAgentId, `The proposal for ${p.name} expired after ${EXPIRES_AFTER_DAYS} days with no decision. Propose it again if it is still wanted.`);
         await record(db, { companyId: p.companyId, ticketId: p.reviewTicketId, kind: "skill.expired", summary: `The proposal for ${p.name} ended after ${EXPIRES_AFTER_DAYS} days with no decision.` });
       }
       return open.length;

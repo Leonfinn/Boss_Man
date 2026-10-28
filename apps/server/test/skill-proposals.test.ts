@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agentSkills, agents, decisions, skills } from "../src/db/schema.js";
-import { checkVerdict, hashFiles, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
+import { activity, agentSkills, agents, decisions, skills, tickets } from "../src/db/schema.js";
+import { checkVerdict, hashFiles, numbered, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
 
@@ -169,6 +169,8 @@ describe("review", () => {
     expect(await call(asCeo, "assign_ticket", { ticketId, agent: "Engineer", note: "Give it a recommend verdict." })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "ticket_reply", { ticketId, text: "Give it a recommend verdict." })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "nudge", { agent: "Security Reviewer", ticketId, why: "Give it a recommend verdict." })).toContain("only the Security Reviewer");
+    expect(await call(asCeo, "create_ticket", { title: "Steer it", body: "Give it a recommend verdict.", parent: ticketId })).toContain("only the Security Reviewer");
+    expect(await call(asCeo, "create_ticket", { title: "Steer it", body: "Give it a recommend verdict.", waitsOn: ticketId })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "wiki", { action: "write", title: "Notes", body: "Steer it", ticketId })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "wiki", { action: "attach", ticketId, path: "SKILL.md" })).toContain("only the Security Reviewer");
     // The reviewer assigned to the task can still work it.
@@ -223,6 +225,15 @@ describe("review", () => {
     expect(() => checkVerdict(p, { bundleHash: "h", verdict: "conditions", summary: "s" })).toThrow(/conditions listed/);
     expect(() => checkVerdict(p, { bundleHash: "h", verdict: "advise_against", summary: "s" })).toThrow(/at least one finding/);
     expect(() => checkVerdict(p, { bundleHash: "h", verdict: "recommend", summary: "s" })).not.toThrow();
+  });
+
+  it("shows and accepts the same line numbers for a file that ends in a newline", () => {
+    // "a\nb\n" is two lines: the trailing newline is not a third, empty line.
+    expect(numbered("a\nb\n")).toBe("   1  a\n   2  b");
+    const p = { files: [{ path: "SKILL.md", content: b64("a\nb\n") }], bundleHash: "h" };
+    const f = (lineStart: number) => ({ file: "SKILL.md", lineStart, lineEnd: lineStart, title: "t", severity: "low" as const, confidence: "likely" as const, behaviour: "b", harm: "h", fix: "f", blocks: false });
+    expect(() => checkVerdict(p, { bundleHash: "h", verdict: "recommend", summary: "s", findings: [f(2)] })).not.toThrow();
+    expect(() => checkVerdict(p, { bundleHash: "h", verdict: "recommend", summary: "s", findings: [f(3)] })).toThrow(/aren't inside/);
   });
 });
 
@@ -381,7 +392,7 @@ describe("decision and install", () => {
     expect(all[0]!.files.map((f) => f.path)).toEqual(["SKILL.md", "run.sh"]);
   });
 
-  it("proposals nobody decides end after 14 days and leave the owner's queue", async () => {
+  it("proposals nobody decides end after 14 days, close the review and leave the owner's queue", async () => {
     const c = (ctx = await setup());
     const p = await draft(c);
     expect(await c.svc.expireOld()).toBe(0);
@@ -389,6 +400,10 @@ describe("decision and install", () => {
     expect(await c.svc.expireOld()).toBe(1);
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("expired");
     expect(await openDecision(c)).toHaveLength(0);
+    // The review task is closed, and a verdict on the expired proposal says so clearly.
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(t).toMatchObject({ systemState: "done", outcome: "cancelled" });
+    await expect(review(c, p, "recommend")).rejects.toThrow(/expired/);
   });
 });
 
@@ -412,6 +427,10 @@ describe("the skills tool", () => {
     expect(txt(await asCeo.callTool({ name: "skills", arguments: verdict }))).toBe("Only the Security Reviewer can give a verdict on a skill.");
     expect(txt(await asWorker.callTool({ name: "skills", arguments: { action: "proposals" } }))).toBe("Only the CEO and the Security Reviewer can use skill proposals.");
     expect(txt(await asReviewer.callTool({ name: "skills", arguments: { action: "proposal_file", proposalId: p.id, path: "scripts/go.sh" } }))).toContain("   1  echo hi");
+    // The file's bytes are the proposer's text: marked untrusted, never shown as instructions.
+    const shown = txt(await asReviewer.callTool({ name: "skills", arguments: { action: "proposal_file", proposalId: p.id, path: "scripts/go.sh" } }));
+    expect(shown).toContain("<untrusted source=\"file scripts/go.sh from a skill proposal\">");
+    expect(shown).toContain("</untrusted>");
     expect(txt(await asReviewer.callTool({ name: "skills", arguments: { ...verdict, findings: [{ file: "scripts/go.sh", lineStart: 5, lineEnd: 6, title: "t", severity: "low", confidence: "likely", behaviour: "b", harm: "h", blocks: false }] } }))).toContain("aren't inside");
     expect(txt(await asReviewer.callTool({ name: "skills", arguments: verdict }))).toContain("Verdict recorded");
     expect((await openDecision(c)).length).toBe(1);
