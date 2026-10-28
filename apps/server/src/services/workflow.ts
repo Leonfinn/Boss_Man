@@ -186,7 +186,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         if (bounced) g.bounced++;
         waits.set(k, g);
       };
-      // The assigner is whoever the activity row names; the service records none for the owner or Boss Man.
+      // The assigner is the agent the activity row names; none means the owner or Boss Man itself.
       const assigned = await db.select({ ticketId: activity.ticketId, agentId: activity.agentId, at: activity.at }).from(activity).where(and(eq(activity.companyId, companyId), eq(activity.kind, "assigned"), isNotNull(activity.ticketId), gte(activity.at, since))).orderBy(asc(activity.at));
       const ticketIds = [...new Set(assigned.map((a) => a.ticketId!))];
       const allAssigned = ticketIds.length ? await db.select({ ticketId: activity.ticketId, at: activity.at }).from(activity).where(and(inArray(activity.ticketId, ticketIds), eq(activity.kind, "assigned"))).orderBy(asc(activity.at)) : [];
@@ -267,7 +267,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
             p85Ms: sum((c) => c.p85),
             ageing: chain.flatMap((x) => {
               const p85 = cyc(x).p85;
-              const reasons = [...(x.assigneeAgentId ? [] : ["Nobody is assigned"]), ...(x.state === "blocked" ? ["Blocked"] : []), ...(p85 !== null && ageOf(x) > p85 ? ["Older than usual for this role"] : [])];
+              const reasons = [...(x.assigneeAgentId ? [] : ["Nobody is assigned"]), ...(x.state === "blocked" ? ["Blocked"] : []), ...(p85 !== null && startedAt.has(x.id) && ageOf(x) > p85 ? ["Older than usual for this role"] : [])];
               return reasons.length ? [{ id: x.id, ref: ticketRef(company?.prefix, x.number), title: x.title, reasons }] : [];
             }),
           };

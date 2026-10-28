@@ -184,7 +184,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${t.state}, version ${t.version}. Read it again with tickets, then decide.`);
       if (t.assignee === to.id) return fail(`That ticket is already assigned to ${agent}.`);
       try {
-        const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim() });
+        const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim(), byAgentId: scope.agentId });
         return text(`Ticket ${ticketId} is now assigned to ${agent} (version ${u.version}); they are woken with your note.`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -307,7 +307,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn });
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
-      if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id });
+      if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
       return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
     },
   );
@@ -1378,7 +1378,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         assigneeId = a.id;
       } else if (assignee === null) assigneeId = null;
       try {
-        const u = await work.updateTicket(ticketId, { ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}) });
+        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}: ${reason}` });
         return text(`Ticket ${ticketId} updated (version ${u.version}).`);
