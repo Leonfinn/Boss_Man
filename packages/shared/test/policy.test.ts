@@ -571,7 +571,7 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
     expect(tempCleanup(bare)).toBe(false);
   });
 
-  // Fails today: the plan says a command whose only delete is in /tmp is never recommended Deny. Remove `.fails` when that is fixed.
+  // Fails today: the plan says a command whose only delete is in /tmp is never recommended Deny. The fix is tracked in follow-up ticket cd2c2730 (and BOS-165); remove `.fails` when it lands.
   it.fails("never recommends Deny for an install that logs into /tmp (finding 2, known gap)", () => {
     expect(recommendedVerdict(exec("rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1"))).not.toBe("deny");
   });
