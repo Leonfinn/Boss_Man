@@ -11,7 +11,7 @@
 // the agents the alert is about (it may be the one looping), is over its hourly cap, or its wake
 // is dropped; when the company is paused it goes straight to the owner. Nothing is ever dropped:
 // the last rung is always the owner.
-import { and, asc, eq, gt, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { readWatchdogSettings, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
@@ -100,7 +100,14 @@ export function alertLadder(
       .where(and(eq(runs.agentId, ceo.id), gte(runs.startedAt, new Date(raised)), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
       .orderBy(asc(runs.startedAt))
       .limit(1);
-    return run ? Math.min(cap, run.startedAt.getTime() + minutes * 60_000) : cap;
+    // A ticketless CEO run already live at the raise gets the card steered in, so the clock starts at the raise.
+    const [live] = await db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(and(eq(runs.agentId, ceo.id), isNull(runs.ticketId), lt(runs.startedAt, new Date(raised)), or(isNull(runs.endedAt), gte(runs.endedAt, new Date(raised))), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+      .limit(1);
+    const start = live ? raised : run?.startedAt.getTime();
+    return start === undefined ? cap : Math.min(cap, start + minutes * 60_000);
   }
 
   /** Who holds this rung now, or why nobody can. */
