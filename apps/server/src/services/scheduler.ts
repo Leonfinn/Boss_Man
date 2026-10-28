@@ -10,7 +10,7 @@ import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
-import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -849,8 +849,11 @@ export function schedulerService(
       if (to.id === from.id) return { ok: false, error: "That's you." };
       const ticketId = input.ticketId ?? null;
       if (ticketId) {
-        const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
+        const [tk] = await db.select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
         if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
+        // An open skill-review ticket is a gate: the proposal's author must not nudge the reviewer into a verdict.
+        const [review] = await db.select({ id: skillProposals.id }).from(skillProposals).where(and(eq(skillProposals.reviewTicketId, ticketId), eq(skillProposals.status, "in_review")));
+        if (review && from.id !== tk.assigneeAgentId) return { ok: false, error: "This is a security review task: only the Security Reviewer and the owner can write on it. Don't nudge the reviewer about the verdict." };
       }
       // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
       // Master's nudges come only from the watchdog, which has its own hourly cap, so they neither count nor are refused:

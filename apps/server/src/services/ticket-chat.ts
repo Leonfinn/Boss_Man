@@ -103,7 +103,14 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
 
     /** An agent's reply, through the ticket_reply tool. */
     async agentSays(input: { companyId: string; ticketId: string; agentId: string | null; runId: string; text: string }) {
-      await ticket(input.ticketId, input.companyId);
+      const t = await ticket(input.ticketId, input.companyId);
+      // An open skill-review ticket is a gate: only the reviewer assigned to it may write there
+      // (the owner has their own route). The proposer must not be able to talk the reviewer into a verdict.
+      const [review] = await db
+        .select({ id: skillProposals.id })
+        .from(skillProposals)
+        .where(and(eq(skillProposals.reviewTicketId, input.ticketId), eq(skillProposals.status, "in_review")));
+      if (review && input.agentId !== t.assigneeAgentId) throw new TicketChatError(403, "This is a security review task: only the Security Reviewer and the owner can write on it.");
       const [m] = await db
         .insert(ticketMessages)
         .values({ companyId: input.companyId, ticketId: input.ticketId, author: "agent", agentId: input.agentId, runId: input.runId, text: input.text.slice(0, MAX_TEXT) })

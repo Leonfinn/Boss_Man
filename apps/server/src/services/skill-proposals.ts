@@ -281,7 +281,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
      */
     async toOwner(p: Proposal) {
       if (p.status !== "proposed" && p.status !== "awaiting_owner") throw new SkillError(409, "This proposal isn't ready for a decision.");
-      if (p.reviewRequired && (!p.verdict || p.reviewedBundleHash !== p.bundleHash)) throw new SkillError(409, "This skill needs a security review of these exact files before the owner can decide.");
+      if (!p.verdict || p.reviewedBundleHash !== p.bundleHash) throw new SkillError(409, "This skill needs a security review of these exact files before the owner can decide.");
       const names = p.proposedAgentIds.length ? await db.select({ name: agents.name }).from(agents).where(inArray(agents.id, p.proposedAgentIds)) : [];
       const advise = p.verdict === "advise_against";
       const conditional = p.verdict === "conditions";
@@ -342,7 +342,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (answer === SKILL_ADD && conditional) throw new SkillError(400, "The Security Reviewer set conditions; adding it takes the answer that accepts them.");
       if (answer === SKILL_CONDITIONS && !conditional) throw new SkillError(400, "There are no conditions to accept on this skill.");
       if (answer === SKILL_OVERRIDE && !advise) throw new SkillError(400, "There is nothing to override: the reviewer did not advise against this skill.");
-      if (p.reviewRequired && (!p.verdict || p.reviewedBundleHash !== p.bundleHash)) throw new SkillError(409, "This skill has no security verdict for these exact files.");
+      if (!p.verdict || p.reviewedBundleHash !== p.bundleHash) throw new SkillError(409, "This skill has no security verdict for these exact files.");
       const at = now();
       const told = async (note: string) => {
         if (p.proposedByAgentId) await deps.tell?.(p.proposedByAgentId, note);
