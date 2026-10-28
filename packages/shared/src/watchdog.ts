@@ -80,3 +80,23 @@ export const BLOCKED_UNTIL_REASON_MAX = 240;
 /** "Blocked until" may be at most this many days ahead, so a ticket can't hide from the watchdog (BOS-77). */
 export const BLOCKED_UNTIL_MAX_DAYS = 30;
 export const BLOCKED_UNTIL_MAX_MS = BLOCKED_UNTIL_MAX_DAYS * 24 * 3_600_000;
+
+/** Plain-English heading for each logged action, as the owner reads it in the Scrum Master's log and a ticket's activity. A new action kind must have one (the type enforces it). */
+export const WATCHDOG_ACTION_LABEL: Record<WatchdogActionKind, string> = {
+  sweep_wake: "Woke the Scrum Master",
+  nudge: "Nudged",
+  assign: "Assigned",
+  rewake: "Re-woke",
+  chase_review: "Chased a review",
+  snooze: "Snoozed",
+  escalate: "Escalated",
+  raise_decision: "Asked you",
+  owner_reminder: "Reminded you",
+  auto_escalate: "Escalated to the CEO",
+  tripped: "Switched itself off",
+  undo: "Undone",
+  daily_summary: "Sent the daily summary",
+  urgent_alert: "Paged you",
+  alert_hop: "Passed a warning on",
+  alert_resolved: "Settled a warning",
+};
