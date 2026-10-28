@@ -69,7 +69,7 @@ export type PermissionExplanation = { title: string; summary: string; effect: "r
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
 export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string; originalQuestion?: string };
 /** A decision the CEO settled: by advice (advice), or a permission request it answered itself (settled, BOS-111). */
-export type AdvisedDecision = { id: string; companyId: string; question: string; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean } };
+export type AdvisedDecision = { id: string; companyId: string; question: string; about?: Array<{ ticketId: string; ref: string | null; title: string }>; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean } };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 
 export type Decision = {
@@ -97,7 +97,7 @@ export type Decision = {
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
   dueDate: string | null;
-  context?: { type?: string; advice?: Advice; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string }>; output?: string; planText?: string | null; ticketId?: string | null; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; advice?: Advice; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string }>; output?: string; planText?: string | null; ticketId?: string | null; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
@@ -127,8 +127,12 @@ export type Ticket = {
   blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
   /** Agents running on the ticket right now. */
   working?: string[];
+  /** When the earliest of those runs began. */
+  workingSince?: string | null;
   branch: string | null;
   risk: Risk | null;
+  /** Relative size: 1, 2, 3, 5 or 8. */
+  size?: number | null;
   planFirst: boolean;
   plan: string | null;
   planApprovedAt: string | null;
@@ -152,7 +156,10 @@ export type Ticket = {
 };
 export type TicketDetail = Ticket & { ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: string[]; noCode: boolean; stateNote: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
-export type Board = { project: Project; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
+/** A run going now that no card on the board shows (BOS-155). */
+export type UnticketedRun = { id: string; agent: string | null; ticketId: string | null; ticket: string | null; purpose: string | null; origin: string | null; originFrom: string | null; originNote: string | null; wakeNote: string | null; runTicketId: string | null; startedAt: string };
+/** `workingAgents` is the number of agents with a run going, the Dashboard's figure. */
+export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 
 export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null };
 export type FundingStatus = {
@@ -192,6 +199,15 @@ export type RunRow = {
   purpose?: string | null;
   reason?: string | null;
   note?: string | null;
+  /** What started it, kept on the run (BOS-118): "nudge", "wiki upkeep", "owner_chat" and so on. */
+  origin?: string | null;
+  /** A nudge's sender and why, when a nudge started the run. */
+  originFrom?: string | null;
+  originNote?: string | null;
+  /** The wake's own note, which names the tickets a review run is about. */
+  wakeNote?: string | null;
+  /** The ticket it was about without being on it (a nudge that named one). */
+  runTicketId?: string | null;
   /** Tokens over the run, when the agent reported them (R67). */
   inputTokens?: number | null;
   outputTokens?: number | null;

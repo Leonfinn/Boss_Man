@@ -6,10 +6,12 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
+import { VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
+import type { AlertInput } from "./alert-ladder.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate, latestRows } from "./review-kinds.js";
@@ -20,6 +22,12 @@ export type SweepLimits = {
   stallAfterMs: number;
   /** A ready, assigned ticket with no activity for this long counts as forgotten (R82). */
   missedAfterMs: number;
+  /**
+   * An approved ticket whose merge never finished is tried again after this long. It is longer than
+   * the server's wait for a merge check, so a check that is still running is never mistaken for one
+   * that stopped.
+   */
+  mergeMissedAfterMs: number;
   /** An agent is nudged about the same ticket at most once per this long (R82). */
   missedEveryMs: number;
   /** "Keep waiting" holds a stall alert off for this long; if the run is still quiet it is raised again. */
@@ -27,14 +35,22 @@ export type SweepLimits = {
   /** A run whose runner is offline (or never reported it) this long past the stall limit is ended by the server. */
   lostAfterMs: number;
 };
-export const DEFAULT_SWEEP_LIMITS: SweepLimits = { staleAfterMs: 24 * 3_600_000, stallAfterMs: 5 * 60_000, missedAfterMs: 30 * 60_000, missedEveryMs: 4 * 3_600_000, keepWaitingMs: 30 * 60_000, lostAfterMs: 30 * 60_000 };
+export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
+  staleAfterMs: 24 * 3_600_000,
+  stallAfterMs: 5 * 60_000,
+  missedAfterMs: 30 * 60_000,
+  mergeMissedAfterMs: VERIFY_ASK_TIMEOUT_MS + 5 * 60_000,
+  missedEveryMs: 4 * 3_600_000,
+  keepWaitingMs: 30 * 60_000,
+  lostAfterMs: 30 * 60_000,
+};
 // After this many nudges in a day the owner is told instead (R82).
 const MISSED_NUDGES_PER_DAY = 2;
 
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -176,25 +192,28 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     let raised = 0;
     for (const [runId, r] of stalled) {
       const ctx: DecisionContext = { type: "stalled_run", runnerId: r.runnerId!, runId };
-      // The key stays after an answer, so "Keep waiting" silences this run for a while (see above).
-      const rows = await db
-        .insert(decisions)
-        .values({
-          companyId: r.run.companyId,
-          kind: "stalled_run",
-          // No event at all: the runner never began it, most likely lost in a runner restart.
-          question: r.run.lastEventAt
-            ? `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. It may be stuck, or busy with a long command.`
-            : `${r.agentName ?? "An agent"}'s run${r.ticketTitle ? ` on "${r.ticketTitle}"` : ""} never started: the runner hasn't reported it beginning in ${ago(r.idle)}, probably because the runner restarted. Cancel it, then message ${r.agentName ?? "the agent"} on the task to start again.`,
-          options: [KEEP_WAITING, CANCEL_RUN],
-          recommendedOption: r.run.lastEventAt ? KEEP_WAITING : CANCEL_RUN,
-          raisedByAgentId: r.run.agentId,
-          dedupeKey: `stalled:${runId}`,
-          context: ctx,
-        })
-        .onConflictDoNothing()
-        .returning({ id: decisions.id });
-      raised += rows.length;
+      // A stalled run is the Scrum Master's first, then the CEO, then the owner (BOS-119). It goes
+      // on the ladder whether or not the watchdog is switched on; without a Scrum Master it starts at the CEO.
+      const row = opts.alert
+        ? await opts.alert({
+            companyId: r.run.companyId,
+            kind: "stalled_run",
+            // No event at all: the runner never began it, most likely lost in a runner restart.
+            question: r.run.lastEventAt
+              ? `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. It may be stuck, or busy with a long command.`
+              : `${r.agentName ?? "An agent"}'s run${r.ticketTitle ? ` on "${r.ticketTitle}"` : ""} never started: the runner hasn't reported it beginning in ${ago(r.idle)}, probably because the runner restarted. Cancel it, then message ${r.agentName ?? "the agent"} on the task to start again.`,
+            options: [KEEP_WAITING, CANCEL_RUN],
+            recommended: r.run.lastEventAt ? KEEP_WAITING : CANCEL_RUN,
+            from: "scrum_master",
+            duty: true,
+            ticketId: r.run.ticketId,
+            about: [r.run.agentId],
+            raisedByAgentId: r.run.agentId,
+            dedupeKey: `stalled:${runId}`,
+            context: ctx,
+          })
+        : null;
+      if (row) raised++;
     }
     return { open: stalled.size, raised };
   }
@@ -243,20 +262,21 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
           .orderBy(desc(wakes.createdAt));
         if (recent[0] && t.getTime() - recent[0].createdAt.getTime() < limits.missedAfterMs) continue;
         if (recent.length > MISSED_NUDGES_PER_DAY) {
-          const rows = await db
-            .insert(decisions)
-            .values({
-              companyId: ticket.companyId,
-              kind: "question",
-              question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
-              options: ["Got it"],
-              recommendedOption: "Got it",
-              dedupeKey: `review-stall:${r.id}`,
-              context: { type: "question" },
-            })
-            .onConflictDoNothing()
-            .returning({ id: decisions.id });
-          result.gaveUp += rows.length;
+          // The CEO first: stopping or moving a review is beyond the Scrum Master, and the owner
+          // should only see this if the CEO doesn't settle it (BOS-119).
+          const row = await opts.alert({
+            companyId: ticket.companyId,
+            kind: "question",
+            question: `"${ticket.title}" is waiting for ${reviewer.name}'s ${r.kind} review. ${reviewer.name} was woken about it ${recent.length} times in the last day without giving a verdict. Look into it, or move the ticket on yourself.`,
+            options: ["Got it"],
+            recommended: "Got it",
+            from: "ceo",
+            ticketId: ticket.id,
+            about: [agentId],
+            dedupeKey: `review-stall:${r.id}`,
+            context: { type: "question" },
+          });
+          if (row) result.gaveUp++;
           continue;
         }
         await opts.wake({
@@ -287,7 +307,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs))));
+      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.mergeMissedAfterMs))));
     let raised = 0;
     for (const ticket of stuck) {
       const rows = await latestRows(db, ticket.id);
@@ -409,6 +429,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     async run() {
       const t = now();
       const goalChecks = await raiseDueGoalChecks(db, t);
+      await opts.expireSkills?.();
       await opts.endUnconfirmedCancels(t);
       await opts.expireAdvice?.();
       const lost = await lostRuns(t);

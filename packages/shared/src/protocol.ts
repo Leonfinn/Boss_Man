@@ -196,6 +196,9 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+/** How long the runner lets a ticket's check run (R47), and how long the server waits for its answer (a minute longer). */
+export const VERIFY_TIMEOUT_MS = 30 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_TIMEOUT_MS + 60_000;
 
 /** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };

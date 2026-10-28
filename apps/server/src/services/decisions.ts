@@ -11,6 +11,8 @@ import {
   ticketRef,
   recommendedVerdict,
   TEMP_CLEANUP_RULE,
+  WORKING_COPY_RULE,
+  cleanupScope,
   type BlockedTicket,
   alwaysChoices,
   explainPermission,
@@ -25,12 +27,14 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
+import { APPLY_CHANGE, REVERT_CHANGE } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
-import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, wikiPages } from "../db/schema.js";
+import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
 import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
@@ -74,7 +78,7 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
 }
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -82,8 +86,17 @@ export type DecisionContext =
   | { type: "deploy"; deployId: string }
   /** The follow-up after a feature ships: did it move its key result? */
   | { type: "goal_check"; featureId: string }
+  /**
+   * An approved decision whose next step is the owner's own (BOS-122): a deploy whose target has to be
+   * applied by hand. It stays open as a to-do on the owner's queue until they mark it done or the live
+   * commit is confirmed to have changed. `ofDecisionId` names the approval it came from; `steps`, `check`
+   * and `rollback` are shown on the card. `fromCommit` is what ran when it was approved: once the live
+   * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
+   * "A step failed" on the card.
+   */
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string } }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; result?: { result: string; message: string; at: string } }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
@@ -102,7 +115,15 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
-  | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
+  /** A skill the CEO proposed (services/skill-proposals.ts); the owner's answer installs or refuses it. */
+  | { type: "skill"; proposalId: string }
+  | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } }
+  /** A change a workflow retro proposed (workflow_changes); Apply carries it out, Skip leaves things as they are. */
+  | { type: "workflow_change"; changeId: string }
+  /** The check on an applied change (part 4): Keep it or Revert it, with the measured result. */
+  | { type: "workflow_check"; changeId: string };
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -120,6 +141,11 @@ export const SEND_IT_BACK = "Send it back";
 export const CHECK_AGAIN = "Run the check again";
 export const CHECK_SEND_BACK = "Send it back to the agent";
 export const CHECK_SKIP = "Merge without the check";
+/** An owner to-do (BOS-122): the approved deploy still needs the owner's own hand. */
+export const TODO_DONE = "Done, it's applied";
+export const TODO_FAILED = "A step failed";
+/** The approval for a change that has to be applied by hand: approving it leaves a to-do rather than deploying. */
+export const APPROVE_HAND_APPLY = "Approve";
 
 /**
  * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
@@ -145,6 +171,45 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
     .onConflictDoNothing()
     .returning({ id: decisions.id });
 }
+/**
+ * An approved decision whose next step is the owner's own (BOS-122) leaves this to-do open on their
+ * queue instead of clearing the approval and leaving nothing. `key` collapses repeats (one per deploy or
+ * commit); answering it as "Done" or a confirmed commit change closes it. Returns the row, or null when
+ * one is already open for this key.
+ */
+export async function raiseOwnerTodo(
+  db: Db,
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string },
+) {
+  const [row] = await db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: t.question,
+      options: [TODO_DONE, TODO_FAILED],
+      recommendedOption: TODO_DONE,
+      tier: "owner",
+      raisedByAgentId: t.raisedByAgentId ?? null,
+      dedupeKey: t.key,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}) } satisfies DecisionContext,
+    })
+    .onConflictDoNothing()
+    .returning({ id: decisions.id });
+  return row ?? null;
+}
+
+/** Closes the open owner to-do for a key once the owner's step is confirmed done (BOS-122), e.g. by the live commit changing. */
+export async function clearOwnerTodo(db: Db, key: string, summary: string) {
+  const [row] = await db
+    .update(decisions)
+    .set({ status: "answered", answer: summary, answeredAt: new Date(), dedupeKey: null })
+    .where(and(eq(decisions.dedupeKey, key), eq(decisions.status, "open")))
+    .returning({ id: decisions.id, companyId: decisions.companyId });
+  if (row) await record(db, { companyId: row.companyId, kind: "decision_answered", summary, at: new Date() });
+  return row ?? null;
+}
+
 export const DEPLOY = "Deploy";
 export const UPDATE_RUNNERS = "Update runners";
 export const NOT_NOW = "Not now";
@@ -184,18 +249,40 @@ export type AnswerExtra = {
   note?: string;
   /** The owner wrote their own answer to an agent's question instead of picking an option. */
   custom?: boolean;
-  /** The CEO settled it ("handled" advice), so the record and the wake say so instead of "the owner". */
-  by?: "ceo";
+  /** Who answered: "ceo" when the CEO settled it ("handled" advice), else the owner's username (logged with a skill override). */
+  by?: string;
   /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
   handled?: { summary: string; at: string };
   /** The CEO answered with the decisions tool: recorded as theirs, with its note as the reason (BOS-111). */
   settledBy?: { agentId: string };
 };
 
+/** Which checkout a working-copy cleanup deletes in, and what (BOS-120). */
+export type WorkingCopy = { ticketId: string; ref: string | null; branch: string; files: string[] };
+/** The keys of Claude Code's Bash tool input. None of them moves the shell to another folder. */
+const SHELL_INPUT_KEYS = new Set(["command", "description", "timeout", "run_in_background", "dangerouslyDisableSandbox"]);
+/** Files for a card, cut at whole names with a count of the rest, so a long list never looks complete. */
+function fileList(files: string[], max: number): string {
+  let out = "";
+  let shown = 0;
+  for (const f of files) {
+    const next = out ? `${out}, ${f}` : f;
+    if (next.length > max) break;
+    out = next;
+    shown++;
+  }
+  return shown < files.length ? `${out}${out ? ", " : ""}…and ${files.length - shown} more` : out;
+}
+
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
 
-/** How long a temp-file cleanup waits with the CEO before it moves to the owner: the runner gives up at 10 minutes. */
-export const TEMP_CLEANUP_MINUTES = 5;
+/** How long a permission or plan request waits with the CEO before it moves to the owner: the runner gives up at 10 minutes (BOS-111, BOS-119). */
+export const CEO_HANDOVER_MINUTES = 5;
+
+export const SKILL_ADD = "Add the skill";
+export const SKILL_REJECT = "Don't add it";
+export const SKILL_CONDITIONS = "Add it, accepting the reviewer's conditions";
+export const SKILL_OVERRIDE = "Add it anyway, against the advice";
 
 /**
  * "Ask the CEO for advice": where a decision stands with the CEO. Kept in the decision's context so the
@@ -250,6 +337,16 @@ export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
+type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
+/** The workflow retro's side of its decisions (services/retro.ts): a check before Apply, and what to do once answered. */
+export type RetroHook = {
+  problemApplying(changeId: string): Promise<string | null>;
+  answered(changeId: string, answer: string): Promise<unknown>;
+  /** Why Revert can't go ahead now (the value was changed again since), or null. */
+  problemReverting(changeId: string): Promise<string | null>;
+  checked(changeId: string, answer: string): Promise<unknown>;
+  lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
+};
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
 
 /**
@@ -288,7 +385,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
+  let retroHook: RetroHook | null = null;
   let onTeamPlan: TeamPlanHook | null = null;
+  let onSkill: SkillHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
   let maintenance: MaintenanceHook | null = null;
@@ -356,6 +455,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
       if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
+    }
+    if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
+      const problem = await retroHook?.problemApplying(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
+    }
+    if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
+      const problem = await retroHook?.problemReverting(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
     if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !replacedLesson(answer)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
@@ -520,6 +627,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ref !== "ceo" && !r.note) forAgentId = r.agent?.id ?? null;
       }
     }
+    // A plan put to the CEO (not to a named approver) waits on the ladder too, so it stays off the
+    // owner's queue until the CEO passes it on or the 5-minute handover runs out (BOS-119).
+    let ladder: Ladder | undefined;
+    let ceoId: string | undefined;
+    if (tier === "ceo" && !forAgentId) {
+      const [ceo] = await db.select({ id: agents.id, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, runner.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo && !ceo.paused) {
+        ceoId = ceo.id;
+        const since = now().toISOString();
+        ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: t?.id ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: "the plan is the CEO's to approve" }] };
+      } else tier = "owner";
+    }
     const [row] = await db
       .insert(decisions)
       .values({
@@ -532,11 +651,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         tier,
         forAgentId,
         dedupeKey: `permission:${event.requestId}`,
-        context: { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan },
+        context: { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan, ...(ladder ? { ladder } : {}) },
       })
       .onConflictDoNothing()
       .returning({ id: decisions.id, question: decisions.question });
-    if (row && tier === "ceo") await tellCeo(runner.companyId, row.question, forAgentId ?? undefined);
+    if (row && ladder && ceoId && wake)
+      await wake({
+        agentId: ceoId,
+        reason: "decision",
+        priority: 3,
+        note: [
+          `A plan is waiting for you (decision ${row.id}): ${row.question}`,
+          "Approve it to let the agent start building, or send it back with what to change.",
+          "Answer with the decisions tool (action answer). If only the owner can settle it, escalate it to them (action escalate).",
+          `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
+        ].join("\n").slice(0, 4000),
+      });
+    else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question, forAgentId ?? undefined);
     return { outcome: tier, rule: "Plans are approved before work starts", decisionId: row?.id ?? null };
   }
 
@@ -586,16 +717,39 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const explain = explainPermission(info, agent?.name ?? "An agent");
       // A CEO never approves its own request: those go to the owner.
       let tier = outcome === "ceo" && agent?.role === "ceo" ? "owner" : outcome;
-      // Temp-file cleanup (BOS-111) waits with the CEO on the alert ladder, so it stays off the owner's
-      // queue and notifications, and moves to the owner if the CEO doesn't settle it in time or escalates it.
+      // Any request the rules send to the CEO waits with the CEO on the alert ladder (BOS-119), so it
+      // stays off the owner's queue and notifications and moves to the owner if the CEO doesn't settle
+      // it in time or escalates it. Permission requests get a short handover: the runner denies at 10 minutes.
       let ladder: Ladder | undefined;
       let ceoId: string | undefined;
-      if (tier === "ceo" && rule === TEMP_CLEANUP_RULE) {
+      // Deletes in the working copy (BOS-120) go the same way, but only when the run has a checkout.
+      // Paths are relative to where the shell starts, and the runner doesn't say where that is, so
+      // two things must hold. The runner reported (run.workspace) that it started this run in its
+      // ticket's own worktree, and that record gives the branch; a review copy or a run with no
+      // worktree sends none. And the tool input has only Claude Code's Bash keys: an allow-list,
+      // because any other key (opencode's workdir, codex's cwd, one we don't know) could point the
+      // command somewhere else (BOS-120 adversarial review).
+      let workingCopy: WorkingCopy | undefined;
+      if (tier === "ceo" && rule === WORKING_COPY_RULE) {
+        const raw = (event.rawInput ?? {}) as Record<string, unknown>;
+        const files = Object.keys(raw).every((k) => SHELL_INPUT_KEYS.has(k)) ? (cleanupScope(typeof raw["command"] === "string" ? raw["command"] : "")?.workingCopy ?? []) : [];
+        const [ws] = run?.ticketId && files.length
+          ? await db.select({ payload: runnerEvents.payload }).from(runnerEvents).where(and(eq(runnerEvents.runnerId, runner.id), eq(runnerEvents.type, "run.workspace"), sql`(${runnerEvents.payload}->>'runId') = ${event.runId}`, sql`(${runnerEvents.payload}->>'ticketId') = ${run.ticketId}`)).orderBy(desc(runnerEvents.seq)).limit(1)
+          : [];
+        const branch = (ws?.payload as { branch?: unknown } | undefined)?.branch;
+        const [t] = ws && typeof branch === "string"
+          ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).innerJoin(companies, eq(companies.id, tickets.companyId)).where(and(eq(tickets.id, run!.ticketId!), eq(tickets.companyId, runner.companyId)))
+          : [];
+        if (t?.repoUrl && typeof branch === "string") workingCopy = { ticketId: run!.ticketId!, ref: ticketRef(t.prefix, t.number), branch, files };
+        else tier = "owner";
+      }
+      if (tier === "ceo") {
         const [ceo] = await db.select({ id: agents.id, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, runner.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
         if (ceo && !ceo.paused) {
           ceoId = ceo.id;
           const since = now().toISOString();
-          ladder = { rung: "ceo", since, minutes: TEMP_CLEANUP_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: "temp-file cleanup goes to the CEO first" }] };
+          const why = workingCopy ? "deletes in the agent's working copy go to the CEO first" : rule === TEMP_CLEANUP_RULE ? "temp-file cleanup goes to the CEO first" : `the rule "${rule}" sends it to the CEO`;
+          ladder = { rung: "ceo", since, minutes: CEO_HANDOVER_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why }] };
         } else tier = "owner";
       }
       // Standing rules are the owner's call, never an agent's.
@@ -606,13 +760,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .values({
           companyId: runner.companyId,
           kind: "permission",
-          question: `${explain.title}. ${explain.summary}`,
+          // Which checkout and which files, on every card the CEO or the owner sees (BOS-120).
+          question: `${explain.title}. ${explain.summary}${workingCopy ? ` In ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 400)}.` : ""}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
-          recommendedOption: recommendedVerdict(info) === "deny" ? DENY : ALLOW,
+          // The same allow-list as everywhere else: build output is Allow, source or anything else is
+          // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).
+          recommendedOption: recommendedVerdict(info) === "allow" ? ALLOW : DENY,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
-          context: { ...context, rule, ...(ladder ? { tempCleanup: true, ladder } : {}) },
+          // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
+          context: { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) },
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
@@ -625,11 +783,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           note: [
             `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
             `Command: ${explain.command ?? ""}`,
-            "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
-            "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
-            "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
+            ...(workingCopy
+              ? [
+                  `Its deletes are plain relative paths in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 1000)}. It has no cd. Any other deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner.`,
+                  "Boss Man can't see the runner's files: if a folder on one of those paths is a symlink, the delete follows it out of the checkout. It recommends Allow only for build output (dist, node_modules and the like). Allow it when the paths are the agent's own throwaway files (a probe or test file it made, build output such as dist or node_modules) and its ticket explains them.",
+                  "Deny it, or escalate it to the owner (decisions tool, action escalate), if it deletes source folders or files the ticket doesn't account for, or anything you can't explain.",
+                ]
+              : rule === TEMP_CLEANUP_RULE
+                ? [
+                    "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
+                    "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
+                    "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
+                  ]
+                : [
+                    "A company rule sends it to you rather than the owner. Allow it if you can vouch for it, or deny it if not; if only the owner can settle it (a secret, host access, sign-off, an owner-only choice), escalate it to them (decisions tool, action escalate).",
+                  ]),
             "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
-            `If you don't answer within ${TEMP_CLEANUP_MINUTES} minutes it goes to the owner.`,
+            `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
           ].join("\n").slice(0, 4000),
         });
       } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
@@ -651,8 +821,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           })
           .returning();
         if (input.blocksTicketId) {
-          await tx.insert(ticketDependencies).values({ blockedTicketId: input.blocksTicketId, blockerDecisionId: row!.id });
-          await tx.update(tickets).set({ systemState: "blocked", lastActivityAt: new Date() }).where(eq(tickets.id, input.blocksTicketId));
+          // The same guarded writer every other link uses (BOS-86 round 12): a proposer can't block
+          // the Security Reviewer's task with a question, on any route.
+          await addTicketDependency(tx as unknown as Db, {
+            companyId: input.companyId,
+            blockedTicketId: input.blocksTicketId,
+            blockerDecisionId: row!.id,
+            actor: { type: "agent", agentId: input.agentId },
+            hold: true,
+            now,
+          });
         }
         return row!;
       });
@@ -726,12 +904,35 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       maintenance = hook;
     },
 
+    setRetroHook(hook: RetroHook) {
+      retroHook = hook;
+    },
+
     setAgentHook(hook: AgentDecisionHook) {
       onAgentDecision = hook;
     },
 
     setTeamPlanHook(hook: TeamPlanHook) {
       onTeamPlan = hook;
+    },
+
+    setSkillHook(hook: SkillHook) {
+      onSkill = hook;
+    },
+
+    /** The owner's call on a proposed skill. One open decision per proposal. */
+    async raiseSkill(input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }) {
+      const [row] = await db
+        .insert(decisions)
+        .values({ companyId: input.companyId, kind: "skill", tier: "owner", question: input.question, options: input.options, recommendedOption: input.recommended, raisedByAgentId: input.agentId, dedupeKey: `skill:${input.proposalId}`, context: { type: "skill", proposalId: input.proposalId } })
+        .onConflictDoNothing()
+        .returning();
+      return row ?? null;
+    },
+
+    /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
+    async withdraw(id: string) {
+      await db.update(decisions).set({ status: "withdrawn", answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
     },
 
     setLoopHooks(hooks: LoopHooks) {
@@ -853,8 +1054,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
       // The ticket a card is about: what it holds up, plus the ticket named in its context (which may be done, or hold nothing up).
       const aboutIds = (d: typeof decisions.$inferSelect): string[] => {
-        const own = (d.context as { ticketId?: unknown }).ticketId;
-        return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : [])])];
+        const c = d.context as DecisionContext;
+        const own = (c as { ticketId?: unknown }).ticketId;
+        // A hire lists the tickets that wait for the new agent.
+        const hireFor = c.type === "hire" ? (c.proposal.forTickets ?? []).filter((id) => UUID.test(id)) : [];
+        return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : []), ...hireFor])];
       };
       const wantedAbout = [...new Set(open.flatMap(({ d }) => aboutIds(d)))];
       const aboutRows = wantedAbout.length
@@ -888,7 +1092,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
-      const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
+      // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).
+      const sorted = rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       return Promise.all(
         sorted.map(async (r) => {
           const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
@@ -1043,19 +1248,52 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(ne(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' in ('reissued', 'handled')`, sql`(${decisions.context}->'advice'->>'at')::timestamptz > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.createdAt))
         .limit(20);
-      // Permission requests the CEO settled (BOS-111): what was allowed or denied, and why.
+      // Anything the CEO or a plan approver settled with the decisions tool, whatever its kind (BOS-111, BOS-119).
       const permissions = await db
         .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context, answer: decisions.answer })
         .from(decisions)
-        .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
+        .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
+      // Alerts the Scrum Master settled from the watchdog tool: alert_resolved records who and why (BOS-119).
+      const resolved = await db
+        .select({ reason: watchdogActions.reason, actorAgentId: watchdogActions.actorAgentId, after: watchdogActions.after, createdAt: watchdogActions.createdAt })
+        .from(watchdogActions)
+        .where(and(eq(watchdogActions.kind, "alert_resolved"), sql`${watchdogActions.createdAt} > ${since.toISOString()}::timestamptz`))
+        .orderBy(desc(watchdogActions.createdAt))
+        .limit(50);
+      const resolvedIds = [...new Set(resolved.map((r) => (r.after as { decisionId?: string } | null)?.decisionId).filter((x): x is string => !!x))];
+      const resolvedRows = resolvedIds.length ? await db.select().from(decisions).where(inArray(decisions.id, resolvedIds)) : [];
+      const resolvedById = new Map(resolvedRows.map((d) => [d.id, d]));
+      const actorIds = [...new Set(resolved.map((r) => r.actorAgentId).filter((x): x is string => !!x))];
+      const actorNames = new Map(actorIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, actorIds))).map((a) => [a.id, a.name]) : []);
+      // The ticket each card was about: the one in its context, or else the one its run was working on.
+      const runIds = [...new Set([...rows, ...permissions, ...resolvedRows].flatMap((r) => { const c = r.context as { ticketId?: unknown; runId?: unknown }; return typeof c.ticketId !== "string" && typeof c.runId === "string" ? [c.runId] : []; }))];
+      const runTicket = new Map(runIds.length ? (await db.select({ id: runs.id, ticketId: runs.ticketId }).from(runs).where(inArray(runs.id, runIds))).map((r) => [r.id, r.ticketId]) : []);
+      const ticketIdOf = (c: unknown) => { const x = c as { ticketId?: unknown; runId?: unknown }; return typeof x.ticketId === "string" ? x.ticketId : typeof x.runId === "string" ? (runTicket.get(x.runId) ?? null) : null; };
+      const ticketIds = [...new Set([...rows, ...permissions, ...resolvedRows].flatMap((r) => ticketIdOf(r.context) ?? []))];
+      const found = ticketIds.length
+        ? await db.select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(inArray(tickets.id, ticketIds))
+        : [];
+      const aboutOf = (r: { companyId: string; context: unknown }) => {
+        const id = ticketIdOf(r.context);
+        const t = found.find((f) => f.id === id);
+        return t && t.companyId === r.companyId ? [{ ticketId: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) }] : [];
+      };
+      const alreadyListed = new Set(permissions.map((r) => r.id));
+      const fromAlerts = resolved.flatMap((r) => {
+        const id = (r.after as { decisionId?: string } | null)?.decisionId;
+        const d = id ? resolvedById.get(id) : undefined;
+        if (!id || !d || alreadyListed.has(id)) return [];
+        return [{ id, companyId: d.companyId, question: d.question.split("\n")[0]!.slice(0, 300), about: aboutOf(d), settled: { by: (r.actorAgentId && actorNames.get(r.actorAgentId)) || "the team", answer: d.answer ?? "Settled", note: r.reason, command: null, tempCleanup: false } }];
+      });
       return [
-        ...rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! })),
+        ...rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)!, about: aboutOf(r) })),
         ...permissions.map((r) => {
           const ctx = r.context as Extract<DecisionContext, { type: "permission" }>;
-          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), settled: { by: ctx.settled!.name, answer: r.answer ?? "", note: ctx.settled!.note, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true } };
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), about: aboutOf(r), settled: { by: ctx.settled?.name ?? "the team", answer: r.answer ?? "", note: ctx.settled?.note ?? null, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true, ...(ctx.workingCopy ? { workingCopy: true } : {}) } };
         }),
+        ...fromAlerts,
       ];
     },
 
@@ -1152,7 +1390,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "deploy") {
         await onDeploy?.(ctx.deployId, answer === "Approve");
       } else if (ctx.type === "self_deploy") {
-        if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
+        if (ctx.infra && answer === APPROVE_HAND_APPLY) {
+          // The change touches deployment files, so Boss Man can't deploy it. Approval doesn't clear it:
+          // it leaves an owner to-do with the steps, the check and the rollback (BOS-122).
+          await raiseOwnerTodo(db, {
+            companyId: d.companyId,
+            question: `"${d.question.split("\n\n")[0]}" was approved. It's waiting for you to apply it by hand on the machine that runs Boss Man.`,
+            key: `owner-todo:self-deploy:${ctx.commit}`,
+            steps: ctx.handSteps?.length ? ctx.handSteps : ["Apply the approved change by hand on the server that runs Boss Man."],
+            check: ctx.check,
+            rollback: ctx.rollback,
+            ofDecisionId: id,
+            raisedByAgentId: d.raisedByAgentId,
+            target: ctx.target,
+            commit: ctx.commit,
+            fromCommit: ctx.fromCommit,
+          });
+        } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
           try {
             await selfDeploy!.send(ctx, id);
           } catch (err) {
@@ -1161,11 +1415,41 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             throw new AnswerError(`The request could not be written for the host deployer: ${(err as Error).message}`);
           }
         }
+      } else if (ctx.type === "owner_todo") {
+        // The approved deploy's hand-apply to-do (BOS-122). Only "Done" clears it: "A step failed" means
+        // the change isn't applied yet, so the card stays on the owner's queue. Keep what the owner said
+        // so it shows on the card, and tell someone who can help: the agent that raised it is woken below;
+        // a to-do raised by the system itself goes to the CEO.
+        if (answer === TODO_FAILED) {
+          const note = (extra.note ?? "").trim() || "No details given.";
+          await db
+            .update(decisions)
+            .set({ status: "open", answer: null, answeredAt: null, context: { ...ctx, lastFailure: { note, at: now().toISOString() } } })
+            .where(eq(decisions.id, id));
+          if (!d.raisedByAgentId && wake) {
+            const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
+            if (ceo) {
+              await wake({
+                agentId: ceo.id,
+                reason: "decision",
+                note: `The owner tried to apply an approved change by hand and a step failed: ${note} The "Waiting for you" card is still on their queue: "${d.question}". Work out what went wrong, fix what you can, and either tell the owner on the ticket or raise a decision with the next step.`,
+              });
+            }
+          }
+        }
       } else if (ctx.type === "maintenance") {
         await maintenance?.answered(answer);
       } else if (ctx.type === "team_plan") {
         if (answer === TEAM_HIRE) {
           await onTeamPlan?.(ctx, d.companyId, [...new Set(extra.picks ?? ctx.hires.map((_, i) => i))]);
+        }
+      } else if (ctx.type === "skill") {
+        try {
+          await onSkill?.(ctx, d.companyId, answer, extra.by ?? "the owner");
+        } catch (err) {
+          // Not an expected refusal: keep the question open so the answer can be given again.
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          throw err;
         }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
         await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
@@ -1193,6 +1477,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
+        await retroHook?.lessonAnswered(id, answer, extra.note);
+      } else if (ctx.type === "workflow_change") {
+        await retroHook?.answered(ctx.changeId, answer);
+      } else if (ctx.type === "workflow_check") {
+        await retroHook?.checked(ctx.changeId, answer);
       } else if (ctx.type === "lesson_replace") {
         await answerLessonReplace(db, d, ctx, answer, ownWords, extra.note);
       } else if (ctx.type === "budget_limit") {
@@ -1211,7 +1500,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Tickets this decision blocked can move again.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
-      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${d.question}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
+      // The activity line is cut at 300 characters, so a long permission card is shortened here to keep the answer and reason in it.
+      const asked = settled && d.question.length > 120 ? `${d.question.slice(0, 119)}…` : d.question;
+      await record(db, { companyId: d.companyId, ticketId: freed[0]?.ticketId, kind: "decision_answered", summary: settled ? `${settled.name} settled "${asked}": ${answer}.${settled.note ? ` Reason: ${settled.note}` : ""}` : `${extra.by === "ceo" ? "The CEO settled" : "Owner answered"} "${d.question}": ${answer}`, at: now() });
       let unblocked: Array<typeof tickets.$inferSelect> = [];
       if (freed.length > 0) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
@@ -1224,7 +1515,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // A rule proposal answered with a button needs nothing more from the CEO.
       if (wake && d.kind === "question" && d.raisedByAgentId && (ctx.type !== "rule_proposal" || ownWords) && !(ctx.type === "lesson_replace" && ownWords)) {
         const onTicket = unblocked.find((t) => t.assigneeAgentId === d.raisedByAgentId) ?? unblocked[0];
-        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${extra.by === "ceo" || settled ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}` });
+        await wake({ agentId: d.raisedByAgentId, reason: "decision answered", ticketId: onTicket?.id ?? null, note: `${settled ? `${settled.name} settled` : extra.by === "ceo" ? "The CEO settled" : "The owner answered"} your question "${d.question}": ${answer}${extra.note ? ` — their note: ${extra.note}` : ""}` });
       }
       for (const t of unblocked) {
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });

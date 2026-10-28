@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, notifications, projects, tickets, wakes } from "../src/db/schema.js";
+import { agents, checkResults, notifications, projects, tickets, wakes } from "../src/db/schema.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -149,6 +149,7 @@ describe("check results wake the right agent (R86)", () => {
     expect(failed).toEqual([expect.objectContaining({ agentId: c.worker.id, ticketId: c.ticket.id, reason: "ci failed", priority: 3, note: expect.stringContaining("ci/build") })]);
     expect(failed[0]!.note).not.toContain("ci/lint");
     expect(await c.state()).toMatchObject({ systemState: "in_progress", pullRequestCi: `${HEAD}:failed` });
+    expect(await c.db.select().from(checkResults)).toEqual([expect.objectContaining({ ticketId: c.ticket.id, sha: HEAD, kind: "ci", passed: false, detail: "ci/build" })]);
 
     // Back in review on the same commit: the same result isn't told again.
     await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, c.ticket.id));
@@ -161,5 +162,6 @@ describe("check results wake the right agent (R86)", () => {
     const [ceo] = await c.db.select().from(agents).where(eq(agents.role, "ceo"));
     const passed = (await c.db.select().from(wakes)).filter((w) => w.reason === "ci passed");
     expect(passed).toEqual([expect.objectContaining({ agentId: ceo!.id, ticketId: c.ticket.id, note: expect.stringContaining("Required status check is not passing") })]);
+    expect((await c.db.select().from(checkResults).orderBy(checkResults.at)).map((r) => r.passed)).toEqual([false, true]);
   });
 });

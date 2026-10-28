@@ -1,5 +1,5 @@
 {
-  "id": "c40bf0a7-7d92-4db2-adc8-5793fc387137",
+  "id": "2180301a-ef10-4140-9c04-747c8c3f61d9",
   "prevId": "97f03470-0fb6-4fe9-9747-fac90408db16",
   "version": "7",
   "dialect": "postgresql",
@@ -1513,18 +1513,6 @@
         "answered_at": {
           "name": "answered_at",
           "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "stale_at": {
-          "name": "stale_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "stale_reason": {
-          "name": "stale_reason",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         }
@@ -6725,12 +6713,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "state_note_stale_at": {
-          "name": "state_note_stale_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "number": {
           "name": "number",
           "type": "integer",
@@ -7470,6 +7452,13 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "backoff_steps": {
+          "name": "backoff_steps",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "detail": {
           "name": "detail",

@@ -45,7 +45,7 @@ echo "Connected: $status"
 
 settings="$(docker inspect "$runner" --format '{{.Config.User}} {{json .HostConfig.CapDrop}} {{.HostConfig.Privileged}} {{.HostConfig.NetworkMode}} {{json .HostConfig.SecurityOpt}} {{.HostConfig.PidsLimit}} {{index .Config.Labels "boss-man.launcher"}}')"
 echo "Runner settings: $settings"
-[[ "$settings" == '1000:1000 ["ALL"] false boss-man_default ["no-new-privileges:true"] 1024 1' ]]
+[[ "$settings" == '1000:1000 ["ALL"] false boss-man_default ["no-new-privileges:true"] 4096 1' ]]
 
 # The launcher publishes no ports.
 [[ -z "$(docker compose port launcher 3105 2>/dev/null || true)" ]]

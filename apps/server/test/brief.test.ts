@@ -93,7 +93,7 @@ describe("activity log (R83)", () => {
     await ctx.req("POST", `/api/tickets/${a.id}/messages`, { text: "Please hurry" });
     await c.callTool({ name: "ticket_reply", arguments: { ticketId: a.id, text: "x".repeat(900) } });
     await c.callTool({ name: "raise_decision", arguments: { question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: a.id, triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
-    await c.callTool({ name: "create_ticket", arguments: { title: "Follow-up" } });
+    await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Follow-up" } });
     await c.close();
     const kinds = (await log()).map((r) => r.kind).sort();
     expect(kinds).toEqual(["decision_raised", "dependency", "message", "message", "ticket_created"]);
@@ -220,7 +220,7 @@ describe("CEO brief (R84)", () => {
     await ctx.ticket("Shipped login", { systemState: "done", outcome: "completed", stateNote: "Merged.", stateNoteAt: minsAgo(300), lastActivityAt: minsAgo(300) });
     await ctx.db.insert(decisions).values({ companyId: cid(), kind: "question", question: "Hire a designer?", options: ["Yes", "No"], recommendedOption: "No", tier: "ceo" });
     await ctx.db.insert(decisions).values({ companyId: cid(), kind: "question", question: "Owner-tier thing?", options: ["Yes"], recommendedOption: "Yes", tier: "owner" });
-    await liveRun(ctx.dev.id, null);
+    await liveRun(ctx.dev.id, null, { origin: "deployment waiting" });
     await record(ctx.db, { companyId: cid(), agentId: ctx.ops.id, kind: "message", summary: "Replied: all quiet" });
     const b = await brief(ctx.co.ceo.id, "ceo");
     expect(b).toContain("Tickets: backlog 0, ready 2, in_progress 2, blocked 1, review 1, done 1.");
@@ -233,7 +233,8 @@ describe("CEO brief (R84)", () => {
     expect(b).toMatch(/## Ready but unassigned\n- "Nobody has this"/);
     expect(b).not.toContain("Owner's own");
     expect(b).toContain('"Shipped login" (completed, 5h ago). Note (5h ago): Merged.');
-    expect(b).toContain("- Dev: no ticket");
+    // A ticketless run says what it was doing, not just "no ticket" (BOS-118).
+    expect(b).toContain("- Dev: Deployment waiting");
     expect(b).toContain("all quiet");
   });
 

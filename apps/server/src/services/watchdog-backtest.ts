@@ -6,12 +6,13 @@
 // Approximate, and the report says so: some automatic state changes (a run starting a ticket,
 // a decision blocking or freeing it) leave no "state" row, so they are inferred from run_started,
 // decision_raised and decision_answered rows and from review requests; dependencies that were
-// deleted when they resolved are gone, and scheduled checks other than "carry on" leave no trace.
+// deleted when they resolved are gone. Scheduled checks are read back from the "scheduled a check" and
+// "carry on" activity rows; a check the history doesn't show is the one gap left.
 import { and, asc, eq, gte, inArray, isNotNull } from "drizzle-orm";
 import { ticketRef, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, reviewRequests, runs, ticketDependencies, ticketReviews, tickets, wakes } from "../db/schema.js";
-import { evaluate, ruleLimitMs, type SnapHold, type SnapTicket } from "./watchdog-rules.js";
+import { backoffGapMs, evaluate, type SnapHold, type SnapTicket } from "./watchdog-rules.js";
 
 type State = SnapTicket["state"];
 const STATES = new Set<State>(["backlog", "ready", "in_progress", "blocked", "review", "done"]);
@@ -154,6 +155,23 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
     acts.filter((a) => a.kind === "monitor" && a.summary.includes("to carry on")),
     (a) => a.ticketId,
   );
+  // A scheduled check runs from the row that set it to its time, or to the next row on the ticket's
+  // monitor (cleared, fired, replaced), whichever comes first.
+  // not state: the replay's working data, built fresh on every call.
+  const checks = new Map<string, Array<[number, number]>>();
+  for (const [id, rows] of group(acts.filter((a) => a.kind === "monitor"), (a) => a.ticketId)) {
+    const list: Array<[number, number]> = [];
+    rows.forEach((a, i) => {
+      const m = /scheduled a check for (\d{4}-\d\d-\d\dT[\d:.]+Z)/.exec(a.summary);
+      if (m) list.push([a.at.getTime(), Math.min(new Date(m[1]!).getTime(), rows[i + 1]?.at.getTime() ?? Infinity)]);
+    });
+    checks.set(id, list);
+  }
+  const messagesBy = group(
+    acts.filter((a) => a.kind === "message"),
+    (a) => a.ticketId,
+  );
+  const runStartsBy = group(runRows.filter((r) => r.ticketId), (r) => r.ticketId);
   const wakesBy = group(wakeRows, (w) => w.ticketId);
   const verdictsBy = group(verdicts, (v) => v.ticketId);
   const ownerBy = group(ownerKeys, (d) => d.dedupeKey!.split(":")[1] ?? null);
@@ -162,7 +180,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
     .filter((r) => r.purpose !== "chat" && r.ticketId)
     .map((r) => ({ id: r.id, ticketId: r.ticketId!, agentId: r.agentId, startedAt: r.startedAt, endedAt: r.endedAt, outcome: r.outcome }));
 
-  type Episode = { ticketId: string; rule: WatchdogRule; firstAt: number; dueAt: number; handOffs: number; clearedAt: number | null };
+  type Episode = { ticketId: string; rule: WatchdogRule; firstAt: number; dueAt: number; handOffs: number; clearedAt: number | null; lastAt: number; steps: number; bounces: number };
   // not state: per call.
   const open = new Map<string, Episode>();
   const episodes: Episode[] = [];
@@ -183,6 +201,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
         stateChangedAt: new Date(st.since(t, x.createdAt.getTime())),
         blockedUntil: null,
         scheduled:
+          (checks.get(x.id) ?? []).some(([a, b]) => a <= t && t < b) ||
           (carryOn.get(x.id) ?? []).some((a) => a.at.getTime() <= t && t - a.at.getTime() < 20 * 60_000) ||
           (wakesBy.get(x.id) ?? []).some((w) => w.agentId === who && w.createdAt.getTime() <= t && (w.launchedAt ? w.launchedAt.getTime() > t : w.status === "queued" || w.status === "deferred")),
         awaitingPlan: x.planFirst && (!x.planApprovedAt || x.planApprovedAt.getTime() > t),
@@ -202,13 +221,29 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
       seen.add(key);
       let e = open.get(key);
       if (!e) {
-        e = { ticketId: trip.ticketId, rule: trip.rule, firstAt: t, dueAt: t, handOffs: 0, clearedAt: null };
+        e = { ticketId: trip.ticketId, rule: trip.rule, firstAt: t, dueAt: t, handOffs: 0, clearedAt: null, lastAt: t, steps: 0, bounces: trip.detail.bounces ?? 0 };
         open.set(key, e);
         episodes.push(e);
       }
+      // Another send-back is news: due again now with the back-off reset, as in the live sweep.
+      if (trip.rule === "review_loop" && (trip.detail.bounces ?? 0) > e.bounces) {
+        e.dueAt = t;
+        e.steps = 0;
+      }
+      e.bounces = trip.detail.bounces ?? 0;
       if (e.dueAt <= t && trip.rule !== "owner_decision_waiting") {
+        // Same back-off as the live sweep: the gap doubles unless something happened on the ticket since the last hand-off.
+        const snapT = snapTickets.find((y) => y.id === trip.ticketId)!;
+        const moved =
+          e.handOffs > 0 &&
+          (snapT.stateChangedAt.getTime() > e.lastAt ||
+            (runStartsBy.get(trip.ticketId) ?? []).some((r) => r.startedAt.getTime() > e.lastAt && r.startedAt.getTime() <= t) ||
+            (messagesBy.get(trip.ticketId) ?? []).some((a) => a.at.getTime() > e.lastAt && a.at.getTime() <= t));
+        if (moved) e.steps = 0;
         e.handOffs++;
-        e.dueAt = t + ruleLimitMs(trip.rule, s);
+        e.dueAt = t + backoffGapMs(trip.rule, s, e.steps);
+        e.steps++;
+        e.lastAt = t;
         handed++;
       }
     }
@@ -252,7 +287,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
     caveats: [
       "State history is rebuilt from the activity log; changes made by a run starting, a decision blocking or freeing a ticket, and review requests are inferred, so times can be a few minutes off.",
       "Dependencies on other tickets that were deleted when they resolved are not in the history; such tickets may show as stale_blocked instead of held.",
-      "Scheduled checks other than Boss Man's 'carry on' leave no history, so a ticket waiting on one may be flagged when the live watchdog would not.",
+      "Scheduled checks are read back from the activity log; one that left no row there is missed, so its ticket may be flagged when the live watchdog would not.",
       "'blocked until' did not exist before BOS-59, so no ticket in the history has one.",
       "Parked wakes of paused agents are not in the history, so a ticket whose assignee was paused may show as a plan instead of a stall.",
       "A very long problem list is split over several wakes live (about 30,000 characters each); here every sweep counts as one wake.",

@@ -136,7 +136,7 @@ describe("a ticket that changed nothing", () => {
 
   it("create_ticket and the ticket patch set the flag", async () => {
     const c = await agent();
-    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { project: "Customer app", title: "Research limits", noCode: true } }));
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 3, project: "Customer app", title: "Research limits", noCode: true } }));
     const id = /([0-9a-f-]{36})/.exec(out)![1]!;
     expect((await row(id)).noCode).toBe(true);
     const plain = await ctx.ticket(ctx.withRepo.id);
@@ -149,7 +149,7 @@ describe("a ticket that changed nothing", () => {
     const c = await agent();
     const tool = (await c.listTools()).tools.find((x) => x.name === "create_ticket")!;
     expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toContain("noCode");
-    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { project: "Customer app", title: "Research limits", noCode: true } }));
+    const out = textOf(await c.callTool({ name: "create_ticket", arguments: { size: 3, project: "Customer app", title: "Research limits", noCode: true } }));
     const id = /([0-9a-f-]{36})/.exec(out)![1]!;
     await ctx.db.update(tickets).set({ systemState: "in_progress", assigneeAgentId: ctx.dev.id, branch: "bossman/x" }).where(eq(tickets.id, id));
     expect(await toReview(id)).toContain("is now review");

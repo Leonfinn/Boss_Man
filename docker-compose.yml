@@ -52,7 +52,7 @@ x-runner: &runner
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   mem_limit: ${BOSSMAN_RUNNER_MEMORY:-4g}
-  pids_limit: 1024
+  pids_limit: ${BOSSMAN_RUNNER_PIDS:-4096}
   # An init as PID 1 reaps the zombies agents' tools leave behind.
   init: true
 
@@ -121,6 +121,7 @@ services:
       BOSSMAN_RUNNER_NETWORK: boss-man_default
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
       BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
+      BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
     # Docker's socket, through the socket's own group rather than root.
     group_add: ["${BOSSMAN_DOCKER_GID:-999}"]

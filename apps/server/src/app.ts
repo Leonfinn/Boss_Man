@@ -7,10 +7,10 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, TOOL_KINDS, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, TOOL_KINDS, SENIOR_DEV, ruleFor } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
-import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError } from "@boss-man/shared";
+import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
 import { hashPassword, hashToken, newSessionToken, SESSION_COOKIE, SESSION_DAYS, verifyPassword } from "./auth.js";
 import type { MasterKey } from "./crypto.js";
 import type { Db } from "./db/client.js";
@@ -33,12 +33,12 @@ import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
-import { acceptanceCriteriaSchema } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { ReviewError, reviewService } from "./services/review.js";
-import { effectivePolicy } from "./services/review-policy.js";
+import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
@@ -52,7 +52,10 @@ import { TicketImageError, ticketImagesService } from "./services/ticket-images.
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
+import { RetroError, retroService } from "./services/retro.js";
+import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
+import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
@@ -270,6 +273,13 @@ export async function buildApp(opts: AppOptions) {
     settled: () => scheduler.settled(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    tellRunning: async (text) => {
+      const live = await db.select({ id: runsTable.id, companyId: runsTable.companyId }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
+      for (const r of live) {
+        const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
+        if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
+      }
+    },
     dir: opts.deployerDir,
     drainMinutes: opts.drainMinutes,
     reconnectMs: opts.drainReconnectMs,
@@ -290,6 +300,7 @@ export async function buildApp(opts: AppOptions) {
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
   const dashboard = dashboardService(db, { now: opts.now });
+  const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
@@ -304,7 +315,6 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
   decisionsSvc.setTeamPlanHook((ctx, companyId, picks) => agentsSvc.hireTeam(companyId, picks.map((i) => ctx.hires[i]!), ctx.byAgentId, (agentId, skill) => skillsSvc.give(companyId, skill, agentId, ctx.byAgentId)));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
-  const WINDOW_NAME: Record<string, string> = { five_hour: "5-hour", seven_day: "weekly" };
   async function quotaWatch(fundingSourceId: string) {
     const t = (opts.now ?? (() => new Date()))();
     const status = await funding.status(fundingSourceId, t);
@@ -316,12 +326,13 @@ export async function buildApp(opts: AppOptions) {
       const told = await db.insert(settings).values({ key, value: true }).onConflictDoNothing().returning();
       if (!told.length) continue;
       const hhmm = (d: Date) => d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: OWNER_TZ });
+      const dayAt = (d: Date) => `${d.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: OWNER_TZ })} at ${hhmm(d)}`;
       await notes.notify({
         companyId: null,
         agentId: null,
         level: "flag",
-        title: `${status.source.name}: the ${WINDOW_NAME[window] ?? window.replace(/_/g, " ")} limit runs out at about ${hhmm(f.runsOutAt)}`,
-        body: `It's at ${Math.round(f.utilization * 100)}% and rising about ${Math.round((f.perHour ?? 0) * 100)}% an hour${f.resetsAt ? `, and resets at ${hhmm(f.resetsAt)}` : ""}. Boss Man holds new runs on it once it's nearly used up, until it resets; pause less urgent work, or move agents to another funding source, to keep the important work going.`,
+        title: `${status.source.name}: the limit "${windowLabel(window).name}" runs out about ${dayAt(f.runsOutAt)}`,
+        body: `It's at ${Math.round(f.utilization * 100)}% and rising about ${Math.round((f.perHour ?? 0) * 100)}% an hour${f.resetsAt ? `, and resets ${dayAt(f.resetsAt)}` : ""}. Boss Man holds new runs on it once it's nearly used up, until it resets; pause less urgent work, or move agents to another funding source, to keep the important work going.`,
         link: "#/funding",
       });
     }
@@ -374,6 +385,9 @@ export async function buildApp(opts: AppOptions) {
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
+    expireSkills: () => skillProposals.expireOld(),
+    // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
+    alert: (input) => alerts.raise(input),
   });
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
@@ -382,6 +396,16 @@ export async function buildApp(opts: AppOptions) {
     onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
   });
+  // The CEO's proposed skills (BOS-86): review by the Security Reviewer where required, the owner's decision, then install.
+  const skillProposals = skillProposalsService(db, skillsSvc, {
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    raiseDecision: (input) => decisionsSvc.raiseSkill(input),
+    withdrawDecision: (id) => decisionsSvc.withdraw(id),
+    tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
+    closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
+    now: opts.now,
+  });
+  decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
   const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now, alert: (input) => alerts.raise(input) });
   // The Scrum Master watchdog (BOS-58): its sweep runs on the leader's timer (main.ts), its actions through the Scrum Master's MCP tool.
   const watchdog = watchdogService(db, {
@@ -397,7 +421,10 @@ export async function buildApp(opts: AppOptions) {
     now: opts.now,
     log: (m) => app.log.error(m),
   });
-  const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer) => decisionsSvc.answer(id, answer), watchdog, now: opts.now });
+  // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
+  const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
+  decisionsSvc.setRetroHook(retro);
+  const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra), watchdog, nudge: (input) => scheduler.nudge(input), now: opts.now });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
   const review = reviewService(db, {
@@ -436,7 +463,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images, watchdog, alerts }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -468,6 +495,13 @@ export async function buildApp(opts: AppOptions) {
       secure: opts.secureCookies ?? true,
       expires: expiresAt,
     });
+  }
+
+  /** The signed-in owner's username, for the log. */
+  async function ownerName(req: FastifyRequest) {
+    const token = req.cookies[SESSION_COOKIE];
+    const [row] = token ? await db.select({ username: owners.username }).from(sessions).innerJoin(owners, eq(owners.id, sessions.ownerId)).where(eq(sessions.tokenHash, hashToken(token))) : [];
+    return row?.username ?? "the owner";
   }
 
   async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
@@ -624,17 +658,7 @@ export async function buildApp(opts: AppOptions) {
 
     // Review routing: per risk tier, who approves plans, who reviews code and whether the owner signs off.
     // Validates the policy, and that every agent it names belongs to the company.
-    async function checkPolicy(companyId: string, body: unknown): Promise<ReviewPolicy | string> {
-      const parsed = ReviewPolicySchema.safeParse(body);
-      if (!parsed.success) return parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-      const named = policyAgentIds(parsed.data);
-      if (named.length) {
-        const ok = new Set((await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), inArray(agents.id, named)))).map((a) => a.id));
-        const bad = named.find((a) => !ok.has(a));
-        if (bad) return `Agent ${bad} isn't an active agent of this company.`;
-      }
-      return parsed.data;
-    }
+    const checkPolicy = (companyId: string, body: unknown) => checkPolicyIn(db, companyId, body);
     owner.get("/api/companies/:id/review-policy", async (req, reply) => {
       const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, IdParam.parse(req.params).id));
       return c ? c.policy : reply.code(404).send({ error: "not_found" });
@@ -1046,6 +1070,7 @@ export async function buildApp(opts: AppOptions) {
       acceptanceCriteria: acceptanceCriteriaSchema,
       noCode: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
+      size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).nullable(),
       planFirst: z.boolean(),
       featureId: Uuid.nullable(),
       overLimit: z.boolean(),
@@ -1315,6 +1340,12 @@ export async function buildApp(opts: AppOptions) {
     };
     const SkillParams = z.object({ id: Uuid, skillId: Uuid });
     const SkillFiles = z.array(z.object({ path: z.string().min(1).max(500), content: z.string().max(4_000_000) })).min(1).max(200);
+    // Skills the CEO proposed: the owner answers through the decision; these show what is behind it.
+    owner.get("/api/companies/:id/skill-proposals", async (req) => skillProposals.list(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/skill-proposals/:pid", async (req, reply) => {
+      const { id, pid } = z.object({ id: Uuid, pid: Uuid }).parse(req.params);
+      return skillProposals.detail(id, pid).catch(skillErrors(reply));
+    });
     owner.get("/api/companies/:id/skills", async (req) => skillsSvc.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/skills", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1327,7 +1358,9 @@ export async function buildApp(opts: AppOptions) {
         .parse(req.body);
       try {
         const added = b.from === "link" ? await skillsSvc.fromLink(id, b.url) : b.from === "written" ? [await skillsSvc.write(id, b)] : [await skillsSvc.upload(id, b.files, b.name)];
-        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name })));
+        // The owner's own add is their call, but it skips the review: say so in the log.
+        for (const x of added) await record(db, { companyId: id, kind: "skill.added_by_owner", summary: `The owner added the skill ${x.name} directly (${b.from === "link" ? `from ${b.url}` : b.from}). Added by the owner, not security-reviewed.` });
+        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name, sourceRef: s.sourceRef })));
       } catch (err) {
         return skillErrors(reply)(err);
       }
@@ -1354,7 +1387,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
-      return skillsSvc.refresh(id, skillId).then((r) => ({ changed: r.changed, sourceRef: r.skill.sourceRef }), skillErrors(reply));
+      return skillProposals.proposeRefresh(id, skillId).then((p) => ({ changed: !!p, proposalId: p?.id ?? null, status: p?.status ?? null }), skillErrors(reply));
     });
     owner.delete("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
@@ -1371,7 +1404,7 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/skill-packs/refresh", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { pack } = z.object({ pack: PackName }).parse(req.body);
-      return skillsSvc.refreshPack(id, pack).catch(skillErrors(reply));
+      return skillProposals.proposeRefreshPack(id, pack).catch(skillErrors(reply));
     });
     owner.delete("/api/companies/:id/skill-packs", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1432,6 +1465,28 @@ export async function buildApp(opts: AppOptions) {
 
     // The home screen (R74).
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
+
+    // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
+    owner.get("/api/companies/:id/workflow", async (req) => {
+      const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(req.query);
+      return workflow.scorecard(IdParam.parse(req.params).id, q.days);
+    });
+
+    // Workflow retros (docs/19 parts 2 and 3): who runs them, the latest findings and changes, and a run on demand.
+    const retroErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof RetroError) return reply.code(err.status).send({ error: "retro", message: err.message });
+      throw err;
+    };
+    owner.get("/api/companies/:id/retro-settings", async (req) => retro.status(IdParam.parse(req.params).id));
+    owner.put("/api/companies/:id/retro-settings", async (req, reply) => {
+      const b = z.object({ agentId: Uuid.nullable() }).parse(req.body);
+      return retro.setAgent(IdParam.parse(req.params).id, b.agentId).catch(retroErrors(reply));
+    });
+    owner.get("/api/companies/:id/retros/latest", async (req) => retro.latest(IdParam.parse(req.params).id));
+    owner.post("/api/companies/:id/retro", async (req, reply) => {
+      const r = await retro.start(IdParam.parse(req.params).id, { force: true }).catch(retroErrors(reply));
+      return r && !r.started ? reply.code(409).send({ error: "retro", message: r.reason }) : reply.code(201).send(r);
+    });
 
     // The company wiki, and what each ticket produced (R69).
     const wikiErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -1964,7 +2019,7 @@ export async function buildApp(opts: AppOptions) {
         .object({ answer: z.string().trim().min(1).max(4000), assigneeAgentId: Uuid.optional(), note: z.string().trim().max(2000).optional(), custom: z.boolean().optional(), picks: z.array(z.number().int().min(0)).max(20).optional() })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
@@ -2109,5 +2164,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skillProposals, ticketChat };
 }
