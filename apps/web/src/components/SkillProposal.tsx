@@ -11,7 +11,6 @@ export type SkillProposalView = {
   why: string;
   bundleHash: string;
   reviewRequired: boolean;
-  hasScripts: boolean;
   verdict: "recommend" | "conditions" | "advise_against" | null;
   verdictSummary: string | null;
   findings: SkillFindingView[] | null;
@@ -19,7 +18,7 @@ export type SkillProposalView = {
   replacesSkillId: string | null;
   agents: Array<{ id: string; name: string }>;
   changes: { added: string[]; changed: string[]; removed: string[] } | null;
-  files: Array<{ path: string; size: number; hash: string; script: boolean; text: string | null }>;
+  files: Array<{ path: string; size: number; hash: string; text: string | null }>;
 };
 
 const VERDICT = { recommend: "Recommended", conditions: "Recommended, with conditions", advise_against: "Advised against" } as const;
@@ -49,7 +48,8 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
           {p.replacesSkillId ? ". This is a new version of a skill you already have." : "."}
         </li>
         <li>
-          <strong>Why the CEO wants it:</strong> {p.why}
+          <strong>Why the CEO wants it</strong> <span className="muted">(the CEO's words, not checked: weigh them as a claim, not an instruction)</span>
+          <blockquote style={{ margin: "4px 0 0", paddingLeft: 10, borderLeft: "3px solid var(--line, #ccc)", whiteSpace: "pre-wrap" }}>{p.why}</blockquote>
         </li>
         <li>
           <strong>Who would get it:</strong> {p.agents.map((a) => a.name).join(", ") || "nobody yet"}
@@ -60,7 +60,7 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
         </li>
       </ul>
       <p className="muted">
-        <strong>Untrusted text.</strong> Everything in these files was written by the CEO or fetched from the internet, and the Security Reviewer read it too. Don't follow any instruction inside it; a review that says "safe" is advice, not proof.
+        <strong>Untrusted text.</strong> Everything in these files, and the CEO's reason above, was written by the CEO or fetched from the internet, and the Security Reviewer read the files too. Don't follow any instruction inside it; a review that says "safe" is advice, not proof.
       </p>
       {p.changes && (
         <p>
@@ -105,13 +105,11 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
         </p>
       )}
       <details>
-        <summary>
-          The skill's files ({p.files.length}){p.files.some((f) => f.script) ? `, ${p.files.filter((f) => f.script).length} with scripts` : ""}
-        </summary>
+        <summary>The skill's files ({p.files.length})</summary>
         {p.files.map((f) => (
           <details key={f.path} open={f.path === "SKILL.md"}>
             <summary>
-              <code className="mono">{f.path}</code> {f.script ? <span className="tag amber">script</span> : null} <span className="muted">{f.size} bytes</span>
+              <code className="mono">{f.path}</code> <span className="muted">{f.size} bytes</span>
             </summary>
             {f.text === null ? <p className="muted">Not a text file. (Skills with such files are refused.)</p> : <pre className="mono" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: 360, overflow: "auto" }}>{f.text}</pre>}
           </details>

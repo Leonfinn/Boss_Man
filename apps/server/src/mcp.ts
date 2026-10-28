@@ -1154,7 +1154,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
             if (f.text === null) return text(`${f.path} is not text (${f.size} bytes, sha256 ${f.hash}).`);
             return text(f.text.split("\n").map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join("\n").slice(0, 200_000));
           }
-          return text(JSON.stringify({ ...d, files: d.files.map((f) => ({ path: f.path, size: f.size, sha256: f.hash, script: f.script })) }));
+          return text(JSON.stringify({ ...d, files: d.files.map((f) => ({ path: f.path, size: f.size, sha256: f.hash })) }));
         } catch (err) {
           if (err instanceof SkillError) return fail(err.message);
           throw err;

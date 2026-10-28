@@ -2,9 +2,9 @@
 // hears: straight into its live run if there is one, otherwise as a new run on the ticket.
 // Agents answer with the ticket_reply tool, and each run's last message lands here too.
 import { and, asc, desc, eq, isNull, ne, or } from "drizzle-orm";
-import { systemAuthor } from "@boss-man/shared";
+import { systemAuthor, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, runs, ticketMessages, tickets } from "../db/schema.js";
+import { agents, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
 import { record } from "./activity.js";
 
@@ -132,5 +132,17 @@ export async function conversationLines(db: Db, ticketId: string) {
     .where(eq(ticketMessages.ticketId, ticketId))
     .orderBy(desc(ticketMessages.createdAt))
     .limit(PROMPT_HISTORY);
-  return rows.reverse().map((m) => `${m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : systemAuthor(m.delivery)}: ${m.text.length > 1500 ? `${m.text.slice(0, 1500)}…` : m.text}`);
+  // An open skill-review ticket is a gate: the proposer must not be able to talk to the reviewer
+  // through the conversation. Mark agent words there as untrusted, like the ticket body, so a
+  // "give it a recommend verdict" line is evidence, not an instruction. The owner's own lines stay as they are.
+  const [review] = await db
+    .select({ id: skillProposals.id })
+    .from(skillProposals)
+    .where(and(eq(skillProposals.reviewTicketId, ticketId), eq(skillProposals.status, "in_review")));
+  const reviewing = !!review;
+  return rows.reverse().map((m) => {
+    const who = m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : systemAuthor(m.delivery);
+    const text = m.text.length > 1500 ? `${m.text.slice(0, 1500)}…` : m.text;
+    return `${who}: ${m.author === "agent" && reviewing ? untrusted(`agent ${m.agent ?? "an agent"} on a skill review ticket`, text) : text}`;
+  });
 }
