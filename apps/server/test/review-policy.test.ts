@@ -168,8 +168,9 @@ describe("an approval whose merge fails", () => {
     c.faults.changed = true;
     const senior = await c.mcp(c.senior.id);
     const out = textOf(await senior.callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } }));
-    // The reviewer is told the merge failed.
-    expect(out).toContain("The runner went away");
+    // The reviewer is told at once that it lands in the background, so a 300 s client timeout can't drop it.
+    expect(out).toContain("being checked and merged in the background");
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${t.id}/landing`)).json().landing.state).toBe("finished"));
     expect((await c.row(t.id)).systemState).toBe("review");
     expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_failed"))))[0]?.summary).toBe("Approved, but the merge couldn't run: The runner went away");
     const [d] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`));
@@ -220,7 +221,8 @@ describe("the review tool", () => {
     const senior = await c.mcp(c.senior.id);
     const submit = async (ticketId: string) => textOf(await senior.callTool({ name: "review", arguments: { action: "submit", ticketId, verdict: "approved" } }));
     // Medium: no sign-off by default, so it merges.
-    expect(await submit(t.id)).toBe("Approved; the ticket is done.");
+    expect(await submit(t.id)).toContain("being checked and merged in the background");
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
     // Turn sign-off on for medium: the owner is asked instead.
     await c.setPolicy((p) => (p.medium.ownerSignoff = true));
     const t2 = await c.ticket({ state: "review" });
@@ -230,8 +232,8 @@ describe("the review tool", () => {
     // And a high ticket with sign-off switched off merges without asking.
     await c.setPolicy((p) => (p.high.ownerSignoff = false));
     const t3 = await c.ticket({ state: "review", risk: "high" });
-    expect(await submit(t3.id)).toBe("Approved; the ticket is done.");
-    expect((await c.row(t3.id)).systemState).toBe("done");
+    expect(await submit(t3.id)).toContain("being checked and merged in the background");
+    await vi.waitFor(async () => expect((await c.row(t3.id)).systemState).toBe("done"));
   });
 });
 
