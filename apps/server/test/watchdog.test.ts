@@ -600,6 +600,17 @@ describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
     expect(bt.scrumMasterWakes).toBe(2);
   });
 
+  it("the backtest hands a review loop off again in the sweep where it is sent back once more", async () => {
+    await ctx.switchOn({ reviewHours: 6 });
+    const t = await ctx.ticket({ title: "Bouncy", stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });
+    for (const mins of [200, 190, 180, 100]) await ctx.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Senior Developer", verdict: "changes_requested", createdAt: ctx.ago(mins) });
+    const bt = await ctx.watchdog.backtest(ctx.companyId, 1);
+    const loop = bt.flags.filter((f) => f.ticketId === t.id && f.rule === "review_loop");
+    expect(loop).toHaveLength(1);
+    // Handed off when it first tripped (third send-back) and again at the fourth, long before the review limit ran out.
+    expect(loop[0]!.handOffs).toBe(2);
+  });
+
   it("the backtest reads scheduled checks back from the activity log", async () => {
     await ctx.switchOn({ inProgressHours: 1 });
     const checked = await ctx.ticket({ title: "Waiting on CI", stateChangedAt: ctx.ago(600), createdAt: ctx.ago(600) });
