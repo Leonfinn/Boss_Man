@@ -144,11 +144,22 @@ export async function reviewTicketWriteRefusal(db: Db, companyId: string, ticket
 }
 
 export const EXPIRES_AFTER_DAYS = 14;
+/**
+ * How long a closed card is left alone before `reconcile()` calls the proposal lost. `decisions.answer`
+ * closes the card before the install hook runs, and a link skill's hook re-fetches its source; a sweep
+ * inside that window must not raise a second card for an answer that is still being carried out.
+ */
+export const RECONCILE_GRACE_MS = 5 * 60_000;
 const VERDICT_WORDS = { recommend: "recommend", conditions: "recommend with conditions", advise_against: "advise against" } as const;
 
 export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillDeps) {
   const now = deps.now ?? (() => new Date());
   const patch = async (id: string, set: Partial<typeof skillProposals.$inferInsert>) => (await db.update(skillProposals).set(set).where(eq(skillProposals.id, id)).returning())[0]!;
+  /** Takes every card for a proposal off the owner's queue once it has been answered one way or another. */
+  const withdrawStrayCards = async (proposalId: string) => {
+    const open = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `skill:${proposalId}`), eq(decisions.status, "open")));
+    for (const d of open) await deps.withdrawDecision(d.id);
+  };
   /** The agent marked as the company's security reviewer, never the proposer. */
   async function securityReviewer(companyId: string, not: string | null) {
     const pool = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.reviewKind, "security"), isNull(agents.retiredAt))).orderBy(asc(agents.createdAt));
@@ -385,6 +396,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       };
       if (!adding) {
         p = await patch(p.id, { status: "rejected", decidedBy: by, decidedAt: at, updatedAt: at });
+        await withdrawStrayCards(p.id);
         await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.decided", summary: `${by} decided not to add ${p.name}.`, at });
         await told(`The owner decided not to add the skill ${p.name}.`);
         return p;
@@ -392,6 +404,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       const same = await this.sourceMatches(p);
       if (!same.ok) {
         p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
+        await withdrawStrayCards(p.id);
         await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${by} said to add ${p.name}, but ${same.reason}. Nothing was installed; it has to be proposed and reviewed again.`, at });
         await told(`The owner said yes to ${p.name}, but ${same.reason}, so nothing was installed. Propose it again so the new version is reviewed.`);
         return p;
@@ -407,11 +420,14 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       } catch (e) {
         if (!(e instanceof SkillError)) throw e;
         p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
+        await withdrawStrayCards(p.id);
         await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${p.name} could not be installed: ${e.message}` });
         await told(`The skill ${p.name} could not be installed: ${e.message}`);
         return p;
       }
       p = await patch(p.id, { status: "installed", decidedBy: by, decidedAt: at, installedSkillId: skill.id, ...(advise ? { overridden: true, overriddenBy: by, overriddenAt: at } : {}), updatedAt: at });
+      // A second card raised before this answer landed must not stay on the owner's queue.
+      await withdrawStrayCards(p.id);
       await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.installed", summary: `Installed ${skill.name}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}, ${p.files.length} files, fingerprint ${p.bundleHash.slice(0, 12)}.`, at });
       // Who gets it: the agents asked for, on top of whoever already has it (an update takes nobody away).
       const given: string[] = [];
@@ -437,7 +453,9 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
      * - `awaiting_owner` with no open card (its card closed without installing), or
      * - `in_review` although the verdict is already in (the status write was lost).
      * One fresh card is raised for the owner; a proposal already waiting on an open card only has
-     * its status put back in step. Proposals past the expiry cutoff are left to `expireOld`.
+     * its status put back in step. A card closed less than `RECONCILE_GRACE_MS` ago may still be
+     * having its answer carried out, so it is left alone until a later sweep. Proposals past the
+     * expiry cutoff are left to `expireOld`.
      */
     async reconcile() {
       const cutoff = new Date(now().getTime() - EXPIRES_AFTER_DAYS * 86_400_000);
@@ -458,6 +476,16 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
           if (p.status !== "awaiting_owner" || p.decisionId !== open.id) await patch(p.id, { status: "awaiting_owner", decisionId: open.id, updatedAt: now() });
           continue;
         }
+        // A closed card can also mean the answer is still being carried out: `decisions.answer`
+        // closes the card before the install hook runs (a link skill re-fetches its source). Only
+        // after the grace window is a closed card really a lost one.
+        const [last] = await db
+          .select({ status: decisions.status, answeredAt: decisions.answeredAt })
+          .from(decisions)
+          .where(eq(decisions.dedupeKey, `skill:${p.id}`))
+          .orderBy(desc(decisions.answeredAt))
+          .limit(1);
+        if (last && last.status !== "open" && last.answeredAt && now().getTime() - last.answeredAt.getTime() < RECONCILE_GRACE_MS) continue;
         await this.toOwner(p);
         reRaised++;
       }

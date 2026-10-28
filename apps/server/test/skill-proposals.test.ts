@@ -7,7 +7,7 @@ import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agentSkills, agents, decisions, skillProposals, skills, tickets } from "../src/db/schema.js";
-import { checkVerdict, hashFiles, numbered, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
+import { checkVerdict, hashFiles, numbered, RECONCILE_GRACE_MS, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
 
@@ -250,6 +250,8 @@ describe("review", () => {
 const draft = (c: Awaited<ReturnType<typeof setup>>, extra: Array<{ path: string; content: string }> = [], body = "Steps.") =>
   c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [{ path: "SKILL.md", content: b64(md(body)) }, ...extra], why: "Notes are messy", agentIds: [c.worker.id] });
 const openDecision = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(decisions).where(eq(decisions.kind, "skill"))).filter((d) => d.status === "open");
+// Past the reconcile grace window, so a closed card is treated as lost rather than still being carried out.
+const longAgo = () => new Date(Date.now() - RECONCILE_GRACE_MS - 60_000);
 const kinds = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(activity)).map((l) => l.kind);
 const review = (c: Awaited<ReturnType<typeof setup>>, p: { id: string; bundleHash: string }, verdict: "recommend" | "advise_against", extra = {}) =>
   c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict, summary: "Summary.", findings: verdict === "advise_against" ? [{ file: "run.sh", lineStart: 1, lineEnd: 1, title: "Bad", severity: "critical", confidence: "confirmed", behaviour: "Runs remote code.", harm: "Takeover.", fix: "none", blocks: true }] : [], ...extra });
@@ -291,7 +293,7 @@ describe("decision and install", () => {
     const [first] = await openDecision(c);
     // A crash after the decision closed but before the install hook ran: the owner's card is gone,
     // the proposal still says awaiting_owner and nothing is installed.
-    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: new Date() }).where(eq(decisions.id, first!.id));
+    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: longAgo() }).where(eq(decisions.id, first!.id));
     expect(await openDecision(c)).toHaveLength(0);
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("awaiting_owner");
     expect(await c.svc.reconcile()).toBe(1);
@@ -306,13 +308,46 @@ describe("decision and install", () => {
     const p = await draft(c);
     await review(c, p, "recommend");
     const [first] = await openDecision(c);
-    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: new Date() }).where(eq(decisions.id, first!.id));
+    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: longAgo() }).where(eq(decisions.id, first!.id));
     expect(await c.db.select().from(skills)).toHaveLength(0);
     await c.svc.reconcile();
     const [again] = await openDecision(c);
     await c.decisions.answer(again!.id, SKILL_ADD, { by: "leon" });
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
     expect((await c.db.select().from(skills))[0]).toMatchObject({ name: "tidy" });
+  });
+
+  it("does not raise a second card while the owner's answer is still being carried out", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c);
+    await review(c, p, "recommend");
+    const [first] = await openDecision(c);
+    // `decisions.answer` closes the card, then the install hook re-fetches a link source for seconds.
+    // The 60-second sweep can land in that window; it must not mistake the open answer for a lost one.
+    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: new Date() }).where(eq(decisions.id, first!.id));
+    expect(await c.svc.reconcile()).toBe(0);
+    expect(await openDecision(c)).toHaveLength(0);
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("awaiting_owner");
+    // The hook then finishes: the same answer installs, and nothing is left on the owner's queue.
+    await c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon");
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
+    expect(await openDecision(c)).toHaveLength(0);
+  });
+
+  it("withdraws a second card for the same proposal when the answer finishes", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c);
+    await review(c, p, "recommend");
+    const [first] = await openDecision(c);
+    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, first!.id));
+    // A second card that slipped in before the answer landed (the race reconcile() now prevents).
+    const stray = await c.decisions.raiseSkill({ companyId: c.company.id, proposalId: p.id, agentId: c.ceo.id, question: "Add tidy?", options: [SKILL_ADD, SKILL_REJECT], recommended: SKILL_ADD });
+    expect(await openDecision(c)).toHaveLength(1);
+    await c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon");
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
+    expect(await openDecision(c)).toHaveLength(0);
+    const [still] = (await c.db.select().from(decisions).where(eq(decisions.id, stray!.id)));
+    expect(still).toMatchObject({ status: "withdrawn" });
   });
 
   it("finishes the owner's answer when the card was raised but the status write was lost", async () => {
@@ -332,7 +367,7 @@ describe("decision and install", () => {
     const p = await draft(c);
     await review(c, p, "recommend");
     const [first] = await openDecision(c);
-    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: new Date() }).where(eq(decisions.id, first!.id));
+    await c.db.update(decisions).set({ status: "answered", answer: SKILL_ADD, answeredAt: longAgo() }).where(eq(decisions.id, first!.id));
     await expect(draft(c)).rejects.toThrow(/already an open proposal/);
     await c.svc.reconcile();
     const [again] = await openDecision(c);
