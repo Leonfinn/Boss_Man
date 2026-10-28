@@ -235,7 +235,7 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/a && cd /tmp/lnk && pnpm install",
       "rm -rf /tmp/a && mkdir -p /tmp/lnk/sub",
       "rm -rf /tmp/a && mkdir -p /tmp/a/sub",
-      "rm -rf /tmp/a && echo x > /tmp/lnk",
+      // A redirect to a plain /tmp/NAME goes to the CEO since adversarial round 14 (see below); a deeper path still doesn't.
       "rm -rf /tmp/a && echo x >> /tmp/a/b",
       // The delete may have failed, or runs alongside, so the name may still be a link.
       "rm -rf /tmp/lnk; git worktree add -b x /tmp/lnk",
@@ -450,6 +450,100 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     }
   });
 
+  it("gives no /tmp note to a command that sets a variable (security round 11)", () => {
+    for (const c of [
+      "export PATH=/tmp/x && ls /tmp",
+      "PATH=/tmp/x ls /tmp",
+      "PATH=/tmp/x:/usr/bin; ls /tmp",
+      "unset PATH && rm -rf /tmp/a",
+      "read -r PATH < /tmp/p && ls /tmp",
+      "set -a && PATH=/tmp/x && ls /tmp",
+      "X=1",
+      "X=1 rm -rf /tmp/a",
+      "declare PATH=/tmp/x && ls /tmp",
+      // The same with a /tmp write, which the note needs: these got it before the fix.
+      "export PATH=/tmp/x && rm -rf /tmp/a",
+      "PATH=/tmp/x:/usr/bin; rm -rf /tmp/a",
+      "read -r PATH < /tmp/p && rm -rf /tmp/a",
+      "set -a && PATH=/tmp/x && rm -rf /tmp/a",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    expect(explainCommand("rm -rf /tmp/a").scratch).toBeDefined();
+    expect(evaluatePermission(exec("rm -rf /tmp/a"), [SCRATCH_RULE]).rule).toBe(SCRATCH_RULE.name);
+  });
+
+  it("gives the /tmp note only when a segment starts with a listed program's bare name (security round 12)", () => {
+    for (const c of [
+      "rm -rf /tmp/a && X+=/tmp/ls /tmp/evil",
+      "PATH+=:/tmp/ls && rm -rf /tmp/a",
+      "X+=1 rm -rf /tmp/a",
+      "X[0]=/tmp/x ls /tmp && rm -rf /tmp/a",
+      "rm -rf /tmp/a && ./x /tmp/a",
+      "rm -rf /tmp/a && /tmp/x /tmp/a",
+      "/bin/rm -rf /tmp/a",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    for (const c of ["rm -rf /tmp/a", "rm -rf /tmp/a && ls /tmp"]) {
+      expect(explainCommand(c).scratch, c).toBeDefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).toBe(SCRATCH_RULE.name);
+    }
+  });
+
+  it("checks every part's redirect targets for the /tmp note, deletes included (security round 14)", () => {
+    for (const c of [
+      "rm /tmp/a >/home/node/.bashrc",
+      "rm -f /tmp/a 2>/home/node/x",
+      "rm -v /tmp/a >>/home/node/x",
+      "ls /tmp &>/home/x",
+      "rm -rf /tmp/a 3>/home/x",
+      "rm -rf /tmp/a >|/home/x",
+      "rm -rf /tmp/a >&/home/x",
+      "rm -rf /tmp/a <>/home/x",
+      "rm -rf /tmp/a>/home/x",
+      "rm -rf /tmp/a > /tmp",
+      "rm -rf /tmp/a 2> /tmp/../home/x",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(tempCleanup(c), c).toBe(false);
+      // rm without -r/-f isn't destructive, so those keep the ordinary Allow every file change gets; with them it's Deny.
+      if (/rm -\w*[rf]/.test(c)) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    for (const c of ["rm -rf /tmp/a 2>/dev/null", "ls /tmp > /tmp/x.log", "rm -rf /tmp/a 2>&1 >/dev/null"]) {
+      expect(explainCommand(c).scratch, c).toBeDefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).toBe(SCRATCH_RULE.name);
+    }
+  });
+
+  it("sends the ticket's own command to the CEO with Allow, its install log not deleted first (adversarial round 14)", () => {
+    const own = "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
+    for (const c of [
+      own,
+      "rm -rf /tmp/a /tmp/a.log && ls /tmp > /tmp/a.log 2>&1",
+      "rm -rf /tmp/a && ls /tmp > /tmp/a.log 2>&1",
+      "rm -rf /tmp/a && cd /tmp/a && pnpm install",
+      "rm -rf /tmp/a && cd /tmp/a && pnpm install > /tmp/a.log 2>&1",
+    ]) {
+      expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+      expect(recommendedVerdict(exec(c)), c).toBe("allow");
+    }
+    expect(explainCommand(own).scratch).toBeUndefined();
+    expect(evaluatePermission(exec(own), [SCRATCH_RULE]).rule).toBe(TEMP_CLEANUP_RULE);
+    for (const c of [
+      "rm -rf /tmp/a && cd /tmp/a && pnpm install > /tmp/a/b.log 2>&1",
+      "rm -rf /tmp/a && cd /tmp/a && pnpm install > /home/x 2>&1",
+      "rm -rf /tmp/a && ls /tmp > /tmp 2>&1",
+      "rm -rf /tmp/a && mkdir /tmp/b",
+    ]) {
+      expect(tempCleanup(c), c).toBe(false);
+      expect(route(c).outcome, c).toBe("owner");
+    }
+  });
+
   it("recommends Deny for shred even in /tmp", () => {
     for (const c of ["shred /tmp/a", "shred -u /tmp/a", "rm -rf /tmp/a && shred /tmp/b"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
     expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
@@ -467,5 +561,39 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     expect(s).toMatch(/writes into the project's repository/);
     expect(s).toMatch(/install scripts/);
     expect(explainCommand("rm -rf /tmp/a").summary).not.toMatch(/install scripts|repository/);
+  });
+});
+
+describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+
+  it("pins the route of a command whose only delete is a /tmp entry (finding 2)", () => {
+    // Checked out into the same /tmp entry first, the install log is a plain temp cleanup: CEO first, Allow.
+    const c = "rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && pnpm install > /tmp/a.log 2>&1";
+    expect(route(c)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(recommendedVerdict(exec(c))).toBe("allow");
+    // Known limit: an install outside the checkout still goes to the owner. It must stay off the CEO route either way.
+    const bare = "rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1";
+    expect(route(bare).outcome).toBe("owner");
+    expect(tempCleanup(bare)).toBe(false);
+  });
+
+  // Fails today: the plan says a command whose only delete is in /tmp is never recommended Deny. The fix is tracked in follow-up ticket cd2c2730 (and BOS-165); remove `.fails` when it lands.
+  it.fails("never recommends Deny for an install that logs into /tmp (finding 2, known gap)", () => {
+    expect(recommendedVerdict(exec("rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1"))).not.toBe("deny");
+  });
+
+  it("keeps the /tmp-only rule from allowing an install in a temp checkout or git worktree prune (finding 3)", () => {
+    for (const c of ["rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && npm install", "rm -rf /tmp/a && git worktree prune"]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    expect(tempCleanup("rm -rf /tmp/a && git worktree prune")).toBe(false);
+    expect(route("rm -rf /tmp/a && git worktree prune").outcome).toBe("owner");
+  });
+
+  it("pins the verdict for shred and find -delete (finding 4)", () => {
+    expect(recommendedVerdict(exec("shred /tmp/a"))).toBe("deny");
+    expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
   });
 });

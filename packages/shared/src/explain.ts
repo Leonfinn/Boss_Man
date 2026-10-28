@@ -89,7 +89,7 @@ function segments(command: string): string[] {
 
 const unquote = (t: string) => t.replace(/^(['"])(.*)\1$/, "$2");
 
-type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean; /** Also writes the repository its folder belongs to. */ repo?: boolean; /** Installs packages, so runs the project's install scripts. */ install?: boolean; /** Every word is plain and every option is on SCRATCH_OPTS, so targets are all there is to check. */ safe?: boolean };
+type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean; /** Also writes the repository its folder belongs to. */ repo?: boolean; /** Installs packages, so runs the project's install scripts. */ install?: boolean; /** Every word is plain and every option is on SCRATCH_OPTS, so targets are all there is to check. */ safe?: boolean; /** Files its output is redirected to (not /dev/null or another fd), whatever the effect. */ writes?: string[] };
 
 /**
  * The programs that may appear in a "/tmp only" command, and the options each may use (BOS-111
@@ -97,7 +97,10 @@ type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; pr
  * diff --output=, find -fprint, git log --output=), so any option not listed, or a program not
  * listed, means no note. Left off on purpose: sed (its script can w a file or e a command), uniq
  * (its second operand is an output file), trap (runs a command), shred (always Deny) and every
- * program not named here.
+ * program not named here. So are the shell's variable commands (export, set, unset, read, declare
+ * and the like): PATH=/tmp/x points every later program at a script planted in /tmp (BOS-111
+ * security round 11). For the same reason a segment with any NAME=value assignment, prefix or
+ * alone, is never scratchSafe, whichever variable it sets.
  */
 const SCRATCH_OPTS: Record<string, RegExp> = {
   rm: /^(?:-[rRfvd]+|--(?:recursive|force|verbose|dir)|--)$/,
@@ -124,7 +127,7 @@ const SCRATCH_OPTS: Record<string, RegExp> = {
   sort: /^-[rnu]+$/,
   echo: /^-[ne]+$/,
   stat: /^$/, pwd: /^$/, date: /^$/, whoami: /^$/, uname: /^-[a]$/, which: /^$/, file: /^$/, cut: /^$/, tr: /^$/,
-  true: /^$/, sleep: /^$/, test: /^$/, "[": /^$/, set: /^[-+][eux]+$|^-o$/, export: /^$/, unset: /^$/, exit: /^$/, read: /^-r$/,
+  true: /^$/, sleep: /^$/, test: /^$/, "[": /^$/, exit: /^$/,
 };
 /** git subcommands that only read, with the options they may use; git's own options before the subcommand (-C, -c) aren't allowed. */
 const GIT_SCRATCH_OPTS: Record<string, RegExp> = {
@@ -149,6 +152,12 @@ function scratchSafe(seg: string, program: string, rest: string[]): boolean {
   const ok = SCRATCH_OPTS[program];
   return Boolean(ok) && rest.every((a) => !a.startsWith("-") || ok!.test(a));
 }
+/**
+ * The segment's first word, as written, must be the bare name of the program scratchSafe judged
+ * (BOS-111 security round 12). An allow-list rather than another assignment pattern: X+=, X[0]=,
+ * keywords, redirects and ./x or /tmp/x as the program all fail it, however they're spelt.
+ */
+const SAFE_FIRST_WORD = /^[a-z0-9_-]+$/;
 
 function explainSegment(seg: string): Part {
   const all = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
@@ -158,18 +167,22 @@ function explainSegment(seg: string): Part {
   const args: string[] = [];
   const writes: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const m = /^(?:\d*|&)>>?(.*)$/.exec(tokens[i]!);
+    // >, >>, >|, &>, &>>, <> (opens for writing, creating the file) with any fd number.
+    const m = /^(?:\d*|&)(?:>>|>\||>|<>)(.*)$/.exec(tokens[i]!);
     if (!m) {
       args.push(tokens[i]!);
       continue;
     }
     const target = m[1] || tokens[++i] || "";
-    if (target && target !== "/dev/null" && !target.startsWith("&")) writes.push(target);
+    // >&1, 2>&- copy or close an fd; >&word sends both streams to the file word.
+    if (target && target !== "/dev/null" && !/^&(?:\d+|-)$/.test(target)) writes.push(target.replace(/^&/, ""));
   }
-  const nested = /^\w+=\$\((.+)$/.exec(args[0] ?? "");
+  const nested = /^\w+\+?=\$\((.+)$/.exec(args[0] ?? "");
   if (nested) args[0] = nested[1]!.replace(/\)$/, "");
-  while (args[0] && (/^\w+=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) args.shift();
+  let assigns = Boolean(nested);
+  while (args[0] && (/^\w+\+?=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) assigns = /^\w+\+?=/.test(args.shift()!) || assigns;
   const program = (args[0] ?? "").split("/").pop() ?? "";
+  const first = seg.trimStart().split(/\s+/)[0] ?? "";
   const rest = args.slice(1);
   const flags = rest.filter((a) => a.startsWith("-"));
   const operands = rest.filter((a) => !a.startsWith("-"));
@@ -212,11 +225,14 @@ function explainSegment(seg: string): Part {
 
   if (/\$\(|`/.test(nested ? seg.slice(seg.indexOf("$(") + 2) : seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
   p.program = program;
-  p.safe = scratchSafe(seg, program, rest);
+  // A > inside a word (rm /tmp/a>/home/x) is a redirect the whitespace split above didn't see.
+  p.safe = !assigns && SAFE_FIRST_WORD.test(first) && first === program && !args.some((a) => a.includes(">")) && scratchSafe(seg, program, rest);
   if (writes.length) {
     const worse = WORST.indexOf(p.effect) < WORST.indexOf("changes") ? p : null;
     p = worse ?? { ...part("changes", "Changes files", writes), env: p.env, repo: p.repo, install: p.install, program: p.program, safe: p.safe };
   }
+  // Kept apart from targets: a delete keeps its own targets above, and scratchOnly checks these for every part (BOS-111 security round 14).
+  p.writes = writes;
   return p;
 }
 
@@ -258,6 +274,7 @@ function scratchOnly(parts: Part[]): { unchecked: string[] } | null {
   for (const p of parts) {
     if (p.program === "cd" || p.program === "pushd" || p.program === "popd") return null;
     if (!p.safe) return null;
+    if (p.writes?.length && !p.writes.every((t) => !/[*?[{]/.test(t) && norm(t) !== null && norm(t) !== "/tmp" && SCRATCH.test(norm(t)!))) return null;
     if (p.effect === "pushes" || p.effect === "network" || p.effect === "unknown" || p.repo) return null;
     if (p.effect !== "changes" && p.effect !== "deletes") continue;
     wrote = true;
@@ -374,7 +391,7 @@ export type CleanupScope = { tmp: string[]; workingCopy: string[] };
  */
 export function cleanupScope(command: string): CleanupScope | null {
   if (!PLAIN.test(command)) return null;
-  if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH=/.test(command)) return null;
+  if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH\+?=/.test(command)) return null;
   if (new RegExp(PUSHING, "i").test(command)) return null;
   // PLAIN rules out quotes and heredocs, so this splits exactly where segments() does, keeping the separators.
   const pieces = command.split(/(&&|\|\||[;|\n]|(?<!>)&(?!>))/);
@@ -409,7 +426,11 @@ export function cleanupScope(command: string): CleanupScope | null {
     }
     let ok = true;
     const rest = s.replace(REDIRECT, (_, to: string) => {
-      if (!(to === "/dev/null" || to === "&1" || to === "&2" || cleared.has(to))) ok = false;
+      // In temp cleanup a log by redirect may also go to a plain /tmp/NAME this command didn't delete (BOS-111 adversarial
+      // round 14: the ticket's own pnpm install > /tmp/rv86-install.log). It could be a planted link, so this only lets the
+      // CEO see it. Program targets (mkdir, git worktree add, the install folder) still need cleared, and so does every
+      // write beside a working-copy delete (security round 2).
+      if (!(to === "/dev/null" || to === "&1" || to === "&2" || cleared.has(to) || (!scope.workingCopy.length && TEMP_ONLY.test(to)))) ok = false;
       return " ";
     });
     if (!ok || /[>&]/.test(rest) || !safeBeside(rest.trim().split(/\s+/), cwd, cleared)) return null;
