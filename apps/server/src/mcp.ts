@@ -31,7 +31,7 @@ import { findSection, splitSections, WikiError, type wikiService } from "./servi
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import type { SkillFinding } from "./db/schema.js";
-import type { skillProposalsService } from "./services/skill-proposals.js";
+import { reviewTicketWriteRefusal, type skillProposalsService } from "./services/skill-proposals.js";
 import { AgentError, type agentsService } from "./services/agents.js";
 import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
 import { resolveReviewer } from "./services/review-policy.js";
@@ -179,7 +179,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     async ({ ticketId, agent, note, expected_version }) => {
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
-      if (await skillProposals.isOpenReviewTicket(scope.companyId, ticketId)) return fail("That ticket is the Security Reviewer's task for a skill proposal. It can't be edited or handed over; propose the skill again if it must change.");
+      const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
+      if (reviewWrite) return fail(reviewWrite);
       const to = await delegateTarget(agent);
       if ("error" in to) return fail(to.error);
       const [t] = await db.select({ version: tickets.version, state: tickets.systemState, assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
@@ -327,6 +328,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       const byRef = REF.exec(given);
       const ticketId = byRef ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, scope.companyId), eq(tickets.number, Number(byRef[1])))))[0]?.id : given;
       if (!ticketId || !z.string().uuid().safeParse(ticketId).success) return fail(`No ticket ${given} in your company.`);
+      const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
+      if (reviewWrite) return fail(reviewWrite);
       try {
         const id = await images.attach(scope.companyId, { ticketId, path, caption, agentId: scope.agentId });
         return text(`Attached ${path} to the ticket. To show it in a wiki page, write: ${imageMarkdown(caption?.replace(/[\][()\n\r]/g, "") || path, id)}`);
@@ -1365,12 +1368,18 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
+            if (input.ticketId) {
+              const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, input.ticketId, scope.agentId);
+              if (reviewWrite) return fail(reviewWrite);
+            }
             const r = await wiki.write(scope.companyId, { slug: input.slug, folder: input.folder, title: input.title, body: input.body, ticketId: input.ticketId ?? null, ...by });
             const link = `#/wiki/${scope.companyId}/${r.page.slug}`;
             return text(`${r.created ? "Created" : "Updated"} ${link}${input.ticketId ? ", linked to the ticket" : ""}. Pass link "${link}" to notify_owner when you tell the owner about it.`);
           }
           case "attach": {
             if (!input.ticketId) return fail("Give the ticketId it belongs to.");
+            const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, input.ticketId, scope.agentId);
+            if (reviewWrite) return fail(reviewWrite);
             await wiki.attach(scope.companyId, { ticketId: input.ticketId, title: input.title ?? "", path: input.path ?? null, ref: input.ref ?? null, url: input.url ?? null, ...by });
             return text("Linked to the ticket.");
           }
@@ -1434,7 +1443,8 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
-      if (await skillProposals.isOpenReviewTicket(scope.companyId, ticketId)) return fail("That ticket is the Security Reviewer's task for a skill proposal. It can't be edited or handed over; propose the skill again if it must change.");
+      const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
+      if (reviewWrite) return fail(reviewWrite);
       if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee or noCode.");
       const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
@@ -1470,6 +1480,10 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason }) => {
       const no = await chatRefusal();
       if (no) return fail(no);
+      // The state note is read by the reviewer as trusted text: on an open review ticket only the
+      // reviewer assigned to it may write one (BOS-86, round 9).
+      const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
+      if (reviewWrite) return fail(reviewWrite);
       const notMine = await moveRefusal(db, scope, ticketId, state === "done" && outcome === "cancelled");
       if (notMine) return fail(notMine);
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).

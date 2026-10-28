@@ -118,6 +118,28 @@ export type SkillDeps = {
   now?: () => Date;
 };
 
+/** The proposal whose Security review ticket this is, while that review is still open. */
+export async function openReviewProposal(db: Db, companyId: string, ticketId: string) {
+  const [r] = await db
+    .select({ id: skillProposals.id })
+    .from(skillProposals)
+    .where(and(eq(skillProposals.companyId, companyId), eq(skillProposals.reviewTicketId, ticketId), eq(skillProposals.status, "in_review")));
+  return r ?? null;
+}
+
+/**
+ * One guard for every tool that writes to a ticket (BOS-86, round 9). On an open skill-review
+ * ticket only the reviewer assigned to it may write: the proposer must not be able to steer the
+ * verdict through a reply, a nudge, a state note or a wiki page. The owner writes through the
+ * owner's own routes (agentId null), so they are never refused here.
+ */
+export async function reviewTicketWriteRefusal(db: Db, companyId: string, ticketId: string, agentId: string | null): Promise<string | null> {
+  if (!(await openReviewProposal(db, companyId, ticketId))) return null;
+  if (!agentId) return null;
+  const [t] = await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, companyId)));
+  return t?.assignee === agentId ? null : "This is a security review task: only the Security Reviewer and the owner can write on it.";
+}
+
 export const EXPIRES_AFTER_DAYS = 14;
 const VERDICT_WORDS = { recommend: "recommend", conditions: "recommend with conditions", advise_against: "advise against" } as const;
 
@@ -143,8 +165,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
   return {
     /** Is this ticket the review task of a proposal that is still open? Nobody edits or reassigns it then. */
     async isOpenReviewTicket(companyId: string, ticketId: string) {
-      const [r] = await db.select({ id: skillProposals.id }).from(skillProposals).where(and(eq(skillProposals.companyId, companyId), eq(skillProposals.reviewTicketId, ticketId), eq(skillProposals.status, "in_review")));
-      return !!r;
+      return !!(await openReviewProposal(db, companyId, ticketId));
     },
 
     /** Records a proposal. Fetches and pins a link, hashes every file, works out whether it has scripts. */
