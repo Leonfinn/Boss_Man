@@ -11,13 +11,16 @@
 // the agents the alert is about (it may be the one looping), is over its hourly cap, or its wake
 // is dropped; when the company is paused it goes straight to the owner. Nothing is ever dropped:
 // the last rung is always the owner.
-import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, gt, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { readWatchdogSettings, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
 import { CANCEL_RUN, checkAsk } from "./decisions.js";
 import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, type watchdogService } from "./watchdog.js";
+
+/** The most a card waits with the CEO, counted from when it was raised, whether or not a CEO run has started (BOS-180). */
+export const CEO_OUTER_CAP_MINUTES = 20;
 
 export type Rung = "scrum_master" | "ceo" | "owner";
 const RUNGS: Rung[] = ["scrum_master", "ceo", "owner"];
@@ -77,6 +80,27 @@ export function alertLadder(
   async function log(companyId: string, row: { kind: "alert_hop" | "alert_resolved"; ticketId: string | null; actorAgentId?: string | null; targetAgentId?: string | null; decisionId: string; reason: string; summary: string }) {
     await db.insert(watchdogActions).values({ companyId, kind: row.kind, ticketId: row.ticketId, actorAgentId: row.actorAgentId ?? null, targetAgentId: row.targetAgentId ?? null, reason: row.reason.slice(0, 500), after: { decisionId: row.decisionId }, createdAt: now() });
     await record(db, { companyId, agentId: row.actorAgentId ?? null, ticketId: row.ticketId, kind: "watchdog", summary: row.summary, at: now() });
+  }
+
+  /**
+   * When a card on its rung is due to move up. The Scrum Master's rung counts from the hop. The CEO's
+   * minutes count from when a CEO run that can see the card starts (one that began after it was
+   * raised), not from the raise: the CEO may be queued behind other runs. Outer cap: CEO_OUTER_CAP_MINUTES
+   * from the raise, so a card nobody picks up still reaches the owner (BOS-180).
+   */
+  async function dueAt(companyId: string, ladder: Ladder, minutes: number): Promise<number> {
+    const raised = new Date(ladder.since).getTime();
+    if (ladder.rung !== "ceo") return raised + minutes * 60_000;
+    const cap = raised + Math.max(minutes, CEO_OUTER_CAP_MINUTES) * 60_000;
+    const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+    if (!ceo) return raised + minutes * 60_000;
+    const [run] = await db
+      .select({ startedAt: runs.startedAt })
+      .from(runs)
+      .where(and(eq(runs.agentId, ceo.id), gte(runs.startedAt, new Date(raised)), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
+      .orderBy(asc(runs.startedAt))
+      .limit(1);
+    return run ? Math.min(cap, run.startedAt.getTime() + minutes * 60_000) : cap;
   }
 
   /** Who holds this rung now, or why nobody can. */
@@ -166,7 +190,8 @@ export function alertLadder(
         .returning({ id: decisions.id });
       if (!moved.length) return null;
       // High priority: the owner would otherwise have been told now, quiet hours or not.
-      const w = await deps.notify(h.agent.id, { ticketId: ladder.ticketId, reason: ALERT_REASON, priority: 3, note: note(rung, d, next, minutes) });
+      // Every card waiting on the CEO shares one ticketless "decision" wake (or the CEO's live run), so a busy CEO is woken once for all of them (BOS-180).
+      const w = await deps.notify(h.agent.id, rung === "ceo" ? { ticketId: null, reason: "decision", priority: 3, note: note(rung, d, next, minutes) } : { ticketId: ladder.ticketId, reason: ALERT_REASON, priority: 3, note: note(rung, d, next, minutes) });
       if (w.status === "dropped") {
         reason = `${LABEL[rung]} was skipped: its wake was dropped (${w.statusReason ?? "no reason given"})`;
         continue;
@@ -239,7 +264,7 @@ export function alertLadder(
       for (const { d, watchdog } of open) {
         const ladder = (d.context as { ladder: Ladder }).ladder;
         const minutes = ladder.minutes ?? readWatchdogSettings(watchdog).alertMinutes;
-        if (new Date(ladder.since).getTime() + minutes * 60_000 > now().getTime()) continue;
+        if ((await dueAt(d.companyId, ladder, minutes)) > now().getTime()) continue;
         if (await place(d, ladder, RUNGS[RUNGS.indexOf(ladder.rung) + 1]!, `${LABEL[ladder.rung]} didn't settle it within ${minutes} minutes`)) moved++;
       }
       return { moved };

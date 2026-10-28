@@ -104,6 +104,10 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
     expect(await ownerNotified(d.id)).toEqual([]);
     expect(await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "decision")))).toEqual([expect.objectContaining({ priority: 3 })]);
 
+    // The 5 minutes start when a CEO run does (BOS-180), not when the card was raised.
+    ctx.advance(10);
+    expect((await ctx.alerts.sweep()).moved).toBe(0);
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.ceo.id, startedAt: ctx.now() });
     ctx.advance(4);
     expect((await ctx.alerts.sweep()).moved).toBe(0);
     ctx.advance(2);
@@ -129,6 +133,21 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
     expect(listed.find((x) => x.id === d.id)?.settled).toMatchObject({ by: expect.any(String), answer: "Allow once", note: "It restarts the company's own service." });
   });
 
+  it("a card no CEO run picks up moves to the owner 20 minutes after it was raised (BOS-180)", async () => {
+    const { d } = await ctx.ask();
+    ctx.advance(19);
+    expect((await ctx.alerts.sweep()).moved).toBe(0);
+    ctx.advance(2);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    expect(await reload(d.id)).toMatchObject({ tier: "owner", status: "open" });
+  });
+
+  it("several cards waiting on the CEO wake it once (BOS-180)", async () => {
+    await ctx.ask();
+    await ctx.ask();
+    expect(await ctx.db.select().from(wakes).where(and(eq(wakes.agentId, ctx.ceo.id), eq(wakes.reason, "decision")))).toHaveLength(1);
+  });
+
   it("a plan addressed to the CEO also waits 5 minutes on the ladder, then reaches the owner", async () => {
     const { d } = await ctx.plan();
     expect(d).toMatchObject({ tier: "ceo", status: "open" });
@@ -137,6 +156,7 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
     expect(await teamIds()).toContain(d.id);
     expect(await ownerNotified(d.id)).toEqual([]);
 
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.ceo.id, startedAt: ctx.now() });
     ctx.advance(4);
     expect((await ctx.alerts.sweep()).moved).toBe(0);
     ctx.advance(2);
