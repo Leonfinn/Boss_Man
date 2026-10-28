@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
@@ -457,7 +457,7 @@ export function reviewService(
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
       for (const command of checks) {
-        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), 11 * 60_000);
+        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS);
         if (!v.ok) {
           const never = checkNeverFinished(v);
           if (never) {

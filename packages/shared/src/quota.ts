@@ -109,3 +109,19 @@ export function parseAcpUsageCost(update: unknown): UsageCost | null {
     contextUsed: typeof update["used"] === "number" ? update["used"] : null,
   };
 }
+
+/**
+ * Plain names for the limits Claude reports; anything unknown gets a readable name, never the raw key.
+ * The Fable key is a guess: the owner's screenshot showed "seven day overage included", and no sample of that
+ * data is in the repo, so any key containing `fable` or `overage_included` is taken as the weekly Fable limit.
+ */
+export function windowLabel(key: string): { name: string; note?: string } {
+  if (key === "five_hour") return { name: "5-hour window" };
+  if (key === "seven_day") return { name: "This week" };
+  if (/fable|overage_included/.test(key))
+    return { name: "Fable (this week)", note: "Fable can use up to 50% of your weekly limit." };
+  const m = /^(\d+)_min$/.exec(key);
+  if (m) return { name: `${m[1]}-minute window` };
+  const words = key.replace(/_/g, " ").trim();
+  return { name: words ? `${words[0]!.toUpperCase()}${words.slice(1)} limit` : "Other limit" };
+}

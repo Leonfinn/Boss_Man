@@ -1171,11 +1171,11 @@ export function Watchdog({ company }: { company: Company }) {
           disabled={test.busy}
           onClick={() =>
             void test.run(async () => {
-              setBt(await api<Backtest>(`/api/companies/${company.id}/watchdog/backtest?days=14`));
+              setBt(await api<Backtest>(`/api/companies/${company.id}/watchdog/backtest?days=2`));
             })
           }
         >
-          Test on the past 14 days
+          Test on the past 48 hours
         </button>
       </div>
       {act.view}
