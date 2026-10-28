@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { DEFAULT_REVIEW_POLICY, type ReviewPolicy, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
@@ -9,10 +9,12 @@ import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { resolveReviewer } from "../src/services/review-policy.js";
+import { MERGE_ACTIVITY_MS } from "../src/services/review.js";
 import { raiseMergeStuck } from "../src/services/decisions.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
 afterEach(async () => {
+  vi.useRealTimers();
   await ctx?.close();
   ctx = undefined;
 });
@@ -41,12 +43,12 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   /** Set to make the runner's merge fail, as when it drops off mid-way. */
-  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null } = { merge: false, changed: false, holdMerge: null };
+  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null } = { merge: false, changed: false, holdMerge: null, holdVerify: null };
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
     if (c.type === "workspace.diff") ok(faults.changed ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
-    if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
+    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
     if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
     else if (c.type === "workspace.merge") void (faults.holdMerge ?? Promise.resolve()).then(() => ok({ status: "merged", commit: "c".repeat(40) }));
     return true;
@@ -200,6 +202,65 @@ describe("an approval whose merge fails", () => {
     await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${t.id}/landing`)).json().landing).toMatchObject({ state: "finished", outcome: "done" }));
     expect(c.sent.slice(before).filter((x) => x.type.startsWith("workspace."))).toEqual([]);
     expect((await c.row(t.id)).systemState).toBe("done");
+  });
+});
+
+describe("a merge check that runs long", () => {
+  it("keeps the ticket active so the sweep doesn't start a second landing beside it", async () => {
+    const c = await setup();
+    const t = await c.ticket({ state: "review" });
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    let release!: () => void;
+    c.faults.holdVerify = new Promise<void>((r) => (release = r));
+    const approved = (await c.mcp(c.senior.id)).callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } });
+    await vi.waitFor(() => expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1));
+
+    // The check is still running 31 minutes on, past the old 30-minute sweep threshold.
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 31 * 60_000) }).where(eq(tickets.id, t.id));
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+    expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1);
+    expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(0);
+    expect(await c.db.select().from(decisions).where(like(decisions.dedupeKey, `merge-stuck:${t.id}`))).toHaveLength(0);
+
+    release();
+    await approved;
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1);
+  });
+
+  it("keeps a high-risk ticket active through a long verify so the sweep never lands it twice", async () => {
+    const c = await setup();
+    const t = await c.ticket({ state: "review", risk: "high" });
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", deepVerifyCommand: "pnpm test:e2e" });
+    // High risk merges without an owner sign-off here, so approving it lands it.
+    await c.setPolicy((p) => (p.high.ownerSignoff = false));
+    let release!: () => void;
+    c.faults.holdVerify = new Promise<void>((r) => (release = r));
+
+    // Only the heartbeat interval is faked, so the app's real timers and the runner's replies stay live.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const approved = (await c.mcp(c.senior.id)).callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } });
+    await vi.waitFor(() => expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1));
+
+    // The verify has been running since before the sweep's (longer) merge threshold: only the heartbeat
+    // inside landOnce stops the sweep from starting a second landing beside it.
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 40 * 60_000) }).where(eq(tickets.id, t.id));
+    vi.advanceTimersByTime(MERGE_ACTIVITY_MS + 1);
+    await vi.waitFor(async () => expect(Date.now() - (await c.row(t.id)).lastActivityAt.getTime()).toBeLessThan(MERGE_ACTIVITY_MS));
+
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
+    expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1);
+    expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(0);
+    expect(await c.db.select().from(decisions).where(like(decisions.dedupeKey, `merge-stuck:${t.id}`))).toHaveLength(0);
+
+    // Releasing the check runs the deep check once and then merges once.
+    vi.useRealTimers();
+    release();
+    await approved;
+    await vi.waitFor(async () => expect((await c.row(t.id)).systemState).toBe("done"));
+    const commands = c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command);
+    expect(commands).toEqual(["pnpm test", "pnpm test:e2e"]);
+    expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(1);
   });
 });
 
