@@ -1248,10 +1248,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!ceo) throw new AnswerError("Only the CEO withdraws a card.");
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId), eq(decisions.status, "open")));
       if (!d) return null;
-      if (d.raisedByAgentId === input.agentId) throw new AnswerError("That's your own request; you can't withdraw it.");
       const ctx = d.context as DecisionContext;
+      // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
+      // stale or not. It expires on its own (BOS-149).
+      if (ctx.type === "permission") throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");
       // Fail closed: only system and info cards may be cleared outright; everything else (a live owner
-      // question, review loop, permission, sign-off...) must be stale or a genuine duplicate (BOS-149).
+      // question, review loop, sign-off...) must be stale or a genuine duplicate (BOS-149).
       if (!isSystemCard(d) && !(await staleOrDuplicate(d))) {
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
@@ -1262,12 +1264,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id });
       if (!closed) return null;
-      // A withdrawn permission request has no verdict otherwise, so the agent's run would wait out the
-      // runner's timeout: tell the runner it is denied (BOS-149).
-      if (ctx.type === "permission") {
-        send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: "deny" });
-        await db.update(runs).set({ lastEventAt: now() }).where(eq(runs.id, ctx.runId));
-      }
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
       // A card that was holding a ticket no longer holds it.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));

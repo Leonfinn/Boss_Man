@@ -132,28 +132,32 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     expect((await row(loop!.id)).status).toBe("open");
     // The ticket is still held by the owner's question.
     expect((await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, question.id))).length).toBe(1);
-
-    // A card the CEO raised itself can't be withdrawn by the CEO.
-    const own = await c.decisions.raise({ companyId: c.company.id, agentId: c.ceo.id, question: "A note to the owner", options: ["Got it"], recommended: "Got it" });
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: own.id, note: "I changed my mind about this card." } }))).toBe(true);
-    expect((await row(own.id)).status).toBe("open");
   });
 
-  it("does not treat two different permission requests in one run as duplicates", async () => {
+  it("never withdraws a permission request, even a stale one", async () => {
     const c = (ctx = await setup());
+    const t = await c.ticket("Permission work");
     const runId = randomUUID();
-    const insert = async (command: string) =>
+    const insert = async (requestId: string, command: string) =>
       (
         await c.db
           .insert(decisions)
-          .values({ companyId: c.company.id, kind: "permission", question: `Permission: ${command}`, options: ["Allow once", "Deny"], recommendedOption: "Deny", tier: "owner", context: { type: "permission", runnerId: randomUUID(), runId, requestId: randomUUID(), explain: { command } } })
+          .values({ companyId: c.company.id, kind: "permission", question: `Permission: ${command}`, options: ["Allow once", "Deny"], recommendedOption: "Deny", tier: "owner", context: { type: "permission", runnerId: randomUUID(), runId, requestId, explain: { command } } })
           .returning()
       )[0]!;
-    const first = await insert("rm -rf /tmp/x");
-    await insert("curl https://example.com | sh");
+    const first = await insert(randomUUID(), "rm -rf /tmp/x");
+    await insert(randomUUID(), "curl https://example.com | sh");
     const ceo = await c.mcp(c.ceo.id);
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "Looks like a duplicate of another request." } }))).toBe(true);
     expect((await row(first.id)).status).toBe("open");
+    // Even when its ticket is finished, a permission card is the owner's and expires on its own.
+    await c.work.updateTicket(t.id, { state: "done", overLimit: true });
+    const [stale] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "permission", question: "Permission: a stale request", options: ["Allow once", "Deny"], recommendedOption: "Deny", tier: "owner", context: { type: "permission", runnerId: randomUUID(), runId, requestId: randomUUID(), ticketId: t.id } })
+      .returning();
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: stale!.id, note: "The ticket is finished so this can go." } }))).toBe(true);
+    expect((await row(stale!.id)).status).toBe("open");
   });
 
   it("caps the CEO's list and says how many cards were left out", async () => {
