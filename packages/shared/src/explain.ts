@@ -277,8 +277,16 @@ function scratchOnly(parts: Part[]): { unchecked: string[] } | null {
 
 /** One plain entry directly in /tmp: not /tmp itself, no deeper path, nothing the shell would expand or resolve. */
 const TEMP_PATH = String.raw`/tmp/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+`;
-/** A delete that touches only TEMP_PATHs, as written; output may only go to /dev/null. */
+/** A plain rm/rmdir/unlink: options first, then its paths (group 1); output may only go to /dev/null. */
+/** A delete that touches only TEMP_PATHs, as written: only these clear a /tmp entry for later writes. */
 const TEMP_DELETE = new RegExp(String.raw`^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+${TEMP_PATH})+(?:\s+(?:(?:[12]|&)?>>?\s*/dev/null|2>&1))*$`);
+const DELETE = /^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*((?:\s+[^\s>&]+)+)(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
+/**
+ * A plain relative path in the agent's working copy (BOS-120): no leading / - or ~, and no . .. or
+ * .git part at any depth (so not a submodule's .git either). Other dot folders (.turbo, .cache) are fine.
+ */
+const WORKING_PATH = /^[A-Za-z0-9_+@.][A-Za-z0-9._+@-]*(?:\/[A-Za-z0-9._+@-]+)*\/?$/;
+const inWorkingCopy = (p: string) => WORKING_PATH.test(p) && p.replace(/\/$/, "").split("/").every((part) => part !== "." && part !== ".." && part.toLowerCase() !== ".git");
 
 /** Any word that deletes, wherever it is: a second guard behind the allow-list, which must find none outside the accepted rm's. */
 const DELETING = String.raw`\b(?:rm|rmdir|unlink|shred|truncate|rmtree|rmSync|unlinkSync)\b|\s--?delete\b|\bgit\s+clean\b`;
@@ -344,31 +352,47 @@ function safeBeside(words: string[], cwd: { tmp: boolean }, cleared: Set<string>
   }
 }
 
+export type CleanupScope = { tmp: string[]; workingCopy: string[] };
+
 /**
- * True when every delete in the command is of temp files and nothing else in it changes anything
- * outside /tmp (BOS-111). An allow-list, per segment: each is either a plain rm/rmdir/unlink of
- * entries directly in /tmp or a known-safe command (safeBeside), its output going only to
- * /dev/null or an entry directly in /tmp. Deletes are one level only, because rm then removes a
- * symlink as a link and never follows it; a deeper path could pass through a symlinked folder,
- * which only the runner's filesystem could tell. The destructive-word counts stay as a second guard.
+ * What a cleanup command deletes, when every delete in it is of temp files (BOS-111) or of plain
+ * relative paths in the agent's working copy (BOS-120), and nothing else in it changes anything
+ * outside /tmp; otherwise null. An allow-list, per segment: each is either a plain rm/rmdir/unlink
+ * of such paths or a known-safe command (safeBeside), its output going only to /dev/null or a /tmp
+ * entry cleared as below. Temp deletes are one level only, because rm then removes a symlink as a
+ * link and never follows it. Working-copy paths go deeper, so a symlinked folder on the way would
+ * be followed: only the runner's filesystem could tell, which is why these still need the CEO.
+ * With any working-copy path there may be no cd anywhere, so the paths are relative to the folder
+ * each shell command starts in. The server sends these to the CEO only when the runner reported it
+ * started the run in its ticket's worktree and the tool input names no other folder; it can't see
+ * where the shell is now, so that and the CEO's approval are what keep them inside.
+ * The destructive-word counts stay as a second guard.
  *
  * Writes have the same symlink problem, so they may only go to a /tmp entry the command deleted
  * earlier in one unbroken && chain (BOS-111 adversarial review: git worktree add, mkdir or an
  * install through /tmp/lnk wrote into the link's target). Once rm -rf /tmp/NAME has succeeded the
  * name is gone, and anything there afterwards was made by this chain. Any other separator ends
- * the chain: after ; or || the rm or cd may have failed, and & or | run alongside it. Left open:
- * another process recreating the name as a link in between, which needs a hostile agent racing it.
+ * the chain: after ; or || the rm or cd may have failed, and & or | run alongside it. Only a delete
+ * of /tmp entries alone clears them: a working-copy delete never does. Left open: another process
+ * recreating the name as a link in between, which needs a hostile agent racing it.
  */
-export function tempCleanup(command: string): boolean {
-  if (!PLAIN.test(command)) return false;
-  if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH=/.test(command)) return false;
-  if (new RegExp(PUSHING, "i").test(command)) return false;
+export function cleanupScope(command: string): CleanupScope | null {
+  if (!PLAIN.test(command)) return null;
+  if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH=/.test(command)) return null;
+  if (new RegExp(PUSHING, "i").test(command)) return null;
   // PLAIN rules out quotes and heredocs, so this splits exactly where segments() does, keeping the separators.
   const pieces = command.split(/(&&|\|\||[;|\n]|(?<!>)&(?!>))/);
   const segs = segments(command);
-  if (pieces.filter((_, i) => i % 2 === 0).map((s) => s.trim()).filter(Boolean).join("\0") !== segs.join("\0")) return false;
-  const deletes = segs.filter((s) => TEMP_DELETE.test(s));
-  if (!deletes.length) return false;
+  if (pieces.filter((_, i) => i % 2 === 0).map((s) => s.trim()).filter(Boolean).join("\0") !== segs.join("\0")) return null;
+  const deletePaths = (s: string) => {
+    const paths = DELETE.exec(s)?.[1]?.trim().split(/\s+/);
+    return paths?.every((p) => TEMP_ONLY.test(p) || inWorkingCopy(p)) ? paths : null;
+  };
+  const deletes = segs.filter((s) => deletePaths(s));
+  if (!deletes.length) return null;
+  const scope: CleanupScope = { tmp: [], workingCopy: [] };
+  for (const p of deletes.flatMap((s) => deletePaths(s)!)) (TEMP_ONLY.test(p) ? scope.tmp : scope.workingCopy).push(p);
+  if (scope.workingCopy.length && segs.some((s) => /^cd(\s|$)/.test(s))) return null;
   const cwd = { tmp: false };
   const cleared = new Set<string>();
   let chained = true;
@@ -381,7 +405,8 @@ export function tempCleanup(command: string): boolean {
     }
     const s = pieces[i]!.trim();
     if (!s) continue;
-    if (TEMP_DELETE.test(s)) {
+    if (deletePaths(s)) {
+      if (!TEMP_DELETE.test(s)) continue;
       const words = s.replace(REDIRECT, " ").trim().split(/\s+/);
       if (chained && words.slice(1).every((w) => TEMP_ONLY.test(w) || CLEARING_FLAG.test(w))) for (const w of words) if (TEMP_ONLY.test(w)) cleared.add(w);
       continue;
@@ -391,12 +416,19 @@ export function tempCleanup(command: string): boolean {
       if (!(to === "/dev/null" || to === "&1" || to === "&2" || cleared.has(to))) ok = false;
       return " ";
     });
-    if (!ok || /[>&]/.test(rest) || !safeBeside(rest.trim().split(/\s+/), cwd, cleared)) return false;
+    if (!ok || /[>&]/.test(rest) || !safeBeside(rest.trim().split(/\s+/), cwd, cleared)) return null;
   }
-  return [DESTRUCTIVE, DELETING].every((re) => {
+  const counted = [DESTRUCTIVE, DELETING].every((re) => {
     const count = (s: string) => s.match(new RegExp(re, "gi"))?.length ?? 0;
     return count(command) === deletes.reduce((n, s) => n + count(s), 0);
   });
+  return counted ? { tmp: [...new Set(scope.tmp)], workingCopy: [...new Set(scope.workingCopy)] } : null;
+}
+
+/** True when every delete in the command is of entries directly in /tmp (BOS-111): see cleanupScope. */
+export function tempCleanup(command: string): boolean {
+  const scope = cleanupScope(command);
+  return Boolean(scope && !scope.workingCopy.length);
 }
 
 /** What a shell command would do, in one sentence led by the worst thing in it. */

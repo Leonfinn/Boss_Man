@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, ReviewPolicySchema, TOOL_KINDS, SENIOR_DEV, policyAgentIds, ruleFor, type ReviewPolicy } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, TOOL_KINDS, SENIOR_DEV, ruleFor } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -33,12 +33,12 @@ import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
-import { acceptanceCriteriaSchema } from "@boss-man/shared";
+import { acceptanceCriteriaSchema, isTaskSize, SIZE_SCALE } from "@boss-man/shared";
 import { DeployError, deploysService } from "./services/deploys.js";
 import { RunError, runsService } from "./services/runs.js";
 import { recoveryService } from "./services/recovery.js";
 import { ReviewError, reviewService } from "./services/review.js";
-import { effectivePolicy } from "./services/review-policy.js";
+import { checkPolicy as checkPolicyIn, effectivePolicy } from "./services/review-policy.js";
 import { listReviews } from "./services/review-kinds.js";
 import { loopGuards, type LoopLimits } from "./services/loop-guards.js";
 import { record } from "./services/activity.js";
@@ -52,6 +52,8 @@ import { TicketImageError, ticketImagesService } from "./services/ticket-images.
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
+import { RetroError, retroService } from "./services/retro.js";
+import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
@@ -270,6 +272,13 @@ export async function buildApp(opts: AppOptions) {
     settled: () => scheduler.settled(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    tellRunning: async (text) => {
+      const live = await db.select({ id: runsTable.id, companyId: runsTable.companyId }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
+      for (const r of live) {
+        const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
+        if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
+      }
+    },
     dir: opts.deployerDir,
     drainMinutes: opts.drainMinutes,
     reconnectMs: opts.drainReconnectMs,
@@ -290,6 +299,7 @@ export async function buildApp(opts: AppOptions) {
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
   const dashboard = dashboardService(db, { now: opts.now });
+  const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
@@ -397,6 +407,9 @@ export async function buildApp(opts: AppOptions) {
     now: opts.now,
     log: (m) => app.log.error(m),
   });
+  // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
+  const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
+  decisionsSvc.setRetroHook(retro);
   const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer) => decisionsSvc.answer(id, answer), watchdog, now: opts.now });
   const gitHosts = gitHostService({ fetch: opts.fetch });
   const setup = setupService(db, { isConnected: (id) => runners.isConnected(id) });
@@ -436,7 +449,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images, watchdog, alerts }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -624,17 +637,7 @@ export async function buildApp(opts: AppOptions) {
 
     // Review routing: per risk tier, who approves plans, who reviews code and whether the owner signs off.
     // Validates the policy, and that every agent it names belongs to the company.
-    async function checkPolicy(companyId: string, body: unknown): Promise<ReviewPolicy | string> {
-      const parsed = ReviewPolicySchema.safeParse(body);
-      if (!parsed.success) return parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-      const named = policyAgentIds(parsed.data);
-      if (named.length) {
-        const ok = new Set((await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), inArray(agents.id, named)))).map((a) => a.id));
-        const bad = named.find((a) => !ok.has(a));
-        if (bad) return `Agent ${bad} isn't an active agent of this company.`;
-      }
-      return parsed.data;
-    }
+    const checkPolicy = (companyId: string, body: unknown) => checkPolicyIn(db, companyId, body);
     owner.get("/api/companies/:id/review-policy", async (req, reply) => {
       const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, IdParam.parse(req.params).id));
       return c ? c.policy : reply.code(404).send({ error: "not_found" });
@@ -1046,6 +1049,7 @@ export async function buildApp(opts: AppOptions) {
       acceptanceCriteria: acceptanceCriteriaSchema,
       noCode: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
+      size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).nullable(),
       planFirst: z.boolean(),
       featureId: Uuid.nullable(),
       overLimit: z.boolean(),
@@ -1432,6 +1436,28 @@ export async function buildApp(opts: AppOptions) {
 
     // The home screen (R74).
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
+
+    // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
+    owner.get("/api/companies/:id/workflow", async (req) => {
+      const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(req.query);
+      return workflow.scorecard(IdParam.parse(req.params).id, q.days);
+    });
+
+    // Workflow retros (docs/19 parts 2 and 3): who runs them, the latest findings and changes, and a run on demand.
+    const retroErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
+      if (err instanceof RetroError) return reply.code(err.status).send({ error: "retro", message: err.message });
+      throw err;
+    };
+    owner.get("/api/companies/:id/retro-settings", async (req) => retro.status(IdParam.parse(req.params).id));
+    owner.put("/api/companies/:id/retro-settings", async (req, reply) => {
+      const b = z.object({ agentId: Uuid.nullable() }).parse(req.body);
+      return retro.setAgent(IdParam.parse(req.params).id, b.agentId).catch(retroErrors(reply));
+    });
+    owner.get("/api/companies/:id/retros/latest", async (req) => retro.latest(IdParam.parse(req.params).id));
+    owner.post("/api/companies/:id/retro", async (req, reply) => {
+      const r = await retro.start(IdParam.parse(req.params).id, { force: true }).catch(retroErrors(reply));
+      return r && !r.started ? reply.code(409).send({ error: "retro", message: r.reason }) : reply.code(201).send(r);
+    });
 
     // The company wiki, and what each ticket produced (R69).
     const wikiErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {
@@ -2109,5 +2135,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic };
 }

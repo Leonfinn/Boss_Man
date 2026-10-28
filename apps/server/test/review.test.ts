@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runs, tickets, wakes } from "../src/db/schema.js";
+import { checkResults, decisions, runs, tickets, wakes } from "../src/db/schema.js";
 import { checkNeverFinished, landingText } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
 
@@ -143,6 +143,7 @@ describe("approval lands in the background (B)", () => {
     await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
     const { landing } = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json();
     expect(landing.text).toBe("Approved, but not merged: the check failed (exit code 2). It's gone back to Engineer to fix; the check's output is in the conversation below.");
+    expect(await c.db.select().from(checkResults)).toEqual([expect.objectContaining({ ticketId: c.ticket.id, kind: "verify", passed: false, detail: "boom" })]);
   });
 
   it("says each outcome in plain words", () => {
