@@ -3,6 +3,7 @@
 //   BOSSMAN_RUNNER_NETWORK the compose network runners join (default boss-man_default)
 //   BOSSMAN_RUNNER_URL     where runners reach the server (default ws://server:3100/api/runner/connect)
 //   BOSSMAN_RUNNER_MEMORY  memory limit per runner, e.g. 4g
+//   BOSSMAN_RUNNER_PIDS    process and thread limit per runner (default 4096)
 //   BOSSMAN_LAUNCHER_KEY_FILE  the key the server sends; made on first start if missing
 // `node dist/main.js recreate-all` puts every runner on the current image (scripts/update-runner.sh).
 import { randomBytes } from "node:crypto";
@@ -10,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { dockerClient } from "./docker.js";
 import { launcher, launcherServer } from "./launcher.js";
-import { parseMemory, type LauncherConfig } from "./spec.js";
+import { parseMemory, parsePids, type LauncherConfig } from "./spec.js";
 
 const env = process.env;
 const dataRoot = env.BOSSMAN_DATA;
@@ -23,6 +24,7 @@ const cfg: LauncherConfig = {
   network: env.BOSSMAN_RUNNER_NETWORK ?? "boss-man_default",
   serverUrl: env.BOSSMAN_RUNNER_URL ?? "ws://server:3100/api/runner/connect",
   memoryBytes: parseMemory(env.BOSSMAN_RUNNER_MEMORY),
+  pidsLimit: parsePids(env.BOSSMAN_RUNNER_PIDS),
 };
 const api = launcher(cfg, dockerClient(env.DOCKER_SOCKET ?? "/var/run/docker.sock"));
 
