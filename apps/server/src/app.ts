@@ -52,6 +52,7 @@ import { TicketImageError, ticketImagesService } from "./services/ticket-images.
 import { ChatError, chatService } from "./services/chat.js";
 import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
+import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
@@ -297,6 +298,7 @@ export async function buildApp(opts: AppOptions) {
   const wiki = wikiService(db, semantic);
   const images = ticketImagesService(db, { runners });
   const dashboard = dashboardService(db, { now: opts.now });
+  const workflow = workflowService(db, { now: opts.now });
   const skillsSvc = skillsService(db, { fetch: opts.fetch });
   const recovery = recoveryService(db);
   recovery.setWakeHook((w) => scheduler.wake(w));
@@ -1439,6 +1441,12 @@ export async function buildApp(opts: AppOptions) {
 
     // The home screen (R74).
     owner.get("/api/companies/:id/dashboard", async (req) => dashboard.get(IdParam.parse(req.params).id));
+
+    // The workflow scorecard: how work moves between roles, and where features wait on their last tasks.
+    owner.get("/api/companies/:id/workflow", async (req) => {
+      const q = z.object({ days: z.coerce.number().int().min(1).max(90).default(14) }).parse(req.query);
+      return workflow.scorecard(IdParam.parse(req.params).id, q.days);
+    });
 
     // The company wiki, and what each ticket produced (R69).
     const wikiErrors = (reply: import("fastify").FastifyReply) => (err: unknown) => {

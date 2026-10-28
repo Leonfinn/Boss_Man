@@ -68,6 +68,9 @@ describe("CEO delegation", () => {
     expect(ok.isError).toBeFalsy();
     expect(await row(t.id)).toMatchObject({ assigneeAgentId: ctx.dev.id, stateNote: "Needs code; start with the limiter." });
     expect(await assignedWakes(ctx.dev.id)).toHaveLength(1);
+    // The activity row names the CEO as the assigner, so the Workflow page can show the CEO -> Dev handoff.
+    const [log] = await ctx.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "assigned")));
+    expect(log!.agentId).toBe(ctx.co.ceo.id);
     await c.close();
   });
 

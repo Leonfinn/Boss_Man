@@ -16,6 +16,8 @@ export class WorkError extends Error {
 }
 
 type TicketPatch = {
+  /** Who made the change, for the activity log (the assigner on an assignment). */
+  byAgentId?: string | null;
   title?: string;
   body?: string | null;
   columnId?: string;
@@ -410,7 +412,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       }
       if (updated!.assigneeAgentId !== t.assigneeAgentId) {
         const [to] = updated!.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, updated!.assigneeAgentId)) : [];
-        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
+        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", agentId: patch.byAgentId ?? undefined, summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
       }
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
       if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);

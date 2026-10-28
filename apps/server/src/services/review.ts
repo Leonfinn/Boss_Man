@@ -4,7 +4,7 @@
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
@@ -491,6 +491,7 @@ export function reviewService(
       for (const command of checks) {
         await touch();
         const v = await whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify", passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
         if (!v.ok) {
           const never = checkNeverFinished(v);
           if (never) {
@@ -596,6 +597,7 @@ export function reviewService(
       const key = `${t.pullRequestHead}:${c.state}`;
       if ((c.state !== "failed" && c.state !== "passed") || key === t.pullRequestCi) return;
       await db.update(tickets).set({ pullRequestCi: key }).where(eq(tickets.id, ticketId));
+      await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: "ci", passed: c.state === "passed", detail: c.state === "failed" ? c.failing.join(", ") || null : null });
       if (c.state === "failed" && t.assigneeAgentId) {
         await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
         await tellAgent({ ...t, systemState: "in_progress" }, `The checks on your pull request ${t.pullRequestUrl ?? ""} failed: ${c.failing.join(", ") || "see the host"}. Fix them, push, then move the ticket back to review.`, "ci failed");
