@@ -152,6 +152,12 @@ function scratchSafe(seg: string, program: string, rest: string[]): boolean {
   const ok = SCRATCH_OPTS[program];
   return Boolean(ok) && rest.every((a) => !a.startsWith("-") || ok!.test(a));
 }
+/**
+ * The segment's first word, as written, must be the bare name of the program scratchSafe judged
+ * (BOS-111 security round 12). An allow-list rather than another assignment pattern: X+=, X[0]=,
+ * keywords, redirects and ./x or /tmp/x as the program all fail it, however they're spelt.
+ */
+const SAFE_FIRST_WORD = /^[a-z0-9_-]+$/;
 
 function explainSegment(seg: string): Part {
   const all = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
@@ -169,11 +175,12 @@ function explainSegment(seg: string): Part {
     const target = m[1] || tokens[++i] || "";
     if (target && target !== "/dev/null" && !target.startsWith("&")) writes.push(target);
   }
-  const nested = /^\w+=\$\((.+)$/.exec(args[0] ?? "");
+  const nested = /^\w+\+?=\$\((.+)$/.exec(args[0] ?? "");
   if (nested) args[0] = nested[1]!.replace(/\)$/, "");
   let assigns = Boolean(nested);
-  while (args[0] && (/^\w+=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) assigns = /^\w+=/.test(args.shift()!) || assigns;
+  while (args[0] && (/^\w+\+?=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) assigns = /^\w+\+?=/.test(args.shift()!) || assigns;
   const program = (args[0] ?? "").split("/").pop() ?? "";
+  const first = seg.trimStart().split(/\s+/)[0] ?? "";
   const rest = args.slice(1);
   const flags = rest.filter((a) => a.startsWith("-"));
   const operands = rest.filter((a) => !a.startsWith("-"));
@@ -216,7 +223,7 @@ function explainSegment(seg: string): Part {
 
   if (/\$\(|`/.test(nested ? seg.slice(seg.indexOf("$(") + 2) : seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
   p.program = program;
-  p.safe = !assigns && scratchSafe(seg, program, rest);
+  p.safe = !assigns && SAFE_FIRST_WORD.test(first) && first === program && scratchSafe(seg, program, rest);
   if (writes.length) {
     const worse = WORST.indexOf(p.effect) < WORST.indexOf("changes") ? p : null;
     p = worse ?? { ...part("changes", "Changes files", writes), env: p.env, repo: p.repo, install: p.install, program: p.program, safe: p.safe };
@@ -378,7 +385,7 @@ export type CleanupScope = { tmp: string[]; workingCopy: string[] };
  */
 export function cleanupScope(command: string): CleanupScope | null {
   if (!PLAIN.test(command)) return null;
-  if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH=/.test(command)) return null;
+  if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH\+?=/.test(command)) return null;
   if (new RegExp(PUSHING, "i").test(command)) return null;
   // PLAIN rules out quotes and heredocs, so this splits exactly where segments() does, keeping the separators.
   const pieces = command.split(/(&&|\|\||[;|\n]|(?<!>)&(?!>))/);

@@ -462,6 +462,25 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     expect(evaluatePermission(exec("rm -rf /tmp/a"), [SCRATCH_RULE]).rule).toBe(SCRATCH_RULE.name);
   });
 
+  it("gives the /tmp note only when a segment starts with a listed program's bare name (security round 12)", () => {
+    for (const c of [
+      "rm -rf /tmp/a && X+=/tmp/ls /tmp/evil",
+      "PATH+=:/tmp/ls && rm -rf /tmp/a",
+      "X+=1 rm -rf /tmp/a",
+      "X[0]=/tmp/x ls /tmp && rm -rf /tmp/a",
+      "rm -rf /tmp/a && ./x /tmp/a",
+      "rm -rf /tmp/a && /tmp/x /tmp/a",
+      "/bin/rm -rf /tmp/a",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    for (const c of ["rm -rf /tmp/a", "rm -rf /tmp/a && ls /tmp"]) {
+      expect(explainCommand(c).scratch, c).toBeDefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).toBe(SCRATCH_RULE.name);
+    }
+  });
+
   it("recommends Deny for shred even in /tmp", () => {
     for (const c of ["shred /tmp/a", "shred -u /tmp/a", "rm -rf /tmp/a && shred /tmp/b"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
     expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
