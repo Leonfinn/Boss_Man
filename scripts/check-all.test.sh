@@ -6,6 +6,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 export BOSSMAN_CHECK_RETRY_SECONDS=0
+# check-all.sh sets this for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
+unset BOSSMAN_CHECK_CHILD
 runs() { grep -c . "$t/count" 2>/dev/null || echo 0; }
 
 # run <expected rc> <expected runs> <label> <stub body> [dir] [command]
