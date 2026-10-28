@@ -919,19 +919,28 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       onSkill = hook;
     },
 
-    /** The owner's call on a proposed skill. One open decision per proposal. */
-    async raiseSkill(input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }) {
-      const [row] = await db
+    /**
+     * The owner's call on a proposed skill. One open decision per proposal. A card that ended
+     * without installing (answered after a crash, withdrawn or expired) keeps its dedupe key
+     * only while it is open, so the same proposal can be put in front of the owner again.
+     */
+    async raiseSkill(input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }, dbc: Db = db) {
+      const dedupeKey = `skill:${input.proposalId}`;
+      await dbc.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, dedupeKey), ne(decisions.status, "open")));
+      const [row] = await dbc
         .insert(decisions)
-        .values({ companyId: input.companyId, kind: "skill", tier: "owner", question: input.question, options: input.options, recommendedOption: input.recommended, raisedByAgentId: input.agentId, dedupeKey: `skill:${input.proposalId}`, context: { type: "skill", proposalId: input.proposalId } })
+        .values({ companyId: input.companyId, kind: "skill", tier: "owner", question: input.question, options: input.options, recommendedOption: input.recommended, raisedByAgentId: input.agentId, dedupeKey, context: { type: "skill", proposalId: input.proposalId } })
         .onConflictDoNothing()
         .returning();
-      return row ?? null;
+      if (row) return row;
+      // Another caller already put this card in front of the owner: adopt it rather than asking twice.
+      const [open] = await dbc.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, dedupeKey), eq(decisions.status, "open")));
+      return open ? { id: open.id } : null;
     },
 
     /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
     async withdraw(id: string) {
-      await db.update(decisions).set({ status: "withdrawn", answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      await db.update(decisions).set({ status: "withdrawn", dedupeKey: null, answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
     },
 
     setLoopHooks(hooks: LoopHooks) {

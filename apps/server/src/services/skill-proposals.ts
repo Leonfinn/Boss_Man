@@ -1,9 +1,9 @@
 // Skill proposals (BOS-86): the CEO proposes a skill (its own draft, or an internet link); the
 // Security Reviewer checks it where the owner's rule requires; the owner decides every one.
 // Nothing here writes to `skills`: only the install step (below, once decided) does.
-import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agentSkills, agents, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
+import { agentSkills, agents, decisions, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "./decisions.js";
 import { hashFiles, scriptFilesOf, sha256, unreadableFile } from "./skill-files.js";
@@ -111,8 +111,8 @@ export type ProposeInput = {
 
 export type SkillDeps = {
   createTicket: CreateTicket;
-  /** Puts the owner's decision in the queue; returns its id. */
-  raiseDecision: (input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }) => Promise<{ id: string } | null>;
+  /** Puts the owner's decision in the queue; returns its id. `tx` lets the caller make it one transaction with the status write. */
+  raiseDecision: (input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }, tx?: Db) => Promise<{ id: string } | null>;
   withdrawDecision: (id: string) => Promise<unknown>;
   /** Tells an agent (the CEO) what happened to its proposal. */
   tell?: (agentId: string, note: string) => Promise<unknown>;
@@ -285,10 +285,10 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (me?.kind !== "security") throw new SkillError(403, "Only the Security Reviewer can give a verdict.");
       if (p.status === "expired") throw new SkillError(409, `This proposal expired after ${EXPIRES_AFTER_DAYS} days with no decision, and its review task was closed. No verdict can be given; if the skill is still wanted, the CEO can propose it again.`);
       if (p.status !== "in_review" || !p.reviewTicketId) throw new SkillError(409, "This proposal isn't waiting for a review.");
-      const [t] = await db.select({ assignee: tickets.assigneeAgentId, title: tickets.title, body: tickets.body }).from(tickets).where(eq(tickets.id, p.reviewTicketId));
+      const [t] = await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, p.reviewTicketId));
       if (t?.assignee !== reviewerId) throw new SkillError(403, "This proposal's review was given to another reviewer.");
-      // Both are rebuilt from the stored row, so a ticket someone edited after it was made can't carry a verdict.
-      if (t.title !== reviewTitle(p) || t.body !== reviewBody(p)) throw new SkillError(409, "This review task was changed after it was made, so the verdict is refused. Read every file with proposal_file and ask the CEO to propose the skill again.");
+      // The verdict is tied to the stored bundle, not to the ticket's live text: the owner (or the
+      // reviewer) may have edited the task since it was made, and that must not make it undecidable.
       checkVerdict(p, v);
       const [row] = await db
         .update(skillProposals)
@@ -305,7 +305,10 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
      * a skill that needs a security review has no decision until the review's verdict is in, for these exact files.
      */
     async toOwner(p: Proposal) {
-      if (p.status !== "proposed" && p.status !== "awaiting_owner") throw new SkillError(409, "This proposal isn't ready for a decision.");
+      // `in_review` is allowed only when the verdict is already in: that is a proposal whose status
+      // write was lost after its card was raised, not one still waiting for the reviewer.
+      const ready = p.status === "proposed" || p.status === "awaiting_owner" || (p.status === "in_review" && !!p.verdict);
+      if (!ready) throw new SkillError(409, "This proposal isn't ready for a decision.");
       if (!p.verdict || p.reviewedBundleHash !== p.bundleHash) throw new SkillError(409, "This skill needs a security review of these exact files before the owner can decide.");
       const names = p.proposedAgentIds.length ? await db.select({ name: agents.name }).from(agents).where(inArray(agents.id, p.proposedAgentIds)) : [];
       const advise = p.verdict === "advise_against";
@@ -313,10 +316,15 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       const source = p.source === "link" ? `${p.sourceUrl}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}` : "written by the CEO";
       const review = p.verdict ? `Security review: ${VERDICT_WORDS[p.verdict]}. ${p.verdictSummary ?? ""}${p.conditions?.length ? ` Conditions: ${p.conditions.join("; ")}.` : ""}${p.findings?.length ? ` ${p.findings.length} finding(s); open the card for each file and line.` : ""}` : "Security review pending.";
       const question = `${advise ? "WARNING, the Security Reviewer advises against this. " : ""}${conditional ? "The Security Reviewer's recommendation has conditions; adding it means you accept them. " : ""}The CEO wants to ${p.replacesSkillId ? "update the skill" : "add the skill"} "${p.name}" (${source}) for ${names.map((n) => n.name).join(", ") || "no one yet"}. Why (the CEO's words, not checked): ${p.why} ${review}`;
-      const d = await deps.raiseDecision({ companyId: p.companyId, proposalId: p.id, agentId: p.proposedByAgentId, question, options: advise ? [SKILL_REJECT, SKILL_OVERRIDE] : conditional ? [SKILL_CONDITIONS, SKILL_REJECT] : [SKILL_ADD, SKILL_REJECT], recommended: advise ? SKILL_REJECT : conditional ? SKILL_CONDITIONS : SKILL_ADD });
-      const [row] = await db.update(skillProposals).set({ status: "awaiting_owner", decisionId: d?.id ?? p.decisionId, updatedAt: now() }).where(eq(skillProposals.id, p.id)).returning();
+      // One transaction: a crash can no longer leave the owner's card open while the proposal still
+      // says `in_review`, or the proposal `awaiting_owner` with no card at all.
+      const row = await db.transaction(async (tx) => {
+        const d = await deps.raiseDecision({ companyId: p.companyId, proposalId: p.id, agentId: p.proposedByAgentId, question, options: advise ? [SKILL_REJECT, SKILL_OVERRIDE] : conditional ? [SKILL_CONDITIONS, SKILL_REJECT] : [SKILL_ADD, SKILL_REJECT], recommended: advise ? SKILL_REJECT : conditional ? SKILL_CONDITIONS : SKILL_ADD }, tx as unknown as Db);
+        const [updated] = await tx.update(skillProposals).set({ status: "awaiting_owner", decisionId: d?.id ?? p.decisionId, updatedAt: now() }).where(eq(skillProposals.id, p.id)).returning();
+        return updated!;
+      });
       await record(db, { companyId: p.companyId, ticketId: p.reviewTicketId, agentId: p.proposedByAgentId, kind: "skill.awaiting_owner", summary: `The owner is asked to decide on ${p.name}. ${review}` });
-      return row!;
+      return row;
     },
 
     /** Re-reads the source at the pinned version, if it has one, and says what differs from the files that were reviewed. */
@@ -355,8 +363,11 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
      */
     async decide(companyId: string, proposalId: string, answer: string, by: string) {
       let p = await this.get(companyId, proposalId);
-      // Answered twice, or the proposal ended another way: nothing more to do.
-      if (p.status !== "awaiting_owner") return p;
+      // Answered twice, or the proposal ended another way: nothing more to do. The one exception is
+      // a crash that closed the card before the status caught up (the verdict is in, status still
+      // `in_review`): carry on and finish the answer instead of swallowing it.
+      const lagged = p.status === "in_review" && !!p.verdict && p.reviewedBundleHash === p.bundleHash;
+      if (p.status !== "awaiting_owner" && !lagged) return p;
       const advise = p.verdict === "advise_against";
       const conditional = p.verdict === "conditions";
       const adding = answer === SKILL_ADD || answer === SKILL_OVERRIDE || answer === SKILL_CONDITIONS;
@@ -420,8 +431,43 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       return p;
     },
 
+    /**
+     * Picks up a proposal a crash left half-decided. `decide()` is only reached from a card, so a
+     * proposal whose card is gone would otherwise sit until the 14-day expiry holding its name:
+     * - `awaiting_owner` with no open card (its card closed without installing), or
+     * - `in_review` although the verdict is already in (the status write was lost).
+     * One fresh card is raised for the owner; a proposal already waiting on an open card only has
+     * its status put back in step. Proposals past the expiry cutoff are left to `expireOld`.
+     */
+    async reconcile() {
+      const cutoff = new Date(now().getTime() - EXPIRES_AFTER_DAYS * 86_400_000);
+      const rows = await db
+        .select()
+        .from(skillProposals)
+        .where(and(inArray(skillProposals.status, ["in_review", "awaiting_owner"]), gt(skillProposals.createdAt, cutoff)));
+      let reRaised = 0;
+      for (const p of rows) {
+        // Still genuinely waiting for its review: nothing to recover.
+        if (!p.verdict || p.reviewedBundleHash !== p.bundleHash) continue;
+        const [open] = await db
+          .select({ id: decisions.id })
+          .from(decisions)
+          .where(and(eq(decisions.dedupeKey, `skill:${p.id}`), eq(decisions.status, "open")));
+        if (open) {
+          // The card exists (perhaps from before a lost status write): point the proposal at it.
+          if (p.status !== "awaiting_owner" || p.decisionId !== open.id) await patch(p.id, { status: "awaiting_owner", decisionId: open.id, updatedAt: now() });
+          continue;
+        }
+        await this.toOwner(p);
+        reRaised++;
+      }
+      return reRaised;
+    },
+
     /** Proposals nobody decided in two weeks end, and their decision leaves the queue. */
     async expireOld() {
+      // Recover a half-decided proposal before deciding it has expired: a lost card is not a lost cause.
+      await this.reconcile();
       const cutoff = new Date(now().getTime() - EXPIRES_AFTER_DAYS * 86_400_000);
       const open = await db.select().from(skillProposals).where(and(inArray(skillProposals.status, ["proposed", "in_review", "awaiting_owner"]), lt(skillProposals.createdAt, cutoff)));
       for (const p of open) {
