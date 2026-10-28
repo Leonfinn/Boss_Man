@@ -1,0 +1,2 @@
+ALTER TABLE "tickets" ADD COLUMN "size" integer;--> statement-breakpoint
+ALTER TABLE "tickets" ADD CONSTRAINT "tickets_size_scale" CHECK ("tickets"."size" is null or "tickets"."size" in (1, 2, 3, 5, 8));

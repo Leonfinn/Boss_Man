@@ -74,7 +74,7 @@ export type AdvisedDecision = {
   companyId: string;
   question: string;
   advice?: Advice;
-  settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean };
+  settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean };
   withdrawn?: { by: string; note: string };
 };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
@@ -135,6 +135,8 @@ export type Ticket = {
   workingSince?: string | null;
   branch: string | null;
   risk: Risk | null;
+  /** Relative size: 1, 2, 3, 5 or 8. */
+  size?: number | null;
   planFirst: boolean;
   plan: string | null;
   planApprovedAt: string | null;

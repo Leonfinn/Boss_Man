@@ -11,6 +11,8 @@ import {
   ticketRef,
   recommendedVerdict,
   TEMP_CLEANUP_RULE,
+  WORKING_COPY_RULE,
+  cleanupScope,
   type BlockedTicket,
   alwaysChoices,
   explainPermission,
@@ -27,6 +29,7 @@ import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
+import { APPLY_CHANGE, REVERT_CHANGE } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
@@ -73,7 +76,7 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
 }
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[] }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -110,7 +113,11 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
-  | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
+  | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } }
+  /** A change a workflow retro proposed (workflow_changes); Apply carries it out, Skip leaves things as they are. */
+  | { type: "workflow_change"; changeId: string }
+  /** The check on an applied change (part 4): Keep it or Revert it, with the measured result. */
+  | { type: "workflow_check"; changeId: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -328,6 +335,23 @@ export type AnswerExtra = {
   settledBy?: { agentId: string };
 };
 
+/** Which checkout a working-copy cleanup deletes in, and what (BOS-120). */
+export type WorkingCopy = { ticketId: string; ref: string | null; branch: string; files: string[] };
+/** The keys of Claude Code's Bash tool input. None of them moves the shell to another folder. */
+const SHELL_INPUT_KEYS = new Set(["command", "description", "timeout", "run_in_background", "dangerouslyDisableSandbox"]);
+/** Files for a card, cut at whole names with a count of the rest, so a long list never looks complete. */
+function fileList(files: string[], max: number): string {
+  let out = "";
+  let shown = 0;
+  for (const f of files) {
+    const next = out ? `${out}, ${f}` : f;
+    if (next.length > max) break;
+    out = next;
+    shown++;
+  }
+  return shown < files.length ? `${out}${out ? ", " : ""}…and ${files.length - shown} more` : out;
+}
+
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
 
 /** How long a temp-file cleanup waits with the CEO before it moves to the owner: the runner gives up at 10 minutes. */
@@ -386,6 +410,15 @@ export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
+/** The workflow retro's side of its decisions (services/retro.ts): a check before Apply, and what to do once answered. */
+export type RetroHook = {
+  problemApplying(changeId: string): Promise<string | null>;
+  answered(changeId: string, answer: string): Promise<unknown>;
+  /** Why Revert can't go ahead now (the value was changed again since), or null. */
+  problemReverting(changeId: string): Promise<string | null>;
+  checked(changeId: string, answer: string): Promise<unknown>;
+  lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
+};
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
 
 /**
@@ -424,6 +457,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
+  let retroHook: RetroHook | null = null;
   let onTeamPlan: TeamPlanHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
@@ -492,6 +526,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
       if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
+    }
+    if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
+      const problem = await retroHook?.problemApplying(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
+    }
+    if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
+      const problem = await retroHook?.problemReverting(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
     if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !replacedLesson(answer)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
@@ -786,12 +828,33 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // queue and notifications, and moves to the owner if the CEO doesn't settle it in time or escalates it.
       let ladder: Ladder | undefined;
       let ceoId: string | undefined;
-      if (tier === "ceo" && rule === TEMP_CLEANUP_RULE) {
+      // Deletes in the working copy (BOS-120) go the same way, but only when the run has a checkout.
+      // Paths are relative to where the shell starts, and the runner doesn't say where that is, so
+      // two things must hold. The runner reported (run.workspace) that it started this run in its
+      // ticket's own worktree, and that record gives the branch; a review copy or a run with no
+      // worktree sends none. And the tool input has only Claude Code's Bash keys: an allow-list,
+      // because any other key (opencode's workdir, codex's cwd, one we don't know) could point the
+      // command somewhere else (BOS-120 adversarial review).
+      let workingCopy: WorkingCopy | undefined;
+      if (tier === "ceo" && rule === WORKING_COPY_RULE) {
+        const raw = (event.rawInput ?? {}) as Record<string, unknown>;
+        const files = Object.keys(raw).every((k) => SHELL_INPUT_KEYS.has(k)) ? (cleanupScope(typeof raw["command"] === "string" ? raw["command"] : "")?.workingCopy ?? []) : [];
+        const [ws] = run?.ticketId && files.length
+          ? await db.select({ payload: runnerEvents.payload }).from(runnerEvents).where(and(eq(runnerEvents.runnerId, runner.id), eq(runnerEvents.type, "run.workspace"), sql`(${runnerEvents.payload}->>'runId') = ${event.runId}`, sql`(${runnerEvents.payload}->>'ticketId') = ${run.ticketId}`)).orderBy(desc(runnerEvents.seq)).limit(1)
+          : [];
+        const branch = (ws?.payload as { branch?: unknown } | undefined)?.branch;
+        const [t] = ws && typeof branch === "string"
+          ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).innerJoin(companies, eq(companies.id, tickets.companyId)).where(and(eq(tickets.id, run!.ticketId!), eq(tickets.companyId, runner.companyId)))
+          : [];
+        if (t?.repoUrl && typeof branch === "string") workingCopy = { ticketId: run!.ticketId!, ref: ticketRef(t.prefix, t.number), branch, files };
+        else tier = "owner";
+      }
+      if (tier === "ceo" && (rule === TEMP_CLEANUP_RULE || workingCopy)) {
         const [ceo] = await db.select({ id: agents.id, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, runner.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
         if (ceo && !ceo.paused) {
           ceoId = ceo.id;
           const since = now().toISOString();
-          ladder = { rung: "ceo", since, minutes: TEMP_CLEANUP_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: "temp-file cleanup goes to the CEO first" }] };
+          ladder = { rung: "ceo", since, minutes: TEMP_CLEANUP_MINUTES, ticketId: run?.ticketId ?? null, about: run?.agentId ? [run.agentId] : [], hops: [{ to: "ceo", at: since, why: workingCopy ? "deletes in the agent's working copy go to the CEO first" : "temp-file cleanup goes to the CEO first" }] };
         } else tier = "owner";
       }
       // Standing rules are the owner's call, never an agent's.
@@ -802,13 +865,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .values({
           companyId: runner.companyId,
           kind: "permission",
-          question: `${explain.title}. ${explain.summary}`,
+          // Which checkout and which files, on every card the CEO or the owner sees (BOS-120).
+          question: `${explain.title}. ${explain.summary}${workingCopy ? ` In ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 400)}.` : ""}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
-          recommendedOption: recommendedVerdict(info) === "deny" ? DENY : ALLOW,
+          // The same allow-list as everywhere else: build output is Allow, source or anything else is
+          // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).
+          recommendedOption: recommendedVerdict(info) === "allow" ? ALLOW : DENY,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
-          context: { ...context, rule, ...(ladder ? { tempCleanup: true, ladder } : {}) },
+          // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
+          context: { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? (workingCopy ? { ladder } : { tempCleanup: true, ladder }) : {}) },
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
@@ -821,9 +888,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           note: [
             `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
             `Command: ${explain.command ?? ""}`,
-            "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
-            "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
-            "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
+            ...(workingCopy
+              ? [
+                  `Its deletes are plain relative paths in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 1000)}. It has no cd. Any other deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner.`,
+                  "Boss Man can't see the runner's files: if a folder on one of those paths is a symlink, the delete follows it out of the checkout. It recommends Allow only for build output (dist, node_modules and the like). Allow it when the paths are the agent's own throwaway files (a probe or test file it made, build output such as dist or node_modules) and its ticket explains them.",
+                  "Deny it, or escalate it to the owner (decisions tool, action escalate), if it deletes source folders or files the ticket doesn't account for, or anything you can't explain.",
+                ]
+              : [
+                  "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
+                  "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
+                  "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
+                ]),
             "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
             `If you don't answer within ${TEMP_CLEANUP_MINUTES} minutes it goes to the owner.`,
           ].join("\n").slice(0, 4000),
@@ -920,6 +995,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setMaintenanceHook(hook: MaintenanceHook) {
       maintenance = hook;
+    },
+
+    setRetroHook(hook: RetroHook) {
+      retroHook = hook;
     },
 
     setAgentHook(hook: AgentDecisionHook) {
@@ -1320,7 +1399,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         ...rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! })),
         ...permissions.map((r) => {
           const ctx = r.context as Extract<DecisionContext, { type: "permission" }>;
-          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), settled: { by: ctx.settled!.name, answer: r.answer ?? "", note: ctx.settled!.note, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true } };
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), settled: { by: ctx.settled!.name, answer: r.answer ?? "", note: ctx.settled!.note, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true, ...(ctx.workingCopy ? { workingCopy: true } : {}) } };
         }),
         ...withdrawn.map((r) => {
           const w = (r.context as { withdrawn: Withdrawal }).withdrawn;
@@ -1499,6 +1578,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
+        await retroHook?.lessonAnswered(id, answer, extra.note);
+      } else if (ctx.type === "workflow_change") {
+        await retroHook?.answered(ctx.changeId, answer);
+      } else if (ctx.type === "workflow_check") {
+        await retroHook?.checked(ctx.changeId, answer);
       } else if (ctx.type === "lesson_replace") {
         await answerLessonReplace(db, d, ctx, answer, ownWords, extra.note);
       } else if (ctx.type === "budget_limit") {

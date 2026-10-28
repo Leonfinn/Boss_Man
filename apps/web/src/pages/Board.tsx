@@ -729,6 +729,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                             {t.risk} risk
                           </span>
                         )}
+                        {t.size && (
+                          <span className="tag" title="Size, relative to other tasks">
+                            Size {t.size}
+                          </span>
+                        )}
                       </div>
                       <h3>
                         <a href={`#/tickets/${t.id}`}>{t.title}</a>
