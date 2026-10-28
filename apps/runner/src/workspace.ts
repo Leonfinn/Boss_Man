@@ -449,9 +449,11 @@ export class Workspaces {
         }
       };
       let tail = "";
-      const onData = (chunk: Buffer) => {
-        tail = (tail + chunk.toString()).slice(-8192);
+      const onData = (chunk: string) => {
+        tail = (tail + chunk).slice(-8192);
       };
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
       child.stdout.on("data", onData);
       child.stderr.on("data", onData);
       let timedOut = false;
