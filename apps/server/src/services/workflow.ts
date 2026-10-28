@@ -92,6 +92,13 @@ export function metricValue(sc: Awaited<ReturnType<ReturnType<typeof workflowSer
   return (row?.[metric] as number | null | undefined) ?? null;
 }
 
+/** How many finished tickets (or handoffs, for a handoff measure) the scorecard behind `metricValue` rests on. */
+export function metricSample(sc: Awaited<ReturnType<ReturnType<typeof workflowService>["scorecard"]>>, metric: string, scope: Record<string, unknown>): number {
+  if (metric === "tailLagMs") return sc.byRole.reduce((n, r) => n + r.done, 0);
+  if (metric === "medianWaitMs" || metric === "bounceRate") return sc.handoffs.find((x) => x.from === scope.from && x.to === scope.to && x.kind === scope.kind)?.count ?? 0;
+  return (scope.agentId ? sc.byAgent.find((x) => x.agentId === scope.agentId) : sc.byRole.find((x) => x.role === scope.role))?.done ?? 0;
+}
+
 export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
   const now = deps.now ?? (() => new Date());
   return {

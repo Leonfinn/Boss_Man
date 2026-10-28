@@ -20,7 +20,7 @@ type Feature = {
 };
 type Finding = { failure: string; failureLabel: string; handoff?: { from: string; to: string }; tickets: string[]; count: number; note: string };
 type RetroInfo = { retro: { id: string; startedAt: string; since: string; until: string; doneCount: number; savedAt: string | null; agentName: string | null; findings: Finding[] } | null; changes: ChangeRow[] };
-type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped"; metricLabel: string; baselineText: string; target: string | null; appliedAt: string | null; evidence: string[] };
+type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[] };
 type Scorecard = { days: number; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
@@ -35,7 +35,7 @@ export function span(ms: number | null) {
 const pct = (n: number | null) => (n === null ? "–" : `${Math.round(n * 100)}%`);
 const dollars = (micros: number | null) => (micros === null ? "–" : `$${(micros / 1_000_000).toFixed(2)}`);
 const LEVER: Record<string, string> = { playbook: "Playbook", lesson: "Brief lesson", instructions: "Instructions", review_policy: "Review policy", watchdog: "Watchdog", model: "Model", thinking: "Thinking level" };
-const STATUS: Record<ChangeRow["status"], string> = { proposed: "Waiting for an answer", applied: "Applied", skipped: "Skipped" };
+const STATUS: Record<ChangeRow["status"], string> = { proposed: "Waiting for an answer", applied: "Applied", skipped: "Skipped", kept: "Kept", reverted: "Reverted" };
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 const label = (s: string) => s.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
 
@@ -100,7 +100,7 @@ function Retro({ companyId }: { companyId: string }) {
       <section>
         <h2>Changes</h2>
         <p className="muted" style={{ fontSize: 14 }}>
-          Changes a retro suggested. Nothing changes until it is approved: the CEO approves playbooks and lessons, and you approve the rest. The number is where the measure stood when it was suggested.
+          Changes a retro suggested. Nothing changes until it is approved: the CEO approves playbooks and lessons, and you approve the rest. Once a change has had time to work, you or the CEO get a Keep or Revert question. "Was" is where the measure stood when it was suggested; "now" is what the check found.
         </p>
         {data.changes.length ? (
           <div className="table-wrap">
@@ -122,7 +122,7 @@ function Retro({ companyId }: { companyId: string }) {
                     <td>{c.approver === "ceo" ? "CEO" : "You"}</td>
                     <td>{STATUS[c.status]}{c.appliedAt ? ` ${day(c.appliedAt)}` : ""}</td>
                     <td>
-                      {c.metricLabel} <small className="muted">was {c.baselineText}</small>
+                      {c.metricLabel} <small className="muted">was {c.baselineText}{c.afterText !== null ? `, now ${c.afterText}` : ""}</small>
                     </td>
                   </tr>
                 ))}

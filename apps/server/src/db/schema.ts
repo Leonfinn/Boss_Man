@@ -803,9 +803,12 @@ export const workflowChanges = pgTable(
     evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
     approver: text("approver").$type<"ceo" | "owner">().notNull(),
     decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
-    status: text("status").$type<"proposed" | "applied" | "skipped">().notNull().default("proposed"),
+    status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     checkDueAt: timestamp("check_due_at", { withTimezone: true }),
+    /** Part 4: what the check measured (value, when, how many relevant tickets or handoffs, whether the 30-day cap raised it) and the Keep / Revert decision. */
+    result: jsonb("result").$type<{ value: number | null; measuredAt: string; sample: number; capped: boolean }>(),
+    checkDecisionId: uuid("check_decision_id").references(() => decisions.id, { onDelete: "set null" }),
     createdAt: createdAt(),
   },
   (t) => [index("workflow_changes_company").on(t.companyId, t.createdAt), index("workflow_changes_retro").on(t.retroId)],

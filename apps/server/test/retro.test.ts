@@ -457,3 +457,200 @@ describe("proposing a change", () => {
     expect(rows.every((r) => r.baseline === null || typeof r.baseline === "number")).toBe(true);
   });
 });
+
+describe("checking a change's result (part 4)", () => {
+  const propose = (pm: Client, over: Record<string, unknown>) =>
+    tool(pm, "propose_workflow_change", { lever: "instructions", target: "Eve", change: { instructions: "Always test the null case." }, metric: "firstPassRate", scope: { role: "engineer" }, expected: "Fewer send-backs.", ...over });
+  const answer = (c: NonNullable<typeof ctx>, decisionId: string, a: string) => c.req("POST", `/api/decisions/${decisionId}/answer`, { answer: a });
+  const decisionRow = async (c: NonNullable<typeof ctx>, id: string) => (await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!;
+  const changeRow = async (c: NonNullable<typeof ctx>, id: string) => (await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, id)))[0]!;
+  /** n tickets finished a day ago, each with one review. */
+  const finish = async (c: NonNullable<typeof ctx>, n: number, verdict: "approved" | "changes_requested" | null, assignee?: string) => {
+    for (const t of await c.done(n, D, { assigneeAgentId: assignee ?? c.eng.id })) if (verdict) await c.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Ed", verdict, comments: [] });
+  };
+
+  /** A retro with 5 finished tickets (40% first-time pass) and an agent that can propose. `apply` moves the tickets out of every later window. */
+  async function ready(opts: { pm?: boolean } = {}) {
+    const c = (ctx = await setup(opts));
+    const rows = await c.done(5, D);
+    for (const [i, r] of rows.entries()) await c.db.insert(ticketReviews).values({ ticketId: r.id, reviewer: "Ed", verdict: i < 3 ? "changes_requested" : "approved", comments: [] });
+    await c.retro.start(c.company.id);
+    const evidence = [await ref(c, rows[0]!.id), await ref(c, rows[1]!.id)];
+    const pm = await c.mcp(opts.pm === false ? c.ceo.id : c.pm!.id);
+    /** Proposes and applies a change, then makes it `ageDays` old. */
+    const apply = async (over: Record<string, unknown> = {}, ageDays = 20) => {
+      expect(isError(await propose(pm, { evidence, ...over }))).toBe(false);
+      const [ch] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.lever, (over.lever as string) ?? "instructions"));
+      const a = (over.lever as string) === "lesson" ? LESSON_ADD : "Apply";
+      expect((await answer(c, ch!.decisionId!, a)).statusCode).toBe(200);
+      await c.db.update(tickets).set({ stateChangedAt: ago(25 * D) }).where(eq(tickets.companyId, c.company.id));
+      await c.db.update(workflowChanges).set({ appliedAt: ago(ageDays * D), checkDueAt: ago((ageDays - 14) * D) }).where(eq(workflowChanges.id, ch!.id));
+      return ch!.id;
+    };
+    /** The Keep / Revert decision once the sweep has raised it. */
+    const checked = async (changeId: string) => {
+      await finish(c, 10, "approved");
+      expect(await c.retro.checkSweep()).toBe(1);
+      return decisionRow(c, (await changeRow(c, changeId)).checkDecisionId!);
+    };
+    return { c, rows, pm, apply, checked };
+  }
+
+  it("waits until the change is due and 10 relevant tickets are done since, or the 30-day cap", async () => {
+    const { c, apply } = await ready();
+    const id = await apply({}, 10);
+    // Not due for another 4 days, however much is done.
+    await finish(c, 12, "approved");
+    expect(await c.retro.checkSweep()).toBe(0);
+    // Due, but only 9 engineer tickets: the Product Manager's don't count.
+    await c.db.update(workflowChanges).set({ checkDueAt: ago(D) }).where(eq(workflowChanges.id, id));
+    await c.db.update(tickets).set({ stateChangedAt: ago(30 * D) }).where(eq(tickets.assigneeAgentId, c.eng.id));
+    await finish(c, 9, "approved");
+    await finish(c, 5, "approved", c.pm!.id);
+    expect(await c.retro.checkSweep()).toBe(0);
+    expect(await c.db.select().from(decisions).where(eq(decisions.kind, "approval"))).toHaveLength(1);
+    await finish(c, 1, "approved");
+    expect(await c.retro.checkSweep()).toBe(1);
+    const ch = await changeRow(c, id);
+    expect(ch.result).toMatchObject({ value: 1, sample: 10, capped: false });
+    const d = await decisionRow(c, ch.checkDecisionId!);
+    expect(d).toMatchObject({ kind: "approval", tier: "owner", options: ["Keep", "Revert"], recommendedOption: "Keep", status: "open", dedupeKey: `workflow-check:${id}`, context: { type: "workflow_check", changeId: id } });
+    // Once only.
+    expect(await c.retro.checkSweep()).toBe(0);
+    expect(await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `workflow-check:${id}`))).toHaveLength(1);
+  });
+
+  it("raises it at 30 days with the few tickets there are, and says how few", async () => {
+    const { c, apply } = await ready();
+    const id = await apply({}, 31);
+    await c.db.update(tickets).set({ stateChangedAt: ago(35 * D) }).where(eq(tickets.companyId, c.company.id));
+    await finish(c, 3, "approved");
+    expect(await c.retro.checkSweep()).toBe(1);
+    const ch = await changeRow(c, id);
+    expect(ch.result).toMatchObject({ sample: 3, capped: true });
+    const q = (await decisionRow(c, ch.checkDecisionId!)).question;
+    expect(q).toContain("rests on 3 finished tickets");
+    expect(q).toContain("Fewer than 10 happened");
+  });
+
+  it("says in plain words how the number moved, using each measure's direction", async () => {
+    const cases: Array<{ metric: string; baseline: number | null; verdict: "approved" | "changes_requested" | null; say: RegExp; pick: string }> = [
+      { metric: "firstPassRate", baseline: 0.4, verdict: "approved", say: /Before it: 40%\. Now: 100%\.[\s\S]*moved the right way \(higher is better here\)/, pick: "Keep" },
+      { metric: "firstPassRate", baseline: 0.9, verdict: "changes_requested", say: /Now: 0%\.[\s\S]*got worse \(higher is better here\)/, pick: "Revert" },
+      { metric: "meanRework", baseline: 0.5, verdict: "changes_requested", say: /Before it: 0\.5\. Now: 1\.0\.[\s\S]*got worse \(lower is better here\)/, pick: "Revert" },
+      { metric: "meanRework", baseline: 2, verdict: "approved", say: /moved the right way \(lower is better here\)/, pick: "Keep" },
+      { metric: "meanRework", baseline: 0, verdict: "approved", say: /held steady/, pick: "Keep" },
+      { metric: "firstPassRate", baseline: 0.4, verdict: null, say: /Now: n\/a\.[\s\S]*can't be measured/, pick: "Keep" },
+      { metric: "firstPassRate", baseline: null, verdict: "approved", say: /Before it: n\/a\.[\s\S]*can't be measured/, pick: "Keep" },
+    ];
+    for (const k of cases) {
+      const c = (ctx = await setup());
+      const [ch] = await c.db
+        .insert(workflowChanges)
+        .values({ companyId: c.company.id, retroId: (await c.priorRetro(10 * D)).id, lever: "model", targetAgentId: c.eng.id, summary: "Set Eve's model.", before: { model: null }, after: { model: "m" }, metric: k.metric, metricScope: { role: "engineer" }, baseline: k.baseline, approver: "owner", status: "applied", appliedAt: ago(20 * D), checkDueAt: ago(6 * D) })
+        .returning();
+      await finish(c, 10, k.verdict);
+      expect(await c.retro.checkSweep()).toBe(1);
+      const d = await decisionRow(c, (await changeRow(c, ch!.id)).checkDecisionId!);
+      expect(d.question).toMatch(k.say);
+      expect(d.recommendedOption).toBe(k.pick);
+      await Promise.all(c.clients.map((x) => x.close()));
+      await c.app.close();
+      await c.close();
+      ctx = undefined;
+    }
+  });
+
+  it("Keep leaves the change in place", async () => {
+    const { c, apply, checked } = await ready();
+    const id = await apply();
+    const d = await checked(id);
+    expect((await answer(c, d.id, "Keep")).statusCode).toBe(200);
+    expect((await changeRow(c, id)).status).toBe("kept");
+    expect((await c.db.select().from(agents).where(eq(agents.id, c.eng.id)))[0]!.instructions).toBe("Always test the null case.");
+  });
+
+  it("Revert puts instructions back through the agent history, and refuses when they have moved on", async () => {
+    const { c, apply, checked } = await ready();
+    const was = (await c.db.select().from(agents).where(eq(agents.id, c.eng.id)))[0]!.instructions;
+    const id = await apply();
+    const d = await checked(id);
+    // Someone edited them since: Revert must not overwrite that, and the decision stays open.
+    await c.db.update(agents).set({ instructions: "Newer words." }).where(eq(agents.id, c.eng.id));
+    const refused = await answer(c, d.id, "Revert");
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().message).toMatch(/has changed since this was applied/);
+    expect((await decisionRow(c, d.id)).status).toBe("open");
+    expect((await changeRow(c, id)).status).toBe("applied");
+    expect((await c.db.select().from(agents).where(eq(agents.id, c.eng.id)))[0]!.instructions).toBe("Newer words.");
+    // Back to what Apply wrote: now it goes.
+    await c.db.update(agents).set({ instructions: "Always test the null case." }).where(eq(agents.id, c.eng.id));
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
+    expect((await c.db.select().from(agents).where(eq(agents.id, c.eng.id)))[0]!.instructions).toBe(was);
+    expect((await changeRow(c, id)).status).toBe("reverted");
+    const history = await c.db.select().from(agentChanges).where(and(eq(agentChanges.agentId, c.eng.id), ne(agentChanges.field, "hired")));
+    expect(history.map((h) => [h.before, h.after])).toEqual(expect.arrayContaining([[was, "Always test the null case."], ["Always test the null case.", was]]));
+  });
+
+  it("Revert puts the review policy tier back, and refuses when the tier has changed", async () => {
+    const { c, apply, checked } = await ready();
+    const was = (await c.db.select({ p: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.company.id)))[0]!.p;
+    const id = await apply({ lever: "review_policy", target: "high", change: { ownerSignoff: false } });
+    const d = await checked(id);
+    const policy = () => c.db.select({ p: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.company.id)).then((r) => r[0]!.p);
+    const applied = await policy();
+    await c.db.update(companies).set({ reviewPolicy: { ...applied, high: { ...applied.high, ownerSignoff: true } } }).where(eq(companies.id, c.company.id));
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(422);
+    await c.db.update(companies).set({ reviewPolicy: applied }).where(eq(companies.id, c.company.id));
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
+    expect(await policy()).toEqual(was);
+    expect((await changeRow(c, id)).status).toBe("reverted");
+  });
+
+  it("Revert puts the watchdog limits back", async () => {
+    const { c, apply, checked } = await ready();
+    const id = await apply({ lever: "watchdog", target: "watchdog", change: { reviewHours: 6, inProgressHours: 4 }, metric: "watchdogFlags" });
+    const d = await checked(id);
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
+    const [co] = await c.db.select({ w: companies.watchdog }).from(companies).where(eq(companies.id, c.company.id));
+    expect(co!.w).toMatchObject({ reviewHours: 2, inProgressHours: 2 });
+  });
+
+  it("Revert takes a playbook away only from the agents Apply gave it to, and keeps the skill", async () => {
+    const { c, apply, checked } = await ready();
+    const id = await apply({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "Check the null case first.", body: "Test null." } });
+    const [skill] = await c.db.select().from(skills).where(eq(skills.name, "null-checks"));
+    // The owner gave it to the Product Manager by hand afterwards: that is not Revert's to undo.
+    await c.db.insert(agentSkills).values({ agentId: c.pm!.id, skillId: skill!.id });
+    const d = await checked(id);
+    expect(d.tier).toBe("ceo");
+    expect(d.question).toContain("stays in the library");
+    expect((await c.wakeFor("decision")).some((w) => w.agentId === c.ceo.id)).toBe(true);
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
+    expect((await c.db.select().from(agentSkills).where(eq(agentSkills.skillId, skill!.id))).map((r) => r.agentId)).toEqual([c.pm!.id]);
+    expect(await c.db.select().from(skills).where(eq(skills.id, skill!.id))).toHaveLength(1);
+    expect((await changeRow(c, id)).status).toBe("reverted");
+  });
+
+  it("Revert drops a lesson from the brief, and refuses when it is no longer there", async () => {
+    const { c, apply, checked } = await ready();
+    const id = await apply({ lever: "lesson", target: "Notes", change: { lesson: "Always cover the null case in importers." }, metric: "meanRework" });
+    expect((await c.db.select().from(wikiPages))[0]!.body).toContain("Always cover the null case in importers.");
+    const d = await checked(id);
+    expect(d.tier).toBe("ceo");
+    expect(d.question).toContain("drops the lesson from the brief");
+    await c.db.update(wikiPages).set({ body: "Describes commit unknown on unknown.\n" });
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(422);
+    await c.db.update(wikiPages).set({ body: "Describes commit unknown on unknown.\n\n## Lessons\n\n- Always cover the null case in importers.\n- Keep this one.\n" });
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
+    const body = (await c.db.select().from(wikiPages))[0]!.body;
+    expect(body).not.toContain("null case");
+    expect(body).toContain("Keep this one.");
+  });
+
+  it("goes to the owner when the CEO ran the retro", async () => {
+    const { c, apply, checked } = await ready({ pm: false });
+    const id = await apply({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } });
+    expect((await checked(id)).tier).toBe("owner");
+  });
+});

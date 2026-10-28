@@ -81,10 +81,14 @@ Not built yet: plan-first (there is no per-company setting for it; it follows th
 
 ## 4. Check the result
 
-- Fourteen days or 10 relevant done tickets after Apply (whichever comes later, capped at 30 days), Boss Man measures the metric again.
-- It raises **Keep / Revert** with the before and after numbers. The decision goes to whoever approved the change.
-- Revert restores the saved old value.
-- A playbook that is reverted is archived, not deleted.
+- A change is checked once it is at least 14 days old and 10 relevant tickets have been done since Apply. The cap is 30 days: then it is checked with however many there are, and the question says how few.
+  - Relevant means the measure's own scope: that role's or agent's done tickets, the handoffs of that pair, or any done ticket for the company-wide measure.
+- Boss Man measures the metric again over the time since Apply. It raises one **Keep / Revert** decision with the before and after numbers, saying whether the number moved the right way. The decision goes to whoever approved the change.
+  - Higher is better for first-time pass rate. Lower is better for every other measure.
+  - Keep is recommended if it improved or held, or if either number can't be measured. Revert is recommended if it got worse.
+- Revert puts the saved old value back through the same code the Apply used. If the value has changed again since, Revert is refused and the decision stays open: Boss Man never overwrites a newer change.
+- A playbook that is reverted is taken away from the agents Apply gave it to, and stays in the library. Boss Man has no archive for skills, so "nobody uses it" is the archive.
+- A lesson that is reverted is dropped from the brief's Lessons section.
 
 ## Skipped
 
