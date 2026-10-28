@@ -239,7 +239,8 @@ describe("Boss Man MCP server", () => {
   it("exposes a small, described tool set", async () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
     const { tools } = await c.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_rule", "propose_team", "raise_decision", "report_key_result", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "set_ticket_risk", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
+    // This company has no Product Manager, so its CEO runs the workflow retro and has that retro's three tools (retro.test.ts).
+    expect(tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "handoff", "list_my_work", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_rule", "propose_team", "propose_workflow_change", "raise_decision", "report_key_result", "request_engagement", "request_note", "review", "roadmap", "runs", "save_retro", "schedule_check", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "workflow_scorecard"]);
     expect(tools.every((t) => (t.description ?? "").length > 20)).toBe(true);
     expect(tools.find((t) => t.name === "ticket_reply")!.description).toContain("Details:");
     expect(tools.find((t) => t.name === "set_ticket_state")!.description).toContain("plain words");
@@ -248,10 +249,10 @@ describe("Boss Man MCP server", () => {
 
   it("creates tickets in the agent's own company only", async () => {
     const c = await client(ctx.appCo.company.id, ctx.appCo.ceo.id);
-    const none = await c.callTool({ name: "create_ticket", arguments: { title: "Set up CI" } });
+    const none = await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Set up CI" } });
     expect(none.isError).toBe(true);
     await ctx.db.insert(projects).values({ companyId: ctx.appCo.company.id, name: "Customer app" });
-    const ok = await c.callTool({ name: "create_ticket", arguments: { title: "Set up CI" } });
+    const ok = await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Set up CI" } });
     expect(textOf(ok)).toMatch(/Created ticket .* in Customer app/);
 
     // A Homelab Co ticket is invisible to App Co's agent.

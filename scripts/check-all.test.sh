@@ -5,6 +5,8 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
+# check-all.sh runs this inside its own child, so drop the markers that would switch the retry loop off
+unset BOSSMAN_CHECK_CHILD BOSSMAN_CHECK_ATTEMPTS BOSSMAN_CHECK_BUDGET_SECONDS BOSSMAN_CHECK_BODY
 export BOSSMAN_CHECK_RETRY_SECONDS=0
 # check-all.sh sets this for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
 unset BOSSMAN_CHECK_CHILD

@@ -93,7 +93,7 @@ describe("activity log (R83)", () => {
     await ctx.req("POST", `/api/tickets/${a.id}/messages`, { text: "Please hurry" });
     await c.callTool({ name: "ticket_reply", arguments: { ticketId: a.id, text: "x".repeat(900) } });
     await c.callTool({ name: "raise_decision", arguments: { question: "Ship it?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: a.id, triedFirst: "Looked for a way to do this from the agent run; it has no access to the host or the secret." } });
-    await c.callTool({ name: "create_ticket", arguments: { title: "Follow-up" } });
+    await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Follow-up" } });
     await c.close();
     const kinds = (await log()).map((r) => r.kind).sort();
     expect(kinds).toEqual(["decision_raised", "dependency", "message", "message", "ticket_created"]);
