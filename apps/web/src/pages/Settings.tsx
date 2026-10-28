@@ -1255,6 +1255,70 @@ function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => 
   );
 }
 
+type RetroStatus = { agentId: string | null; runner: { id: string; name: string; source: "chosen" | "default" | "ceo" } | null; last: { startedAt: string; doneCount: number; savedAt: string | null } | null; doneSince: number };
+
+/** Workflow retros (docs/19): who runs the team's look-back, when it last ran, and a button to run one now. */
+function WorkflowRetros({ company }: { company: Company }) {
+  const [status, setStatus] = useState<RetroStatus | null>(null);
+  const act = useAction();
+  const load = async () => setStatus(await api<RetroStatus>(`/api/companies/${company.id}/retro-settings`));
+  useEffect(() => {
+    void load().catch(() => setStatus(null));
+  }, [company.id]);
+  if (!status) return null;
+  const hasPm = company.agents.some((a) => a.template === "product-manager" && !a.paused);
+  return (
+    <Section id="retro-h" title="Workflow retros">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Every 20 finished tickets, or after 7 days if anything was finished, one agent looks back over how the team worked and suggests small changes. It never changes anything without approval: the CEO approves playbooks and brief lessons, and you approve the rest.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label htmlFor="retro-agent">Who runs it</label>
+        <select
+          id="retro-agent"
+          value={status.agentId ?? ""}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              setStatus(await api<RetroStatus>(`/api/companies/${company.id}/retro-settings`, { method: "PUT", body: { agentId: e.target.value || null } }));
+              return "Saved.";
+            })
+          }
+        >
+          <option value="">{hasPm ? "Product Manager (default)" : "CEO (no Product Manager)"}</option>
+          {company.agents
+            .filter((a) => a.duty !== "assistant")
+            .map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+        </select>
+      </div>
+      <p style={{ fontSize: 14 }}>
+        {status.last ? `Last ran ${when(status.last.startedAt)}, over ${status.last.doneCount} finished tickets.` : "It has not run yet. The first one waits for 5 finished tickets."} {status.doneSince} finished since.
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || status.doneSince < 1}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}/retro`, { method: "POST" });
+              await load();
+              return `${status.runner?.name ?? "The agent"} has been asked to run a retro.`;
+            })
+          }
+        >
+          Run a retro now
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** How long the CEO has to act on a decision the owner asked for advice on. */
 function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [minutes, setMinutes] = useState(String(company.adviceTimeoutMinutes ?? 120));
@@ -1901,6 +1965,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <NudgeCap company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <Watchdog company={company} />
+            <WorkflowRetros company={company} />
             <Chapters company={company} />
           </div>
         )}

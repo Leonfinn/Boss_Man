@@ -97,6 +97,18 @@ describe("ranked decision queue (R20)", () => {
     expect(q.find((r) => r.id === deployed.id)!.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished work" })]);
   });
 
+  it("links the tickets a hire is for, and shows nothing for a card with no ticket", async () => {
+    ctx = await setup();
+    const waiting = await ctx.ticket({ title: "Waiting for a designer" });
+    const mk = async (question: string, context: Record<string, unknown>) =>
+      (await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", question, options: ["Yes", "No"], recommendedOption: "Yes", context: context as never }).returning())[0]!;
+    const hire = await mk("Hire a designer?", { type: "hire", proposal: { name: "Dee", forTickets: [waiting.id, "not-an-id"] }, byAgentId: ctx.ceo.id });
+    const bare = await mk("Hire anyone?", { type: "hire", proposal: { name: "Eve" }, byAgentId: ctx.ceo.id });
+    const q = (await ctx.queue()) as Array<Row & { about: Array<{ ticketId: string }> }>;
+    expect(q.find((r) => r.id === hire.id)!.about.map((a) => a.ticketId)).toEqual([waiting.id]);
+    expect(q.find((r) => r.id === bare.id)!.about).toEqual([]);
+  });
+
   it("keeps a ticket blocked while it still waits on something else", async () => {
     ctx = await setup();
     const design = await ctx.ticket({ title: "Design" });

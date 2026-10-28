@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, inArray, isNull, or, ne } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { reviewWaits } from "./review-kinds.js";
@@ -16,6 +16,8 @@ export class WorkError extends Error {
 }
 
 type TicketPatch = {
+  /** Who made the change, for the activity log (the assigner on an assignment). */
+  byAgentId?: string | null;
   title?: string;
   body?: string | null;
   columnId?: string;
@@ -34,6 +36,8 @@ type TicketPatch = {
   customFields?: Record<string, unknown>;
   /** Risk tier (R48); null means medium. */
   risk?: RiskTier | null;
+  /** Relative size (docs/19 part 6); null clears it. */
+  size?: TaskSize | null;
   /** The feature request this ticket delivers. */
   featureId?: string | null;
   /** Makes this a sub-task of that task: it joins the parent's feature and the parent waits on it. Null on an update takes it out. */
@@ -189,7 +193,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const ids = rows.map((r) => r.t.id);
       const live = ids.length
         ? await db
-            .select({ ticketId: runs.ticketId, agent: agents.name })
+            .select({ ticketId: runs.ticketId, agent: agents.name, startedAt: runs.startedAt })
             .from(runs)
             .innerJoin(agents, eq(agents.id, runs.agentId))
             .where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
@@ -214,6 +218,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
         working: live.filter((l) => l.ticketId === t.id).map((l) => l.agent),
+        // When the earliest of those runs began, so the card can say how long the work has been going.
+        workingSince: live.filter((l) => l.ticketId === t.id).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         };
@@ -262,6 +268,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           noCode: input.noCode ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
+          size: input.size ?? null,
           // Graded planning: high and critical work is planned first unless the creator says otherwise.
           planFirst: input.planFirst ?? (input.risk ? planFirstByDefault(input.risk) : false),
           featureId,
@@ -408,7 +415,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       }
       if (updated!.assigneeAgentId !== t.assigneeAgentId) {
         const [to] = updated!.assigneeAgentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, updated!.assigneeAgentId)) : [];
-        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
+        await record(db, { companyId: t.companyId, ticketId: t.id, kind: "assigned", agentId: patch.byAgentId ?? undefined, summary: `Assigned to ${to?.name ?? "nobody"}`, at: now() });
       }
       if (updated!.assigneeAgentId && updated!.assigneeAgentId !== t.assigneeAgentId && updated!.systemState !== "done") await hooks.onAssigned?.(updated!);
       if (updated!.systemState === "done" && t.systemState !== "done") await hooks.onDone?.(updated!);

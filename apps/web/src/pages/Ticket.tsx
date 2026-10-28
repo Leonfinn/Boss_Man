@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { TASK_SIZES } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
@@ -643,6 +644,20 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </select>
               {!t.risk && <small className="muted" style={{ display: "block" }}>Not rated yet — the CEO rates it when it reviews the task (treated as medium until then).</small>}
               <RiskHelp tiers={tiers} current={t.risk} />
+            </dd>
+            <dt>
+              <label htmlFor="t-size">Size</label>
+            </dt>
+            <dd>
+              <select id="t-size" value={t.size ?? ""} onChange={(e) => void patch({ size: e.target.value ? Number(e.target.value) : null })}>
+                <option value="">Not sized</option>
+                {TASK_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+              <small className="muted" style={{ display: "block" }}>How big this task is compared with others: 1, 2, 3, 5 or 8. Whoever creates a task sets it. The Workflow page shows what each size really takes.</small>
             </dd>
             <dt>
               <label htmlFor="t-watcher">Watcher</label>
