@@ -67,11 +67,15 @@ const txt = (r: unknown) => ((r as { content: Array<{ text: string }> }).content
 describe("BOS-88 finding 1: the review task can't be rewritten under the reviewer", () => {
   const draft = (c: Awaited<ReturnType<typeof setup>>) => c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [f("SKILL.md", md("Steps.")), f("run.sh", "echo hi\n")], why: "x", agentIds: [c.worker.id] });
 
-  it("a verdict is refused once the ticket's text was changed", async () => {
+  it("a verdict for the same bundle still counts after the ticket's text was changed", async () => {
     const c = (ctx = await setup());
     const p = await draft(c);
     await c.db.update(tickets).set({ body: "Nothing to see here." }).where(eq(tickets.id, p.reviewTicketId!));
-    await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict: "recommend", summary: "fine" })).rejects.toMatchObject({ status: 409 });
+    // BOS-170: an edited task must not leave the proposal undecidable. The verdict is tied to the
+    // stored bundle hash, not to the ticket's live text.
+    const r = await c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict: "recommend", summary: "fine" });
+    expect(r.status).toBe("awaiting_owner");
+    await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: "0".repeat(64), verdict: "recommend", summary: "fine" })).rejects.toMatchObject({ status: 409 });
   });
   it("a verdict on the untouched ticket still works", async () => {
     const c = (ctx = await setup());
