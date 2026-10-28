@@ -142,6 +142,17 @@ describe("CEO-tier cards on the alert ladder (BOS-119)", () => {
     expect(await reload(d.id)).toMatchObject({ tier: "owner", status: "open" });
   });
 
+  it("a CEO run already live when the card is raised starts the 5 minutes at the raise (BOS-180)", async () => {
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.ceo.id, startedAt: ctx.now() });
+    ctx.advance(1);
+    const { d } = await ctx.ask();
+    ctx.advance(4);
+    expect((await ctx.alerts.sweep()).moved).toBe(0);
+    ctx.advance(2);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    expect(await reload(d.id)).toMatchObject({ tier: "owner", status: "open" });
+  });
+
   it("several cards waiting on the CEO wake it once (BOS-180)", async () => {
     await ctx.ask();
     await ctx.ask();
