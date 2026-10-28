@@ -37,6 +37,9 @@ const SHELLS = new Set("sh bash zsh dash ksh mksh ash fish".split(" "));
 const WIPES = new Set("shred truncate wipefs dd mke2fs mkswap blkdiscard sfdisk".split(" "));
 const DELETES = new Set(["rm", "rmdir", "unlink"]);
 
+/** An option whose letters the shell fills in when it runs: -$x, -{r,f}, -[r]f, --$x. Words that start with an expansion are `lead`. */
+const runtimeOption = (w: Word) => w.dynamic && w.text.startsWith("-");
+
 /** Index of the ")" closing the "(" at s[open], skipping quotes and escapes; -1 when there's none. */
 function matchParen(s: string, open: number): number {
   let depth = 0;
@@ -479,7 +482,7 @@ export function commandRisks(command: string | string[]): Risk[] {
           for (const a of args) {
             const t = a.text;
             if (t === "--") break;
-            if (a.lead) return destroys("rm with an option only known when it runs");
+            if (a.lead || runtimeOption(a)) return destroys("rm with an option only known when it runs");
             const long = /^--([^=]+)/.exec(t)?.[1];
             // GNU rm accepts any unambiguous start of a long option: --rec is --recursive.
             if (long ? ["recursive", "force", "no-preserve-root"].some((o) => o.startsWith(long)) : /^-[a-zA-Z]*[rRf]/.test(t)) return destroys("deletes folders or forces deletes (rm -r/-f)");
@@ -492,6 +495,7 @@ export function commandRisks(command: string | string[]): Risk[] {
           for (let i = 0; i < args.length; i++) {
             const t = args[i]!.text;
             if (t === "-delete") return destroys("deletes what it finds (find -delete)");
+            if (runtimeOption(args[i]!)) return destroys("find with an option only known when it runs");
             if (/^-(exec|execdir|ok|okdir)$/.test(t)) {
               const end = args.findIndex((a, j) => j > i && (a.text === ";" || a.text === "+"));
               judge({ ...cmd, words: args.slice(i + 1, end < 0 ? args.length : end) }, depth, true);
@@ -515,10 +519,11 @@ export function commandRisks(command: string | string[]): Risk[] {
           const rest = afterOptions(args, valued);
           const sub = rest[0]?.text;
           const opts = rest.slice(1).map((a) => a.text);
+          const unknownOpt = rest.slice(1).some(runtimeOption);
           if (sub === "push") {
             add("pushes", "pushes to a remote (git push)", all, plain);
-            if (opts.some((o) => /^-[a-zA-Z]*[fd]|^--(force|mirror|delete|prune)|^[+:]/.test(o))) destroys("overwrites or deletes on the remote (git push --force/--delete)");
-          } else if (sub === "clean" && opts.some((o) => /^-[a-zA-Z]*f|^--force$/.test(o))) destroys("deletes untracked files (git clean -f)");
+            if (unknownOpt || opts.some((o) => /^-[a-zA-Z]*[fd]|^--(force|mirror|delete|prune)|^[+:]/.test(o))) destroys("overwrites or deletes on the remote (git push --force/--delete)");
+          } else if (sub === "clean" && (unknownOpt || opts.some((o) => /^-[a-zA-Z]*f|^--force$/.test(o)))) destroys("deletes untracked files (git clean -f)");
           return;
         }
         if (prog === "docker" || prog === "podman") {
