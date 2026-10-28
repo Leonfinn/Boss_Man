@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNull, or, ne } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { liveRuns } from "./runs.js";
 import { reviewWaits } from "./review-kinds.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
@@ -189,15 +190,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       );
       const withPr = new Set(rows.filter((r) => r.t.pullRequestUrl).map((r) => r.t.id));
       for (const id of inReview) if (!pendingAny.has(id) && !withPr.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
-      // Who is running on each ticket right now, so a card can show live work (chat runs don't count).
+      // Who is running on each ticket right now, so a card can show live work. A run counts for a
+      // ticket when it is on it (chat runs don't) or was about it without being on it (a nudge that named it).
       const ids = rows.map((r) => r.t.id);
-      const live = ids.length
-        ? await db
-            .select({ ticketId: runs.ticketId, agent: agents.name, startedAt: runs.startedAt })
-            .from(runs)
-            .innerJoin(agents, eq(agents.id, runs.agentId))
-            .where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
-        : [];
+      const everyLive = await liveRuns(db, p.companyId);
+      const onCard = (r: (typeof everyLive)[number], id: string) => (r.purpose !== "chat" && r.ticketId === id) || r.runTicketId === id;
+      // Runs no card on this board shows: the strip lists them, so the board never under-reports.
+      const withoutCard = everyLive.filter((r) => !ids.some((id) => onCard(r, id)));
       const waits = await reviewWaits(db, inReview);
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
@@ -217,15 +216,18 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
-        working: live.filter((l) => l.ticketId === t.id).map((l) => l.agent),
+        working: [...new Set(everyLive.filter((l) => onCard(l, t.id)).map((l) => l.agent ?? "An agent"))],
         // When the earliest of those runs began, so the card can say how long the work has been going.
-        workingSince: live.filter((l) => l.ticketId === t.id).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
+        workingSince: everyLive.filter((l) => onCard(l, t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         };
       });
       return {
         project: p,
+        // Same source as the Dashboard's "agents working": every agent with a run going.
+        workingAgents: new Set(everyLive.map((r) => r.agentId)).size,
+        withoutTicket: withoutCard.map((r) => ({ id: r.id, agent: r.agent, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, wakeNote: r.wakeNote, runTicketId: r.runTicketId, startedAt: r.startedAt.toISOString() })),
         columns: cols.map((c) => ({
           ...c,
           // A ticket shows in its column while that column matches its state; otherwise (no
