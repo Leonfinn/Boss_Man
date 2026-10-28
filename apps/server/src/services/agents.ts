@@ -224,6 +224,8 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       if (a.retiredAt) throw new AgentError(409, `${a.name} is retired, so their model setup can't change.`);
       const checked = await validateModelConfig(companyId, config);
       const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.agentId, a.id), isNull(runs.endedAt))).limit(1);
+      // The row is updated at once, but "after the run" still holds: scheduler.launch reads the agent's
+      // config when a run starts, so a run already in flight keeps the setup it launched with.
       await this.update(a.id, { agentKind: checked.harness, model: checked.model, fundingSourceId: checked.fundingSourceId }, ctx.byAgentId);
       return { afterRunId: running?.id ?? null };
     },
