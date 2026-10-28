@@ -5,7 +5,7 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
-import { activity, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -159,11 +159,50 @@ describe("stale blockers (R21)", () => {
     await ctx.sweep();
     const [row] = await ctx.queue();
     expect(row!.recommendedOption).toBe("Reassign");
-    expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign" })).statusCode).toBe(422);
+    const noPick = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign" });
+    expect(noPick.statusCode).toBe(422);
+    expect(noPick.body).toContain("Pick who should take this ticket.");
+    expect(noPick.body).not.toContain("assigneeAgentId");
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
     expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+  });
+
+  it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    expect(row!.options).toContain("Let the CEO decide");
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    expect(r.statusCode).toBe(200);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(d).toMatchObject({ status: "open", tier: "ceo" });
+    expect((d!.context as { ladder: { rung: string } }).ladder.rung).toBe("ceo");
+    expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.ceo.id, reason: "decision" })]);
+    expect((await ctx.sweep()).staleBlockers.raised).toBe(0); // not raised a second time
+
+    // The CEO's answer carries out the owner's options.
+    const done = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.ceo.id });
+    expect(done.statusCode).toBe(200);
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.ceo.id);
+  });
+
+  it("refuses to hand the card to the CEO when the company has none", async () => {
+    ctx = await setup();
+    await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    await ctx.db.update(agents).set({ role: "worker" }).where(eq(agents.id, ctx.ceo.id));
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    expect(r.statusCode).toBe(422);
+    expect(r.body).toContain("no CEO");
+    expect(await ctx.queue()).toHaveLength(1);
   });
 
   it("dropping the dependency frees the waiting ticket", async () => {

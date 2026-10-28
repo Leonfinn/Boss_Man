@@ -10,7 +10,7 @@ import { VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
-import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
+import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, evaluate, latestRows } from "./review-kinds.js";
@@ -87,7 +87,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const who = b.assignee ? `assigned to ${b.assignee}` : b.t.assignedToOwner ? "assigned to you" : "unassigned";
         stale.set(dep.id, {
           question: `"${b.t.title}" (${who}) has blocked "${blocked.title}" with no activity for ${ago(idle)}.`,
-          options: [CHASE, REASSIGN, DROP],
+          options: [CHASE, REASSIGN, LET_CEO_DECIDE, DROP],
           // Nobody to chase means it needs an owner.
           recommended: b.t.assigneeAgentId || b.t.assignedToOwner ? CHASE : REASSIGN,
           companyId: blocked.companyId,
@@ -100,7 +100,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         if (idle < limits.staleAfterMs) continue;
         stale.set(dep.id, {
           question: `The engagement "${e.title}" (${e.status.replace("_", " ")}) has blocked "${blocked.title}" with no activity for ${ago(idle)}.`,
-          options: [CHASE, DROP],
+          options: [CHASE, LET_CEO_DECIDE, DROP],
           recommended: e.status === "rejected" ? DROP : CHASE,
           companyId: blocked.companyId,
           ctx,

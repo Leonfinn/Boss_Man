@@ -124,6 +124,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
 export const DROP = "Drop dependency";
+/** On a stale-blocker card: hand it to the company's CEO to settle. */
+export const LET_CEO_DECIDE = "Let the CEO decide";
 const BOSSMAN_TOOL = /^(mcp__bossman__|mcp\.bossman\.)/;
 export const KEEP_WAITING = "Keep waiting";
 export const CANCEL_RUN = "Cancel run";
@@ -440,10 +442,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.type === "stale_blocker" && answer === REASSIGN) {
       if (!ctx.blockerTicketId) throw new AnswerError("Only a ticket can be reassigned.");
-      if (!extra.assigneeAgentId) throw new AnswerError("Say who to reassign it to (assigneeAgentId).");
+      if (!extra.assigneeAgentId) throw new AnswerError("Pick who should take this ticket.");
       const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
-      if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
+      if (!a) throw new AnswerError("That person isn't on this ticket's team. Pick someone from the list.");
+    }
+    if (ctx.type === "stale_blocker" && answer === LET_CEO_DECIDE) {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
+      if (!ceo) throw new AnswerError("This company has no CEO to hand it to.");
     }
     if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
       const problem = await retroHook?.problemApplying(ctx.changeId);
@@ -453,7 +459,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const problem = await retroHook?.problemReverting(ctx.changeId);
       if (problem) throw new AnswerError(problem);
     }
-    if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
+    if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Write the corrected lesson in the note box.");
     if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !replacedLesson(answer)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
     if (ctx.type === "lesson_replace" && !extra.custom) {
       const dropped = replacedLesson(answer);
@@ -552,12 +558,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.blockerTicketId) {
       const assignee = answer === REASSIGN ? extra.assigneeAgentId! : undefined;
+      const [before] = assignee ? await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId)) : [];
       // Chasing restarts the stale clock; so does a new owner.
       const [t] = await db
         .update(tickets)
         .set({ lastActivityAt: now(), ...(assignee ? { assigneeAgentId: assignee, assignedToOwner: false } : {}) })
         .where(eq(tickets.id, ctx.blockerTicketId))
         .returning();
+      if (assignee && before) await record(db, { companyId: before.companyId, ticketId: ctx.blockerTicketId, kind: "assigned", summary: `Reassigned from the stale-blocker card by ${extra.settledBy ? "the CEO" : "the owner"}`, at: now() });
       if (t?.assigneeAgentId && wake) {
         await wake({
           agentId: t.assigneeAgentId,
@@ -593,6 +601,27 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   async function tellCeo(companyId: string, question: string, agentId?: string) {
     const [ceo] = agentId ? [{ id: agentId }] : await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
     if (ceo && wake) await wake({ agentId: ceo.id, reason: "decision", note: `A decision is waiting for you: ${question}\nUse the decisions tool to read it and answer.` });
+  }
+
+  /**
+   * The owner hands a stale-blocker card to the company's CEO: it moves to the CEO's rung of the alert
+   * ladder (off the owner's queue, listed under "Being handled by the team"), the CEO is woken, and it
+   * climbs back to the owner if the CEO doesn't settle it in time.
+   */
+  async function handToCeo(d: typeof decisions.$inferSelect) {
+    const ctx = d.context as Extract<DecisionContext, { type: "stale_blocker" }>;
+    const at = now().toISOString();
+    const ladder = { rung: "ceo", since: at, ticketId: ctx.blockerTicketId ?? ctx.blockedTicketId, about: [] as string[], hops: [{ to: "ceo", at, why: "the owner asked the CEO to decide" }] };
+    const [moved] = await db
+      .update(decisions)
+      .set({ tier: "ceo", forAgentId: null, context: { ...ctx, ladder } })
+      .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (!moved) return null;
+    const [blocker] = ctx.blockerTicketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId)) : [];
+    await record(db, { companyId: d.companyId, ticketId: ladder.ticketId, kind: "decision_answered", summary: `The owner handed "${d.question}" to the CEO to decide`, at: now() });
+    await tellCeo(d.companyId, `${d.question}\nThe owner asked you to settle this ${blocker ? `(the blocking ticket is "${blocker.title}")` : ""}. Answer decision ${d.id} with Chase, Reassign (give assigneeAgentId) or Drop dependency.`);
+    return { id: d.id, answer: LET_CEO_DECIDE, delivered: null as boolean | null, endedHere: false };
   }
 
   /** A plan from a plan-first ticket, put to the CEO, or to the owner for high-risk work (R40, R48). */
@@ -1220,8 +1249,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // answer (a permission, a deploy, a budget) keeps to its options.
       const ownWords = extra.custom === true && d.kind === "question";
       if (extra.custom && !ownWords) throw new AnswerError("This decision needs one of its options; only an agent's question takes your own answer.");
-      if (options.length > 0 && !ownWords && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
+      const handOff = (d.context as DecisionContext).type === "stale_blocker" && answer === LET_CEO_DECIDE; // also on cards raised before the option existed
+      if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
+      if (handOff) return handToCeo(d);
       const ctx = d.context as DecisionContext;
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
