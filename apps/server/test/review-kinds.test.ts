@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -116,8 +116,8 @@ describe("review kinds", () => {
     expect(await c.call(c.senior.id, { action: "submit", verdict: "approved" })).toContain("waiting for the other reviews");
     expect(await c.call(c.sec.id, { action: "submit", verdict: "approved" })).toContain("waiting");
     expect((await c.row(c.t.id)).systemState).toBe("review");
-    expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toBe("Approved; the ticket is done.");
-    expect((await c.row(c.t.id)).systemState).toBe("done");
+    expect(await c.call(c.infra.id, { action: "submit", verdict: "approved" })).toContain("Approved");
+    await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("done"));
   });
 
   it("sends the work back once everyone has answered if one asks for changes", async () => {
@@ -170,8 +170,8 @@ describe("review kinds", () => {
     expect((await c.row(c.t.id)).systemState).toBe("in_progress");
     expect(await c.call(c.sec.id, { action: "overrule", kind: "security", reason: "x" })).toBe("Only your company's CEO can do that.");
     expect(await c.call(c.ceo.id, { action: "overrule", kind: "infra", reason: "no" })).toContain("no infra review asking for changes");
-    expect(await c.call(c.ceo.id, { action: "overrule", kind: "security", reason: "Out of scope for this ticket." })).toContain("Approved; the ticket is done.");
-    expect((await c.row(c.t.id)).systemState).toBe("done");
+    expect(await c.call(c.ceo.id, { action: "overrule", kind: "security", reason: "Out of scope for this ticket." })).toContain("Approved");
+    await vi.waitFor(async () => expect((await c.row(c.t.id)).systemState).toBe("done"));
     const listed = (await c.req("GET", `/api/tickets/${c.t.id}/reviews`)).json() as Array<{ kind: string; status: string; overruleReason: string | null; reviewer: string }>;
     expect(listed.find((r) => r.kind === "security")).toMatchObject({ status: "overruled", overruleReason: "Out of scope for this ticket.", reviewer: "Sec" });
     expect((await c.db.select().from(activity).where(eq(activity.ticketId, c.t.id))).map((a) => a.summary)).toContain("The CEO overruled the security review's changes requested: Out of scope for this ticket.");

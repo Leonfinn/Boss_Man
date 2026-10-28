@@ -470,6 +470,34 @@
       "when": 1793180296972,
       "tag": "0066_watchdog_backoff",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1793180396972,
+      "tag": "0067_workflow_scorecard",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1793180496972,
+      "tag": "0068_workflow_retros",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1793182592051,
+      "tag": "0069_workflow_checks",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1793182966807,
+      "tag": "0070_task_size",
+      "breakpoints": true
     }
   ]
 }

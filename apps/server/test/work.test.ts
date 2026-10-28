@@ -179,10 +179,13 @@ describe("dependencies (R25)", () => {
     // A blocker that's done no longer shows; an agent running on the ticket does, but not a chat run.
     await req("PATCH", `/api/tickets/${t2.id}`, { state: "done" });
     const [agent] = (await req("GET", "/api/companies")).json().find((x: { id: string }) => x.id === c.id).agents;
-    await t.db.insert(runs).values({ companyId: c.id, agentId: agent.id, ticketId: t1.id });
-    await t.db.insert(runs).values({ companyId: c.id, agentId: agent.id, ticketId: t1.id, purpose: "chat" });
+    await t.db.insert(runs).values({ companyId: c.id, agentId: agent.id, ticketId: t1.id, startedAt: new Date("2026-10-20T09:00:00Z") });
+    // An older chat run is not "working" and cannot decide the card's time.
+    await t.db.insert(runs).values({ companyId: c.id, agentId: agent.id, ticketId: t1.id, purpose: "chat", startedAt: new Date("2026-10-19T09:00:00Z") });
     const after = (await req("GET", `/api/projects/${p.id}/board`)).json().columns.flatMap((x: { tickets: Array<{ title: string }> }) => x.tickets).find((x: { title: string }) => x.title === "Ship");
     expect(after.blockedBy).toEqual([]);
     expect(after.working).toEqual([agent.name]);
+    // The card's time comes from the live run, not the older chat run.
+    expect(after.workingSince).toBe("2026-10-20T09:00:00.000Z");
   });
 });
