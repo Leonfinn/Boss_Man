@@ -128,6 +128,8 @@ export type Ticket = {
   workingSince?: string | null;
   branch: string | null;
   risk: Risk | null;
+  /** Relative size: 1, 2, 3, 5 or 8. */
+  size?: number | null;
   planFirst: boolean;
   plan: string | null;
   planApprovedAt: string | null;

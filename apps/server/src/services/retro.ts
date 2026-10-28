@@ -106,10 +106,10 @@ const PlaybookIn = z.object({ name: Str(64), description: Str(1024), body: Str(2
 const PolicyPatch = z.object({ planApprover: z.string().min(1).optional(), reviewer: z.string().min(1).optional(), ownerSignoff: z.boolean().optional() }).strict();
 const WatchdogPatch = WatchdogSettings.omit({ enabled: true }).partial().strict();
 
-const hrs = (ms: number | null) => (ms === null ? "n/a" : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : ms < 48 * 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} days`);
+export const hrs = (ms: number | null) => (ms === null ? "n/a" : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : ms < 48 * 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} days`);
 const pct = (v: number | null) => (v === null ? "n/a" : `${Math.round(v * 100)}%`);
 const num = (v: number | null) => (v === null ? "n/a" : v.toFixed(1));
-const usd = (micros: number | null) => (micros === null ? "n/a" : `$${(micros / 1e6).toFixed(2)}`);
+export const usd = (micros: number | null) => (micros === null ? "n/a" : `$${(micros / 1e6).toFixed(2)}`);
 const METRIC_FORMAT: Record<string, (v: number | null) => string> = { firstPassRate: pct, bounceRate: pct, meanRework: num, watchdogFlags: num, medianCycleMs: hrs, medianWaitMs: hrs, tailLagMs: hrs, costPerDoneMicros: usd };
 const METRIC_LABEL: Record<string, string> = {
   firstPassRate: "first-time review pass rate",
@@ -311,6 +311,13 @@ export function retroService(
       const lags = sc.features.filter((f) => f.tailLagMs !== null).sort((a, b) => b.tailLagMs! - a.tailLagMs!).slice(0, 3);
       for (const f of lags) out.push(`- Released ${clip(f.title, 80)}: its last task finished ${hrs(f.tailLagMs)} after three quarters were done`);
       if (!tails.length && !lags.length) out.push("- None.");
+
+      // Sizes come from the last 90 days whatever the retro's own period is.
+      const sc90 = await workflowService(db, { now: () => until }).scorecard(companyId, 90);
+      out.push("", `## Task sizes (last 90 days; role, size, finished, middle cycle time, average cost, average send-backs)`);
+      for (const r of [...sc90.sizes].sort((a, b) => b.done - a.done).slice(0, 12)) out.push(`- ${r.role}, size ${r.size}: ${r.done} done; ${hrs(r.p50CycleMs)}; ${usd(r.meanCostMicros)}; ${num(r.meanRework)}`);
+      for (const n of sc90.sizeNotes.slice(0, 5)) out.push(`- ${n.role}: size ${n.size} tickets take ${hrs(n.p50CycleMs)}, closer to size ${n.likeSize} (${hrs(n.nextP50Ms)}) than to the size below (${hrs(n.prevP50Ms)}). Sizes may be set too low.`);
+      if (!sc90.sizes.length) out.push("- No finished ticket has a size yet.");
 
       const changes = await db.select().from(workflowChanges).where(and(eq(workflowChanges.companyId, companyId), inArray(workflowChanges.status, ["proposed", "applied", "kept", "reverted"]))).orderBy(desc(workflowChanges.createdAt)).limit(10);
       out.push("", "## Changes already proposed, applied or checked (don't propose these again)");

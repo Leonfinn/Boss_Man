@@ -117,19 +117,19 @@ describe("create_ticket with feature and parent", () => {
   it("resolves a feature by exact title or id, and makes sub-tasks", async () => {
     const f = await ctx.feature();
     const c = await agent(ctx.co.ceo.id);
-    const byTitle = await c.callTool({ name: "create_ticket", arguments: { title: "Build it", feature: "dark MODE" } });
+    const byTitle = await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Build it", feature: "dark MODE" } });
     expect(byTitle.isError).toBeFalsy();
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.title, "Build it"));
     expect(t!.featureId).toBe(f.id);
-    expect((await c.callTool({ name: "create_ticket", arguments: { title: "By id", feature: f.id } })).isError).toBeFalsy();
-    expect((await c.callTool({ name: "create_ticket", arguments: { title: "Nope", feature: "No such" } })).isError).toBe(true);
+    expect((await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "By id", feature: f.id } })).isError).toBeFalsy();
+    expect((await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Nope", feature: "No such" } })).isError).toBe(true);
 
-    const sub = await c.callTool({ name: "create_ticket", arguments: { title: "Need infra", parent: t!.id } });
+    const sub = await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Need infra", parent: t!.id } });
     expect(sub.isError).toBeFalsy();
     const [s] = await ctx.db.select().from(tickets).where(eq(tickets.title, "Need infra"));
     expect(s).toMatchObject({ parentTicketId: t!.id, featureId: f.id });
     expect(await ctx.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, s!.id))).toHaveLength(1);
-    const deep = await c.callTool({ name: "create_ticket", arguments: { title: "Deeper", parent: s!.id } });
+    const deep = await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "Deeper", parent: s!.id } });
     expect(deep.isError).toBe(true);
     expect(textOf(deep)).toMatch(/can't have sub-tasks/);
     await c.close();
@@ -139,9 +139,9 @@ describe("create_ticket with feature and parent", () => {
     const theirs = await ctx.feature(ctx.other.company.id, "Theirs");
     const theirTask = await ctx.work.createTicket(ctx.op.id, { title: "Theirs" });
     const c = await agent(ctx.co.ceo.id);
-    expect((await c.callTool({ name: "create_ticket", arguments: { title: "x", feature: theirs.id } })).isError).toBe(true);
-    expect((await c.callTool({ name: "create_ticket", arguments: { title: "x", featureId: theirs.id } })).isError).toBe(true);
-    expect((await c.callTool({ name: "create_ticket", arguments: { title: "x", parent: theirTask.id } })).isError).toBe(true);
+    expect((await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "x", feature: theirs.id } })).isError).toBe(true);
+    expect((await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "x", featureId: theirs.id } })).isError).toBe(true);
+    expect((await c.callTool({ name: "create_ticket", arguments: { size: 3, title: "x", parent: theirTask.id } })).isError).toBe(true);
     await c.close();
   });
 });

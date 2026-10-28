@@ -1,6 +1,6 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
 import { and, asc, eq, inArray, isNull, or, ne } from "drizzle-orm";
-import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState } from "@boss-man/shared";
+import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { reviewWaits } from "./review-kinds.js";
@@ -36,6 +36,8 @@ type TicketPatch = {
   customFields?: Record<string, unknown>;
   /** Risk tier (R48); null means medium. */
   risk?: RiskTier | null;
+  /** Relative size (docs/19 part 6); null clears it. */
+  size?: TaskSize | null;
   /** The feature request this ticket delivers. */
   featureId?: string | null;
   /** Makes this a sub-task of that task: it joins the parent's feature and the parent waits on it. Null on an update takes it out. */
@@ -266,6 +268,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           noCode: input.noCode ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
+          size: input.size ?? null,
           // Graded planning: high and critical work is planned first unless the creator says otherwise.
           planFirst: input.planFirst ?? (input.risk ? planFirstByDefault(input.risk) : false),
           featureId,

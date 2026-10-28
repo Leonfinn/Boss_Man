@@ -131,8 +131,10 @@ Each task gets a relative size, **1, 2, 3, 5 or 8**, set by whoever creates it (
   - `update_ticket` lets the CEO and managers change it.
   - The owner can set it on the ticket page.
   - The Board shows it.
-- **Reference tickets.** `sizing_guide` gives the planner, for each size, 2–3 recent finished tickets with their actual time, cost and rework, plus the approved sizing playbook if there is one. The planner sizes by comparison: "like BOS-42, which was a 3".
+  - The owner's chat assistant may give a size but isn't made to: the CEO sizes the tickets it plans.
+- **Reference tickets.** `sizing_guide` gives the planner, for each size, 2–3 recent finished tickets with their actual time, cost and rework, plus the sizing playbook if there is one. That is any skill a retro made whose name starts with "sizing" and that some agent still has, so a reverted playbook drops out. The planner sizes by comparison: "like BOS-42, which was a 3".
 - **Scorecard.** A **Sizes** table shows, for each role and size, the median and 85th-percentile cycle time, cost and rework.
+  - It covers the last 90 days, whatever period the page shows.
   - The critical path uses size-and-role times once a pair has 10 finished tickets.
   - Before that it falls back to the role's times, then to the company's.
 - **Retro.** The scorecard digest says where sizes don't match actuals, for example 3s that behave like 5s, or a kind of work that is always undersized. The retro fixes this with a **playbook** for the planners, which the CEO approves.

@@ -191,6 +191,23 @@ describe("the retro agent's tools", () => {
 
   });
 
+  it("tells the retro agent where sizes don't match actuals", async () => {
+    const c = (ctx = await setup());
+    const H = 3_600_000;
+    await c.done(5, D);
+    for (const [size, hours] of [[2, 4], [3, 30], [5, 32]] as const)
+      for (let i = 0; i < 3; i++) {
+        const [t] = await c.db.insert(tickets).values({ companyId: c.company.id, projectId: c.project.id, title: "Sized", size, assigneeAgentId: c.eng.id, systemState: "in_progress", stateChangedAt: ago(5 * D + hours * H) }).returning();
+        await c.db.update(tickets).set({ systemState: "done", stateChangedAt: ago(5 * D + i * H) }).where(eq(tickets.id, t!.id));
+      }
+    await c.retro.start(c.company.id);
+    const out = textOf(await tool(await c.mcp(c.pm!.id), "workflow_scorecard"));
+    expect(out).toContain("## Task sizes");
+    expect(out).toContain("- engineer, size 3: 3 done; 29.0 h;");
+    expect(out).toContain("engineer: size 3 tickets take 29.0 h, closer to size 5 (31.0 h) than to the size below (3.0 h)");
+    expect(out.length).toBeLessThanOrEqual(12_200);
+  });
+
   it("keeps the scorecard short however many tickets went wrong", async () => {
     const c = (ctx = await setup());
     for (const t of await c.done(30, D / 2, { title: "T".repeat(300) })) for (let i = 0; i < 3; i++) await c.db.insert(ticketReviews).values({ ticketId: t.id, reviewer: "Ed", verdict: "changes_requested", comments: [{ path: "p".repeat(100), line: 1, body: "b".repeat(2000) }] });

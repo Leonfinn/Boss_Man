@@ -303,6 +303,8 @@ export const tickets = pgTable(
     risk: riskTier("risk"),
     /** Plan-first (R40): the agent starts in plan mode until its plan is approved. */
     planFirst: boolean("plan_first").notNull().default(false),
+    /** Relative size, 1, 2, 3, 5 or 8 (docs/19 part 6), set by whoever creates the task; null is unsized. */
+    size: integer("size"),
     /** The CEO's order for this ticket's reviews (slots by name); null or empty means all at once. */
     reviewOrder: jsonb("review_order").$type<string[]>(),
     plan: text("plan"),
@@ -336,7 +338,7 @@ export const tickets = pgTable(
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number)],
+  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number), check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`)],
 );
 
 // ---------- Decisions and engagements ----------

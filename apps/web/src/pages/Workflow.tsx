@@ -21,7 +21,9 @@ type Feature = {
 type Finding = { failure: string; failureLabel: string; handoff?: { from: string; to: string }; tickets: string[]; count: number; note: string };
 type RetroInfo = { retro: { id: string; startedAt: string; since: string; until: string; doneCount: number; savedAt: string | null; agentName: string | null; findings: Finding[] } | null; changes: ChangeRow[] };
 type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[] };
-type Scorecard = { days: number; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[] };
+type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
+type SizeNote = { role: string; size: number; likeSize: number };
+type Scorecard = { days: number; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
 export function span(ms: number | null) {
@@ -303,6 +305,50 @@ export function Workflow({ company }: { company: Company | undefined }) {
               ))
             ) : (
               <p className="muted">No features in progress.</p>
+            )}
+          </section>
+
+          <section>
+            <h2>Sizes</h2>
+            <p className="muted" style={{ fontSize: 14 }}>
+              Each task has a size (1, 2, 3, 5 or 8) set by whoever made it. This shows what finished tasks of each size really took over the last 90 days, whatever period is chosen above. The critical path uses these times once a role and size has 10 finished tasks.
+            </p>
+            {d.sizeNotes.map((n) => (
+              <p key={`${n.role}|${n.size}`} style={{ fontSize: 14, margin: "4px 0" }}>
+                <span className="tag amber">{label(n.role)}</span> Size {n.size} tasks take about as long as size {n.likeSize}. They may be sized too low.
+              </p>
+            ))}
+            {d.sizes.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Role</th>
+                      <th>Size</th>
+                      <th>Done</th>
+                      <th>Typical time</th>
+                      <th>Slow time</th>
+                      <th>Cost</th>
+                      <th>Sent back</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.sizes.map((r) => (
+                      <tr key={`${r.role}|${r.size}`}>
+                        <td>{label(r.role)}</td>
+                        <td>{r.size}</td>
+                        <td>{r.done}</td>
+                        <td>{span(r.p50CycleMs)}</td>
+                        <td>{span(r.p85CycleMs)}</td>
+                        <td>{dollars(r.meanCostMicros)}</td>
+                        <td>{r.meanRework === null ? "–" : r.meanRework.toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="muted">No finished task has a size yet.</p>
             )}
           </section>
 
