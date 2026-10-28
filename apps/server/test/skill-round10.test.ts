@@ -105,7 +105,7 @@ describe("round 10", () => {
     const shown = [...section.matchAll(/^ {0,3}(\d+) {2}/gm)].map((m) => Number(m[1]));
     const last = Math.max(...shown);
     expect(section).toMatch(new RegExp(`\\(${last} lines`));
-    const finding = { file: "SKILL.md", lineStart: last, lineEnd: last, title: "t", severity: "low" as const, confidence: "likely" as const, behaviour: "b", harm: "h", blocks: false };
+    const finding = { file: "SKILL.md", lineStart: last, lineEnd: last, title: "t", severity: "low" as const, confidence: "likely" as const, behaviour: "b", harm: "h", fix: "none", blocks: false };
     expect(() => checkVerdict(p, { bundleHash: p.bundleHash, verdict: "recommend", summary: "s", findings: [finding] })).not.toThrow();
     // proposal_file shows the same count.
     const out = txt(await (await c.mcp(c.reviewer.id)).callTool({ name: "skills", arguments: { action: "proposal_file", proposalId: p.id, path: "SKILL.md" } }));
