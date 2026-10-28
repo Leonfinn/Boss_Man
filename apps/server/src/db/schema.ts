@@ -1202,6 +1202,8 @@ export const watchdogFlags = pgTable(
     snoozeCount: integer("snooze_count").notNull().default(0),
     escalatedAt: timestamp("escalated_at", { withTimezone: true }),
     /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
+    /** Hand-offs in a row with nothing happening on the ticket in between; each doubles the wait before the next (BOS-121). */
+    backoffSteps: integer("backoff_steps").notNull().default(0),
     detail: jsonb("detail").notNull().default({}),
   },
   (t) => [

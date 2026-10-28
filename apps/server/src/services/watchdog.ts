@@ -13,7 +13,7 @@ import { getHold } from "./maintenance.js";
 import { activeRows, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
-import { evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
+import { backoffGapMs, evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
 
 /** Why the Scrum Master is woken: the note lists the due flags. */
 export const WATCHDOG_REASON = "watchdog";
@@ -323,11 +323,33 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const bounced = trip.rule === "review_loop" && (trip.detail.bounces ?? 0) > ((f.detail as Trip["detail"]).bounces ?? 0);
       await db
         .update(watchdogFlags)
-        .set({ detail: trip.detail, ...(bounced ? { dueAt: t, snoozedUntil: null } : {}) })
+        .set({ detail: trip.detail, ...(bounced ? { dueAt: t, snoozedUntil: null, backoffSteps: 0 } : {}) })
         .where(eq(watchdogFlags.id, f.id));
     }
     const cleared = open.filter((f) => !seen.has(`${f.ticketId}|${f.rule}`)).map((f) => f.id);
     if (cleared.length) await db.update(watchdogFlags).set({ status: "closed", closedAt: t }).where(inArray(watchdogFlags.id, cleared));
+  }
+
+  /** Flags whose ticket moved state, got a comment or started a run since the flag was last handed on: their back-off starts over. */
+  async function movedSince(snap: Awaited<ReturnType<typeof snapshot>>, list: Array<typeof watchdogFlags.$inferSelect>) {
+    const moved = new Set<string>();
+    const handed = list.filter((f) => f.lastFlaggedAt && f.backoffSteps > 0);
+    if (!handed.length) return moved;
+    const comments = await db
+      .select({ ticketId: activity.ticketId, at: activity.at })
+      .from(activity)
+      .where(and(inArray(activity.ticketId, handed.map((f) => f.ticketId)), eq(activity.kind, "message"), gt(activity.at, new Date(Math.min(...handed.map((f) => f.lastFlaggedAt!.getTime()))))));
+    for (const f of handed) {
+      const last = f.lastFlaggedAt!.getTime();
+      const x = snap.tickets.find((y) => y.id === f.ticketId);
+      if (
+        (x && x.stateChangedAt.getTime() > last) ||
+        snap.runs.some((r) => r.ticketId === f.ticketId && r.startedAt.getTime() > last) ||
+        comments.some((c) => c.ticketId === f.ticketId && c.at.getTime() > last)
+      )
+        moved.add(f.id);
+    }
+    return moved;
   }
 
   function flagLine(f: typeof watchdogFlags.$inferSelect, info: { ref: string; title: string; state: string } | undefined, names: Map<string, string>, assigneeId: string | null) {
@@ -450,7 +472,14 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     // Flags are pushed back only if the wake was accepted. A dropped one (company paused, wake chain too deep) leaves them due, tried again soon, and the log says so.
     const dropped = w.status === "dropped";
     if (dropped) for (const f of list) await db.update(watchdogFlags).set({ dueAt: new Date(t.getTime() + RETRY_DROPPED_MS) }).where(eq(watchdogFlags.id, f.id));
-    else for (const f of list) await db.update(watchdogFlags).set({ dueAt: later(f), lastFlaggedAt: t, flagCount: sql`${watchdogFlags.flagCount} + 1` }).where(eq(watchdogFlags.id, f.id));
+    else {
+      // A repeat flag on the same ticket waits twice as long as the last gap, unless something happened on the ticket since.
+      const moved = await movedSince(snap, list);
+      for (const f of list) {
+        const steps = moved.has(f.id) ? 0 : f.backoffSteps;
+        await db.update(watchdogFlags).set({ dueAt: new Date(t.getTime() + backoffGapMs(f.rule as WatchdogRule, s, steps)), lastFlaggedAt: t, flagCount: sql`${watchdogFlags.flagCount} + 1`, backoffSteps: steps + 1 }).where(eq(watchdogFlags.id, f.id));
+      }
+    }
     await log({
       companyId: c.id,
       kind: "sweep_wake",
