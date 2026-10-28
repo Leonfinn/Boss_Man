@@ -272,6 +272,13 @@ export async function buildApp(opts: AppOptions) {
     settled: () => scheduler.settled(),
     tick: () => scheduler.tick(),
     notify: (n) => notes.notify(n),
+    tellRunning: async (text) => {
+      const live = await db.select({ id: runsTable.id, companyId: runsTable.companyId }).from(runsTable).where(and(isNull(runsTable.endedAt), sql`${runsTable.purpose} is distinct from 'chat'`));
+      for (const r of live) {
+        const [runner] = await db.select({ id: runnersTable.id }).from(runnersTable).where(eq(runnersTable.companyId, r.companyId));
+        if (runner) runners.send(runner.id, { type: "run.message", runId: r.id, text: `Message from Boss Man: ${text}`, interrupt: false });
+      }
+    },
     dir: opts.deployerDir,
     drainMinutes: opts.drainMinutes,
     reconnectMs: opts.drainReconnectMs,

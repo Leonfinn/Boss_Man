@@ -39,6 +39,7 @@ import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./servic
 import type { alertLadder } from "./services/alert-ladder.js";
 import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
+import { getHold, WRAP_UP } from "./services/maintenance.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -1492,7 +1493,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
-      return text(`Ticket ${ticketId} is now ${state}.`);
+      return text(`Ticket ${ticketId} is now ${state}.${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
