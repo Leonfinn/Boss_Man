@@ -410,7 +410,8 @@ export function reviewService(
     async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
       try {
         return await this.landOnce(ticketId, reviewer, causedByRunId, opts);
-      } catch (err) {
+      } catch (caught) {
+        const err = caught instanceof Error ? caught : new Error(String(caught));
         // Any failure counts, not only ReviewError: a database or git exception would otherwise leave an approved ticket with no record and no card.
         // The approval is already recorded, so nothing else would move the ticket: say so on it and ask the owner as well.
         const [t] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
