@@ -89,7 +89,7 @@ function segments(command: string): string[] {
 
 const unquote = (t: string) => t.replace(/^(['"])(.*)\1$/, "$2");
 
-type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean; /** Also writes the repository its folder belongs to. */ repo?: boolean; /** Installs packages, so runs the project's install scripts. */ install?: boolean; /** Every word is plain and every option is on SCRATCH_OPTS, so targets are all there is to check. */ safe?: boolean };
+type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean; /** Also writes the repository its folder belongs to. */ repo?: boolean; /** Installs packages, so runs the project's install scripts. */ install?: boolean; /** Every word is plain and every option is on SCRATCH_OPTS, so targets are all there is to check. */ safe?: boolean; /** Files its output is redirected to (not /dev/null or another fd), whatever the effect. */ writes?: string[] };
 
 /**
  * The programs that may appear in a "/tmp only" command, and the options each may use (BOS-111
@@ -167,13 +167,15 @@ function explainSegment(seg: string): Part {
   const args: string[] = [];
   const writes: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const m = /^(?:\d*|&)>>?(.*)$/.exec(tokens[i]!);
+    // >, >>, >|, &>, &>>, <> (opens for writing, creating the file) with any fd number.
+    const m = /^(?:\d*|&)(?:>>|>\||>|<>)(.*)$/.exec(tokens[i]!);
     if (!m) {
       args.push(tokens[i]!);
       continue;
     }
     const target = m[1] || tokens[++i] || "";
-    if (target && target !== "/dev/null" && !target.startsWith("&")) writes.push(target);
+    // >&1, 2>&- copy or close an fd; >&word sends both streams to the file word.
+    if (target && target !== "/dev/null" && !/^&(?:\d+|-)$/.test(target)) writes.push(target.replace(/^&/, ""));
   }
   const nested = /^\w+\+?=\$\((.+)$/.exec(args[0] ?? "");
   if (nested) args[0] = nested[1]!.replace(/\)$/, "");
@@ -223,11 +225,14 @@ function explainSegment(seg: string): Part {
 
   if (/\$\(|`/.test(nested ? seg.slice(seg.indexOf("$(") + 2) : seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
   p.program = program;
-  p.safe = !assigns && SAFE_FIRST_WORD.test(first) && first === program && scratchSafe(seg, program, rest);
+  // A > inside a word (rm /tmp/a>/home/x) is a redirect the whitespace split above didn't see.
+  p.safe = !assigns && SAFE_FIRST_WORD.test(first) && first === program && !args.some((a) => a.includes(">")) && scratchSafe(seg, program, rest);
   if (writes.length) {
     const worse = WORST.indexOf(p.effect) < WORST.indexOf("changes") ? p : null;
     p = worse ?? { ...part("changes", "Changes files", writes), env: p.env, repo: p.repo, install: p.install, program: p.program, safe: p.safe };
   }
+  // Kept apart from targets: a delete keeps its own targets above, and scratchOnly checks these for every part (BOS-111 security round 14).
+  p.writes = writes;
   return p;
 }
 
@@ -269,6 +274,7 @@ function scratchOnly(parts: Part[]): { unchecked: string[] } | null {
   for (const p of parts) {
     if (p.program === "cd" || p.program === "pushd" || p.program === "popd") return null;
     if (!p.safe) return null;
+    if (p.writes?.length && !p.writes.every((t) => !/[*?[{]/.test(t) && norm(t) !== null && norm(t) !== "/tmp" && SCRATCH.test(norm(t)!))) return null;
     if (p.effect === "pushes" || p.effect === "network" || p.effect === "unknown" || p.repo) return null;
     if (p.effect !== "changes" && p.effect !== "deletes") continue;
     wrote = true;
@@ -420,7 +426,11 @@ export function cleanupScope(command: string): CleanupScope | null {
     }
     let ok = true;
     const rest = s.replace(REDIRECT, (_, to: string) => {
-      if (!(to === "/dev/null" || to === "&1" || to === "&2" || cleared.has(to))) ok = false;
+      // In temp cleanup a log by redirect may also go to a plain /tmp/NAME this command didn't delete (BOS-111 adversarial
+      // round 14: the ticket's own pnpm install > /tmp/rv86-install.log). It could be a planted link, so this only lets the
+      // CEO see it. Program targets (mkdir, git worktree add, the install folder) still need cleared, and so does every
+      // write beside a working-copy delete (security round 2).
+      if (!(to === "/dev/null" || to === "&1" || to === "&2" || cleared.has(to) || (!scope.workingCopy.length && TEMP_ONLY.test(to)))) ok = false;
       return " ";
     });
     if (!ok || /[>&]/.test(rest) || !safeBeside(rest.trim().split(/\s+/), cwd, cleared)) return null;
