@@ -189,7 +189,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const ids = rows.map((r) => r.t.id);
       const live = ids.length
         ? await db
-            .select({ ticketId: runs.ticketId, agent: agents.name })
+            .select({ ticketId: runs.ticketId, agent: agents.name, startedAt: runs.startedAt })
             .from(runs)
             .innerJoin(agents, eq(agents.id, runs.agentId))
             .where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt), or(isNull(runs.purpose), ne(runs.purpose, "chat"))))
@@ -214,6 +214,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
         working: live.filter((l) => l.ticketId === t.id).map((l) => l.agent),
+        // When the earliest of those runs began, so the card can say how long the work has been going.
+        workingSince: live.filter((l) => l.ticketId === t.id).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         };
