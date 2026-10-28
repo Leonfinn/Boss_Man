@@ -7,7 +7,6 @@ import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, decisions, skills, tickets } from "../src/db/schema.js";
-import { checkVerdict, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 const clients: Client[] = [];
@@ -92,11 +91,13 @@ describe("QA BOS-90: nine paths", () => {
       await ctx!.app.close(); await ctx!.close(); ctx = undefined;
     }
   });
-  it("3. CEO draft with a script cannot reach the owner without a verdict; 4. new version adding a script is reviewed", async () => {
+  it("3. a script draft cannot reach the owner without a verdict; 4. a new version of an installed skill that adds a script is reviewed", async () => {
     const c = (ctx = await setup());
     const v1 = await draft(c);
     await verdict(c, v1, "recommend");
-    await c.decisions.answer((await open(c))[0]!.id, "Add", { by: "leon" }).catch(async () => c.decisions.answer((await open(c))[0]!.id, ((await open(c))[0]!.options as string[])[0]!, { by: "leon" }));
+    const [d1] = await open(c);
+    await c.decisions.answer(d1!.id, (d1!.options as string[])[0]!, { by: "leon" });
+    expect(await c.db.select().from(skills)).toHaveLength(1);
     const v2 = await draft(c, [f("run.sh", "echo hi\n")]);
     expect(v2).toMatchObject({ status: "in_review", hasScripts: true });
     expect(v2.replacesSkillId).toBeTruthy();
@@ -106,30 +107,34 @@ describe("QA BOS-90: nine paths", () => {
     expect((await c.svc.get(c.company.id, v2.id)).status).toBe("in_review");
     expect(await c.db.select().from(skills)).toHaveLength(1);
   });
-  it("5-8. internet skill: recommend / conditions / advise against declined / override warns and is logged", async () => {
-    const out: Record<string, unknown> = {};
-    for (const [i, v] of (["recommend", "conditions", "advise_against", "advise_against"] as const).entries()) {
-      const c = (ctx = await setup());
-      resetRepo(String(i + 1).repeat(40));
-      const p = await link(c);
-      expect(p).toMatchObject({ source: "link", pinnedRef: String(i + 1).repeat(40) });
-      await verdict(c, p, v);
-      const [d] = await open(c);
-      expect(d!.question).toContain("github.com/acme/kit");
-      expect(d!.question).toContain(`version ${String(i + 1).repeat(12)}`);
-      expect(d!.question).toContain("Popular tidy skill");
-      expect(d!.question).toContain("Engineer");
-      if (v === "conditions") { expect(d!.question).toContain("Pin the version."); await c.decisions.answer(d!.id, (d!.options as string[])[0]!, { by: "leon" }); expect(await c.db.select().from(skills)).toHaveLength(1); }
-      if (v === "recommend") { await c.decisions.answer(d!.id, (d!.options as string[])[0]!, { by: "leon" }); expect(await c.db.select().from(skills)).toHaveLength(1); }
-      if (v === "advise_against") {
-        expect(d!.question).toMatch(/^WARNING/);
-        expect(d!.recommendedOption).toBe((d!.options as string[])[0]);
-        if (i === 2) { await c.decisions.answer(d!.id, (d!.options as string[])[0]!, { by: "leon" }); expect(await c.db.select().from(skills)).toHaveLength(0); }
-        else { await c.decisions.answer(d!.id, (d!.options as string[])[1]!, { by: "leon" }); expect(await c.db.select().from(skills)).toHaveLength(1); expect((await log(c)).join("\n")).toMatch(/skill\.overridden: OVERRIDE: leon added tidy although/); }
-      }
-      out[v + i] = true;
-      await ctx!.app.close(); await ctx!.close(); ctx = undefined;
-    }
+  it.each([
+    { n: 5, v: "recommend", answer: 0, installed: 1 },
+    { n: 6, v: "conditions", answer: 0, installed: 1 },
+    { n: 7, v: "advise_against", answer: 0, installed: 0 },
+    { n: 8, v: "advise_against", answer: 1, installed: 1 },
+  ] as const)("$n. internet skill, verdict $v, owner picks option $answer: $installed installed", async ({ n, v, answer, installed }) => {
+    const c = (ctx = await setup());
+    const sha = String(n).repeat(40);
+    resetRepo(sha);
+    const p = await link(c);
+    expect(p).toMatchObject({ source: "link", pinnedRef: sha });
+    await verdict(c, p, v);
+    const [d] = await open(c);
+    const options = d!.options as string[];
+    expect(d!.question).toContain("github.com/acme/kit");
+    expect(d!.question).toContain(`version ${sha.slice(0, 12)}`);
+    expect(d!.question).toContain("Popular tidy skill");
+    expect(d!.question).toContain("Engineer");
+    if (v === "conditions") expect(d!.question).toContain("Pin the version.");
+    if (v === "advise_against") {
+      expect(d!.question).toMatch(/^WARNING/);
+      expect(d!.recommendedOption).toBe(options[0]);
+    } else expect(d!.question).not.toMatch(/^WARNING/);
+    await c.decisions.answer(d!.id, options[answer]!, { by: "leon" });
+    expect(await c.db.select().from(skills)).toHaveLength(installed);
+    const l = (await log(c)).join("\n");
+    if (n === 8) expect(l).toMatch(/skill\.overridden: OVERRIDE: leon added tidy although/);
+    else expect(l).not.toMatch(/skill\.overridden/);
   });
   it("9. a link whose source changed after review is refused at install, logged as stale", async () => {
     const c = (ctx = await setup());
@@ -152,14 +157,20 @@ describe("QA BOS-90: nine paths", () => {
     expect(await open(c)).toHaveLength(0);
     await expect(draft(c, [f("SKILL.md", "other")])).rejects.toThrow();
     await expect(draft(c, [f("notes.md", "a"), f("Notes.md", "b")])).rejects.toThrow();
-    const p = await draft(c, [], "Distinct.").catch(() => null);
-    const [t] = p?.reviewTicketId ? await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId)) : [];
-    if (t) expect(t.planFirst).toBe(false);
+    const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [f("SKILL.md", md("Distinct."))], why: "x", agentIds: [c.worker.id], name: "distinct" });
+    expect(p.reviewTicketId).toBeTruthy();
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(t).toBeDefined();
+    expect(t!.planFirst).toBe(false);
+  });
+  it("attack: a non-CEO agent cannot propose a skill, and the refusal says so", async () => {
+    const c = (ctx = await setup());
     const w = await c.mcp(c.worker.id);
-    const tools = (await w.listTools()).tools.map((x) => x.name);
-    const r = await w.callTool({ name: "skills", arguments: { action: "propose", why: "x", agents: [c.worker.id], files: [{ path: "SKILL.md", content: md() }] } }).catch((e) => ({ isError: true, e }));
-    expect(tools.length).toBeGreaterThan(0);
-    expect((r as { isError?: boolean }).isError).toBe(true);
+    expect((await w.listTools()).tools.map((x) => x.name)).toContain("skills");
+    const r = (await w.callTool({ name: "skills", arguments: { action: "propose", why: "x", agents: ["Engineer"], files: [{ path: "SKILL.md", content: md() }] } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toBe("Only your company's CEO can propose a skill.");
     expect(await c.db.select().from(skills)).toHaveLength(0);
+    expect(await c.svc.list(c.company.id)).toHaveLength(0);
   });
 });
