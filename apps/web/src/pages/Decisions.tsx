@@ -17,6 +17,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   question: { label: "Question", tone: "" },
   deploy: { label: "Production deploy", tone: "red" },
   self_deploy: { label: "Boss Man update", tone: "blue" },
+  owner_todo: { label: "Waiting for you", tone: "amber" },
   rule_proposal: { label: "Proposed rule", tone: "blue" },
 };
 
@@ -43,7 +44,7 @@ const minutesAgo = (iso: string) => {
 const PREVIEW_LINES = 8;
 
 /** Long text shows its first lines and opens in place, so a card stays short until it's read. */
-export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { text: string; label?: string; lines?: number; chars?: number }) {
+export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars, refs }: { text: string; label?: string; lines?: number; chars?: number; refs?: Decision["refs"] }) {
   const [open, setOpen] = useState(false);
   const lines = text.split("\n");
   const byLines = lines.length > keep + 2 ? lines.slice(0, keep).join("\n") : text;
@@ -52,13 +53,35 @@ export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { 
   return (
     <div>
       {label && <p style={{ fontWeight: 600, margin: "8px 0 4px" }}>{label}</p>}
-      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{long && !open ? `${preview}…` : text}</p>
+      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{long && !open ? <><Linked text={preview} refs={refs} />…</> : <Linked text={text} refs={refs} />}</p>
       {long && (
         <button type="button" className="linkish" aria-expanded={open} onClick={() => setOpen(!open)}>
           {open ? "▾ Show less" : `▸ Show all${byLines !== text ? ` (${lines.length - keep} more lines)` : ""}`}
         </button>
       )}
     </div>
+  );
+}
+
+function TicketLink({ t }: { t: { ticketId: string; ref?: string | null; title: string } }) {
+  return (
+    <a href={`#/tickets/${t.ticketId}`}>
+      {t.ref ? `${t.ref} ` : ""}
+      {t.title}
+    </a>
+  );
+}
+
+/** Text with ticket references the server resolved (BOS-70) turned into links; anything else stays plain text. */
+function Linked({ text, refs }: { text: string; refs?: Decision["refs"] }) {
+  if (!refs || !Object.keys(refs).length) return <>{text}</>;
+  return (
+    <>
+      {text.split(/\b([A-Za-z][A-Za-z0-9]{0,9}-\d{1,9})\b/).map((part, i) => {
+        const t = i % 2 ? refs[part.toUpperCase()] : undefined;
+        return t ? <a key={i} href={`#/tickets/${t.ticketId}`} title={t.title}>{part}</a> : part;
+      })}
+    </>
   );
 }
 
@@ -312,20 +335,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
-                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\nNew instructions:")[0]}</h2>
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>
                         <MoreText label="New instructions" text={d.context.instructions} />
                       </>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
-                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n")[0]}</h2>
-                        <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} />
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
+                        <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} />
                       </>
                     ) : (
-                      <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : rule ? d.question.split("\n\n")[0] : d.question}</h2>
+                      <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : <Linked text={rule ? d.question.split("\n\n")[0]! : d.question} refs={d.refs} />}</h2>
                     )}
                     {rule && (
                       <>
-                        <p style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n").slice(1).join("\n\n")}</p>
+                        <p style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} /></p>
                         <details>
                           <summary>The exact rule</summary>
                           <ul style={{ paddingLeft: 18 }}>
@@ -379,8 +402,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
+                      {d.about && d.about.length > 0 && (
+                        <span>
+                          About: {d.about.map((t, i) => (
+                            <span key={t.ticketId}>{i > 0 && ", "}<TicketLink t={t} /></span>
+                          ))}
+                        </span>
+                      )}
+                      {d.blocks.length > 0 && (
+                        <span>
+                          Blocks{" "}
+                          {d.blocks.map((t, i) => (
+                            <span key={t.ticketId}>{i > 0 && ", "}<TicketLink t={t} /></span>
+                          ))}
+                        </span>
+                      )}
                       <span>Raised <time dateTime={d.createdAt}>{when(d.createdAt)}</time></span>
-                      {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
                       {d.reasons.map((r) => (
                         <span key={r}>{r}</span>
@@ -392,15 +429,34 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
-                            <li key={i}>{s}</li>
+                            <li key={i}><Linked text={s} refs={d.refs} /></li>
                           ))}
                         </ol>
+                      </div>
+                    )}
+                    {d.context?.check && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>How to check it worked</p>
+                        <p style={{ fontSize: 14 }}>{d.context.check}</p>
+                      </div>
+                    )}
+                    {d.context?.rollback && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>How to roll back</p>
+                        <p style={{ fontSize: 14 }}>{d.context.rollback}</p>
+                      </div>
+                    )}
+                    {d.context?.lastFailure && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>Last step failed</p>
+                        <p style={{ fontSize: 14 }}>{d.context.lastFailure.note}</p>
+                        <p className="muted" style={{ fontSize: 12 }}>Reported {when(d.context.lastFailure.at)}</p>
                       </div>
                     )}
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>
-                        <p style={{ fontSize: 14 }}>{d.context.triedFirst}</p>
+                        <p style={{ fontSize: 14 }}><Linked text={d.context.triedFirst} refs={d.refs} /></p>
                       </details>
                     )}
                     {d.context?.planText && (
@@ -444,9 +500,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             {d.recommendedOption}
                           </p>
                         )}
-                        {d.options.some((o) => o === "Keep planning" || o === "Send it back") && (
+                        {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
                           <div className="field">
-                            <label htmlFor={`note-${d.id}`}>Note for the agent (if you send it back)</label>
+                            <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : "Note for the agent (if you send it back)"}</label>
                             <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
                           </div>
                         )}

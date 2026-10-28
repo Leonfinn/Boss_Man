@@ -270,3 +270,51 @@ describe("temp-file cleanup (BOS-111)", () => {
     for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 });
+
+describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+  const OWNER = { outcome: "owner", rule: "Destructive commands go to the owner" };
+
+  it("keeps a shortcut link at /tmp/NAME with the owner: worktree add, mkdir and installs write through it", () => {
+    for (const c of [
+      "rm -rf /tmp/a && git worktree add -b feat2 /tmp/lnk2",
+      "rm -rf /tmp/a && mkdir -p /tmp/lnk/sub",
+      "rm -rf /tmp/a && cd /tmp/lnk && pnpm install",
+      "rm -rf /tmp/a && cd /tmp/lnk && npm ci",
+      "rm -rf /tmp/a && git worktree remove --force /tmp/lnk",
+    ]) {
+      expect(tempCleanup(c), c).toBe(false);
+      expect(route(c), c).toEqual(OWNER);
+    }
+  });
+
+  it("still sends the ticket's example to the CEO with Allow, and the unprovable ones to the owner with Deny", () => {
+    const example = "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
+    expect(tempCleanup(example)).toBe(true);
+    expect(route(example)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(recommendedVerdict(exec(example))).toBe("allow");
+    for (const c of ["rm -rf /tmp/../home", "rm -rf /tmp/$X", "rm -rf /tmp /home", "rm -rf /tmp/a /home/node/x"]) {
+      expect(route(c), c).toEqual(OWNER);
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+    for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(route(c), c).toEqual(OWNER);
+  });
+
+  // Found in the BOS-126 run: a glob inside /tmp is recommended Allow, because the command counts as /tmp-only work.
+  // The doc comment on recommendedVerdict says globs are Deny. it.fails flips to a failure once that is fixed: then make it a plain it.
+  // One it.fails per pattern, so fixing one of them makes exactly that test fail.
+  for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) {
+    it.fails(`recommends Deny for a glob in /tmp, which would wipe other agents' checkouts: ${c}`, () => {
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    });
+  }
+
+  // "rm /tmp/a -rf" is a plain /tmp cleanup; routing it to the owner is a deliberately conservative side effect of the widened pattern.
+  it("pins the widened destructive pattern: flags after the file, and find -delete, go to the owner with Deny", () => {
+    for (const c of ["rm file -rf", "rm a.txt -rf", "rm /tmp/a -rf", "find . -name x -delete", "find /tmp -name x -delete"]) {
+      expect(route(c), c).toEqual(OWNER);
+      expect(tempCleanup(c), c).toBe(false);
+    }
+    for (const c of ["rm file -rf", "find . -name x -delete"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+  });
+});

@@ -136,6 +136,15 @@ describe("work only in a temporary folder", () => {
   });
 });
 
+describe("repository promise (BOS-126)", () => {
+  it("makes no promise that the repository is untouched for a command that runs git worktree add", () => {
+    for (const c of ["rm -rf /tmp/a && git worktree add -b feat2 /tmp/a", "rm -rf /tmp/a && git worktree add /tmp/a origin/main && cd /tmp/a && pnpm install"]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+    }
+    expect(explainCommand("rm -rf /tmp/a && mkdir /tmp/a").scratch?.note).toMatch(/repository aren.t touched/);
+  });
+});
+
 describe("git subcommands (BOS-111)", () => {
   it("recognises worktrees, -C and branch deletes", () => {
     expect(explainCommand("git worktree list").effect).toBe("reads");

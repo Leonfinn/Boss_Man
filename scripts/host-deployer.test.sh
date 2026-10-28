@@ -7,7 +7,7 @@ T="$(mktemp -d)"; trap 'kill "${hook_pid:-0}" 2>/dev/null || true; rm -rf "$T"' 
 fail() { echo "FAIL: $*"; [[ -z ${DEBUG:-} ]] || { cat "${DL:-/dev/null}" "$D/deployer.log"; }; exit 1; }
 has() { grep -qF -- "$2" "$1" || fail "$1 lacks: $2 (has: $(cat "$1" 2>/dev/null))"; }
 hasnt() { ! grep -qF -- "$2" "$1" 2>/dev/null || fail "$1 should not have: $2"; }
-jget() { jq -er --arg k "$2" '.[$k]' "$1"; }
+jget() { node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(o[process.argv[2]]))' "$1" "$2"; }
 
 # --- fixture: origin, a working clone that moves main, and the checkout the host deploys ---
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -45,14 +45,15 @@ export BOSSMAN_DEPLOYER="$D" STUB_LOG="$T/stub.log" BOSSMAN_DEPLOY_STATUS="$T/de
 : >"$STUB_LOG"
 # A webhook listener that appends each POST body to a file, on a free port.
 cat >"$T/hook.mjs" <<'JS'
-import http from "node:http"
-import fs from "node:fs"
+import http from "node:http";
+import { appendFileSync } from "node:fs";
+const out = process.argv[2];
 const s = http.createServer((req, res) => {
-  const b = []
-  req.on("data", (d) => b.push(d))
-  req.on("end", () => { fs.appendFileSync(process.argv[2], Buffer.concat(b) + "\n"); res.writeHead(200); res.end() })
-})
-s.listen(0, "127.0.0.1", () => console.log(s.address().port))
+  let body = "";
+  req.on("data", (d) => (body += d));
+  req.on("end", () => { appendFileSync(out, body + "\n"); res.writeHead(200); res.end(); });
+});
+s.listen(0, "127.0.0.1", () => { console.log(s.address().port); });
 JS
 node "$T/hook.mjs" "$T/hook.out" >"$T/hook.port" & hook_pid=$!
 for _ in $(seq 50); do [[ -s $T/hook.port ]] && break; sleep 0.1; done
@@ -96,6 +97,18 @@ req server "$c1" 11111111-1111-1111-1111-111111111111
 host
 has "$D/outbox/status.json" "already handled"
 
+# 3b. A history line written with a space after the colon is still recognised.
+printf '{"id": "22222222-2222-2222-2222-222222222222", "result": "deployed"}\n' >>"$D/outbox/history.jsonl"
+req server "$c1" 22222222-2222-2222-2222-222222222222
+host
+has "$D/outbox/status.json" "already handled"
+
+# 3c. A compact history line (no space) is still recognised.
+printf '{"id":"33333333-3333-3333-3333-333333333333","result":"deployed"}\n' >>"$D/outbox/history.jsonl"
+req server "$c1" 33333333-3333-3333-3333-333333333333
+host
+has "$D/outbox/status.json" "already handled"
+
 # 4. Rate limit: a second server deploy inside 10 minutes is refused, and the webhook says so.
 c2="$(push apps/server/b)"
 req server "$c2"
@@ -103,14 +116,12 @@ host
 [[ $(status result) == rejected ]] || fail "rate limit result"
 has "$D/outbox/status.json" "only one server deploy every 10 minutes"
 [[ $(calls) == 1 ]] || fail "deploy ran despite the rate limit"
-has "$T/hook.out" '"result":"rejected"'
-node - "$T/hook.out" <<'JS' || fail "webhook payload keys"
-const fs = require("node:fs")
-const lines = fs.readFileSync(process.argv[2], "utf8").split("\n").filter((l) => l.trim())
-const p = JSON.parse(lines[lines.length - 1])
-const keys = Object.keys(p).sort().join(",")
-if (keys !== "at,from_commit,message,result,to_commit") throw new Error(`unexpected keys: ${keys}`)
-JS
+has "$T/hook.out" '"result": "rejected"'
+node -e '
+const fs=require("fs");const lines=fs.readFileSync(process.argv[1],"utf8").split("\n").filter(l=>l.trim());
+const p=JSON.parse(lines[lines.length-1]);const got=Object.keys(p).sort().join(",");const want="at,from_commit,message,result,to_commit";
+if(got!==want){console.error("keys: "+got);process.exit(1)}
+' "$T/hook.out" || fail "webhook payload keys"
 
 # 5. Not the tip of main: refused (the old commit is real, but main has moved).
 rm "$D/state/last-server"
@@ -168,7 +179,7 @@ unset STUB_RC STUB_RESULT
 conf 1
 rm -f "$D/state/last-runner"; : >"$T/hook.out"
 req runner "$(git -C "$T/src" rev-parse HEAD)"; host
-has "$T/hook.out" '"result":"deployed"'
+has "$T/hook.out" '"result": "deployed"'
 conf 0
 
 # 11. Dry run: every check, no changes, request left in place.
@@ -311,7 +322,7 @@ live_is blue
 order "$DL" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
 [[ $(cat "$W/role.blue") == leader && ! -e $W/running.green && ! -e $D/state/soak ]] || fail "world after switch-back"
 [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not put back to the old commit"
-has "$T/hook.out" '"result":"rolled_back"'
+has "$T/hook.out" '"result": "rolled_back"'
 
 # 18. Checks fail right after the flip, during the swap itself: same reversal, same alert.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
@@ -320,7 +331,7 @@ FAKE_VERIFY_FAIL=green bg
 [[ $(status result) == rolled_back ]] || fail "swap-time rollback: $(cat "$D/outbox/status.json")"
 order "$DL" "signal USR1 blue" "signal USR2 green" "reload now green" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
 live_is blue; [[ ! -e $D/state/soak ]] || fail "soak recorded for a failed swap"
-has "$T/hook.out" '"result":"rolled_back"'
+has "$T/hook.out" '"result": "rolled_back"'
 
 # 19. A failed smoke test on the idle colour: nobody is demoted, the idle colour is stopped, failure webhook.
 reset_world blue "$cur"; git -C "$T/src" reset -q --hard "$P"
@@ -330,7 +341,7 @@ FAKE_SMOKE_FAIL=1 bg
 has "$D/outbox/status.json" "smoke test"
 hasnt "$DL" "signal"; has "$DL" "stopped green"; live_is blue
 [[ $(cat "$W/role.blue") == leader && $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "live colour touched / checkout not reset"
-has "$T/hook.out" '"result":"failed"'
+has "$T/hook.out" '"result": "failed"'
 # A failed migration stops before anything starts.
 reset_world blue "$cur"; bgreq "$b4"
 FAKE_MIGRATE_RC=1 bg
@@ -369,7 +380,7 @@ order "$DL" "pg_dump" "up -d --no-deps server-blue" "signal USR1 green" "signal 
 hasnt "$DL" "build"; hasnt "$DL" "migrate"; hasnt "$DL" "force-recreate"
 live_is blue; [[ $(cat "$W/role.blue") == leader && ! -e $W/running.green ]] || fail "world after manual rollback"
 [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not moved to the running code"
-has "$T/hook.out" '"result":"rolled_back"'
+has "$T/hook.out" '"result": "rolled_back"'
 # The rejected release is held (not offered again); a newer commit lifts the hold.
 [[ $(cat "$D/state/hold") == "$b6" && ! -e $D/state/previous ]] || fail "hold / previous not recorded after rollback"
 touch "$D/inbox/check"; bg
