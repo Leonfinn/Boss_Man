@@ -114,9 +114,8 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86 2>&1",
       "rm -rf /tmp/a /tmp/b.log 2>/dev/null",
       "rm -rf -- /tmp/.hidden-dir",
-      "rm -rf /tmp/rv86 &>/dev/null; git worktree prune",
       "rm -rf /tmp/wt /tmp/wt-logs && git worktree add -b bos-111 /tmp/wt origin/main 2>&1 && mkdir -p /tmp/wt-logs",
-      "rm -rf /tmp/wt; git worktree prune; git worktree list",
+      "rm -rf /tmp/wt; git worktree list",
       "rm -rf /tmp/x2 /tmp/x2.log && mkdir /tmp/x2 && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
       "rm -rf /tmp/a; rm -f /tmp/b && echo x > /tmp/b",
     ]) {
@@ -330,5 +329,60 @@ describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
       expect(tempCleanup(c), c).toBe(false);
     }
     for (const c of ["rm file -rf", "find . -name x -delete"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+  });
+});
+
+describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+
+  it("gives no /tmp note when an option could carry the real target", () => {
+    for (const c of [
+      "rm -rf /tmp/a && cp -t /home/node /tmp/a",
+      "rm -rf /tmp/a && cp --target-directory=/home/node /tmp/a",
+      "rm -rf /tmp/a && diff --output=/home/node/x /tmp/a /tmp/b",
+      "rm -rf /tmp/a && sort -o/home/node/x /tmp/a",
+      "rm -rf /tmp/a && sort -o /home/node/x /tmp/a",
+      "rm -rf /tmp/a && touch --some-new-option=/home/x /tmp/a",
+      "rm -rf /tmp/a && find /tmp/b -fprint /home/x",
+      "rm -rf /tmp/a && git log --output=/home/x",
+      "rm -rf /tmp/a && git -C /home/x status",
+      // Words the shell rebuilds: a quote glued to text, a variable, an escape.
+      "rm -rf /tmp/a && sort '-'o/home/x /tmp/a",
+      "rm -rf /tmp/a && sort $OPT /tmp/a",
+      "rm -rf /tmp/a && sort \\-o/home/x /tmp/a",
+      // Programs whose plain words can write elsewhere.
+      "rm -rf /tmp/a && sed -n 'w /home/x' /tmp/b",
+      "rm -rf /tmp/a && uniq /tmp/b /home/x",
+      "rm -rf /tmp/a && trap 'cp /tmp/b /home/x' EXIT",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+      expect(recommendedVerdict(exec(c)), c).not.toBe("allow");
+    }
+  });
+
+  it("keeps the note for listed options", () => {
+    for (const c of ["rm -rf /tmp/a", "rm -rf /tmp/a && mkdir -p /tmp/a/b && cp -r /tmp/c /tmp/a/b", "rm -rf /tmp/a && ls -la /tmp && cat /tmp/b > /tmp/a.log 2>&1", "find /tmp/x -name '*.log' -delete"]) {
+      expect(explainCommand(c).scratch, c).toBeDefined();
+    }
+  });
+
+  it("recommends Deny for shred even in /tmp", () => {
+    for (const c of ["shred /tmp/a", "shred -u /tmp/a", "rm -rf /tmp/a && shred /tmp/b"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
+  });
+
+  it("no longer counts git worktree prune as temp cleanup", () => {
+    for (const c of ["rm -rf /tmp/rv86 &>/dev/null; git worktree prune", "rm -rf /tmp/wt; git worktree prune; git worktree list"]) {
+      expect(tempCleanup(c), c).toBe(false);
+      expect(route(c).outcome, c).toBe("owner");
+    }
+  });
+
+  it("says on the card when a cleanup also runs install scripts or writes the repository", () => {
+    const s = explainCommand("rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86.log 2>&1").summary;
+    expect(s).toMatch(/writes into the project's repository/);
+    expect(s).toMatch(/install scripts/);
+    expect(explainCommand("rm -rf /tmp/a").summary).not.toMatch(/install scripts|repository/);
   });
 });

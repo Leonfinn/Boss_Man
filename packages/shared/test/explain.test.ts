@@ -111,7 +111,7 @@ describe("work only in a temporary folder", () => {
   const scratch = (c: string) => explainCommand(c).scratch;
 
   it("says so when every change and delete names an absolute path under /tmp", () => {
-    const s = scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && sed -i 's/a/b/' /tmp/opencode/mut/x.js");
+    const s = scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && touch /tmp/opencode/mut/x.js");
     expect(s?.unchecked).toEqual([]);
     expect(s?.note).toMatch(/^Works only in a temporary folder \(\/tmp\)/);
   });
@@ -154,7 +154,7 @@ describe("git subcommands (BOS-111)", () => {
   it("recognises worktrees, -C and branch deletes", () => {
     expect(explainCommand("git worktree list").effect).toBe("reads");
     for (const c of ["git worktree add /tmp/rv86 origin/main", "git worktree remove --force /tmp/rv86", "git worktree prune"]) {
-      expect(explainCommand(c), c).toMatchObject({ effect: "changes", summary: "Adds or removes a second checkout of the project (git worktree)." });
+      expect(explainCommand(c), c).toMatchObject({ effect: "changes", summary: "Adds or removes a second checkout of the project (git worktree). The git worktree step also writes into the project's repository (.git), and can create a branch there." });
       // It also writes the repository's .git, so it isn't /tmp-only work.
       expect(explainCommand(c).scratch, c).toBeUndefined();
     }
