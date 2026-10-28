@@ -65,6 +65,18 @@ describe("ranked decision queue (R20)", () => {
     expect(q[1]!.score).toBeLessThan(q[0]!.score);
   });
 
+  it("lists the newest card first even when an older one scores higher", async () => {
+    ctx = await setup();
+    const checkout = await ctx.ticket({ title: "Checkout" });
+    const urgent = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Which payment provider?", options: ["Stripe", "Mollie"], recommended: "Stripe", blocksTicketId: checkout.id });
+    ctx.advance(HOUR);
+    const idle = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+
+    const q = await ctx.queue();
+    expect(q.map((r) => r.id)).toEqual([idle.id, urgent.id]);
+    expect(q[0]!.score).toBeLessThan(q[1]!.score);
+  });
+
   it("links the tickets a card is about and the references in its text, in its own company only", async () => {
     ctx = await setup();
     const restore = await ctx.ticket({ title: "Restore proof" });

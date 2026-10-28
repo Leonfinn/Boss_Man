@@ -5,6 +5,7 @@ import { State } from "../components/State";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
+import { SkillProposal } from "../components/SkillProposal";
 
 const KIND: Record<string, { label: string; tone: string }> = {
   permission: { label: "Permission", tone: "" },
@@ -19,6 +20,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   self_deploy: { label: "Boss Man update", tone: "blue" },
   owner_todo: { label: "Waiting for you", tone: "amber" },
   rule_proposal: { label: "Proposed rule", tone: "blue" },
+  skill: { label: "Skill", tone: "blue" },
 };
 
 const EFFECT = {
@@ -315,7 +317,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       ) : (
         <>
           <div className="formula">
-            <p>The number is each decision's priority score: the highest comes first. It adds up three things, drawn as the bar under it:</p>
+            <p>Newest first. The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
             <ul className="score-legend">
               <li>
                 <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer
@@ -389,6 +391,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         </details>
                       </>
                     )}
+                    {d.context?.type === "skill" && d.context.proposalId ? <SkillProposal companyId={d.companyId} proposalId={d.context.proposalId} /> : null}
                     {x && (
                       <>
                         {x.scratch && (

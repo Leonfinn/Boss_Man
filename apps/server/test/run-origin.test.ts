@@ -96,6 +96,24 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect((await card(c, c.worker.id)).run).toMatchObject({ origin: "nudge", originFrom: "CEO", runTicketId: t.id });
   });
 
+  it("shows ticketless runs on the board and counts them like the dashboard (BOS-155)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Add a skill" })).json() as { id: string };
+    // The Engineer is nudged about the ticket without being on it; the CEO runs with no ticket at all.
+    const ceo = await agent(c, c.ceo.id);
+    await ceo.callTool({ name: "nudge", arguments: { agent: "Engineer", why: `The ticket ${t.id} needs a look` } });
+    await ceo.close();
+    await c.scheduler.notify(c.ceo.id, { reason: "feedback", note: "New notes." });
+    await c.scheduler.tick();
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string; origin: string }>; columns: Array<{ tickets: Array<{ id: string; working: string[] }> }> };
+    const dash = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json() as { stats: { running: number } };
+    const card = board.columns.flatMap((x) => x.tickets).find((x) => x.id === t.id)!;
+    expect(card.working).toEqual(["Engineer"]);
+    expect(board.withoutTicket.map((r) => r.agent)).toEqual(["CEO"]);
+    expect(board.workingAgents).toBe(2);
+    expect(board.workingAgents).toBe(dash.stats.running);
+  });
+
   it("does not pick one ticket out of a review wake that lists several", async () => {
     const c = (ctx = await setup());
     const a = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First" })).json() as { id: string };

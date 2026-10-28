@@ -28,6 +28,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { APPLY_CHANGE, REVERT_CHANGE } from "./retro.js";
@@ -114,6 +115,8 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
+  /** A skill the CEO proposed (services/skill-proposals.ts); the owner's answer installs or refuses it. */
+  | { type: "skill"; proposalId: string }
   | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } }
   /** A change a workflow retro proposed (workflow_changes); Apply carries it out, Skip leaves things as they are. */
   | { type: "workflow_change"; changeId: string }
@@ -248,8 +251,8 @@ export type AnswerExtra = {
   note?: string;
   /** The owner wrote their own answer to an agent's question instead of picking an option. */
   custom?: boolean;
-  /** The CEO settled it ("handled" advice), so the record and the wake say so instead of "the owner". */
-  by?: "ceo";
+  /** Who answered: "ceo" when the CEO settled it ("handled" advice), else the owner's username (logged with a skill override). */
+  by?: string;
   /** With by "ceo": the advice summary, stored in the same conditional update that closes the decision. */
   handled?: { summary: string; at: string };
   /** The CEO answered with the decisions tool: recorded as theirs, with its note as the reason (BOS-111). */
@@ -277,6 +280,11 @@ export type Settled = { agentId: string; name: string; note: string | null; at: 
 
 /** How long a permission or plan request waits with the CEO before it moves to the owner: the runner gives up at 10 minutes (BOS-111, BOS-119). */
 export const CEO_HANDOVER_MINUTES = 5;
+
+export const SKILL_ADD = "Add the skill";
+export const SKILL_REJECT = "Don't add it";
+export const SKILL_CONDITIONS = "Add it, accepting the reviewer's conditions";
+export const SKILL_OVERRIDE = "Add it anyway, against the advice";
 
 /**
  * "Ask the CEO for advice": where a decision stands with the CEO. Kept in the decision's context so the
@@ -331,6 +339,7 @@ export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
+type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: string, answer: string, by: string) => Promise<unknown>;
 /** The workflow retro's side of its decisions (services/retro.ts): a check before Apply, and what to do once answered. */
 export type RetroHook = {
   problemApplying(changeId: string): Promise<string | null>;
@@ -380,6 +389,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onAgentDecision: AgentDecisionHook | null = null;
   let retroHook: RetroHook | null = null;
   let onTeamPlan: TeamPlanHook | null = null;
+  let onSkill: SkillHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
   let maintenance: MaintenanceHook | null = null;
@@ -840,8 +850,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           })
           .returning();
         if (input.blocksTicketId) {
-          await tx.insert(ticketDependencies).values({ blockedTicketId: input.blocksTicketId, blockerDecisionId: row!.id });
-          await tx.update(tickets).set({ systemState: "blocked", lastActivityAt: new Date() }).where(eq(tickets.id, input.blocksTicketId));
+          // The same guarded writer every other link uses (BOS-86 round 12): a proposer can't block
+          // the Security Reviewer's task with a question, on any route.
+          await addTicketDependency(tx as unknown as Db, {
+            companyId: input.companyId,
+            blockedTicketId: input.blocksTicketId,
+            blockerDecisionId: row!.id,
+            actor: { type: "agent", agentId: input.agentId },
+            hold: true,
+            now,
+          });
         }
         return row!;
       });
@@ -925,6 +943,25 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setTeamPlanHook(hook: TeamPlanHook) {
       onTeamPlan = hook;
+    },
+
+    setSkillHook(hook: SkillHook) {
+      onSkill = hook;
+    },
+
+    /** The owner's call on a proposed skill. One open decision per proposal. */
+    async raiseSkill(input: { companyId: string; proposalId: string; agentId: string | null; question: string; options: string[]; recommended: string }) {
+      const [row] = await db
+        .insert(decisions)
+        .values({ companyId: input.companyId, kind: "skill", tier: "owner", question: input.question, options: input.options, recommendedOption: input.recommended, raisedByAgentId: input.agentId, dedupeKey: `skill:${input.proposalId}`, context: { type: "skill", proposalId: input.proposalId } })
+        .onConflictDoNothing()
+        .returning();
+      return row ?? null;
+    },
+
+    /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
+    async withdraw(id: string) {
+      await db.update(decisions).set({ status: "withdrawn", answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
     },
 
     setLoopHooks(hooks: LoopHooks) {
@@ -1084,7 +1121,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
-      const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
+      // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).
+      const sorted = rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       return Promise.all(
         sorted.map(async (r) => {
           const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
@@ -1429,6 +1467,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (ctx.type === "team_plan") {
         if (answer === TEAM_HIRE) {
           await onTeamPlan?.(ctx, d.companyId, [...new Set(extra.picks ?? ctx.hires.map((_, i) => i))]);
+        }
+      } else if (ctx.type === "skill") {
+        try {
+          await onSkill?.(ctx, d.companyId, answer, extra.by ?? "the owner");
+        } catch (err) {
+          // Not an expected refusal: keep the question open so the answer can be given again.
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          throw err;
         }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
         await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
