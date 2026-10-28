@@ -18,6 +18,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   question: { label: "Question", tone: "" },
   deploy: { label: "Production deploy", tone: "red" },
   self_deploy: { label: "Boss Man update", tone: "blue" },
+  owner_todo: { label: "Waiting for you", tone: "amber" },
   rule_proposal: { label: "Proposed rule", tone: "blue" },
   skill: { label: "Skill", tone: "blue" },
 };
@@ -426,6 +427,25 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         </ol>
                       </div>
                     )}
+                    {d.context?.check && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>How to check it worked</p>
+                        <p style={{ fontSize: 14 }}>{d.context.check}</p>
+                      </div>
+                    )}
+                    {d.context?.rollback && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>How to roll back</p>
+                        <p style={{ fontSize: 14 }}>{d.context.rollback}</p>
+                      </div>
+                    )}
+                    {d.context?.lastFailure && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>Last step failed</p>
+                        <p style={{ fontSize: 14 }}>{d.context.lastFailure.note}</p>
+                        <p className="muted" style={{ fontSize: 12 }}>Reported {when(d.context.lastFailure.at)}</p>
+                      </div>
+                    )}
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>
@@ -473,9 +493,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             {d.recommendedOption}
                           </p>
                         )}
-                        {d.options.some((o) => o === "Keep planning" || o === "Send it back") && (
+                        {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
                           <div className="field">
-                            <label htmlFor={`note-${d.id}`}>Note for the agent (if you send it back)</label>
+                            <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : "Note for the agent (if you send it back)"}</label>
                             <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
                           </div>
                         )}

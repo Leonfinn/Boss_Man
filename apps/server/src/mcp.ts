@@ -55,6 +55,26 @@ export async function issueRunToken(db: Db, scope: Scope, ttlHours = 12): Promis
 const STATES = ["backlog", "ready", "in_progress", "blocked", "review", "done"] as const;
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 const fail = (t: string) => ({ content: [{ type: "text" as const, text: t }], isError: true });
+
+/** A reply that asks the owner to do something: an imperative aimed at them, not a plain status report. */
+const OWNER_ASK = /\b(please|you(?:'ll| will)? (?:need|have|must|should)|could you|would you|can you|when you(?:'ve| have)? |reply here|tell me (?:here|once|when)|let me know|confirm (?:that|once|when)|run (?:this|it|the|scripts)|apply (?:it|this|the|them)|do this|try again|revert|roll back)\b/i;
+
+/**
+ * After a ticket reply, say when the owner has to act but nothing on their queue asks them to (BOS-122):
+ * the owner doesn't watch tickets, so a reply alone doesn't reach them. Returns null when no hint applies.
+ */
+async function ownerActionHint(db: Db, scope: Scope, ticketId: string, body: string): Promise<string | null> {
+  if (!OWNER_ASK.test(body)) return null;
+  // An open decision covers it when it blocks this ticket, or this agent already asked about it.
+  const covering = await db
+    .select({ id: decisionsTable.id })
+    .from(decisionsTable)
+    .leftJoin(ticketDependencies, eq(ticketDependencies.blockerDecisionId, decisionsTable.id))
+    .where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), or(eq(ticketDependencies.blockedTicketId, ticketId), scope.agentId ? eq(decisionsTable.raisedByAgentId, scope.agentId) : sql`false`)))
+    .limit(1);
+  if (covering.length) return null;
+  return "This reply asks the owner to do something, but no open decision covers it — the owner doesn't watch tickets, so this won't reach their queue or the Your review lane. Call raise_decision with blocksTicketId set to this ticket, with what you tried first and the steps they need. The reply is still posted.";
+}
 /** A lossless cap: at most n chars of s from offset; when there's more, says how much and how to get it. */
 export const cut = (s: string, n: number, how: (next: number) => string, offset = 0) =>
   s.length <= offset + n ? s.slice(offset) : `${s.slice(offset, offset + n)}\n\n… ${s.length - offset - n} more chars; ${how(offset + n)}`;
@@ -376,7 +396,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
       await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: "note", title, body, link: `#/tickets/${ticketId}` });
-      return text("Posted on the ticket's conversation.");
+      // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
+      // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
+      const hint = await ownerActionHint(db, scope, ticketId, body);
+      return text(`Posted on the ticket's conversation.${hint ? `\n\n${hint}` : ""}`);
     },
   );
 
