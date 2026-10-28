@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted } from "@boss-man/shared";
+import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -39,6 +39,9 @@ import { latestRows } from "./services/review-kinds.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
+import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
+import { sizingGuideText } from "./services/sizing.js";
+import { getHold, WRAP_UP } from "./services/maintenance.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -122,6 +125,7 @@ type Services = {
   images: ReturnType<typeof ticketImagesService>;
   watchdog: ReturnType<typeof watchdogService>;
   alerts: ReturnType<typeof alertLadder>;
+  retro: ReturnType<typeof retroService>;
 };
 
 /**
@@ -141,13 +145,14 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   }) as never;
 }
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
     registerWatchdog(server, watchdog, alerts, scope);
   }
+  if (retroAgent) registerRetro(server, retro, scope);
 
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
@@ -189,7 +194,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${t.state}, version ${t.version}. Read it again with tickets, then decide.`);
       if (t.assignee === to.id) return fail(`That ticket is already assigned to ${agent}.`);
       try {
-        const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim() });
+        const u = await work.updateTicket(ticketId, { assigneeAgentId: to.id, stateNote: note.trim(), byAgentId: scope.agentId });
         return text(`Ticket ${ticketId} is now assigned to ${agent} (version ${u.version}); they are woken with your note.`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -232,11 +237,13 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "create_ticket",
     {
       description:
-        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass waitsOn (a task's id) to make this task wait until that one is done, such as a QA task waiting on its build task: it starts, and its assignee is woken, when that task is done. Set noCode to true for research, wiki, docs or deploy-only work that changes nothing in the repository; a ticket without it can't go to review until the repository has changed. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that.",
+        "Create a ticket in your company's backlog. Use it to record work you or your team should do. CEOs and managers can pass assignee (an agent's name) to hand it straight to that colleague, who is woken to work on it. Give the project by name when your company has more than one. Pass engagementId when the ticket does work another company engaged you for. Pass feature (a feature's id or exact title) when the task delivers a feature request. Pass waitsOn (a task's id) to make this task wait until that one is done, such as a QA task waiting on its build task: it starts, and its assignee is woken, when that task is done. Set noCode to true for research, wiki, docs or deploy-only work that changes nothing in the repository; a ticket without it can't go to review until the repository has changed. Pass parent (a task's id) to make this a sub-task: use one when you need help from a colleague (say, a developer needing infra input) without handing over your own task. The parent waits on it and is woken when it is done; a sub-task can't have sub-tasks, and it joins the parent's feature and project. Rate its risk: trivial, low, medium (the default), high or critical; high and critical work is reviewed by the owner, gets the project's deeper check and goes to staging before production. High and critical tickets are planned and approved before anything changes unless you set planFirst to false; set it to true for other work that needs that. Size is required: 1, 2, 3, 5 or 8, relative to the tickets your team has finished. Size by comparison with the reference tickets sizing_guide gives you (\"like BOS-42, which was a 3\"), not by guessing hours. Developers don't change a size once it is set.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
         project: z.string().optional(),
+        // Checked in the handler so the refusal can name the scale and point at sizing_guide.
+        size: z.number().optional().describe("Required. 1, 2, 3, 5 or 8. Call sizing_guide first and compare."),
         engagementId: z.string().uuid().optional(),
         risk: z.enum(RISK_TIERS).optional(),
         planFirst: z.boolean().optional(),
@@ -249,7 +256,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         noCode: z.boolean().optional().describe("true for research, wiki, docs or deploy-only work that changes nothing in the repository; such a ticket can reach review and be closed with an empty diff. Leave it off for anything that changes code."),
       },
     },
-    async ({ title, body, project, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, noCode, ...rest }) => {
+    async ({ title, body, project, size, engagementId, risk, planFirst, feature, parent, assignee, waitsOn, acceptanceCriteria, noCode, ...rest }) => {
+      if (scope.agentId && !isTaskSize(size)) return fail(`${size === undefined ? "A ticket you create needs a size" : `${size} is not a size`}: ${SIZE_SCALE}, relative to the tickets your team has finished. Call sizing_guide to see finished tickets of each size, pick the one yours is most like, then call create_ticket again with size.`);
       const out = await outsideTree(parent);
       if (out) return fail(`${out} Pass parent (a ticket in the tree) to add a sub-task.`);
       // Attaching a sub-task to an open skill-review task, or making a ticket wait on it, is a way
@@ -313,15 +321,24 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       const [t] = await db
         .insert(tickets)
-        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}) })
+        .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}) })
         .returning({ id: tickets.id });
       if (parentTask) await work.waitOnSubtask(parentTask, t!.id);
       if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn });
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
-      if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id });
+      if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
       return text(`Created ticket ${t!.id} in ${p.name}${assignee ? `, assigned to ${assignee}` : ""}.`);
     },
+  );
+
+  server.registerTool(
+    "sizing_guide",
+    {
+      description: "Before create_ticket: finished tickets of each size (1, 2, 3, 5, 8) with their real time, cost and send-backs, the typical figures per role, and the company's sizing playbook if it has one. Size a new task by comparing it with these.",
+      inputSchema: {},
+    },
+    async () => text(await sizingGuideText(db, scope.companyId)),
   );
 
   server.registerTool(
@@ -780,7 +797,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "decisions",
     {
       description:
-        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert or a temp-file cleanup request only the owner can settle (a secret, host access, sign-off, an owner-only choice, a delete you can't vouch for): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests, except a lesson for a project brief that your own review raised. Permission requests: answer them with a note saying why (the owner reads it). Ones marked TEMP-FILE CLEANUP only delete entries directly in /tmp and came to you instead of the owner: allow them when the rest of the command looks like the agent's own work; deny or escalate (id, triedFirst) anything that reaches outside /tmp, pushes, or that you can't account for. They go to the owner if you don't answer within 5 minutes. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert or a temp-file cleanup request only the owner can settle (a secret, host access, sign-off, an owner-only choice, a delete you can't vouch for): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests, except a lesson for a project brief that your own review raised. Permission requests: answer them with a note saying why (the owner reads it). Ones marked TEMP-FILE CLEANUP only delete entries directly in /tmp and came to you instead of the owner: allow them when the rest of the command looks like the agent's own work; deny or escalate (id, triedFirst) anything that reaches outside /tmp, pushes, or that you can't account for. Ones marked WORKING-COPY CLEANUP delete plain relative paths in the asking agent's own checkout (the card names the ticket, branch and files): allow them when the files are its own throwaway work (a probe file, build output) and its ticket explains them; deny or escalate source folders or anything you can't account for. They go to the owner if you don't answer within 5 minutes. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
       inputSchema: {
         action: z.enum(["list", "answer", "escalate", "advise"]),
         outcome: z.enum(["reissue", "handled"]).optional(),
@@ -820,8 +837,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         return text(
           open
             .map((d) => {
-              const { planText: plan, explain, tempCleanup } = d.context as { planText?: string | null; explain?: { command?: string }; tempCleanup?: boolean };
-              return [`${d.id}: ${tempCleanup ? "TEMP-FILE CLEANUP: " : ""}${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
+              const { planText: plan, explain, tempCleanup, workingCopy } = d.context as { planText?: string | null; explain?: { command?: string }; tempCleanup?: boolean; workingCopy?: unknown };
+              return [`${d.id}: ${tempCleanup ? "TEMP-FILE CLEANUP: " : workingCopy ? "WORKING-COPY CLEANUP: " : ""}${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
             })
             .concat(asked)
             .join("\n\n"),
@@ -911,7 +928,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         }
         if (input.action === "overrule") {
           if (!input.kind || !input.reason) return fail("Give the kind of review and your reason.");
-          const r = await review.overrule(input.ticketId, { kind: input.kind, reason: input.reason, byAgentId: scope.agentId!, companyId: scope.companyId, causedByRunId: scope.runId });
+          const r = await review.overrule(input.ticketId, { kind: input.kind, reason: input.reason, byAgentId: scope.agentId!, companyId: scope.companyId, causedByRunId: scope.runId, background: true });
           return text(`Overruled the ${input.kind} review. ${reviewOutcome(r)}`);
         }
         if (input.action === "diff") {
@@ -935,6 +952,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           reviewerAgentId: scope.agentId,
           companyId: scope.companyId,
           causedByRunId: scope.runId,
+          // Land in the background: the check can outlast the client's 300 s call timeout, which would drop the merge.
+          background: true,
         });
         return text(reviewOutcome(r));
       } catch (err) {
@@ -967,6 +986,7 @@ function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?
   const outcome = r.outcome ?? "done";
   if (outcome === "waiting") return `Recorded: ${r.delivered}.`;
   if (r.verdict !== "approved") return `Changes requested; ${r.delivered}.`;
+  if (outcome === "landing") return "Approved; it is being checked and merged in the background. If the check fails or the merge can't finish, the ticket comes back to the assignee or raises a card.";
   return outcome === "owner_review"
     ? `Approved. ${r.delivered}: the owner signs it off before it merges.`
     : outcome === "merged" || outcome === "done"
@@ -1434,7 +1454,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
     "update_ticket",
     {
       description:
-        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
+        "For CEOs and managers: reorganise one of your company's tickets. Move it to another project (project: name or id; its sub-tasks go with it; not while it is in progress or in review), put it under a feature (featureId, or null to take it out), make it a sub-task of a task (parentTicketId, or null to take it out; it joins the parent's feature and the parent waits on it), fix its title or description, or set who it is assigned to (assignee: an agent's name, or null to leave it unassigned; the new assignee is woken), or mark it as not needing code (noCode true for research, wiki, docs or deploy-only work, so it can reach review with an empty diff; false to clear it), or change its size (1, 2, 3, 5 or 8; null to clear it; compare with sizing_guide first). Give at least one change and a reason up to 240 characters; the reason is kept on the ticket. Pass expected_version so it is refused if the ticket changed since you read it. To close a duplicate, use set_ticket_state done with outcome cancelled.",
       inputSchema: {
         ticketId: z.string().uuid(),
         project: z.string().min(1).optional(),
@@ -1444,17 +1464,19 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         body: z.string().max(10_000).optional(),
         assignee: z.string().min(1).nullable().optional(),
         noCode: z.boolean().optional(),
+        size: z.number().nullable().optional(),
         reason: z.string().trim().min(1).max(240),
         expected_version: z.number().int().optional(),
       },
     },
-    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, reason, expected_version }) => {
+    async ({ ticketId, project, featureId, parentTicketId, title, body, assignee, noCode, size, reason, expected_version }) => {
       if (!(await isManager())) return fail("Only your company's CEO or a manager can reorganise tickets.");
+      if (size !== undefined && size !== null && !isTaskSize(size)) return fail(`${size} is not a size: ${SIZE_SCALE}, or null to clear it.`);
       const out = await outsideTree(ticketId);
       if (out) return fail(out);
       const reviewWrite = await reviewTicketWriteRefusal(db, scope.companyId, ticketId, scope.agentId);
       if (reviewWrite) return fail(reviewWrite);
-      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee or noCode.");
+      if (project === undefined && featureId === undefined && parentTicketId === undefined && title === undefined && body === undefined && assignee === undefined && noCode === undefined && size === undefined) return fail("Nothing to change: give project, featureId, parentTicketId, title, body, assignee, noCode or size.");
       const [t] = await db.select({ version: tickets.version }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!t) return fail("No ticket with that ID in your company.");
       if (expected_version !== undefined && t.version !== expected_version) return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}; it is now ${t.version}). Read it again with tickets, then decide.`);
@@ -1469,9 +1491,9 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         assigneeId = a.id;
       } else if (assignee === null) assigneeId = null;
       try {
-        const u = await work.updateTicket(ticketId, { ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}) });
+        const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(size !== undefined ? { size } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
-        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}: ${reason}` });
+        await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}: ${reason}` });
         return text(`Ticket ${ticketId} updated (version ${u.version}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -1569,7 +1591,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
-      return text(`Ticket ${ticketId} is now ${state}.`);
+      return text(`Ticket ${ticketId} is now ${state}.${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
@@ -1900,6 +1922,47 @@ function buildPaServer(db: Db, { notes, wiki, skills, skillProposals, review, ag
   return server;
 }
 
+/** The workflow retro agent's tools (docs/19 parts 2 and 3): the company's configured retro agent only, and checked again on every call. */
+function registerRetro(server: McpServer, retro: Services["retro"], scope: Scope) {
+  const guarded = (run: () => Promise<string>) => async () => {
+    if (!scope.agentId || !(await retro.isRetroAgent(scope.companyId, scope.agentId))) return fail("Only the agent that runs this company's workflow retro can use this.");
+    try {
+      return text(await run());
+    } catch (err) {
+      if (err instanceof RetroError) return fail(err.message);
+      if (err instanceof z.ZodError) return fail(err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
+      throw err;
+    }
+  };
+  const agentId = () => scope.agentId!;
+  server.registerTool(
+    "workflow_scorecard",
+    { description: "Workflow retro only. The numbers for the retro's period against the one before (per role, handoffs, features waiting on their last tasks), digests of up to 10 of the worst tickets, and the workflow changes already proposed or applied. Start here.", inputSchema: {} },
+    guarded(() => retro.scorecardText(scope.companyId)),
+  );
+  server.registerTool(
+    "save_retro",
+    {
+      description: "Workflow retro only. Save what the retro found, once: findings ranked by how often they recur. Each has a failure label, the handoff where it went wrong (from and to roles, if it fits), the tickets it was seen on (references like HOL-12 or ids), how many tickets in all, and a note of up to 240 characters. Blame handoffs and patterns, never one agent on one ticket.",
+      inputSchema: FindingsShape,
+    },
+    async (input) => guarded(async () => `Saved ${(await retro.save(scope.companyId, agentId(), input)).saved} findings.`)(),
+  );
+  server.registerTool(
+    "propose_workflow_change",
+    {
+      description:
+        "Workflow retro only. Propose one small change; at most 3 per retro, and only one live change per kind and target. It becomes a decision with Apply and Skip; nothing changes until it is answered. Needs evidence (at least 2 tickets), a metric it should move, and what you expect. lever and what target and change hold: playbook (CEO approves) target = a role, change = {name, description, body}, a skill given to that role's agents. lesson (CEO approves) target = a project name, change = {lesson}, one line for the project's brief. instructions (owner approves) target = an agent name, change = {instructions}, the whole new text. review_policy (owner) target = a risk tier, change = any of {planApprover, reviewer, ownerSignoff}. watchdog (owner) target = watchdog, change = any of the numeric watchdog limits; it is replayed over 14 days first. model (owner) target = an agent name, change = {model}. thinking (owner) target = an agent name, change = {thinking}. metric is one of firstPassRate, meanRework, medianCycleMs, costPerDoneMicros, watchdogFlags (scope: a role or an agent name; defaults to the target), medianWaitMs or bounceRate (scope: from and to roles, optional kind), tailLagMs (whole company).",
+      inputSchema: ProposeShape,
+    },
+    async (input) =>
+      guarded(async () => {
+        const r = await retro.propose(scope.companyId, agentId(), input);
+        return `Proposed as change ${r.changeId}. It is waiting for ${r.approver === "ceo" ? "the CEO" : "the owner"} (decision ${r.decisionId}); nothing changes until it is answered.`;
+      })(),
+  );
+}
+
 /** The Scrum Master's watchdog actions (BOS-58). Each needs a one-line reason, is logged and can be undone. */
 function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], alerts: Services["alerts"], scope: Scope) {
   server.registerTool(
@@ -2016,11 +2079,12 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillPro
     "create_ticket",
     {
       description:
-        "Create a ticket for the owner. Give the project by name when there's more than one. Rate its risk: trivial, low, medium (the default), high or critical. Optionally put it in a milestone, assign it to an agent by name, and list tickets it waits on.",
+        "Create a ticket for the owner. Give the project by name when there's more than one. Rate its risk: trivial, low, medium (the default), high or critical. Optionally put it in a milestone, assign it to an agent by name, and list tickets it waits on. Size (1, 2, 3, 5 or 8) is optional here; the CEO sizes the tickets it plans.",
       inputSchema: {
         title: z.string().min(1).max(200),
         body: z.string().max(10_000).optional(),
         project: z.string().optional(),
+        size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).optional(),
         risk: z.enum(RISK_TIERS).optional(),
         planFirst: z.boolean().optional(),
         milestoneId: z.string().uuid().optional(),
@@ -2043,7 +2107,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillPro
       }
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
       try {
-        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
+        const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
         for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id });
         return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
       } catch (err) {
@@ -2140,14 +2204,15 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
     // A PA gets its read-only server whatever woke it (R87).
     const [me] = scope.agentId ? await db.select({ duty: agents.duty }).from(agents).where(eq(agents.id, scope.agentId)) : [];
     // The Scrum Master gets its restricted server for its own runs (BOS-58); the owner's chat with it keeps the chat tools.
+    const retroAgent = !!scope.agentId && run?.purpose !== "chat" && me?.duty !== "assistant" && (await services.retro.isRetroAgent(scope.companyId, scope.agentId));
     const server =
       me?.duty === "assistant"
         ? buildPaServer(db, services, scope)
         : run?.purpose === "chat"
           ? buildChatServer(db, services, scope, hooks)
           : me?.duty === SCRUM_MASTER_DUTY
-            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS)
-            : buildServer(db, services, scope, hooks);
+            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent)
+            : buildServer(db, services, scope, hooks, undefined, retroAgent);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {

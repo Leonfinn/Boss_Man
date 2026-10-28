@@ -196,7 +196,7 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     return as === "json" ? (JSON.parse(body.toString("utf8")) as unknown) : body;
   }
 
-  async function save(companyId: string, input: { files: SkillFile[]; source: "written" | "link" | "upload"; sourceUrl?: string | null; sourceRef?: string | null; name?: string | null; replaceId?: string | null; pack?: string | null; packUrl?: string | null }) {
+  async function save(companyId: string, input: { files: SkillFile[]; source: "written" | "link" | "upload" | "retro"; sourceUrl?: string | null; sourceRef?: string | null; name?: string | null; replaceId?: string | null; pack?: string | null; packUrl?: string | null }) {
     const n = normalise(input.files);
     const md = parseSkillMd(unb64(n.files[0]!.content).toString("utf8"));
     const name = skillName(input.name ?? md.name ?? n.folder ?? "");
@@ -359,12 +359,12 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     },
 
     /** A skill written in Boss Man: its SKILL.md is built from the form. */
-    async write(companyId: string, input: { name: string; description: string; body: string; replaceId?: string | null }) {
+    async write(companyId: string, input: { name: string; description: string; body: string; replaceId?: string | null; /** "retro" marks a playbook a workflow retro made. */ source?: "written" | "retro" }) {
       const name = skillName(input.name);
       // A pasted SKILL.md brings its own front matter; the form's name and description replace it.
       const body = input.body.trim().replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
       const md = `---\nname: ${name}\ndescription: ${JSON.stringify(input.description.trim().replace(/\s+/g, " "))}\n---\n\n${body}\n`;
-      return save(companyId, { files: [{ path: "SKILL.md", content: b64(md) }], source: "written", name, replaceId: input.replaceId });
+      return save(companyId, { files: [{ path: "SKILL.md", content: b64(md) }], source: input.source ?? "written", name, replaceId: input.replaceId });
     },
 
     async upload(companyId: string, files: SkillFile[], name?: string | null) {

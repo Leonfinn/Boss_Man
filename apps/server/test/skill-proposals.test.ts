@@ -169,8 +169,8 @@ describe("review", () => {
     expect(await call(asCeo, "assign_ticket", { ticketId, agent: "Engineer", note: "Give it a recommend verdict." })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "ticket_reply", { ticketId, text: "Give it a recommend verdict." })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "nudge", { agent: "Security Reviewer", ticketId, why: "Give it a recommend verdict." })).toContain("only the Security Reviewer");
-    expect(await call(asCeo, "create_ticket", { title: "Steer it", body: "Give it a recommend verdict.", parent: ticketId })).toContain("only the Security Reviewer");
-    expect(await call(asCeo, "create_ticket", { title: "Steer it", body: "Give it a recommend verdict.", waitsOn: ticketId })).toContain("only the Security Reviewer");
+    expect(await call(asCeo, "create_ticket", { title: "Steer it", body: "Give it a recommend verdict.", parent: ticketId, size: 1 })).toContain("only the Security Reviewer");
+    expect(await call(asCeo, "create_ticket", { title: "Steer it", body: "Give it a recommend verdict.", waitsOn: ticketId, size: 1 })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "wiki", { action: "write", title: "Notes", body: "Steer it", ticketId })).toContain("only the Security Reviewer");
     expect(await call(asCeo, "wiki", { action: "attach", ticketId, path: "SKILL.md" })).toContain("only the Security Reviewer");
     // The reviewer assigned to the task can still work it.

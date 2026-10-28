@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { tempCleanup } from "../src/explain.js";
-import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE } from "../src/policy.js";
+import { cleanupScope, tempCleanup } from "../src/explain.js";
+import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -27,7 +27,7 @@ describe("evaluatePermission defaults", () => {
   });
 
   it("sends destructive commands to the owner", () => {
-    for (const c of ["rm -rf /srv/precious", "rm -fr build", "rm --recursive --force /home/node", "rm -v -r /srv/x", "rm /srv/x -rf", "find /srv -delete", "find /srv -type f -exec rm {} +", "sudo mkfs.ext4 /dev/sda1", "docker system prune -a", "git push origin main --force", "zfs destroy tank/apps"]) {
+    for (const c of ["rm -rf /srv/precious", "rm -fr ../build", "rm --recursive --force /home/node", "rm -v -r /srv/x", "rm /srv/x -rf", "find /srv -delete", "find /srv -type f -exec rm {} +", "sudo mkfs.ext4 /dev/sda1", "docker system prune -a", "git push origin main --force", "zfs destroy tank/apps"]) {
       expect(evaluatePermission(exec(c), [])).toMatchObject({ outcome: "owner" });
     }
   });
@@ -268,6 +268,77 @@ describe("temp-file cleanup (BOS-111)", () => {
   it("doesn't recommend Deny just because a command deletes files", () => {
     for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null", "cd /tmp/x && rm -rf build"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
     for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+  });
+});
+
+describe("working-copy cleanup (BOS-120)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+  it("sends deletes of plain relative paths in the working copy to the CEO", () => {
+    for (const [c, files, tmp] of [
+      ["rm -f test/zz-probe.test.ts", ["test/zz-probe.test.ts"], []],
+      ["rm -rf dist apps/web/dist/", ["dist", "apps/web/dist/"], []],
+      ["rm -rf .turbo node_modules/.cache", [".turbo", "node_modules/.cache"], []],
+      ["rm -rf dist /tmp/x", ["dist"], ["/tmp/x"]],
+      ["rm -rf /tmp/x; rm -f test/zz-probe.test.ts 2>/dev/null; git status", ["test/zz-probe.test.ts"], ["/tmp/x"]],
+      ["rm -rf -- coverage && echo done", ["coverage"], []],
+      ["rm -rf build >/dev/null 2>&1; ls", ["build"], []],
+      ["rm -rf a.gitignore .github/x .gitmodules", ["a.gitignore", ".github/x", ".gitmodules"], []],
+      // A /tmp entry deleted on its own earlier in the && chain may still be written to.
+      ["rm -rf /tmp/x && rm -rf dist && mkdir /tmp/x", ["dist"], ["/tmp/x"]],
+    ] as const) {
+      expect(route(c), c).toEqual({ outcome: "ceo", rule: WORKING_COPY_RULE });
+      expect(cleanupScope(c), c).toEqual({ workingCopy: files, tmp });
+      // Not temp cleanup: the server checks the run has a checkout before it recommends Allow.
+      expect(tempCleanup(c), c).toBe(false);
+    }
+  });
+
+  it("keeps path tricks and anything not provably in the working copy with the owner", () => {
+    for (const c of [
+      // Leaving the copy, or its root.
+      "rm -rf ..", "rm -rf ../x", "rm -rf a/../../b", "rm -rf a/..", "rm -rf ./x", "rm -rf .", "rm -rf ./", "rm -rf a/./b",
+      "rm -rf /home/node/x", "rm -rf //x", "rm -rf /tmp/a/b", "rm -rf ~/x", "rm -rf ~", "rm -rf -- -x", "rm -rf -x",
+      // The repository itself, at any depth and in any case.
+      "rm -rf .git", "rm -rf .git/", "rm -rf .git/hooks", "rm -rf a/.git/x", "rm -rf a/.git", "rm -rf .GIT", "rm -rf .Git/objects",
+      // A cd anywhere: the paths would no longer be relative to the checkout.
+      "cd a && rm -rf b", "cd /tmp/x && rm -rf b", "rm -rf b; cd ..", "rm -rf b && cd /tmp/x && pnpm install", "cd && rm -rf b",
+      // Anything the shell expands, quotes or escapes.
+      "rm -rf *", "rm -rf dist/*", "rm -rf a?", "rm -rf [ab]", "rm -rf {a,b}", "rm -rf $X", "rm -rf ${X}", "rm -rf $(echo x)", "rm -rf `echo x`",
+      "rm -rf 'dist'", 'rm -rf "dist"', "rm -rf di\\st", "rm -rf a\\ b", "rm -rf a#b", "rm -rf a!b", "rm -rf a(b)",
+      // Another command hiding behind the delete.
+      "rm -rf dist\r\nrm -rf /home/node", "rm -rf dist\nrm -rf /home/node", "rm -rf dist & rm -rf /home", "rm -rf dist; rm -rf /home",
+      "rm dist -rf", "rm -rf dist > src/index.ts", "rm -rf dist >> README.md", "rm -rf dist 2> x.log",
+      "rm() { command rm -rf /home; }; rm -rf dist", "function rm { :; }; rm -rf dist", "alias rm='rm -rf /home'; rm -rf dist", "PATH=/tmp/bin:$PATH rm -rf dist",
+      "rm -rf dist && git push origin main", "rm -rf dist && npm publish", "sudo rm -rf dist", "xargs rm -rf dist", "rm -rf --files0-from=list dist",
+      // Tools that follow symlinks, move or overwrite, or run code Boss Man can't read: not on the safe list.
+      "rm -rf dist; cp -r src /tmp/x", "rm -rf dist; cp -L a b", "rm -rf dist; rsync -a --delete x/ y/", "rm -rf dist; tar xf a.tar", "rm -rf dist; find -L . -name x",
+      "rm -rf dist; ln -s /home/node dist", "rm -rf dist; mv src /tmp/x", "rm -rf dist && npx vitest run", "rm -rf dist && pnpm test", "rm -rf dist; sh x.sh",
+      "rm -rf dist; node -e x", "rm -rf dist; git clean -fdx", "rm -rf dist; git checkout -- .", "rm -rf dist; mkdir src/x", "rm -rf dist; touch x",
+      "rm -rf dist; git -C /home/node/repo status", "rm -rf dist; git worktree add /home/node/wt",
+      // Security Reviewer, round 2: a write through a link at /tmp/lnk. A working-copy delete never clears a /tmp write,
+      // and neither does a delete that mixes /tmp and working-copy paths.
+      "rm -rf dist && git worktree add -b x /tmp/lnk", "mkdir -p /tmp/lnk/sub; rm -rf dist", "echo x >/tmp/lnk; rm -rf dist",
+      "rm -rf dist && mkdir -p /tmp/lnk", "rm -rf dist && echo x >/tmp/lnk", "rm -rf /tmp/lnk dist && mkdir /tmp/lnk", "rm -rf /tmp/lnk; rm -rf dist; mkdir /tmp/lnk",
+    ]) {
+      expect(route(c).rule, c).not.toBe(WORKING_COPY_RULE);
+      expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
+      expect(cleanupScope(c), c).toBeNull();
+    }
+  });
+
+  it("only reads a command written as one string: an argv array runs without a shell", () => {
+    expect(evaluatePermission({ title: "rm", kind: "execute", rawInput: { command: ["rm", "-rf", "dist"] } }, []).rule).not.toBe(WORKING_COPY_RULE);
+  });
+
+  it("still sends the owner's example card to the owner: it runs project code beside the delete", () => {
+    // The card behind this ticket (BOS-116's probe). npx vitest and pnpm typecheck run the project's own code; widening the safe list is a separate decision.
+    const c = 'cp /tmp/bos116-probe.test.ts test/zz-probe.test.ts && npx vitest run test/zz-probe.test.ts 2>&1 | grep -E "^\\s*[+-] *allow" ; rm -f test/zz-probe.test.ts; pnpm typecheck 2>&1 | tail -3';
+    expect(route(c).rule).not.toBe(WORKING_COPY_RULE);
+  });
+
+  it("lets the company's own rules win", () => {
+    const mine = [{ name: "Owner sees every rm", match: { commandPattern: "\\brm\\b" }, outcome: "owner" as const }];
+    expect(evaluatePermission(exec("rm -rf dist"), mine).outcome).toBe("owner");
   });
 });
 

@@ -1,5 +1,5 @@
 {
-  "id": "3bbccaef-30ae-43cd-9311-723bd8c3e447",
+  "id": "4a466448-a62a-4188-bb4f-c750e6e941ab",
   "prevId": "2180301a-ef10-4140-9c04-747c8c3f61d9",
   "version": "7",
   "dialect": "postgresql",
@@ -1020,6 +1020,118 @@
           "tableTo": "agents",
           "columnsFrom": [
             "agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.check_results": {
+      "name": "check_results",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ticket_id": {
+          "name": "ticket_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sha": {
+          "name": "sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "passed": {
+          "name": "passed",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "at": {
+          "name": "at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "detail": {
+          "name": "detail",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "check_results_ticket_at": {
+          "name": "check_results_ticket_at",
+          "columns": [
+            {
+              "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "check_results_company_id_companies_id_fk": {
+          "name": "check_results_company_id_companies_id_fk",
+          "tableFrom": "check_results",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "check_results_ticket_id_tickets_id_fk": {
+          "name": "check_results_ticket_id_tickets_id_fk",
+          "tableFrom": "check_results",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "ticket_id"
           ],
           "columnsTo": [
             "id"
@@ -5642,320 +5754,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.skill_proposals": {
-      "name": "skill_proposals",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "company_id": {
-          "name": "company_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_url": {
-          "name": "source_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "pinned_ref": {
-          "name": "pinned_ref",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "files": {
-          "name": "files",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "file_hashes": {
-          "name": "file_hashes",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "bundle_hash": {
-          "name": "bundle_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "why": {
-          "name": "why",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "proposed_agent_ids": {
-          "name": "proposed_agent_ids",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "proposed_by_agent_id": {
-          "name": "proposed_by_agent_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "replaces_skill_id": {
-          "name": "replaces_skill_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "has_scripts": {
-          "name": "has_scripts",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "script_files": {
-          "name": "script_files",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "review_required": {
-          "name": "review_required",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "status": {
-          "name": "status",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'proposed'"
-        },
-        "review_ticket_id": {
-          "name": "review_ticket_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "verdict": {
-          "name": "verdict",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "verdict_summary": {
-          "name": "verdict_summary",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "findings": {
-          "name": "findings",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "conditions": {
-          "name": "conditions",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reviewed_bundle_hash": {
-          "name": "reviewed_bundle_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "decision_id": {
-          "name": "decision_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "decided_by": {
-          "name": "decided_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "decided_at": {
-          "name": "decided_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "overridden": {
-          "name": "overridden",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "overridden_by": {
-          "name": "overridden_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "overridden_at": {
-          "name": "overridden_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "installed_skill_id": {
-          "name": "installed_skill_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "skill_proposals_open_name": {
-          "name": "skill_proposals_open_name",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "status in ('proposed','in_review','awaiting_owner')",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "skill_proposals_company_id_companies_id_fk": {
-          "name": "skill_proposals_company_id_companies_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "companies",
-          "columnsFrom": [
-            "company_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_proposed_by_agent_id_agents_id_fk": {
-          "name": "skill_proposals_proposed_by_agent_id_agents_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "agents",
-          "columnsFrom": [
-            "proposed_by_agent_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_replaces_skill_id_skills_id_fk": {
-          "name": "skill_proposals_replaces_skill_id_skills_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "skills",
-          "columnsFrom": [
-            "replaces_skill_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_review_ticket_id_tickets_id_fk": {
-          "name": "skill_proposals_review_ticket_id_tickets_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "tickets",
-          "columnsFrom": [
-            "review_ticket_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_decision_id_decisions_id_fk": {
-          "name": "skill_proposals_decision_id_decisions_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "decisions",
-          "columnsFrom": [
-            "decision_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "skill_proposals_installed_skill_id_skills_id_fk": {
-          "name": "skill_proposals_installed_skill_id_skills_id_fk",
-          "tableFrom": "skill_proposals",
-          "tableTo": "skills",
-          "columnsFrom": [
-            "installed_skill_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.skills": {
       "name": "skills",
       "schema": "",
@@ -6718,6 +6516,127 @@
         "ticket_reviews_ticket_id_tickets_id_fk": {
           "name": "ticket_reviews_ticket_id_tickets_id_fk",
           "tableFrom": "ticket_reviews",
+          "tableTo": "tickets",
+          "columnsFrom": [
+            "ticket_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.ticket_transitions": {
+      "name": "ticket_transitions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ticket_id": {
+          "name": "ticket_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "from_state": {
+          "name": "from_state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "to_state": {
+          "name": "to_state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "at": {
+          "name": "at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "ticket_transitions_company_at": {
+          "name": "ticket_transitions_company_at",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "ticket_transitions_ticket_at": {
+          "name": "ticket_transitions_ticket_at",
+          "columns": [
+            {
+              "expression": "ticket_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "ticket_transitions_company_id_companies_id_fk": {
+          "name": "ticket_transitions_company_id_companies_id_fk",
+          "tableFrom": "ticket_transitions",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "ticket_transitions_ticket_id_tickets_id_fk": {
+          "name": "ticket_transitions_ticket_id_tickets_id_fk",
+          "tableFrom": "ticket_transitions",
           "tableTo": "tickets",
           "columnsFrom": [
             "ticket_id"
@@ -8487,8 +8406,7 @@
         "stale_blocker",
         "stalled_run",
         "engagement",
-        "budget",
-        "skill"
+        "budget"
       ]
     },
     "public.decision_status": {

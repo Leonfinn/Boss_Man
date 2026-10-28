@@ -140,8 +140,8 @@ describe("agents and feedback", () => {
 
     // A ticket an agent creates can deliver a feature.
     const ceo2 = await c.mcp(c.ceo.id);
-    expect(textOf(await ceo2.callTool({ name: "create_ticket", arguments: { title: "Build CSV export", featureId: f.id } }))).toMatch(/^Created ticket/);
-    expect((await ceo2.callTool({ name: "create_ticket", arguments: { title: "Bad", featureId: randomUUID() } })).isError).toBe(true);
+    expect(textOf(await ceo2.callTool({ name: "create_ticket", arguments: { size: 3, title: "Build CSV export", featureId: f.id } }))).toMatch(/^Created ticket/);
+    expect((await ceo2.callTool({ name: "create_ticket", arguments: { size: 3, title: "Bad", featureId: randomUUID() } })).isError).toBe(true);
     await ceo2.close();
     expect((await c.db.select().from(tickets).where(eq(tickets.featureId, f.id))).length).toBe(1);
   });

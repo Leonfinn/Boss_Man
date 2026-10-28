@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { explainCommand, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, tempCleanup } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -25,6 +25,8 @@ export type PolicyMatch = {
   scratchOnly?: boolean;
   /** Only matches a shell command whose every delete is of an entry directly in /tmp, with nothing else destructive or pushing (BOS-111, tempCleanup in explain.ts). */
   tempCleanupOnly?: boolean;
+  /** Only matches a shell command written as one string whose deletes include plain relative paths in the working copy, the rest as tempCleanupOnly (BOS-120, cleanupScope in explain.ts). */
+  workingCopyOnly?: boolean;
 };
 
 export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: PolicyOutcome };
@@ -38,11 +40,14 @@ export const DESTRUCTIVE = String.raw`\brm\s+(?:[^\s;&|]+\s+)*?(?:-[a-zA-Z]*[rf]
 export const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
 
 export const TEMP_CLEANUP_RULE = "Temp-file cleanup goes to the CEO first";
+export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to the CEO first";
 
 export const DEFAULT_POLICY: PolicyRuleSpec[] = [
   { name: "Boss Man's own tools", match: { titlePattern: String.raw`^(mcp__bossman__|mcp\.bossman\.)` }, outcome: "allow" },
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
   { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
+  // The same for plain relative paths in the agent's checkout; the server sends it to the owner when the run has no checkout (BOS-120).
+  { name: WORKING_COPY_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, workingCopyOnly: true }, outcome: "ceo" },
   { name: "Destructive commands go to the owner", match: { commandPattern: DESTRUCTIVE }, outcome: "owner" },
   { name: "Pushing and publishing go to the owner", match: { commandPattern: PUSHING }, outcome: "owner" },
   { name: "Reading, searching and editing the workspace", match: { kinds: ["read", "search", "edit", "think", "fetch"] }, outcome: "allow" },
@@ -101,6 +106,11 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     if (!scratch || scratch.unchecked.length) return false;
   }
   if (rule.tempCleanupOnly && !tempCleanup(commandOf(info.rawInput) ?? "")) return false;
+  if (rule.workingCopyOnly) {
+    // A string only: an argv array runs without a shell, so cleanupScope's reading of ; and && wouldn't hold.
+    const cmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
+    if (typeof cmd !== "string" || !cleanupScope(cmd)?.workingCopy.length) return false;
+  }
   if (rule.titlePattern) {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;

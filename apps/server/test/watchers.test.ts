@@ -254,11 +254,11 @@ describe("ticket watchers (R80)", () => {
       const outside = /outside the tree/;
       expect(await call("assign_ticket", { ticketId: other.id, agent: "Scrum Master", note: "yours" })).toMatch(outside);
       expect(await call("nudge", { agent: "Scrum Master", ticketId: other.id, why: "look" })).toMatch(outside);
-      expect(await call("create_ticket", { title: "Loose end" })).toMatch(outside);
-      expect(await call("create_ticket", { title: "Sub of other", parent: other.id })).toMatch(outside);
+      expect(await call("create_ticket", { size: 3, title: "Loose end" })).toMatch(outside);
+      expect(await call("create_ticket", { size: 3, title: "Sub of other", parent: other.id })).toMatch(outside);
       // Inside the tree the guard steps aside (the role check or the tool itself answers).
       expect(await call("assign_ticket", { ticketId: kid.id, agent: "Scrum Master", note: "yours" })).not.toMatch(outside);
-      expect(await call("create_ticket", { title: "Sub of root", parent: root.id })).not.toMatch(outside);
+      expect(await call("create_ticket", { size: 3, title: "Sub of root", parent: root.id })).not.toMatch(outside);
       await client.close();
     });
   });
