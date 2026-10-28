@@ -323,8 +323,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         .insert(tickets)
         .values({ companyId: scope.companyId, projectId: p.id, title, body, engagementId: engagementId ?? null, createdByAgentId: scope.agentId, risk: risk ?? null, size: isTaskSize(size) ? size : null, planFirst: planFirst ?? (risk ? planFirstByDefault(risk) : false), featureId, parentTicketId: parentTask?.id ?? null, ...(blocker && blocker.state !== "done" ? { systemState: "blocked" as const } : {}), ...(acceptanceCriteria?.length ? { acceptanceCriteria } : {}), ...(noCode ? { noCode } : {}) })
         .returning({ id: tickets.id });
-      if (parentTask) await work.waitOnSubtask(parentTask, t!.id);
-      if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn });
+      if (parentTask) await work.waitOnSubtask(parentTask, t!.id, scope.agentId);
+      if (waitsOn) await work.addDependency(t!.id, { ticketId: waitsOn }, scope.agentId);
       await feedback.syncFeature(featureId);
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${title}" in ${p.name}` });
       if (to) await work.updateTicket(t!.id, { assigneeAgentId: to.id, byAgentId: scope.agentId });
@@ -2108,7 +2108,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillPro
       for (const id of input.waitsOn ?? []) if (!(await ownTicket(id))) return fail(`No ticket ${id} in this company.`);
       try {
         const t = await work.createTicket(p.id, { title: input.title, body: input.body ?? null, risk: input.risk, size: input.size as TaskSize | undefined, planFirst: input.planFirst, milestoneId: input.milestoneId, assigneeAgentId, featureId: input.featureId, acceptanceCriteria: input.acceptanceCriteria, noCode: input.noCode });
-        for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id });
+        for (const id of input.waitsOn ?? []) await work.addDependency(t.id, { ticketId: id }, scope.agentId);
         return text(`Created #/tickets/${t.id} "${t.title}" in ${p.name}${t.planFirst ? " (plan first)" : ""}.`);
       } catch (err) {
         return workFail(err);
@@ -2162,7 +2162,7 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillPro
     async ({ ticketId, waitsOnTicketId }) => {
       if (!(await ownTicket(ticketId))) return fail("No such ticket in this company.");
       try {
-        await work.addDependency(ticketId, { ticketId: waitsOnTicketId });
+        await work.addDependency(ticketId, { ticketId: waitsOnTicketId }, scope.agentId);
         return text(`#/tickets/${ticketId} now waits on #/tickets/${waitsOnTicketId}.`);
       } catch (err) {
         return workFail(err);

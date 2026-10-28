@@ -4,6 +4,7 @@ import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, 
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { reviewWaits } from "./review-kinds.js";
+import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export class WorkError extends Error {
@@ -95,6 +96,20 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
   async function assertFeatureInCompany(id: string, companyId: string) {
     const [f] = await db.select({ id: features.id }).from(features).where(and(eq(features.id, id), eq(features.companyId, companyId)));
     if (!f) throw new WorkError(422, "That feature isn't in this company.");
+  }
+
+  /**
+   * One guard for every write that links tickets (parent, sub-task, waitsOn, dependency), BOS-86
+   * round 11. Either end of the link may be an open security-review task: only the reviewer assigned
+   * to it (or the owner, whose routes pass no agent) may attach anything to it or make it wait.
+   * Living in the service means a new tool can't open the hole again by forgetting its own check.
+   */
+  async function assertLinkWriteAllowed(companyId: string, ids: Array<string | null | undefined>, byAgentId: string | null) {
+    for (const id of ids) {
+      if (!id) continue;
+      const refusal = await reviewTicketWriteRefusal(db, companyId, id, byAgentId);
+      if (refusal) throw new WorkError(403, refusal);
+    }
   }
 
   /** The task a sub-task hangs off: in the same company and not itself a sub-task (one level only). */
@@ -246,6 +261,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (input.keyResultId) await assertLinkInCompany("keyResult", input.keyResultId, p.companyId);
       if (input.featureId) await assertFeatureInCompany(input.featureId, p.companyId);
       const parent = input.parentTicketId ? await parentOf(input.parentTicketId, p.companyId) : null;
+      if (parent) await assertLinkWriteAllowed(p.companyId, [parent.id], input.createdByAgentId ?? null);
       const featureId = parent ? parent.featureId : (input.featureId ?? null);
       const col = await placement(projectId, { columnId: input.columnId, state: input.state }, { overLimit: input.overLimit });
       const [t] = await db
@@ -277,16 +293,17 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         })
         .returning();
       await record(db, { companyId: p.companyId, ticketId: t!.id, kind: "ticket_created", summary: `Created "${t!.title}" in ${t!.systemState}${t!.assigneeAgentId ? ", assigned" : ""}`, at: now() });
-      if (parent) await this.waitOnSubtask(parent, t!.id);
+      if (parent) await this.waitOnSubtask(parent, t!.id, input.createdByAgentId ?? null);
       if (featureId) await hooks.onFeature?.(featureId);
       if (t!.assigneeAgentId && t!.systemState !== "done") await hooks.onAssigned?.(t!);
       return t!;
     },
 
     /** The parent waits on its new sub-task; the existing unblocked note hands it back when the sub-task is done. */
-    async waitOnSubtask(parent: typeof tickets.$inferSelect, childId: string) {
+    async waitOnSubtask(parent: typeof tickets.$inferSelect, childId: string, byAgentId: string | null = null) {
+      await assertLinkWriteAllowed(parent.companyId, [parent.id, childId], byAgentId);
       await db.insert(ticketDependencies).values({ blockedTicketId: parent.id, blockerTicketId: childId });
-      if (parent.systemState === "ready" || parent.systemState === "in_progress") await this.updateTicket(parent.id, { state: "blocked", overLimit: true });
+      if (parent.systemState === "ready" || parent.systemState === "in_progress") await this.updateTicket(parent.id, { state: "blocked", overLimit: true, byAgentId });
     },
 
     /** Checks a parent for a new sub-task before it is created. */
@@ -368,6 +385,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         if (busy) throw new WorkError(409, `"${busy.title}" is ${busy.systemState === "review" ? "in review" : "in progress"}. Move tickets before work starts or after it ends.`);
       }
       const parent = newParent ? await parentOf(newParent, t.companyId) : null;
+      const actor = patch.byAgentId ?? null;
+      // Either end of a parent link: the ticket itself, the parent it leaves and the parent it joins.
+      if (newParent !== undefined) await assertLinkWriteAllowed(t.companyId, [t.id, t.parentTicketId, newParent], actor);
       if (parent) {
         if (parent.id === t.id) throw new WorkError(422, "A ticket can't be its own parent.");
         if (kids.length) throw new WorkError(422, "It has sub-tasks of its own, so it can't become a sub-task.");
@@ -410,7 +430,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (reparent) {
         // The old parent no longer waits on it; the new one does while it is open.
         if (t.parentTicketId) await db.delete(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, t.parentTicketId), eq(ticketDependencies.blockerTicketId, t.id)));
-        if (parent && updated!.systemState !== "done") await this.waitOnSubtask(parent, t.id);
+        if (parent && updated!.systemState !== "done") await this.waitOnSubtask(parent, t.id, actor);
         await record(db, { companyId: t.companyId, ticketId: t.id, kind: "parent", summary: parent ? `Now a sub-task of "${parent.title}"` : "No longer a sub-task", at: now() });
       }
       if (updated!.assigneeAgentId !== t.assigneeAgentId) {
@@ -424,12 +444,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     },
 
     /** A ticket can wait on another ticket in its company, or on an engagement its company requested (R25). */
-    async addDependency(ticketId: string, blocker: { ticketId?: string; engagementId?: string }) {
+    async addDependency(ticketId: string, blocker: { ticketId?: string; engagementId?: string }, byAgentId: string | null = null) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
       if (!!blocker.ticketId === !!blocker.engagementId) throw new WorkError(422, "Give exactly one blocker: a ticket or an engagement.");
       if (blocker.ticketId) {
         if (blocker.ticketId === ticketId) throw new WorkError(422, "A ticket can't block itself.");
+        await assertLinkWriteAllowed(t.companyId, [ticketId, blocker.ticketId], byAgentId);
         const [b] = await db.select().from(tickets).where(and(eq(tickets.id, blocker.ticketId), eq(tickets.companyId, t.companyId)));
         if (!b) throw new WorkError(422, "The blocking ticket must be in the same company. Use an engagement to wait on another company.");
         if (await this.wouldCycle(ticketId, blocker.ticketId)) throw new WorkError(422, "That would make the tickets wait on each other.");
