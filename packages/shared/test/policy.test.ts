@@ -119,6 +119,8 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/wt; git worktree prune; git worktree list",
       "rm -rf /tmp/x2 /tmp/x2.log && mkdir /tmp/x2 && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
       "rm -rf /tmp/a; rm -f /tmp/b && echo x > /tmp/b",
+      // A `;` between chains does not break it: each write stays in the && chain of its own delete.
+      "rm -rf /tmp/a && mkdir /tmp/a; rm -rf /tmp/b && mkdir /tmp/b",
     ]) {
       expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
@@ -251,6 +253,9 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && true || pnpm install",
       // The cleared name is only cleared until the chain breaks.
       "rm -rf /tmp/a; true; cd /tmp/a && pnpm install",
+      // A failed rm short-circuits the write after it, so a `;` chain cannot borrow another chain's delete (BOS-120 round 3).
+      "rm -rf /tmp/a && mkdir /tmp/a; mkdir /tmp/b",
+      "rm -rf /tmp/a; rm -rf /tmp/b && mkdir /tmp/a",
     ]) {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
       expect(tempCleanup(c), c).toBe(false);
