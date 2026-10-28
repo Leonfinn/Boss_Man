@@ -24,6 +24,7 @@ import {
   type PolicyRuleSpec,
   type RunnerCommand,
   type RunnerEvent,
+  untrusted,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -620,7 +621,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (!moved) return null;
     const [blocker] = ctx.blockerTicketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId)) : [];
     await record(db, { companyId: d.companyId, ticketId: ladder.ticketId, kind: "decision_answered", summary: `The owner handed "${d.question}" to the CEO to decide`, at: now() });
-    await tellCeo(d.companyId, `${d.question}\nThe owner asked you to settle this ${blocker ? `(the blocking ticket is "${blocker.title}")` : ""}. Answer decision ${d.id} with Chase, Reassign (give assigneeAgentId) or Drop dependency.`);
+    await tellCeo(d.companyId, `${untrusted("Boss Man decision", d.question)}\nThe owner asked you to settle this ${blocker ? `(the blocking ticket is "${blocker.title}")` : ""}. Answer decision ${d.id} with Chase, Reassign (give assigneeAgentId) or Drop dependency.`);
     return { id: d.id, answer: LET_CEO_DECIDE, delivered: null as boolean | null, endedHere: false };
   }
 
@@ -1250,6 +1251,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const ownWords = extra.custom === true && d.kind === "question";
       if (extra.custom && !ownWords) throw new AnswerError("This decision needs one of its options; only an agent's question takes your own answer.");
       const handOff = (d.context as DecisionContext).type === "stale_blocker" && answer === LET_CEO_DECIDE; // also on cards raised before the option existed
+      if (handOff && extra.settledBy) throw new AnswerError("Only the owner can hand this to the CEO; answer Chase, Reassign or Drop dependency.");
       if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
       if (handOff) return handToCeo(d);

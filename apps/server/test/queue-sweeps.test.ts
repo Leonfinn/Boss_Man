@@ -5,6 +5,7 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
+import { decisionsService } from "../src/services/decisions.js";
 import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
@@ -205,6 +206,21 @@ describe("stale blockers (R21)", () => {
     expect(r.body).toContain("Pick someone from the list");
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+  });
+
+  it("a CEO agent can't hand the card back to itself to keep it off the owner's queue", async () => {
+    ctx = await setup();
+    await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    const [before] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    ctx.advance(10 * 60 * 1000);
+    const svc = decisionsService(ctx.db, () => true, ctx.clock);
+    await expect(svc.answer(row!.id, "Let the CEO decide", { settledBy: { agentId: ctx.ceo.id } })).rejects.toThrow("Only the owner");
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect((after!.context as { ladder: { since: string } }).ladder.since).toBe((before!.context as { ladder: { since: string } }).ladder.since);
   });
 
   it("refuses to hand the card to the CEO when the company has none", async () => {

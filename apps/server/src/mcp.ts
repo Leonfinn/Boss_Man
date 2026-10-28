@@ -825,7 +825,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           open
             .map((d) => {
               const { planText: plan, explain, tempCleanup, workingCopy } = d.context as { planText?: string | null; explain?: { command?: string }; tempCleanup?: boolean; workingCopy?: unknown };
-              return [`${d.id}: ${tempCleanup ? "TEMP-FILE CLEANUP: " : workingCopy ? "WORKING-COPY CLEANUP: " : ""}${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
+              return [`${d.id}: ${tempCleanup ? "TEMP-FILE CLEANUP: " : workingCopy ? "WORKING-COPY CLEANUP: " : ""}${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).filter((o) => o !== "Let the CEO decide").join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
             })
             .concat(asked)
             .join("\n\n"),
