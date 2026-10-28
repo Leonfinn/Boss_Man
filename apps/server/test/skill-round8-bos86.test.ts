@@ -100,16 +100,17 @@ describe("R8-2: the review ticket makes no claim about which files are scripts",
     const c = (ctx = await setup());
     const p = await draft(c, evil);
     const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
-    expect(t!.body).not.toMatch(/Files that count as scripts: none/);
+    expect(t!.body).not.toMatch(/files that count as scripts/i);
+    expect(t!.body).not.toMatch(/\[script\]/i);
     expect(p).toMatchObject({ status: "in_review" });
   });
 
-  // Known open gap (BOS-146): the owner's card still reports hasScripts=false for this draft. it.fails passes
-  // while the gap exists and goes red once the card stops counting scripts; flip it to a plain it() then.
-  it.fails("the owner's card does not count scripts", async () => {
+  // Known open gap (BOS-146): the owner's card still reports hasScripts=false for this draft, which is a false
+  // negative. This pins the current behaviour so it goes red when the card is fixed; then assert not.toBe(false).
+  it("known gap: the owner's card still counts no scripts", async () => {
     const c = (ctx = await setup());
     const p = await draft(c, evil);
-    expect(p.hasScripts).not.toBe(false);
+    expect(p.hasScripts).toBe(false);
   });
 
   it("a draft with no scripts is still reviewed", async () => {
@@ -134,12 +135,15 @@ describe("R8-3: the invariants still hold", () => {
   it("a link whose source changed after the review installs nothing", async () => {
     const c = (ctx = await setup());
     const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "link", url: "https://github.com/acme/kit", why: "x", agentIds: [c.worker.id] });
-    repo.files["tidy/SKILL.md"] = md("Now malicious.");
-    await c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict: "recommend", summary: "ok" });
-    const d = await decisionOf(c, p.id);
-    await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Add the skill" });
-    expect(await c.db.select().from(skills)).toHaveLength(0);
-    repo.files["tidy/SKILL.md"] = md("Steps.");
+    try {
+      repo.files["tidy/SKILL.md"] = md("Now malicious.");
+      await c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict: "recommend", summary: "ok" });
+      const d = await decisionOf(c, p.id);
+      await c.req("POST", `/api/decisions/${d.id}/answer`, { answer: "Add the skill" });
+      expect(await c.db.select().from(skills)).toHaveLength(0);
+    } finally {
+      repo.files["tidy/SKILL.md"] = md("Steps.");
+    }
   });
 
   it("a clean verdict on an unchanged draft installs it", async () => {
