@@ -43,6 +43,8 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
 
 /** How long the server waits for the runner to merge or push an approved branch. */
 export const MERGE_WAIT_MS = 10 * 60_000;
+/** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
+export const MERGE_ACTIVITY_MS = 60_000;
 
 /** What the author hears when a ticket that needs code changes has none. */
 export const NOTHING_CHANGED = "Nothing in the repository changed. Make the change, or ask your CEO or a manager to mark the ticket as not needing code (update_ticket with noCode true) and say why.";
@@ -422,7 +424,8 @@ export function reviewService(
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
-      await db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+      const touch = () => db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+      await touch();
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
         return { outcome: "done", delivered: null };
@@ -440,10 +443,21 @@ export function reviewService(
         await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
         return tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
       };
+      // Checks can run for half an hour and merges can queue behind other work: keep saying the ticket
+      // is active while we wait, so the unmerged-approvals sweep never starts a second landing beside it.
+      const whileActive = async <T>(work: () => Promise<T>): Promise<T> => {
+        const beat = setInterval(() => void touch().catch(() => undefined), MERGE_ACTIVITY_MS);
+        beat.unref?.();
+        try {
+          return await work();
+        } finally {
+          clearInterval(beat);
+        }
+      };
 
       // Nothing changed in the repository (a wiki-only ticket, say): there is nothing to check or
       // merge, and running the check anyway could send the ticket back for a failure it can't fix.
-      const changed = await ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000).catch(() => null);
+      const changed = await whileActive(() => ask<WorkspaceDiff>((requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId }), 60_000)).catch(() => null);
       if ((changed && !changed.commits.length && !changed.files.length) || (!changed && !t.branch)) {
         // Only a ticket marked "no code" closes on an empty diff; any other is sent back, not closed.
         if (!t.noCode) {
@@ -457,7 +471,8 @@ export function reviewService(
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
       for (const command of checks) {
-        const v = await ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS);
+        await touch();
+        const v = await whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
         if (!v.ok) {
           const never = checkNeverFinished(v);
           if (never) {
@@ -491,9 +506,10 @@ export function reviewService(
       // The runner does one git job per repo at a time, so a merge can queue behind other agents' fetches and
       // worktree set-ups before its own fetch and push; two minutes wasn't enough on a busy project. A merge
       // that finishes after this is still safe: trying again finds the branch already merged.
+      await touch();
       const m: MergeResult | PushResult = pr
-        ? await ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS)
-        : await ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }), MERGE_WAIT_MS);
+        ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
+        : await whileActive(() => ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }), MERGE_WAIT_MS));
       if (m.status === "uncommitted") {
         const tpl = (await templates(t.companyId)).commit;
         const delivered = await sendBack(`The review was approved, but these files aren't committed: ${m.files.join(", ")}. ${renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title })} Then move the ticket back to review.`, "commit");
