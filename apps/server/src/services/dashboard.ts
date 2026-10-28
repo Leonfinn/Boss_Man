@@ -3,7 +3,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runs, tickets } from "../db/schema.js";
-import { runOriginQuery } from "./runs.js";
+import { liveRuns, runOriginQuery } from "./runs.js";
 
 export const DAYS = 14;
 
@@ -76,7 +76,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .where(and(eq(runs.companyId, companyId), gte(runs.startedAt, monthStart), onSubscription));
-      const live = await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.companyId, companyId), isNull(runs.endedAt)));
+      const live = await liveRuns(db, companyId);
 
       // The last 14 days, one entry per day, oldest first.
       const days = Array.from({ length: DAYS }, (_, i) => day(new Date(since.getTime() + i * 86_400_000)));
