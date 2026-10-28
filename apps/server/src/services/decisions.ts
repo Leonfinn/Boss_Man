@@ -931,7 +931,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
-    async withdraw(id: string) {
+    async withdrawSkill(id: string) {
       await db.update(decisions).set({ status: "withdrawn", answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
     },
 
