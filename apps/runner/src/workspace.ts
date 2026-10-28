@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 
 const run = promisify(execFile);
 
@@ -429,7 +429,7 @@ export class Workspaces {
    * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
-  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = 10 * 60_000): Promise<VerifyResult> {
+  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS): Promise<VerifyResult> {
     const dir = await this.reopen(spec);
     const started = Date.now();
     try {

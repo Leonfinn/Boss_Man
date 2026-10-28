@@ -1,0 +1,1 @@
+ALTER TABLE "watchdog_flags" ADD COLUMN "backoff_steps" integer DEFAULT 0 NOT NULL;
