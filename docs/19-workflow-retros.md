@@ -72,6 +72,7 @@ New records:
 | Hire (a role is a bottleneck) | Owner | the existing hire decision |
 
 Rules:
+- When the CEO runs the retro (no Product Manager), its playbooks and lessons go to the owner: the CEO never approves its own proposal.
 - Only one live change per agent per setting.
 - At most 3 proposals per retro.
 - `workflow_changes` keeps the old value, the new value, the metric and its baseline, so every change can be undone.

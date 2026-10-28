@@ -405,7 +405,9 @@ export function retroService(
 
       const { metricScope, baseline } = await self.measure(companyId, input.metric, input.scope, plan);
       const changeId = randomUUID();
-      const approver = leverApprover(input.lever);
+      // The CEO never approves its own proposal: when it runs the retro (no Product Manager), the owner does.
+      const [me] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, agentId));
+      const approver = me?.role === "ceo" ? "owner" : leverApprover(input.lever);
       const refs = [...(await refsFor(companyId, evidence)).values()];
       const aim = `${METRIC_LABEL[input.metric]}${scopeText(metricScope)}, now ${baseline === null ? "not measurable yet" : showMetric(input.metric, baseline)}`;
       let backtestLine = "";
@@ -432,7 +434,7 @@ export function retroService(
         const question = `Add this lesson to ${plan.projectName}'s brief? "${plan.lesson}"\n\nIt came from a workflow retro, from tickets ${refs.join(", ")}. Expected: ${plain(input.expected)}\n\n${await lessonsForCeo(db, companyId, plan.projectId!)}\n\nJudge whether it overlaps a lesson already there and whether it is worth a line. Answer with a one-line reason as the note.`;
         const [row] = await db
           .insert(decisions)
-          .values({ companyId, kind: "question", question, options: [LESSON_ADD, LESSON_EDIT, LESSON_DROP], recommendedOption: LESSON_ADD, tier: "ceo", raisedByAgentId: agentId, dedupeKey: `lesson:${evidence[0]}:${plan.lesson}`, context: { type: "lesson", ticketId: evidence[0]!, projectId: plan.projectId!, projectName: plan.projectName!, lesson: plan.lesson! } })
+          .values({ companyId, kind: "question", question, options: [LESSON_ADD, LESSON_EDIT, LESSON_DROP], recommendedOption: LESSON_ADD, tier: approver, raisedByAgentId: agentId, dedupeKey: `lesson:${evidence[0]}:${plan.lesson}`, context: { type: "lesson", ticketId: evidence[0]!, projectId: plan.projectId!, projectName: plan.projectName!, lesson: plan.lesson! } })
           .onConflictDoNothing()
           .returning({ id: decisions.id });
         if (!row) {
@@ -440,7 +442,7 @@ export function retroService(
           throw new RetroError(409, "That lesson is already waiting for the CEO's answer.");
         }
         decisionId = row.id;
-        await self.tellCeo(companyId, question);
+        if (approver === "ceo") await self.tellCeo(companyId, question);
       } else {
         const question = [
           `A workflow retro suggests a change: ${plan.summary}.`,

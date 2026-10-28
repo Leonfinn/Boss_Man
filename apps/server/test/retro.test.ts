@@ -393,6 +393,18 @@ describe("proposing a change", () => {
     expect(co!.w).toMatchObject({ reviewHours: 6, inProgressHours: 4, enabled: false });
   });
 
+  it("the CEO never approves its own proposal: with no Product Manager, playbooks go to the owner", async () => {
+    const c = (ctx = await setup({ pm: false }));
+    const rows = await c.done(5, D);
+    await c.retro.start(c.company.id);
+    const ceo = await c.mcp(c.ceo.id);
+    const evidence = [await ref(c, rows[0]!.id), await ref(c, rows[1]!.id)];
+    expect(isError(await propose(ceo, { evidence, lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } }))).toBe(false);
+    const [ch] = await c.db.select().from(workflowChanges);
+    expect(ch!.approver).toBe("owner");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, ch!.decisionId!)))[0]!.tier).toBe("owner");
+  });
+
   it("a playbook becomes a retro-made skill for the role's agents, approved by the CEO", async () => {
     const { c, p } = await ready();
     const clash = await c.db.insert(skills).values({ companyId: c.company.id, name: "taken", description: "d", source: "written", files: [], sizeBytes: 0 }).returning();
