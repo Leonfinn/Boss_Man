@@ -725,6 +725,42 @@ export const reviewRequests = pgTable(
   (t) => [uniqueIndex("review_requests_slot").on(t.ticketId, t.round, t.kind)],
 );
 
+/**
+ * One row per ticket state change, written by the same database trigger that keeps state_changed_at,
+ * so every write path counts (docs/19-workflow-retros.md).
+ */
+// shortcut: history starts at deploy; older tickets have only the activity log. Upgrade if a retro needs them.
+export const ticketTransitions = pgTable(
+  "ticket_transitions",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** Null for the first state of a new ticket. */
+    fromState: text("from_state"),
+    toState: text("to_state").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("ticket_transitions_company_at").on(t.companyId, t.at), index("ticket_transitions_ticket_at").on(t.ticketId, t.at)],
+);
+
+/** One row per CI or verify result on a commit; tickets.pull_request_ci keeps only the latest CI result. */
+export const checkResults = pgTable(
+  "check_results",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    sha: text("sha"),
+    /** ci, verify or deep_verify. */
+    kind: text("kind").notNull(),
+    passed: boolean("passed").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    detail: text("detail"),
+  },
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+);
+
 /** Normalised failures (run errors, failed checks), to spot an agent going round in circles. */
 export const failureSignatures = pgTable(
   "failure_signatures",

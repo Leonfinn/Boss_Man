@@ -470,6 +470,13 @@
       "when": 1793180296972,
       "tag": "0066_watchdog_backoff",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1793180396972,
+      "tag": "0067_workflow_scorecard",
+      "breakpoints": true
     }
   ]
 }
