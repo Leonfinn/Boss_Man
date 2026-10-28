@@ -115,7 +115,7 @@ const METRIC_LABEL: Record<string, string> = {
   firstPassRate: "first-time review pass rate",
   meanRework: "mean rework rounds",
   medianCycleMs: "median cycle time",
-  costPerDoneMicros: "cost per done ticket",
+  costPerDoneMicros: "whole-ticket cost (all runs) per done ticket",
   watchdogFlags: "watchdog flags",
   medianWaitMs: "median wait at the handoff",
   bounceRate: "share of reviews sent back",
@@ -292,7 +292,7 @@ export function retroService(
       for (const r of sc.byRole.slice(0, 12)) {
         const p = prev.byRole.find((x) => x.role === r.role);
         const was = (f: (v: number | null) => string, k: "firstPassRate" | "meanRework" | "medianCycleMs" | "costPerDoneMicros") => (p ? ` (${f(p[k])})` : "");
-        out.push(`- ${r.role} (${r.agents} agent${r.agents === 1 ? "" : "s"}): ${r.done} done${p ? ` (${p.done})` : ""}; first-time pass ${pct(r.firstPassRate)}${was(pct, "firstPassRate")}; rework ${num(r.meanRework)}${was(num, "meanRework")}; cycle ${hrs(r.medianCycleMs)}${was(hrs, "medianCycleMs")}; cost per ticket ${usd(r.costPerDoneMicros)}${was(usd, "costPerDoneMicros")}; watchdog flags ${r.watchdogFlags}${p ? ` (${p.watchdogFlags})` : ""}; owner overrode the recommendation ${pct(r.overrideShare)}`);
+        out.push(`- ${r.role} (${r.agents} agent${r.agents === 1 ? "" : "s"}): ${r.done} done${p ? ` (${p.done})` : ""}; first-time pass ${pct(r.firstPassRate)}${was(pct, "firstPassRate")}; rework ${num(r.meanRework)}${was(num, "meanRework")}; cycle ${hrs(r.medianCycleMs)}${was(hrs, "medianCycleMs")}; own cost per ticket ${usd(r.ownCostPerDoneMicros)}; whole-ticket cost (reviews, CEO and rework included) ${usd(r.costPerDoneMicros)}${was(usd, "costPerDoneMicros")}; watchdog flags ${r.watchdogFlags}${p ? ` (${p.watchdogFlags})` : ""}; owner overrode the recommendation ${pct(r.overrideShare)}`);
       }
       if (!sc.byRole.length) out.push("- Nothing finished in this period.");
 

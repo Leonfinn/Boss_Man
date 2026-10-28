@@ -180,7 +180,7 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
     .filter((r) => r.purpose !== "chat" && r.ticketId)
     .map((r) => ({ id: r.id, ticketId: r.ticketId!, agentId: r.agentId, startedAt: r.startedAt, endedAt: r.endedAt, outcome: r.outcome }));
 
-  type Episode = { ticketId: string; rule: WatchdogRule; firstAt: number; dueAt: number; handOffs: number; clearedAt: number | null; lastAt: number; steps: number };
+  type Episode = { ticketId: string; rule: WatchdogRule; firstAt: number; dueAt: number; handOffs: number; clearedAt: number | null; lastAt: number; steps: number; bounces: number };
   // not state: per call.
   const open = new Map<string, Episode>();
   const episodes: Episode[] = [];
@@ -221,10 +221,16 @@ export async function backtest(db: Db, companyId: string, days: number, s: Watch
       seen.add(key);
       let e = open.get(key);
       if (!e) {
-        e = { ticketId: trip.ticketId, rule: trip.rule, firstAt: t, dueAt: t, handOffs: 0, clearedAt: null, lastAt: t, steps: 0 };
+        e = { ticketId: trip.ticketId, rule: trip.rule, firstAt: t, dueAt: t, handOffs: 0, clearedAt: null, lastAt: t, steps: 0, bounces: trip.detail.bounces ?? 0 };
         open.set(key, e);
         episodes.push(e);
       }
+      // Another send-back is news: due again now with the back-off reset, as in the live sweep.
+      if (trip.rule === "review_loop" && (trip.detail.bounces ?? 0) > e.bounces) {
+        e.dueAt = t;
+        e.steps = 0;
+      }
+      e.bounces = trip.detail.bounces ?? 0;
       if (e.dueAt <= t && trip.rule !== "owner_decision_waiting") {
         // Same back-off as the live sweep: the gap doubles unless something happened on the ticket since the last hand-off.
         const snapT = snapTickets.find((y) => y.id === trip.ticketId)!;

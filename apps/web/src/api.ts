@@ -69,7 +69,7 @@ export type PermissionExplanation = { title: string; summary: string; effect: "r
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
 export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string; originalQuestion?: string };
 /** A decision the CEO settled: by advice (advice), or a permission request it answered itself (settled, BOS-111). */
-export type AdvisedDecision = { id: string; companyId: string; question: string; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean } };
+export type AdvisedDecision = { id: string; companyId: string; question: string; about?: Array<{ ticketId: string; ref: string | null; title: string }>; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean } };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 
 export type Decision = {
@@ -193,6 +193,15 @@ export type RunRow = {
   purpose?: string | null;
   reason?: string | null;
   note?: string | null;
+  /** What started it, kept on the run (BOS-118): "nudge", "wiki upkeep", "owner_chat" and so on. */
+  origin?: string | null;
+  /** A nudge's sender and why, when a nudge started the run. */
+  originFrom?: string | null;
+  originNote?: string | null;
+  /** The wake's own note, which names the tickets a review run is about. */
+  wakeNote?: string | null;
+  /** The ticket it was about without being on it (a nudge that named one). */
+  runTicketId?: string | null;
   /** Tokens over the run, when the agent reported them (R67). */
   inputTokens?: number | null;
   outputTokens?: number | null;

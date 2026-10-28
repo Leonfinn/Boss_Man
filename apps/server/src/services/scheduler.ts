@@ -518,6 +518,22 @@ export function schedulerService(
     return lines.join("\n");
   }
 
+  /** Ticket ids a wake's note names, the way a nudge or a review ask writes them. */
+  const NOTE_TICKET_IDS = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+
+  /**
+   * The ticket a wake was about when it wasn't formally on one (BOS-118): the last id its note
+   * names, when that ticket exists in the same company. A nudge that passed a ticketId lands here.
+   */
+  async function ticketNamedIn(note: string | null | undefined, companyId: string) {
+    if (!note) return null;
+    for (const id of [...new Set(note.match(NOTE_TICKET_IDS) ?? [])].reverse()) {
+      const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
+      if (t) return t.id;
+    }
+    return null;
+  }
+
   /** A review wake's first ticket, when its project has a repo: the reviewer gets its own copy of that ticket's work. */
   async function reviewCopy(w: typeof wakes.$inferSelect) {
     if (w.reason !== REVIEW_REASON || w.ticketId) return null;
@@ -566,7 +582,12 @@ export function schedulerService(
     const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt);
     // A CEO's run belongs to its current chapter (CEO continuity).
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, model: agent.model, startedAt: now() });
+    // Why the run started is kept on it, so a run with no ticket still says what it was for
+    // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake lists
+    // several, and picking one of them would point the card at the wrong ticket.
+    const origin = w.reason;
+    const aboutTicket = w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
@@ -914,10 +935,12 @@ export function schedulerService(
         }
         return { ok: false, error: `You and ${to.name} have nudged each other ${LOOP_EXCHANGES} times about this in 10 minutes. ${ticketId ? "Put the rest on the ticket" : "Put it on a ticket (create one if needed)"} instead of nudging again.` };
       }
-      await db.insert(nudges).values(row);
+      const [sentNudge] = await db.insert(nudges).values(row).returning({ id: nudges.id });
       // On the ticket's timeline (or the company's log without one). The watchdog logs its own nudges.
       if (from.duty !== SCRUM_MASTER_DUTY) await record(db, { companyId: from.companyId, agentId: from.id, ticketId, kind: "nudge", summary: `${from.name} nudged ${to.name}: ${input.why.trim()}`, at: now() });
       const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });
+      // The run this starts can say who nudged and why in plain words (BOS-118).
+      if (sentNudge) await db.update(nudges).set({ wakeId: w.id }).where(eq(nudges.id, sentNudge.id));
       return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it", wakeId: w.id };
     },
 

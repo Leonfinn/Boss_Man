@@ -97,6 +97,18 @@ req server "$c1" 11111111-1111-1111-1111-111111111111
 host
 has "$D/outbox/status.json" "already handled"
 
+# 3b. A history line written with a space after the colon is still recognised.
+printf '{"id": "22222222-2222-2222-2222-222222222222", "result": "deployed"}\n' >>"$D/outbox/history.jsonl"
+req server "$c1" 22222222-2222-2222-2222-222222222222
+host
+has "$D/outbox/status.json" "already handled"
+
+# 3c. A compact history line (no space) is still recognised.
+printf '{"id":"33333333-3333-3333-3333-333333333333","result":"deployed"}\n' >>"$D/outbox/history.jsonl"
+req server "$c1" 33333333-3333-3333-3333-333333333333
+host
+has "$D/outbox/status.json" "already handled"
+
 # 4. Rate limit: a second server deploy inside 10 minutes is refused, and the webhook says so.
 c2="$(push apps/server/b)"
 req server "$c2"
