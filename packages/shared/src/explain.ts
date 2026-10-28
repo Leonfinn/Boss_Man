@@ -49,22 +49,10 @@ const FRIENDLY: Array<[RegExp, string]> = [
 ];
 const friendly = (p: string) => FRIENDLY.find(([re]) => re.test(p))?.[1] ?? p;
 
-/**
- * Splits on ; && || | and newlines outside quotes, leaving out heredoc bodies (text fed to a program, not commands). shortcut: no escapes or subshells; commands that use $( ) or backticks are flagged unknown instead.
- * joins, if given, gets the separator before each segment ("" for the first, ";" where empty segments were dropped between different ones).
- */
-function segments(command: string, joins: string[] = []): string[] {
+/** Splits on ; && || | and newlines outside quotes, leaving out heredoc bodies (text fed to a program, not commands). shortcut: no escapes or subshells; commands that use $( ) or backticks are flagged unknown instead. */
+function segments(command: string): string[] {
   const out: string[] = [];
   let cur = "";
-  let join = "";
-  const push = (next: string) => {
-    if (cur.trim()) {
-      out.push(cur.trim());
-      joins.push(join);
-      join = next;
-    } else if (join !== next) join = ";";
-    cur = "";
-  };
   let quote = "";
   const heredocs: string[] = [];
   for (let i = 0; i < command.length; i++) {
@@ -81,9 +69,9 @@ function segments(command: string, joins: string[] = []): string[] {
         continue;
       }
     } else if (c === ";" || c === "|" || c === "\n" || (c === "&" && (command[i + 1] === "&" || (command[i - 1] !== ">" && command[i + 1] !== ">")))) {
-      const double = (c === "&" && command[i + 1] === "&") || (c === "|" && command[i + 1] === "|");
-      if (double) i++;
-      push(double ? c + c : c);
+      if ((c === "&" && command[i + 1] === "&") || (c === "|" && command[i + 1] === "|")) i++;
+      out.push(cur);
+      cur = "";
       // Skip each heredoc's body, up to its closing word on a line of its own.
       if (c === "\n") {
         for (const end of heredocs.splice(0)) {
@@ -96,8 +84,7 @@ function segments(command: string, joins: string[] = []): string[] {
     }
     cur += c;
   }
-  push("");
-  return out;
+  return [...out, cur].map((s) => s.trim()).filter(Boolean);
 }
 
 const unquote = (t: string) => t.replace(/^(['"])(.*)\1$/, "$2");
@@ -192,47 +179,31 @@ function norm(p: string): string | null {
 }
 
 /**
- * Whether everything the command changes or deletes is under /tmp, following its cd's. Null when
- * anything could reach further: a push, the network, a relative path from an unknown folder, or a
- * change with no named target outside a /tmp folder. Programs it can't see into are listed.
+ * Whether everything the command changes or deletes is named by an absolute path under /tmp. Null
+ * when anything could reach further: a push, the network, a program it can't see into, a relative
+ * path, a change with no named target, or any cd.
+ *
+ * It doesn't follow cd's (BOS-111 security re-checks). Working out where a cd lands keeps missing
+ * cases: a failed cd followed by ; runs the rest from the agent's own folder, and cd -, cd -- dir,
+ * cd -P and CDPATH= all go somewhere other than the first word. So any cd, pushd or popd means
+ * "not /tmp-only", and `cd /tmp/x && rm -rf y` loses the note. CEO routing (tempCleanup) doesn't
+ * rely on this. unchecked stays in the result's shape but is now always empty.
  */
-function scratchOnly(segs: string[], joins: string[], parts: Part[]): { unchecked: string[] } | null {
-  let cwd: string | null = null;
-  const at = (p: string) => norm(p.startsWith("/") ? p : cwd ? `${cwd}/${p}` : "");
-  const unchecked: string[] = [];
+function scratchOnly(parts: Part[]): { unchecked: string[] } | null {
   let wrote = false;
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i]!;
-    // A cd is only known to have worked for what follows it through &&. After ; or a newline the
-    // next part runs even if the cd failed, after || only if something failed, and | or & run it
-    // in another shell, so the folder is unknown again (BOS-111 security re-check: cd /tmp/missing; rm -rf ../x).
-    if (joins[i] !== "&&") cwd = null;
-    if (p.program === "cd") {
-      // `a || cd /tmp/x && rm ../y` skips the cd when a succeeds, and | or & runs it in another shell.
-      if (joins[i] && joins[i] !== "&&" && joins[i] !== ";" && joins[i] !== "\n") {
-        cwd = null;
-        continue;
-      }
-      const to = (segs[i]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote)[1] ?? "";
-      cwd = to ? at(to) : null;
-      continue;
-    }
-    if (p.effect === "pushes" || p.effect === "network" || p.repo) return null;
-    if (p.effect === "unknown") {
-      if (!cwd || !SCRATCH.test(cwd)) return null;
-      unchecked.push(p.program || "a program");
-      continue;
-    }
+  for (const p of parts) {
+    if (p.program === "cd" || p.program === "pushd" || p.program === "popd") return null;
+    if (p.effect === "pushes" || p.effect === "network" || p.effect === "unknown" || p.repo) return null;
     if (p.effect !== "changes" && p.effect !== "deletes") continue;
     wrote = true;
     // norm() reads paths as written, but the shell expands globs and braces (/tmp/*, /tmp/{a,../home}) after it.
-    if (p.targets.some((t) => /[*?[{]/.test(t))) return null;
-    const where = p.targets.length ? p.targets.map(at) : [cwd];
+    if (!p.targets.length || p.targets.some((t) => !t.startsWith("/") || /[*?[{]/.test(t))) return null;
+    const where = p.targets.map(norm);
     if (where.some((w) => !w || !SCRATCH.test(w))) return null;
     // Deleting /tmp itself wipes every agent's temp files: not scratch work.
     if (p.effect === "deletes" && where.includes("/tmp")) return null;
   }
-  return wrote ? { unchecked: [...new Set(unchecked)] } : null;
+  return wrote ? { unchecked: [] } : null;
 }
 
 /** One plain entry directly in /tmp: not /tmp itself, no deeper path, nothing the shell would expand or resolve. */
@@ -361,8 +332,7 @@ export function tempCleanup(command: string): boolean {
 
 /** What a shell command would do, in one sentence led by the worst thing in it. */
 export function explainCommand(command: string): { summary: string; effect: Effect; scratch?: PermissionExplanation["scratch"] } {
-  const joins: string[] = [];
-  const segs = segments(command, joins);
+  const segs = segments(command);
   const parts = segs.map(explainSegment);
   const effect = WORST.find((e) => parts.some((p) => p.effect === e)) ?? "reads";
   const sentences: string[] = [];
@@ -379,7 +349,7 @@ export function explainCommand(command: string): { summary: string; effect: Effe
     }
   }
   if (parts.some((p) => p.env)) sentences.push("Shows environment variables, which can include secrets.");
-  const tmp = parts.some((p) => p.env) ? null : scratchOnly(segs, joins, parts);
+  const tmp = parts.some((p) => p.env) ? null : scratchOnly(parts);
   const scratch = tmp && {
     unchecked: tmp.unchecked,
     note: `Works only in a temporary folder (/tmp): every file it changes or deletes is there, so your project, its branch and the repository aren't touched.${tmp.unchecked.length ? ` It also runs ${tmp.unchecked.join(", ")} in that folder; Boss Man can't see inside ${tmp.unchecked.length === 1 ? "that program" : "those programs"}.` : ""}`,

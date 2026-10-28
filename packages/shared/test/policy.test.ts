@@ -6,7 +6,7 @@ const exec = (command: string) => ({ title: command, kind: "execute", rawInput: 
 
 describe("the /tmp-only switch", () => {
   it("allows commands that only work in /tmp when on, and still asks when off", () => {
-    for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && cp -r src /tmp/a", "cd /tmp/x && find . -delete"]) {
+    for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && cp -r src /tmp/a", "find /tmp/x -delete"]) {
       expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toEqual({ outcome: "allow", rule: SCRATCH_RULE.name });
     }
     expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("ceo");
@@ -266,21 +266,24 @@ describe("temp-file cleanup (BOS-111)", () => {
   });
 
   it("doesn't recommend Deny just because a command deletes files", () => {
-    for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null", "cd /tmp/x && rm -rf build"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
-    for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+    for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "cd /tmp/x && rm -rf build", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 
-  it("doesn't follow a cd that may have failed (BOS-111 security re-check)", () => {
-    // After ; || | & or a newline the rm runs from the agent's own folder when the cd fails.
-    const unsure = ["cd /tmp/missing; rm -rf ../x", "cd /tmp/missing\nrm -rf ../x", "cd /tmp/missing || rm -rf ../x", "cd /tmp/missing | rm -rf ../x", "cd /tmp/missing & rm -rf ../x", "cd /tmp/a && true; rm -rf ../x", "true || cd /tmp/a && rm -rf ../x", "cd /tmp/missing; rm -rf build"];
+  it("doesn't follow any cd (BOS-111 security re-checks)", () => {
+    // A cd that failed (any separator but &&), took an option or went back (cd -, cd --, -P, -L, -e),
+    // used CDPATH, or a pushd/popd: Boss Man doesn't work out where these land, so none is /tmp-only.
+    const unsure = ["cd /tmp/missing; rm -rf ../x", "cd /tmp/missing\nrm -rf ../x", "cd /tmp/missing || rm -rf ../x", "cd /tmp/missing | rm -rf ../x", "cd /tmp/missing & rm -rf ../x", "cd /tmp/a && true; rm -rf ../x", "true || cd /tmp/a && rm -rf ../x", "cd /tmp/missing; rm -rf build",
+      "cd /tmp/a && rm -rf ../x", "cd /tmp/a && rm -rf x", "cd /tmp/a && cd -- /home && rm -rf x", "cd /tmp/a && cd - && rm -rf x", "cd /tmp/a && cd -P /home && rm -rf x", "cd /tmp/a && cd -L .. && rm -rf x", "cd /tmp/a && cd -e /home && rm -rf x", "cd /tmp/a && CDPATH=/home cd x && rm -rf y", "pushd /tmp/a && popd && rm -rf x", "cd /tmp/a && pushd /home && rm -rf x"];
     for (const c of unsure) {
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
       expect(explainCommand(c).scratch, c).toBeUndefined();
       expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
     }
-    // Joined by &&, the rm only runs if the cd worked, so ../x is /tmp/x.
-    expect(recommendedVerdict(exec("cd /tmp/a && rm -rf ../x"))).toBe("allow");
-    expect(explainCommand("cd /tmp/a && rm -rf ../x").scratch).toBeDefined();
+    // Absolute /tmp deletes need no cd: still Allow, still the CEO's.
+    expect(recommendedVerdict(exec("rm -rf /tmp/a"))).toBe("allow");
+    expect(explainCommand("rm -rf /tmp/a").scratch).toBeDefined();
+    expect(evaluatePermission(exec("rm -rf /tmp/a"), []).outcome).toBe("ceo");
   });
 });
 
