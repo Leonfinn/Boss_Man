@@ -156,11 +156,21 @@ export function isSystemCard(d: { kind: string; tier: string; options: unknown; 
  * caller, not just the MCP tool: owner sign-offs, deploys, hires, instruction changes, owner-only
  * permissions and the rest stay the owner's.
  */
-export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unknown; context: unknown }): string | null {
+export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unknown; context: unknown }, answer?: string): string | null {
   const ctx = d.context as DecisionContext;
   if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) return "Only the owner can answer this kind of decision. Leave it for them; if they asked for your advice, use action advise.";
   if (ctx.type === "question" && ctx.steps?.length) return "This asks the owner to do something, so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
   if (d.tier === "owner" && !isSystemCard(d)) return "This card is the owner's to answer. Leave it for them; if they asked for your advice, use action advise.";
+  if (isSystemCard(d)) {
+    // An allow-list, not a single refusal: anything added to a system card later stays off the CEO's list.
+    // On a merge card only the retry and the send-back are safe; "Merge without the check" is the owner's.
+    const allowed = ctx.type === "check_stuck" ? [CHECK_AGAIN, CHECK_SEND_BACK] : ["Got it"];
+    if (!answer || !allowed.includes(answer)) {
+      return ctx.type === "check_stuck"
+        ? `The CEO may only choose "${CHECK_AGAIN}" or "${CHECK_SEND_BACK}" on this card. Leave "${CHECK_SKIP}" and any other choice to the owner.`
+        : "The CEO may only acknowledge this card with \"Got it\".";
+    }
+  }
   return null;
 }
 
@@ -181,9 +191,6 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "rule_proposal",
   "goal_check",
 ]);
-
-/** Types the CEO may only withdraw when they are stale or a duplicate, not just because they're noise. */
-const OWNER_ONLY_WITHDRAW_TYPES = new Set([...OWNER_ONLY_ANSWER_TYPES, "permission", "lesson", "lesson_replace"]);
 
 /**
  * Withdraws every open merge card for a ticket (BOS-149): one ticket never shows two, and a card for a
@@ -211,6 +218,9 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
  * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
  */
 export async function raiseMergeStuck(db: Db, t: { id: string; title: string; companyId: string }, why: string) {
+  // A finished ticket needs no merge card, even if a sweep or a late failure asks for one (BOS-149).
+  const [ticket] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, t.id));
+  if (ticket?.systemState === "done") return [];
   // A ticket only ever has one open merge card: a new reason replaces the older card (BOS-149).
   await clearMergeCards(db, t.id, { by: "system", note: `Replaced by a newer merge card: ${why}`, at: new Date().toISOString() });
   // GitHub's own words when the token can't change .github/workflows/.
@@ -671,7 +681,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     const c = d.context as DecisionContext & { ladder?: { ticketId?: string | null } };
     switch (c.type) {
       case "permission":
-        return c.ticketId ? `ticket:${c.ticketId}` : c.runId ? `run:${c.runId}` : null;
+        // Keyed on the request, not the run: two different requests in one run are not duplicates (BOS-149).
+        return c.requestId ? `request:${c.requestId}` : null;
       case "check_stuck":
       case "review_loop":
       case "ticket_cap":
@@ -1237,8 +1248,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!ceo) throw new AnswerError("Only the CEO withdraws a card.");
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId), eq(decisions.status, "open")));
       if (!d) return null;
+      if (d.raisedByAgentId === input.agentId) throw new AnswerError("That's your own request; you can't withdraw it.");
       const ctx = d.context as DecisionContext;
-      if (OWNER_ONLY_WITHDRAW_TYPES.has(ctx.type) && !(await staleOrDuplicate(d))) {
+      // Fail closed: only system and info cards may be cleared outright; everything else (a live owner
+      // question, review loop, permission, sign-off...) must be stale or a genuine duplicate (BOS-149).
+      if (!isSystemCard(d) && !(await staleOrDuplicate(d))) {
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
@@ -1248,6 +1262,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
         .returning({ id: decisions.id });
       if (!closed) return null;
+      // A withdrawn permission request has no verdict otherwise, so the agent's run would wait out the
+      // runner's timeout: tell the runner it is denied (BOS-149).
+      if (ctx.type === "permission") {
+        send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: "deny" });
+        await db.update(runs).set({ lastEventAt: now() }).where(eq(runs.id, ctx.runId));
+      }
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
       // A card that was holding a ticket no longer holds it.
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
@@ -1279,11 +1299,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
-      // Cards the CEO cleared as stale or duplicates (BOS-149), with the reason they gave.
+      // Cards the CEO cleared as stale or duplicates (BOS-149), with the reason they gave. Kept for
+      // 30 days so the owner can still trace a withdrawal after a day.
+      const withdrawnSince = new Date(now().getTime() - 30 * 24 * 3_600_000);
       const withdrawn = await db
         .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context })
         .from(decisions)
-        .where(and(eq(decisions.status, "withdrawn"), sql`${decisions.context}->'withdrawn'->>'by' = 'ceo'`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${since.toISOString()}::timestamptz`))
+        .where(and(eq(decisions.status, "withdrawn"), sql`${decisions.context}->'withdrawn'->>'by' = 'ceo'`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
       return [
@@ -1305,7 +1327,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!d) return null;
       // The server's own guard (BOS-149): a CEO answer may never settle an owner-only card, whatever the tool text says.
       if (extra.settledBy) {
-        const refusal = ceoAnswerRefusal(d);
+        const refusal = ceoAnswerRefusal(d, answer);
         if (refusal) throw new AnswerError(refusal);
       }
       const options = d.options as string[];

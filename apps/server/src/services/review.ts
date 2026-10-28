@@ -507,7 +507,7 @@ export function reviewService(
                 options: [CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP],
                 recommendedOption: CHECK_AGAIN,
                 tier: "owner",
-                dedupeKey: `check-stuck:${ticketId}:${command}`,
+                dedupeKey: `merge-stuck:${ticketId}`,
                 context: { type: "check_stuck", ticketId, command, output: v.output.slice(-1500) },
               })
               .onConflictDoNothing();

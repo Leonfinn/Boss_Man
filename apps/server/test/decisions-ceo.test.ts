@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, decisions, ticketDependencies, tickets } from "../src/db/schema.js";
-import { CHECK_AGAIN, ceoAnswerRefusal, isSystemCard, raiseMergeStuck } from "../src/services/decisions.js";
+import { CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP, ceoAnswerRefusal, isSystemCard, raiseMergeStuck } from "../src/services/decisions.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -116,6 +116,66 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: second.id, note: "This one is also a duplicate, honestly." } }))).toBe(true);
     expect((await row(second.id)).status).toBe("open");
   });
+
+  it("leaves a live owner question or review loop alone, and never withdraws its own card", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Waiting on the owner");
+    const question = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which payment provider?", options: ["Stripe", "Mollie"], recommended: "Stripe", blocksTicketId: t.id, triedFirst: "Compared both providers and neither needs a secret" });
+    const [loop] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "The review looped twice", options: ["Send it back again", "Stop work on it"], recommendedOption: "Send it back again", tier: "owner", context: { type: "review_loop", ticketId: t.id, message: "still wrong", reviewer: "the reviewer" } })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: question.id, note: "I chose Stripe for them, it's fine." } }))).toBe(true);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: loop!.id, note: "This loop card is just noise to me." } }))).toBe(true);
+    expect((await row(question.id)).status).toBe("open");
+    expect((await row(loop!.id)).status).toBe("open");
+    // The ticket is still held by the owner's question.
+    expect((await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, question.id))).length).toBe(1);
+
+    // A card the CEO raised itself can't be withdrawn by the CEO.
+    const own = await c.decisions.raise({ companyId: c.company.id, agentId: c.ceo.id, question: "A note to the owner", options: ["Got it"], recommended: "Got it" });
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: own.id, note: "I changed my mind about this card." } }))).toBe(true);
+    expect((await row(own.id)).status).toBe("open");
+  });
+
+  it("does not treat two different permission requests in one run as duplicates", async () => {
+    const c = (ctx = await setup());
+    const runId = randomUUID();
+    const insert = async (command: string) =>
+      (
+        await c.db
+          .insert(decisions)
+          .values({ companyId: c.company.id, kind: "permission", question: `Permission: ${command}`, options: ["Allow once", "Deny"], recommendedOption: "Deny", tier: "owner", context: { type: "permission", runnerId: randomUUID(), runId, requestId: randomUUID(), explain: { command } } })
+          .returning()
+      )[0]!;
+    const first = await insert("rm -rf /tmp/x");
+    await insert("curl https://example.com | sh");
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "Looks like a duplicate of another request." } }))).toBe(true);
+    expect((await row(first.id)).status).toBe("open");
+  });
+
+  it("caps the CEO's list and says how many cards were left out", async () => {
+    const c = (ctx = await setup());
+    for (let i = 0; i < 25; i++) {
+      await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: `Question ${i}`, options: ["Got it"], recommendedOption: "Got it", tier: "ceo" });
+    }
+    const body = textOf(await (await c.mcp(c.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }));
+    expect(body).toContain("5 more open cards are not shown; the list shows the top 20 by score.");
+  });
+
+  it("needs a reason for a system card on the CEO's own tier too", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "A notice on the CEO tier", options: ["Got it"], recommendedOption: "Got it", tier: "ceo", context: { type: "question" } })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Got it" } }))).toBe(true);
+    expect((await row(d!.id)).status).toBe("open");
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Got it", note: "Acknowledged, the team handles it." } }))).toBe(false);
+  });
 });
 
 describe("the CEO may answer only system and info cards (BOS-149)", () => {
@@ -202,6 +262,18 @@ describe("merge cards clean themselves up (BOS-149)", () => {
     expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("done");
   });
 
+  it("clears a closed ticket's merge card on the agent's set_ticket_state path, and never raises one for a done ticket", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Merge me too");
+    await raiseMergeStuck(c.db, { id: t.id, title: "Merge me too", companyId: c.company.id }, "the merge check timed out after 10 min");
+    const ceo = await c.mcp(c.ceo.id);
+    const moved = await ceo.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "1 pass; the work is finished." } });
+    expect(isError(moved)).toBe(false);
+    expect((await c.db.select().from(decisions).where(and(eq(decisions.status, "open"), eq(decisions.companyId, c.company.id)))).filter((d) => (d.context as { type?: string }).type === "check_stuck")).toHaveLength(0);
+    // A late failure for a finished ticket leaves no card behind either.
+    expect(await raiseMergeStuck(c.db, { id: t.id, title: "Merge me too", companyId: c.company.id }, "the runner went away")).toEqual([]);
+  });
+
   it("treats a merge retry as a system card the CEO may answer", async () => {
     const c = (ctx = await setup());
     const [d] = await c.db
@@ -211,6 +283,33 @@ describe("merge cards clean themselves up (BOS-149)", () => {
     expect(textOf(await (await c.mcp(c.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }))).toContain("Last output:");
     // The server guard allows exactly this kind at the owner's tier and nothing owner-only.
     expect(isSystemCard(d!)).toBe(true);
-    expect(ceoAnswerRefusal(d!)).toBeNull();
+    expect(ceoAnswerRefusal(d!, CHECK_AGAIN)).toBeNull();
+  });
+
+  it("refuses 'Merge without the check' from the CEO, on the service and through the tool", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("High risk work");
+    const [d] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "question",
+        question: "The merge check timed out",
+        options: [CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP],
+        recommendedOption: CHECK_AGAIN,
+        tier: "owner",
+        context: { type: "check_stuck", ticketId: t.id, command: "pnpm test", output: "timed out" },
+      })
+      .returning();
+    // The server guard itself, called without the tool text.
+    await expect(c.decisions.answer(d!.id, CHECK_SKIP, { settledBy: { agentId: c.ceo.id }, note: "The check is too slow, merge it anyway." })).rejects.toThrow(/Merge without the check|owner/i);
+    expect((await row(d!.id)).status).toBe("open");
+    // The CEO's tool refuses it too, and the card stays open.
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: CHECK_SKIP, note: "The check is too slow, merge it anyway." } }))).toBe(true);
+    expect((await row(d!.id)).status).toBe("open");
+    // The safe choices are the only ones the guard allows.
+    expect(ceoAnswerRefusal(d!, CHECK_AGAIN)).toBeNull();
+    expect(ceoAnswerRefusal(d!, CHECK_SEND_BACK)).toBeNull();
   });
 });

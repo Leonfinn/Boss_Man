@@ -163,10 +163,13 @@ describe("the alert ladder (BOS-64)", () => {
     expect(await ownerNotified(d.id)).toHaveLength(1);
   });
 
-  it("the CEO can settle an alert with a plain answer", async () => {
+  it("the CEO can settle an alert with a plain answer, with a reason the owner can read", async () => {
     const d = await wakeChain();
-    const r = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });
+    const bare = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });
+    expect(isError(bare)).toBe(true);
+    const r = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it", note: "I checked the alert and the team has it." } });
     expect(isError(r)).toBe(false);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.context).toMatchObject({ settled: { note: "I checked the alert and the team has it." } });
     expect(await ownerNotified(d.id)).toHaveLength(0);
   });
 
