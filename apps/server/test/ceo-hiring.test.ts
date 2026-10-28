@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, decisions, notifications, projects, settings, tickets } from "../src/db/schema.js";
+import { activity, agents, decisions, fundingSources, notifications, projects, settings, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -226,6 +226,41 @@ describe("the CEO assigns tickets, including to a planned hire", () => {
     const [dee] = await c.db.select().from(agents).where(eq(agents.name, "Dee"));
     expect((await ticketOf(c, "Design the filter bar")).assigneeAgentId).toBe(dee!.id);
     expect((await ticketOf(c, "Already taken")).assigneeAgentId).toBe(c.worker.id);
+    await client.close();
+  });
+
+  it("keeps a hire card open when its setup no longer checks out, and hires nobody", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Rae", template: "qa", reason: "Releases need testing." }) });
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    // The funding source it was checked against is gone by the time the owner answers.
+    await c.db.delete(fundingSources).where(eq(fundingSources.id, c.funding.id));
+    const failed = await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire" });
+    expect(failed.statusCode).toBe(422);
+    expect(failed.json().message).toContain("No funding source with that ID");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+    expect(await c.db.select().from(agents).where(eq(agents.name, "Rae"))).toEqual([]);
+
+    // A card raised before hires carried the four fields is reopened, not closed with nobody hired.
+    const [legacy] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        raisedByAgentId: c.ceo.id,
+        kind: "approval",
+        tier: "owner",
+        question: "The CEO wants to hire Old.",
+        options: ["Hire", "Don't hire"],
+        recommendedOption: "Hire",
+        context: { type: "hire", proposal: { name: "Old", template: "qa", model: "claude-opus-4-5", fundingSourceId: c.funding.id }, byAgentId: c.ceo.id },
+      })
+      .returning({ id: decisions.id });
+    const stale = await c.req("POST", `/api/decisions/${legacy!.id}/answer`, { answer: "Hire" });
+    expect(stale.statusCode).toBe(422);
+    expect(stale.json().message).toContain("Choose a harness");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, legacy!.id)))[0]!.status).toBe("open");
+    expect(await c.db.select().from(agents).where(eq(agents.name, "Old"))).toEqual([]);
     await client.close();
   });
 });

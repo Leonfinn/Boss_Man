@@ -1193,7 +1193,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           }
         }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
-        await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
+        try {
+          await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
+        } catch (err) {
+          // Nothing was hired or changed (a setup that no longer validates, or a card from before
+          // the setup was checked), so leave the card open for another try.
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          throw err instanceof AnswerError ? err : new AnswerError((err as Error).message);
+        }
       } else if (ctx.type === "review_loop" || ctx.type === "ticket_cap") {
         // Free the ticket from this decision first, so the action below sets its final state.
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
