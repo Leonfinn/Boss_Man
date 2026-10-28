@@ -117,3 +117,18 @@ Not built at all:
 - Monte Carlo forecasts. These need more history first.
 - Model-generated duration estimates.
 - Cost-of-delay scoring.
+
+## 6. Task sizing (owner's choice, 28 Oct 2026)
+
+Each task gets a relative size, **1, 2, 3, 5 or 8**, set by whoever creates it (usually the CEO). That's how the owner's human teams work. Each size is calibrated against measured hours and cost per role, not against velocity: agents have no fixed sprint capacity, the owner pays per token, and the limit is the number of run slots.
+
+- **The field.** `tickets.size`, which may only be 1, 2, 3, 5 or 8.
+  - An agent's `create_ticket` must give a size.
+  - `update_ticket` lets the CEO and managers change it.
+  - The owner can set it on the ticket page.
+  - The Board shows it.
+- **Reference tickets.** `sizing_guide` gives the planner, for each size, 2–3 recent finished tickets with their actual time, cost and rework, plus the approved sizing playbook if there is one. The planner sizes by comparison: "like BOS-42, which was a 3".
+- **Scorecard.** A **Sizes** table shows, for each role and size, the median and 85th-percentile cycle time, cost and rework.
+  - The critical path uses size-and-role times once a pair has 10 finished tickets.
+  - Before that it falls back to the role's times, then to the company's.
+- **Retro.** The scorecard digest says where sizes don't match actuals, for example 3s that behave like 5s, or a kind of work that is always undersized. The retro fixes this with a **playbook** for the planners, which the CEO approves.
