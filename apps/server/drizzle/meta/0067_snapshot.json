@@ -1,6 +1,6 @@
 {
-  "id": "504257d4-69bb-47bd-9934-bf5aab401985",
-  "prevId": "322e9262-45ed-4ecf-8592-236bce79c090",
+  "id": "322e9262-45ed-4ecf-8592-236bce79c090",
+  "prevId": "2180301a-ef10-4140-9c04-747c8c3f61d9",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3731,12 +3731,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "wake_id": {
-          "name": "wake_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "dropped": {
           "name": "dropped",
           "type": "boolean",
@@ -3832,19 +3826,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "nudges_wake_id_wakes_id_fk": {
-          "name": "nudges_wake_id_wakes_id_fk",
-          "tableFrom": "nudges",
-          "tableTo": "wakes",
-          "columnsFrom": [
-            "wake_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -7132,21 +7113,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "wakes_run_id": {
-          "name": "wakes_run_id",
-          "columns": [
-            {
-              "expression": "run_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -7511,6 +7477,13 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "backoff_steps": {
+          "name": "backoff_steps",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "detail": {
           "name": "detail",

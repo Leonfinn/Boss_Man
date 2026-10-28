@@ -1,5 +1,5 @@
 {
-  "id": "322e9262-45ed-4ecf-8592-236bce79c090",
+  "id": "2180301a-ef10-4140-9c04-747c8c3f61d9",
   "prevId": "97f03470-0fb6-4fe9-9747-fac90408db16",
   "version": "7",
   "dialect": "postgresql",
@@ -5105,18 +5105,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "origin": {
-          "name": "origin",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "run_ticket_id": {
-          "name": "run_ticket_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "chapter_id": {
           "name": "chapter_id",
           "type": "uuid",
@@ -5220,19 +5208,6 @@
           "tableTo": "engagements",
           "columnsFrom": [
             "engagement_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
-        },
-        "runs_run_ticket_id_tickets_id_fk": {
-          "name": "runs_run_ticket_id_tickets_id_fk",
-          "tableFrom": "runs",
-          "tableTo": "tickets",
-          "columnsFrom": [
-            "run_ticket_id"
           ],
           "columnsTo": [
             "id"
@@ -7477,6 +7452,13 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "backoff_steps": {
+          "name": "backoff_steps",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "detail": {
           "name": "detail",

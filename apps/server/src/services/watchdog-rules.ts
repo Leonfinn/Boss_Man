@@ -165,3 +165,16 @@ export function ruleLimitMs(rule: WatchdogRule, s: WatchdogSettings) {
       return s.inProgressHours * H;
   }
 }
+
+/** The longest a repeat flag on the same ticket and rule is made to wait. */
+export const BACKOFF_CAP_MS = 24 * H;
+
+/**
+ * How long a flag waits after a hand-off before it can be handed on again. `steps` is how many
+ * hand-offs in a row nothing happened on the ticket since the last one: the rule's limit, then
+ * twice that, then four times, capped at 24 hours (or the limit itself, if that is longer).
+ */
+export function backoffGapMs(rule: WatchdogRule, s: WatchdogSettings, steps: number) {
+  const limit = ruleLimitMs(rule, s);
+  return Math.min(limit * 2 ** steps, Math.max(limit, BACKOFF_CAP_MS));
+}

@@ -68,7 +68,8 @@ export type PermissionExplanation = { title: string; summary: string; effect: "r
 /** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
 export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string; originalQuestion?: string };
-export type AdvisedDecision = { id: string; companyId: string; question: string; advice: Advice };
+/** A decision the CEO settled: by advice (advice), or a permission request it answered itself (settled, BOS-111). */
+export type AdvisedDecision = { id: string; companyId: string; question: string; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean } };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 
 export type Decision = {
@@ -84,12 +85,16 @@ export type Decision = {
   agentName: string | null;
   /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
   forAgentName?: string | null;
-  blocks: Array<{ id: string; title: string }>;
+  blocks: Array<{ ticketId: string; ref?: string | null; title: string }>;
+  /** The tickets this decision is about (the ones it holds up directly). */
+  about?: Array<{ ticketId: string; ref: string | null; title: string }>;
+  /** Ticket references written in the card's text, resolved in the owner's own company. */
+  refs?: Record<string, { ticketId: string; ref: string; title: string }>;
   score: number;
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
   dueDate: string | null;
-  context?: { type?: string; advice?: Advice; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string }>; output?: string; planText?: string | null; ticketId?: string | null; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; advice?: Advice; /** Numbered steps when the owner must do something. */ steps?: string[]; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string }>; output?: string; planText?: string | null; ticketId?: string | null; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
