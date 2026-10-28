@@ -46,6 +46,18 @@ export function lintSql(file, sql) {
   return problems;
 }
 
+/** Drizzle skips a migration whose "when" isn't above the latest one already applied, so each entry must beat the one before. */
+export function lintJournal(journal) {
+  const problems = [];
+  const entries = journal.entries ?? [];
+  for (let i = 1; i < entries.length; i++) {
+    const prev = entries[i - 1], cur = entries[i];
+    if (cur.when > prev.when) continue;
+    problems.push(`_journal.json: entry ${cur.idx} "${cur.tag}" has when=${cur.when}, not greater than entry ${prev.idx} "${prev.tag}" (when=${prev.when}). Existing databases would silently skip it; set its "when" to more than ${prev.when}.`);
+  }
+  return problems;
+}
+
 export function newMigrations(dir) {
   return readdirSync(dir).filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > BASELINE).sort();
 }
@@ -54,6 +66,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const dir = process.argv[2] ?? "apps/server/drizzle";
   const files = newMigrations(dir);
   const problems = files.flatMap((f) => lintSql(f, readFileSync(join(dir, f), "utf8")));
+  problems.push(...lintJournal(JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8"))));
   if (problems.length) {
     console.error(`Migration lint failed:\n${problems.join("\n")}\nSee docs/10-migrations.md.`);
     process.exit(1);

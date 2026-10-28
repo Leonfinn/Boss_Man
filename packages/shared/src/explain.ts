@@ -203,6 +203,8 @@ function scratchOnly(segs: string[], parts: Part[]): { unchecked: string[] } | n
     }
     if (p.effect !== "changes" && p.effect !== "deletes") continue;
     wrote = true;
+    // norm() reads paths as written, but the shell expands globs and braces (/tmp/*, /tmp/{a,../home}) after it.
+    if (p.targets.some((t) => /[*?[{]/.test(t))) return null;
     const where = p.targets.length ? p.targets.map(at) : [cwd];
     if (where.some((w) => !w || !SCRATCH.test(w))) return null;
     // Deleting /tmp itself wipes every agent's temp files: not scratch work.

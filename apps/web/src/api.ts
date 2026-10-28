@@ -85,7 +85,11 @@ export type Decision = {
   agentName: string | null;
   /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
   forAgentName?: string | null;
-  blocks: Array<{ id: string; title: string }>;
+  blocks: Array<{ ticketId: string; ref?: string | null; title: string }>;
+  /** The tickets this decision is about (the ones it holds up directly). */
+  about?: Array<{ ticketId: string; ref: string | null; title: string }>;
+  /** Ticket references written in the card's text, resolved in the owner's own company. */
+  refs?: Record<string, { ticketId: string; ref: string; title: string }>;
   score: number;
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];

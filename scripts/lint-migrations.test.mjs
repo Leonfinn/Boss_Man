@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { lintSql } from "./lint-migrations.mjs";
+import { lintJournal, lintSql } from "./lint-migrations.mjs";
 import { findUnannotated } from "./check-in-memory-state.mjs";
 
 const bad = (sql) => lintSql("t.sql", sql);
@@ -46,4 +46,16 @@ test("in-memory state check wants a note", () => {
   assert.equal(findUnannotated("f.ts", "// shortcut: lost on restart\nconst m = new Map<string, number>();").length, 0);
   assert.equal(findUnannotated("f.ts", "const OK = new Set([1, 2]);\n    const local = new Map();").length, 0);
   assert.equal(findUnannotated("f.ts", "  const out = new Map(); // not state: built per call").length, 0);
+});
+
+test("journal: flags a when value not later than the entry before it", () => {
+  const e = (idx, tag, when) => ({ idx, tag, when });
+  assert.deepEqual(lintJournal({ entries: [e(0, "0000_a", 10), e(1, "0001_b", 20)] }), []);
+  for (const when of [20, 15]) {
+    const [msg, ...rest] = lintJournal({ entries: [e(0, "0000_a", 10), e(1, "0001_b", 20), e(2, "0002_c", when)] });
+    assert.equal(rest.length, 0);
+    assert.match(msg, /0002_c/);
+    assert.match(msg, /0001_b/);
+    assert.match(msg, /more than 20/);
+  }
 });

@@ -8,6 +8,7 @@ import {
   evaluatePermission,
   ruleFor,
   rankDecision,
+  ticketRef,
   recommendedVerdict,
   TEMP_CLEANUP_RULE,
   type BlockedTicket,
@@ -33,6 +34,43 @@ import { agents, budgetPolicies, companies, decisions, deploys, engagementMessag
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
+
+/** The words on a card that can name a ticket: the question and, for an agent's question, what it tried and its steps. */
+function cardText(d: typeof decisions.$inferSelect): string {
+  const c = d.context as { triedFirst?: unknown; steps?: unknown };
+  return [d.question, typeof c.triedFirst === "string" ? c.triedFirst : "", ...(Array.isArray(c.steps) ? c.steps.filter((x): x is string => typeof x === "string") : [])].join("\n");
+}
+
+/**
+ * Ticket references (BOS-70) written in each card's text, resolved to tickets in the card's own company only.
+ * A reference that matches nothing there is left out, so it stays plain text.
+ */
+async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string; text: string }>) {
+  const wanted = cards.map((c) => ({ ...c, found: [...new Set([...c.text.matchAll(/\b([A-Za-z][A-Za-z0-9]{0,9})-(\d{1,9})\b/g)].map((m) => `${m[1]!.toUpperCase()}-${m[2]}`))] }));
+  const numbers = [...new Set(wanted.flatMap((w) => w.found.map((r) => Number(r.slice(r.lastIndexOf("-") + 1)))))];
+  // lost on restart, harmless because it only lives for this one call
+  const byCompany = new Map<string, Map<string, { ticketId: string; title: string; ref: string }>>();
+  if (numbers.length) {
+    const rows = await db
+      .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
+      .from(tickets)
+      .innerJoin(companies, eq(companies.id, tickets.companyId))
+      .where(and(inArray(tickets.number, numbers), inArray(tickets.companyId, [...new Set(cards.map((c) => c.companyId))])));
+    for (const r of rows) {
+      const ref = ticketRef(r.prefix, r.number);
+      if (!ref) continue;
+      const m = byCompany.get(r.companyId) ?? new Map();
+      m.set(ref.toUpperCase(), { ticketId: r.id, title: r.title, ref });
+      byCompany.set(r.companyId, m);
+    }
+  }
+  return new Map(
+    wanted.map((w) => [
+      w.id,
+      Object.fromEntries(w.found.flatMap((r) => { const t = byCompany.get(w.companyId)?.get(r); return t ? [[r, t]] : []; })) as Record<string, { ticketId: string; title: string; ref: string }>,
+    ]),
+  );
+}
 
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
@@ -748,12 +786,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .select({
           id: tickets.id,
           title: tickets.title,
+          number: tickets.number,
+          prefix: companies.ticketPrefix,
           dueDate: tickets.dueDate,
           milestoneTarget: milestones.targetDate,
           krPriority: objectives.priority,
           milestoneObjectiveId: milestones.objectiveId,
         })
         .from(tickets)
+        .innerJoin(companies, eq(companies.id, tickets.companyId))
         .leftJoin(keyResults, eq(keyResults.id, tickets.keyResultId))
         .leftJoin(objectives, eq(objectives.id, keyResults.objectiveId))
         .leftJoin(milestones, eq(milestones.id, tickets.milestoneId))
@@ -765,7 +806,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const info = new Map(
         work.map((w) => {
           const ps = [w.krPriority, w.milestoneObjectiveId ? msPriority.get(w.milestoneObjectiveId) : undefined].filter((p): p is number => p != null);
-          return [w.id, { title: w.title, dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
+          return [w.id, { title: w.title, ref: ticketRef(w.prefix, w.number), dueDate: effectiveDueDate(w.dueDate, w.milestoneTarget), objectivePriority: ps.length ? Math.min(...ps) : null }];
         }),
       );
       const deps = await db.select().from(ticketDependencies);
@@ -809,9 +850,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       };
 
+      // The ticket a card is about: what it holds up, plus the ticket named in its context (which may be done, or hold nothing up).
+      const aboutIds = (d: typeof decisions.$inferSelect): string[] => {
+        const own = (d.context as { ticketId?: unknown }).ticketId;
+        return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : [])])];
+      };
+      const wantedAbout = [...new Set(open.flatMap(({ d }) => aboutIds(d)))];
+      const aboutRows = wantedAbout.length
+        ? await db
+            .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
+            .from(tickets)
+            .innerJoin(companies, eq(companies.id, tickets.companyId))
+            .where(inArray(tickets.id, wantedAbout))
+        : [];
+      const aboutInfo = new Map(aboutRows.map((r) => [r.id, r]));
+
       const rows = open.map(({ d, companyName, agentName }) => {
         // Walk down the chain, nearest first; each ticket counts once.
-        const chain: Array<BlockedTicket & { ticketId: string; title: string }> = [];
+        const chain: Array<BlockedTicket & { ticketId: string; title: string; ref: string | null }> = [];
         const seen = new Set<string>();
         let frontier = direct(d).filter((id) => info.has(id));
         for (let depth = 1; frontier.length && depth <= 10; depth++) {
@@ -821,16 +877,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             seen.add(id);
             const i = info.get(id);
             if (!i) continue;
-            chain.push({ ticketId: id, title: i.title, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
+            chain.push({ ticketId: id, title: i.title, ref: i.ref, depth, dueDate: i.dueDate, objectivePriority: i.objectivePriority });
             next.push(...(dependents.get(id) ?? []));
           }
           frontier = next;
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
-        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, ...rank };
+        const about = aboutIds(d).flatMap((id) => { const r = aboutInfo.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
+        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
+      const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
       const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
-      return Promise.all(sorted.map(async (r) => ((r.context as DecisionContext).type === "stalled_run" ? { ...r, evidence: await stallEvidence((r.context as { runId: string }).runId) } : r)));
+      return Promise.all(
+        sorted.map(async (r) => {
+          const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
+          return (r.context as DecisionContext).type === "stalled_run" ? { ...withRefs, evidence: await stallEvidence((r.context as { runId: string }).runId) } : withRefs;
+        }),
+      );
     },
 
     /** The owner asks the CEO for advice on an open decision. It stays open and answerable. Returns null if it isn't open. */
