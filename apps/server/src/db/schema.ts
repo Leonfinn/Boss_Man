@@ -1292,9 +1292,9 @@ export const watchdogFlags = pgTable(
     /** Snoozes in a row in this episode; after two, the next time it is due it goes to the CEO. */
     snoozeCount: integer("snooze_count").notNull().default(0),
     escalatedAt: timestamp("escalated_at", { withTimezone: true }),
-    /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
     /** Hand-offs in a row with nothing happening on the ticket in between; each doubles the wait before the next (BOS-121). */
     backoffSteps: integer("backoff_steps").notNull().default(0),
+    /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
     detail: jsonb("detail").notNull().default({}),
   },
   (t) => [
