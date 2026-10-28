@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { issueRunToken } from "../src/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, skillProposals, tickets, wakes } from "../src/db/schema.js";
@@ -71,15 +71,14 @@ describe("round 10", () => {
     const p = await propose(c, "Steps.");
     const reviewId = p.reviewTicketId!;
     const before = (await ticketOf(c, reviewId)).systemState;
-    const out = txt(await (await c.mcp(c.ceo.id)).callTool({ name: "create_ticket", arguments: { title: "Help the review", body: STEER, parent: reviewId, assignee: "Security Reviewer" } }));
-    const kids = (await c.db.select().from(tickets).where(eq(tickets.companyId, c.company.id))).filter((t) => t.parentTicketId === reviewId);
-    if (kids.length) {
-      // Allowed only if the child's text reaches the reviewer marked as untrusted.
-      expect(kids[0]!.body).toContain("<untrusted");
-    } else {
-      expect(out).toMatch(/only the Security Reviewer|review/i);
-    }
-    // Either way the proposer didn't flip the review ticket to blocked.
+    const res = await (await c.mcp(c.ceo.id)).callTool({ name: "create_ticket", arguments: { title: "Help the review", body: STEER, parent: reviewId, assignee: "Security Reviewer" } });
+    const all = await c.db.select().from(tickets).where(eq(tickets.companyId, c.company.id));
+    // Refused by the shared review-task guard: an error, and no ticket was created at all.
+    expect(res.isError).toBe(true);
+    expect(txt(res)).toMatch(/security review task/i);
+    expect(all.filter((t) => t.parentTicketId === reviewId)).toHaveLength(0);
+    expect(all.filter((t) => t.title === "Help the review")).toHaveLength(0);
+    // The proposer didn't flip the review ticket to blocked.
     expect((await ticketOf(c, reviewId)).systemState).toBe(before);
     expect((await ticketOf(c, reviewId)).systemState).not.toBe("blocked");
   });
@@ -91,7 +90,7 @@ describe("round 10", () => {
     expect(await c.svc.expireOld()).toBe(1);
     const t = await ticketOf(c, p.reviewTicketId!);
     expect(t.systemState === "done" || t.assigneeAgentId === null).toBe(true);
-    const told = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.reviewer.id), eq(wakes.ticketId, p.reviewTicketId!)));
+    const told = await c.db.select().from(wakes).where(eq(wakes.agentId, c.reviewer.id));
     expect(told.some((w) => /expired|ended|no decision/i.test(w.note ?? ""))).toBe(true);
     const verdict = c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, { bundleHash: p.bundleHash, verdict: "recommend", summary: "Fine.", findings: [] });
     await expect(verdict).rejects.toThrow(/expired|ended/i);
