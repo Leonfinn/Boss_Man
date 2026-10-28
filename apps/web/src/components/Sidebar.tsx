@@ -2,7 +2,7 @@
 // company screen shows the chosen company. On a phone the groups fold away behind Menu.
 import { useState, type FormEvent } from "react";
 import type { Company, Decision } from "../api";
-import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, type LucideIcon } from "lucide-react";
+import { Activity, BookOpen, FolderGit2, Bell, Gavel, Handshake, LayoutDashboard, ListChecks, Map, MessageCircle, MessageSquare, Puzzle, Settings, ShieldCheck, Sparkles, Star, Users, Workflow as WorkflowIcon, type LucideIcon } from "lucide-react";
 import { art } from "../brand";
 
 type Item = { id: string; label: string; icon: LucideIcon };
@@ -34,6 +34,7 @@ const GROUPS: Array<{ title: string; items: Item[] }> = [
       { id: "skills", label: "Skills", icon: Puzzle },
       { id: "runs", label: "Runs", icon: Activity },
       { id: "scrum-master", label: "Scrum Master", icon: ShieldCheck },
+      { id: "workflow", label: "Workflow", icon: WorkflowIcon },
       { id: "engagements", label: "Engagements", icon: Handshake },
       { id: "settings", label: "Settings", icon: Settings },
     ],

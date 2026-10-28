@@ -530,6 +530,9 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (prefers-reduced-motion: reduce) { .rstate.blue { animation: none; } }
 /* A board card an agent is running on right now. */
 .ticket.live { border-color: var(--green-ink); box-shadow: 0 0 0 1px var(--green-soft); }
+.unticketed { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--green-soft); background: var(--green-soft); display: grid; gap: 4px; }
+.unticketed ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.unticketed li { overflow-wrap: anywhere; }
 .ticket .working { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--green-ink); font-weight: 600; }
 .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green-ink); animation: pulse 1.6s ease-in-out infinite; flex: none; }
 @media (prefers-reduced-motion: reduce) { .pulse-dot { animation: none; } }
@@ -681,3 +684,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .image-thumbs figure { margin: 0; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .image-thumbs img { width: 120px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
 .file-chip { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Wide enough for the menu to sit beside the page: it stays in view while the page scrolls, and scrolls on its own where it is taller than the window. */
+@media (min-width: 840px) {
+  .app > nav.side { position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
+}

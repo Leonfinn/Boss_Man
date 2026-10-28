@@ -12,6 +12,8 @@ import { ProjectBudget } from "./ProjectBudget";
 import { WatchdogHealth } from "../components/WatchdogHealth";
 import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
 import { Avatar } from "../components/Avatar";
+import { RunLabelLink } from "./Runs";
+import { ago } from "./Dashboard";
 
 const DONE_SHOWN = 8;
 const PROJECT_TABS = [
@@ -40,6 +42,11 @@ function age(iso: string | undefined, now = Date.now()) {
   if (!iso) return "";
   const m = Math.max(0, Math.round((now - new Date(iso).getTime()) / 60_000));
   return m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+}
+/** The card footer's time: how long the run has been going ("23m"), or "now" in its first minute. */
+export function workingFor(since: string | null | undefined, now = Date.now()) {
+  const a = age(since ?? undefined, now);
+  return !a || a === "0m" ? "now" : a;
 }
 /** "today", "3 days ago": for the done list. */
 function when(iso: string | undefined, now = Date.now()) {
@@ -319,6 +326,18 @@ function AddForm({ companyId, initial, agents, features, goals, tiers, hasCeo, o
   );
 }
 
+const FILTERS_KEY = "board-filters";
+type SavedFilters = { feature: string; working: boolean };
+/** The feature and "working now" filters, kept for the browser session like the feature states below. */
+function readFilters(): SavedFilters {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(FILTERS_KEY) ?? "null") as Partial<SavedFilters> | null;
+    return { feature: typeof saved?.feature === "string" ? saved.feature : "any", working: saved?.working === true };
+  } catch {
+    return { feature: "any", working: false };
+  }
+}
+
 const STATES_KEY = "board-feature-states";
 /** Every state but Declined, as before the toggles; the choice is kept for the browser session. */
 function readShownStates(): FeatureStatus[] {
@@ -375,6 +394,17 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
   const [renaming, setRenaming] = useState<string | null>(null);
   const [assignee, setAssignee] = useState("anyone");
   const [query, setQuery] = useState("");
+  const [filters, setFilters] = useState(readFilters);
+  const setFilter = (change: Partial<SavedFilters>) =>
+    setFilters((cur) => {
+      const next = { ...cur, ...change };
+      try {
+        sessionStorage.setItem(FILTERS_KEY, JSON.stringify(next));
+      } catch {
+        /* storage blocked: the choice lasts until the page reloads */
+      }
+      return next;
+    });
   const [allDone, setAllDone] = useState(false);
   const [shownStates, setShownStates] = useState(readShownStates);
   const toggleState = (st: FeatureStatus) =>
@@ -388,6 +418,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
       return next;
     });
   const featureList = feats.data?.features ?? [];
+  // A saved feature that is not in this company's list (other company, deleted) counts as any.
+  const featureFilter = filters.feature === "any" || filters.feature === "none" || featureList.some((f) => f.id === filters.feature) ? filters.feature : "any";
   const visibleFeatures = featureList.filter((f) => shownStates.includes(f.status));
   // The review column is two lanes: agent review, and every ticket, from any column, whose next step is the owner's.
   const label = (c: BoardData["columns"][number]) => (c.systemState === "review" && c.name === DEFAULT_LABEL.review ? "Agent review" : c.name);
@@ -551,6 +583,18 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <strong style={{ whiteSpace: "nowrap" }}>Review it <span aria-hidden="true">→</span></strong>
         </a>
       )}
+      {!!board.data?.withoutTicket?.length && (
+        <section className="unticketed" aria-label="Working without a ticket">
+          <strong>Working without a ticket</strong>
+          <ul>
+            {board.data.withoutTicket.map((r) => (
+              <li key={r.id}>
+                <strong>{r.agent ?? "An agent"}</strong> <RunLabelLink run={{ ...r, note: r.wakeNote }} /> <span className="muted">· started {ago(r.startedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <div className="board-bar">
         <div>
           {current && !adding && (
@@ -582,6 +626,25 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
               </select>
             </label>
           )}
+          {view !== "features" && (
+            <label>
+              Feature
+              <select value={featureFilter} onChange={(e) => setFilter({ feature: e.target.value })}>
+                <option value="any">Any feature</option>
+                <option value="none">No feature</option>
+                {featureList.map((f) => (
+                  <option key={f.id} value={f.id}>
+                    {f.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {view !== "features" && (
+            <button type="button" className="chip" aria-pressed={filters.working} onClick={() => setFilter({ working: !filters.working })}>
+              Working now{board.data ? ` (${board.data.workingAgents})` : ""}
+            </button>
+          )}
         </div>
         {view !== "features" && (
           <p>
@@ -610,7 +673,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
             const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
             // Every word must appear in the ticket's reference, title, feature or description.
             const hit = (t: (typeof tickets)[number]) => !words.length || words.every((w) => [t.number ? ticketRef(company?.ticketPrefix, t.number) : "", t.title, t.featureTitle ?? "", t.body ?? ""].join("\n").toLowerCase().includes(w));
-            const shown = tickets.filter((t) => (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) && hit(t));
+            const shown = tickets.filter((t) => (assignee === "anyone" || (assignee === "owner" ? t.assignedToOwner : t.assigneeAgentId === assignee)) && (featureFilter === "any" || (featureFilter === "none" ? !t.featureId : t.featureId === featureFilter)) && (!filters.working || !!t.working?.length) && hit(t));
             const named = (t: (typeof shown)[number]) => {
               const a = t.assigneeAgentId ? agents.get(t.assigneeAgentId) : undefined;
               return a ? a.name : t.assignedToOwner ? "You" : "Nobody yet";
@@ -680,6 +743,11 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                             {t.risk} risk
                           </span>
                         )}
+                        {t.size && (
+                          <span className="tag" title="Size, relative to other tasks">
+                            Size {t.size}
+                          </span>
+                        )}
                       </div>
                       <h3>
                         <a href={`#/tickets/${t.id}`}>{t.title}</a>
@@ -727,7 +795,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                           )}
                           {named(t)}
                         </span>
-                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? "now" : age(t.lastActivityAt)}</span>
+                        <span className="mono">{t.dueDate ? `Due ${t.dueDate}` : t.working?.length ? workingFor(t.workingSince) : age(t.lastActivityAt)}</span>
                       </div>
                     </article>
                   );

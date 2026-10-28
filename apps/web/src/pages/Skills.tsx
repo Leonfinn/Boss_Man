@@ -10,8 +10,8 @@ import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
 import { Section, useAction } from "./Settings";
 
-type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
-type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }>; requiresAddons: string[] | null };
+type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
+type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; sha256?: string; text: string | null }>; requiresAddons: string[] | null };
 type Upload = { path: string; content: string };
 type Elsewhere = { id: string; name: string; description: string; companyName: string; requiresAddons: string[] | null; fileCount: number; hasScripts: boolean };
 
@@ -261,7 +261,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
             </button>
           )}
           {s.source === "link" && (
-            <button type="button" className="btn" onClick={() => void run(async () => ((await api<{ changed: boolean }>(`/api/companies/${company.id}/skills/${id}/refresh`, { method: "POST" })).changed ? "Updated to the latest commit." : "Already up to date."))}>
+            <button type="button" className="btn" onClick={() => void run(async () => ((await api<{ changed: boolean }>(`/api/companies/${company.id}/skills/${id}/refresh`, { method: "POST" })).changed ? "A newer version was found. It is not installed: it goes to the Security Reviewer, then to Decisions for you." : "Already up to date."))}>
               Check for updates
             </button>
           )}
@@ -375,7 +375,10 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
                   ) : (
                     <span className="mono">{f.path}</span>
                   )}
-                  <small className="muted">{f.text === null ? `binary, ${kb(f.size)}` : kb(f.size)}</small>
+                  <small className="muted">
+                    {f.text === null ? `binary, ${kb(f.size)}` : kb(f.size)}
+                    {f.sha256 ? <span title={f.sha256}> · sha256 <span className="mono">{f.sha256.slice(0, 16)}</span></span> : null}
+                  </small>
                 </span>
                 {open === f.path && f.text !== null && <pre className="skill-file">{f.text}</pre>}
               </li>
@@ -430,8 +433,8 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
             className="btn"
             onClick={() =>
               void run(async () => {
-                const r = await api<{ changed: number; added: string[]; gone: string[] }>(`/api/companies/${company.id}/skill-packs/refresh`, { method: "POST", body: { pack } });
-                const parts = [r.changed ? `${r.changed} updated` : null, r.added.length ? `added ${r.added.join(", ")}` : null, r.gone.length ? `no longer in the link: ${r.gone.join(", ")}` : null].filter(Boolean);
+                const r = await api<{ proposed: string[]; unchanged: number; problems: string[] }>(`/api/companies/${company.id}/skill-packs/refresh`, { method: "POST", body: { pack } });
+                const parts = [r.proposed.length ? `newer versions of ${r.proposed.join(", ")} are waiting for review and your decision (nothing is installed yet)` : null, r.problems.length ? r.problems.join("; ") : null].filter(Boolean);
                 return parts.length ? `${parts.join("; ")}.` : "Already up to date.";
               })
             }
@@ -497,6 +500,39 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
+type ProposalRow = { id: string; name: string; source: "draft" | "link"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
+const PROPOSAL_STATUS: Record<string, string> = {
+  proposed: "Waiting",
+  in_review: "With the Security Reviewer",
+  awaiting_owner: "Waiting for your decision",
+  installed: "Added",
+  rejected: "Not added",
+  stale: "Not added: the source changed",
+  expired: "Expired after 14 days",
+};
+
+/** Skills the CEO proposed, and where each one stands. The decision itself is answered in Decisions. */
+function Proposals({ companyId }: { companyId: string }) {
+  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals`, { signal }), 30_000, companyId);
+  const rows = (list.data ?? []).slice(0, 10);
+  if (!rows.length) return null;
+  return (
+    <section className="card" aria-label="Skills the CEO proposed" style={{ marginBottom: 16 }}>
+      <h2>Proposed by the CEO</h2>
+      <ul>
+        {rows.map((p) => (
+          <li key={p.id}>
+            <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
+            {` · security review: ${p.verdict ? p.verdict.replace("_", " ") : "pending"}`}
+            {p.overridden ? " · added against the reviewer's advice" : ""}
+            {p.status === "awaiting_owner" ? <> · <a href="#/decisions">Decide</a></> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function Skills({ company }: { company: Company | undefined }) {
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
   const [picked, setPicked] = useState<string | null>(null);
@@ -513,7 +549,7 @@ export function Skills({ company }: { company: Company | undefined }) {
       <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), pick(s.id))}>
         <span className="mono">{s.name}</span>
         <small>
-          {SOURCE[s.source]} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
+          {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
         </small>
       </a>
     </li>
@@ -535,6 +571,7 @@ export function Skills({ company }: { company: Company | undefined }) {
           <span>Added {added}. Choose who has it below.</span>
         </p>
       )}
+      <Proposals companyId={company.id} />
       <div className="wiki">
         <nav className="card wiki-list" aria-label="Skills">
           {list.data && rows.length === 0 && <p className="muted">No skills yet.</p>}

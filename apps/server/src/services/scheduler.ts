@@ -10,7 +10,7 @@ import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
-import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -19,6 +19,7 @@ import { effectivePolicy } from "./review-policy.js";
 import { handOverReviews, REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
+import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
@@ -26,6 +27,7 @@ import type { runnersService } from "./runners.js";
 import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
+import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 
@@ -456,7 +458,9 @@ export function schedulerService(
         lines.push("", `Ticket ${ref ? `${ref} (id ${t.t.id})` : t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
         const note = stateNoteLine(t.t, now());
-        if (note) lines.push("", note);
+        // On an open skill-review ticket the note is a way to talk to the reviewer, so it is
+        // untrusted like the ticket body, whoever wrote it (BOS-86, round 9).
+        if (note) lines.push("", (await openReviewProposal(db, t.t.companyId, t.t.id)) ? untrusted("state note on a skill review ticket", note) : note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) {
           const serious = t.t.risk === "high" || t.t.risk === "critical";
@@ -477,7 +481,7 @@ export function schedulerService(
             .where(and(eq(agents.companyId, agent.companyId), isNull(agents.retiredAt), eq(agents.paused, false), ne(agents.id, agent.id), sql`${agents.duty} is distinct from 'assistant'`));
           lines.push(
             "",
-            `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Only do the work yourself when nobody on the team can. New functionality is a feature: reuse a matching one (feedback features) or create_feature (with the objectiveId it serves, if any), and give every ticket for it that featureId; bug fixes and chores are plain tasks.${t.t.featureId && /^plan:/i.test(t.t.title) ? " This is a feature's plan ticket, so keep it: create the build task (create_ticket with feature and assignee) and a QA task that waitsOn the build, assigned to your QA agent or else a reviewer, then move this plan ticket to review so the owner can approve it closed. Never hand the plan ticket itself to a worker." : ""}${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,
+            `You run the company. If a worker on your team can do this ticket, hand it to them with assign_ticket (ticketId, agent name, a note saying why), or split it into tickets for them with create_ticket and assignee. Give each a size (1, 2, 3, 5 or 8) by comparison with the reference tickets sizing_guide shows. Only do the work yourself when nobody on the team can. New functionality is a feature: reuse a matching one (feedback features) or create_feature (with the objectiveId it serves, if any), and give every ticket for it that featureId; bug fixes and chores are plain tasks.${t.t.featureId && /^plan:/i.test(t.t.title) ? " This is a feature's plan ticket, so keep it: create the build task (create_ticket with feature and assignee) and a QA task that waitsOn the build, assigned to your QA agent or else a reviewer, then move this plan ticket to review so the owner can approve it closed. Never hand the plan ticket itself to a worker." : ""}${team.length ? ` Your team: ${team.map((m) => `${m.name} (${m.title ?? m.role})`).join(", ")}.` : " You have no one else on the team yet."}`,
           );
         }
         if (t.t.systemState === "in_progress")
@@ -496,6 +500,7 @@ export function schedulerService(
     }
     if (agent.duty === "wiki" && !w.ticketId) lines.push("", ...(await wikiDuty(agent)));
     if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
+    if (w.reason === RETRO_REASON) lines.push("", ...RETRO_DUTY);
     if (w.reason === REVIEW_REASON) {
       lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
       const copy = await reviewCopy(w);
@@ -511,6 +516,22 @@ export function schedulerService(
       UNTRUSTED_NOTE,
     );
     return lines.join("\n");
+  }
+
+  /** Ticket ids a wake's note names, the way a nudge or a review ask writes them. */
+  const NOTE_TICKET_IDS = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+
+  /**
+   * The ticket a wake was about when it wasn't formally on one (BOS-118): the last id its note
+   * names, when that ticket exists in the same company. A nudge that passed a ticketId lands here.
+   */
+  async function ticketNamedIn(note: string | null | undefined, companyId: string) {
+    if (!note) return null;
+    for (const id of [...new Set(note.match(NOTE_TICKET_IDS) ?? [])].reverse()) {
+      const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, companyId)));
+      if (t) return t.id;
+    }
+    return null;
   }
 
   /** A review wake's first ticket, when its project has a repo: the reviewer gets its own copy of that ticket's work. */
@@ -561,7 +582,12 @@ export function schedulerService(
     const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt);
     // A CEO's run belongs to its current chapter (CEO continuity).
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, model: agent.model, startedAt: now() });
+    // Why the run started is kept on it, so a run with no ticket still says what it was for
+    // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake lists
+    // several, and picking one of them would point the card at the wrong ticket.
+    const origin = w.reason;
+    const aboutTicket = w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
@@ -700,7 +726,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON && input.reason !== RETRO_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -717,6 +743,7 @@ export function schedulerService(
               sql`${wakes.reason} <> ${REVIEW_REASON}`,
               sql`${wakes.reason} <> ${ANSWER_REASON}`,
               sql`${wakes.reason} <> ${WATCHDOG_REASON}`,
+              sql`${wakes.reason} <> ${RETRO_REASON}`,
             ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
@@ -766,8 +793,8 @@ export function schedulerService(
       const note = input.note ?? null;
       const priority = input.priority ?? 2;
       const t = now();
-      // Chat runs have their own tools, and a watch report and a tree-stopped brief are built from their wake's note, so none takes a steer.
-      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON) {
+      // Chat runs have their own tools, and a watch report, a tree-stopped brief or a retro (its duty lines go in the prompt) is built from its wake, so none takes a steer.
+      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
         const [live] = await db
           .select({ id: runs.id })
           .from(runs)
@@ -849,8 +876,11 @@ export function schedulerService(
       if (to.id === from.id) return { ok: false, error: "That's you." };
       const ticketId = input.ticketId ?? null;
       if (ticketId) {
-        const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
+        const [tk] = await db.select({ id: tickets.id, companyId: tickets.companyId, assigneeAgentId: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
         if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
+        // An open skill-review ticket is a gate: the proposal's author must not nudge the reviewer into a verdict.
+        const refusal = await reviewTicketWriteRefusal(db, tk.companyId, ticketId, from.id);
+        if (refusal) return { ok: false, error: `${refusal} Don't nudge the reviewer about the verdict.` };
       }
       // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
       // Master's nudges come only from the watchdog, which has its own hourly cap, so they neither count nor are refused:
@@ -905,10 +935,12 @@ export function schedulerService(
         }
         return { ok: false, error: `You and ${to.name} have nudged each other ${LOOP_EXCHANGES} times about this in 10 minutes. ${ticketId ? "Put the rest on the ticket" : "Put it on a ticket (create one if needed)"} instead of nudging again.` };
       }
-      await db.insert(nudges).values(row);
+      const [sentNudge] = await db.insert(nudges).values(row).returning({ id: nudges.id });
       // On the ticket's timeline (or the company's log without one). The watchdog logs its own nudges.
       if (from.duty !== SCRUM_MASTER_DUTY) await record(db, { companyId: from.companyId, agentId: from.id, ticketId, kind: "nudge", summary: `${from.name} nudged ${to.name}: ${input.why.trim()}`, at: now() });
       const w = await this.notify(to.id, { ticketId, reason: "nudge", causedByRunId: input.runId, note: `${from.name}, a colleague, nudged you.\n${untrusted(`agent ${from.name}`, `${from.name} says: ${input.why}`)}` });
+      // The run this starts can say who nudged and why in plain words (BOS-118).
+      if (sentNudge) await db.update(nudges).set({ wakeId: w.id }).where(eq(nudges.id, sentNudge.id));
       return w.status === "dropped" ? { ok: false, error: w.statusReason ?? "The nudge was dropped." } : { ok: true, delivered: w.status === "steered" ? "straight into their running work" : "they will be woken with it", wakeId: w.id };
     },
 
