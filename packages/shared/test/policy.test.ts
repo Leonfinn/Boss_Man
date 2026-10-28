@@ -556,3 +556,37 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     expect(explainCommand("rm -rf /tmp/a").summary).not.toMatch(/install scripts|repository/);
   });
 });
+
+describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+
+  it("pins the route of a command whose only delete is a /tmp entry (finding 2)", () => {
+    // Checked out into the same /tmp entry first, the install log is a plain temp cleanup: CEO first, Allow.
+    const c = "rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && pnpm install > /tmp/a.log 2>&1";
+    expect(route(c)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(recommendedVerdict(exec(c))).toBe("allow");
+    // Known limit: an install outside the checkout still goes to the owner. It must stay off the CEO route either way.
+    const bare = "rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1";
+    expect(route(bare).outcome).toBe("owner");
+    expect(tempCleanup(bare)).toBe(false);
+  });
+
+  // Fails today: the plan says a command whose only delete is in /tmp is never recommended Deny. The fix is tracked in follow-up ticket cd2c2730 (and BOS-165); remove `.fails` when it lands.
+  it.fails("never recommends Deny for an install that logs into /tmp (finding 2, known gap)", () => {
+    expect(recommendedVerdict(exec("rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1"))).not.toBe("deny");
+  });
+
+  it("keeps the /tmp-only rule from allowing an install in a temp checkout or git worktree prune (finding 3)", () => {
+    for (const c of ["rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && npm install", "rm -rf /tmp/a && git worktree prune"]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    expect(tempCleanup("rm -rf /tmp/a && git worktree prune")).toBe(false);
+    expect(route("rm -rf /tmp/a && git worktree prune").outcome).toBe("owner");
+  });
+
+  it("pins the verdict for shred and find -delete (finding 4)", () => {
+    expect(recommendedVerdict(exec("shred /tmp/a"))).toBe("deny");
+    expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
+  });
+});

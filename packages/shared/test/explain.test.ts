@@ -168,3 +168,30 @@ describe("git subcommands (BOS-111)", () => {
     expect(explainCommand("git frobnicate").summary).toBe("Runs a git command Boss Man doesn't recognise: frobnicate.");
   });
 });
+
+describe("round-5 regression pins (BOS-153)", () => {
+  it("says so on the card when an install in a temp checkout or a worktree prune reaches outside /tmp (finding 3)", () => {
+    const install = explainCommand("rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && npm install");
+    expect(install.scratch).toBeUndefined();
+    expect(install.summary).toMatch(/install scripts/);
+    const prune = explainCommand("rm -rf /tmp/a && git worktree prune");
+    expect(prune.scratch).toBeUndefined();
+    expect(prune.summary).toMatch(/writes into the project's repository/);
+  });
+
+  it("gives no /tmp note when an option carries the real target (finding 1)", () => {
+    for (const c of [
+      "rm -rf /tmp/a && cp -t /home/node /tmp/a",
+      "rm -rf /tmp/a && cp --target-directory=/home/node /tmp/a",
+      "rm -rf /tmp/a && diff --output=/home/node/x /tmp/a /tmp/b",
+      "rm -rf /tmp/a && sort -o/home/node/x /tmp/a",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+    }
+  });
+
+  it("keeps the /tmp note for find -delete, and gives none for shred (finding 4)", () => {
+    expect(explainCommand("find /tmp/x -delete").scratch?.note).toMatch(/^Works only in a temporary folder/);
+    expect(explainCommand("shred /tmp/a").scratch).toBeUndefined();
+  });
+});
