@@ -2,16 +2,23 @@ import { api, usd, type ActiveRun, type BudgetRow, type Company, type FundingSou
 import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
+import { windowLabel } from "@boss-man/shared";
 
 const pct = (f: number) => `${Math.round(f * 100)}%`;
-const clock = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+/** "Thu 29 Oct at 14:04": day, date and time in the same style as the reset line. */
+const dayAndTime = (iso: string) => {
+  const d = new Date(iso);
+  const day = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  return `${day} at ${d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
+};
+
 const compact = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
 /** The limit estimate under a quota bar (R78): how fast it's going, and whether it lasts until the reset. */
 function Forecast({ f }: { f: FundingStatus["forecasts"][string] | undefined }) {
   if (!f || f.perHour === null) return null;
   const rate = `about ${pct(f.perHour)} an hour`;
-  const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out at about ${clock(f.runsOutAt)} at the recent rate (${rate})`] : [false, `Lasts until it resets at the recent rate (${rate})`];
+  const [warn, text] = f.perHour <= 0 || !f.runsOutAt ? [false, "Not rising at the moment"] : f.beforeReset ? [true, `Runs out about ${dayAndTime(f.runsOutAt)} at the recent rate (${rate})`] : [false, `Won't run out before it resets, at the recent rate (${rate})`];
   return (
     <span className={warn ? undefined : "muted"} style={{ fontSize: 12, color: warn ? "var(--amber-ink)" : undefined }}>
       {text}
@@ -101,10 +108,12 @@ function SourceCard({ s }: { s: FundingStatus }) {
           </span>
         </>
       ) : s.quota.length ? (
-        s.quota.map((q) => (
+        s.quota.map((q) => {
+          const label = windowLabel(q.window);
+          return (
           <div key={q.window} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-              <span>{q.window === "five_hour" ? "5-hour window" : q.window === "seven_day" ? "This week" : q.window.replace(/_/g, " ")}</span>
+              <span>{label.name}</span>
               <span className="mono" style={{ color: q.utilization >= 0.9 ? "var(--amber-ink)" : undefined }}>
                 {pct(q.utilization)}
               </span>
@@ -112,6 +121,11 @@ function SourceCard({ s }: { s: FundingStatus }) {
             <div className={`bar${q.utilization >= 0.9 ? " warn" : ""}`} aria-hidden="true">
               <span style={{ width: pct(Math.min(1, q.utilization)) }} />
             </div>
+            {label.note && (
+              <span className="muted" style={{ fontSize: 12 }}>
+                {label.note}
+              </span>
+            )}
             {q.resetsAt && (
               <span className="muted" style={{ fontSize: 12 }}>
                 Resets {when(q.resetsAt)}
@@ -120,7 +134,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
             )}
             <Forecast f={s.forecasts[q.window]} />
           </div>
-        ))
+          );
+        })
       ) : s.source.kind === "subscription" ? (
         // A subscription isn't paid per run, so there's no money to show; its quota appears after its first run.
         <span className="muted">No quota reported yet. It shows here after the first run on this subscription.</span>

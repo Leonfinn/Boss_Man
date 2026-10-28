@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, parseMemory, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, parseMemory, parsePids, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -53,7 +53,7 @@ function fakeDocker() {
   return { docker, containers, calls, image };
 }
 
-const config = (): LauncherConfig => ({ dataRoot: mkdtempSync(path.join(tmpdir(), "bm-launch-")), network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4 * 1024 ** 3 });
+const config = (): LauncherConfig => ({ dataRoot: mkdtempSync(path.join(tmpdir(), "bm-launch-")), network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4 * 1024 ** 3, pidsLimit: 4096 });
 
 let close: (() => Promise<void>) | undefined;
 afterEach(async () => {
@@ -76,7 +76,7 @@ async function serve() {
 
 describe("the runner launcher (R55)", () => {
   it("builds exactly the fixed, locked-down container", () => {
-    expect(containerSpec({ dataRoot: "/mnt/data", network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4294967296 }, "app-co")).toEqual({
+    expect(containerSpec({ dataRoot: "/mnt/data", network: "boss-man_default", serverUrl: "ws://server:3100/api/runner/connect", memoryBytes: 4294967296, pidsLimit: 4096 }, "app-co")).toEqual({
       Image: "boss-man-runner:current",
       User: "1000:1000",
       Env: ["BOSSMAN_URL=ws://server:3100/api/runner/connect", "BOSSMAN_RUNNER_TOKEN_FILE=/run/secrets/runner_token"],
@@ -98,7 +98,7 @@ describe("the runner launcher (R55)", () => {
         PidMode: "",
         IpcMode: "private",
         UTSMode: "",
-        PidsLimit: 1024,
+        PidsLimit: 4096,
         Init: true,
         Memory: 4294967296,
         RestartPolicy: { Name: "unless-stopped" },
@@ -110,6 +110,10 @@ describe("the runner launcher (R55)", () => {
     expect(parseMemory("4g")).toBe(4294967296);
     expect(parseMemory("512m")).toBe(536870912);
     expect(() => parseMemory("lots")).toThrow();
+    expect(parsePids(undefined)).toBe(4096);
+    expect(parsePids("8192")).toBe(8192);
+    expect(() => parsePids("lots")).toThrow();
+    expect(() => parsePids("10")).toThrow();
   });
 
   it("writes the token, creates and starts the runner, and recreates it on a second call", async () => {

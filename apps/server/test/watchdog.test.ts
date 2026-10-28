@@ -521,6 +521,97 @@ describe("the read API and backtest (BOS-58)", () => {
     expect(bt.scrumMasterWakes).toBeGreaterThan(0);
     expect(bt.caveats.length).toBeGreaterThan(0);
   });
+
+  it("the backtest counts one wake per sweep, however many flags the sweep hands over", async () => {
+    await ctx.switchOn();
+    for (let i = 0; i < 5; i++) await ctx.ticket({ title: `Loose ${i}`, assigneeAgentId: null, stateChangedAt: ctx.ago(60), createdAt: ctx.ago(60) });
+    const bt = (await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/backtest?days=1`)).json();
+    expect(bt.flags.length).toBeGreaterThanOrEqual(5);
+    expect(bt.scrumMasterWakes).toBeLessThan(bt.flags.length);
+    expect(bt.busiestHourWakes).toBeLessThanOrEqual(bt.scrumMasterWakes);
+  });
+});
+
+describe("back-off for repeat flags and scheduled checks (BOS-121)", () => {
+  const MIN = 60_000;
+  /** Sweeps every 5 minutes for the given time; returns the minutes (from the first sweep) at which the Scrum Master was woken. */
+  const sweepFor = async (minutes: number) => {
+    const woken: number[] = [];
+    let seen = (await ctx.smWakes()).length;
+    for (let m = 0; m <= minutes; m += 5) {
+      await ctx.watchdog.run();
+      const n = (await ctx.smWakes()).length;
+      if (n > seen) woken.push(m);
+      seen = n;
+      await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+      ctx.advance(5);
+    }
+    return woken;
+  };
+
+  it("a ticket stuck for hours is handed on after the limit, then twice that, then four times, not every limit", async () => {
+    await ctx.switchOn({ inProgressHours: 1 });
+    await ctx.ticket({ stateChangedAt: ctx.ago(60) });
+    // Without back-off this would be woken at 0, 60, 120, 180 and 240.
+    expect(await sweepFor(300)).toEqual([0, 60, 180]);
+  });
+
+  it("starts over when the ticket gets a comment between hand-offs", async () => {
+    await ctx.switchOn({ inProgressHours: 1 });
+    const t = await ctx.ticket({ stateChangedAt: ctx.ago(60) });
+    await ctx.watchdog.run();
+    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+    ctx.advance(30);
+    await ctx.db.insert(activity).values({ companyId: ctx.companyId, ticketId: t.id, kind: "message", summary: "Replied: still waiting", at: ctx.now() });
+    ctx.advance(30);
+    // Second hand-off at 60 minutes; the comment means the third waits one limit again, not two.
+    expect((await sweepFor(90)).map((m) => m + 60)).toEqual([60, 120]);
+  });
+
+  it("still gives a flag to the CEO after two snoozes, however far the back-off has gone", async () => {
+    await ctx.switchOn({ inProgressHours: 1 });
+    const t = await ctx.ticket({ stateChangedAt: ctx.ago(60) });
+    await ctx.watchdog.run();
+    await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, backoffSteps: 5, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, t.id));
+    await ctx.watchdog.run();
+    const [f] = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id));
+    expect(f!.escalatedAt).not.toBeNull();
+  });
+
+  it("never flags a ticket whose assignee has a check scheduled for later, and flags it again once there is none", async () => {
+    await ctx.switchOn({ inProgressHours: 1 });
+    const t = await ctx.ticket({ stateChangedAt: ctx.ago(600), monitorAt: new Date(ctx.now().getTime() + 2 * H), monitorNote: "CI" });
+    await ctx.watchdog.run();
+    expect(await ctx.db.select().from(watchdogFlags)).toHaveLength(0);
+    expect(await ctx.smWakes()).toHaveLength(0);
+    await ctx.db.update(tickets).set({ monitorAt: null }).where(eq(tickets.id, t.id));
+    await ctx.watchdog.run();
+    expect((await ctx.db.select().from(watchdogFlags)).map((f) => f.rule)).toEqual(["stale_in_progress"]);
+  });
+
+  it("the backtest gives an idle ticket at most two hand-offs in four hours", async () => {
+    await ctx.switchOn({ inProgressHours: 1 });
+    const t = await ctx.ticket({ stateChangedAt: ctx.ago(230), createdAt: ctx.ago(230) });
+    const bt = await ctx.watchdog.backtest(ctx.companyId, 1);
+    const flags = bt.flags.filter((f) => f.ticketId === t.id);
+    expect(flags).toHaveLength(1);
+    // Hand-offs at 1 h and 2 h idle; the next would be at 4 h.
+    expect(flags[0]!.handOffs).toBe(2);
+    expect(bt.scrumMasterWakes).toBe(2);
+  });
+
+  it("the backtest reads scheduled checks back from the activity log", async () => {
+    await ctx.switchOn({ inProgressHours: 1 });
+    const checked = await ctx.ticket({ title: "Waiting on CI", stateChangedAt: ctx.ago(600), createdAt: ctx.ago(600) });
+    const plain = await ctx.ticket({ title: "Forgotten", stateChangedAt: ctx.ago(600), createdAt: ctx.ago(600) });
+    const until = ctx.ago(60);
+    await ctx.db.insert(activity).values({ companyId: ctx.companyId, ticketId: checked.id, agentId: ctx.dev.id, kind: "monitor", summary: `Developer scheduled a check for ${until.toISOString()}: CI`, at: ctx.ago(590) });
+    const bt = await ctx.watchdog.backtest(ctx.companyId, 1);
+    const first = (id: string) => new Date(bt.flags.find((f) => f.ticketId === id)!.firstAt).getTime();
+    expect(first(plain.id)).toBeLessThan(ctx.ago(400).getTime());
+    // Quiet while the check was pending; flagged only after it ran out.
+    expect(first(checked.id)).toBeGreaterThanOrEqual(until.getTime());
+  });
 });
 
 describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {

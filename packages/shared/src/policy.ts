@@ -229,14 +229,17 @@ const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-
  */
 export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const cmd = commandOf(info.rawInput) ?? info.title ?? "";
+  const run = dataText(cmd);
+  const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
+  // What the reader finds (BOS-116), as well as the text patterns.
+  const found = risksOf(info).filter((r) => r.kind === "destroys");
+  // Destructive commands that aren't file deletes are Deny even in /tmp (shred /tmp/a); find -delete counts as a delete.
+  if ([...hits, ...found.map((r) => r.text)].some((h) => !/^(rm|find)\b/i.test(h))) return "deny";
   // A command that only works in /tmp, with nothing in it Boss Man can't check, is safe too.
   const scratch = explainCommand(cmd).scratch;
   if (tempCleanup(cmd) || (scratch && !scratch.unchecked.length)) return "allow";
-  // Of what the reader finds (BOS-116), only a plainly written rm of build output can be vouched for.
-  const found = risksOf(info).filter((r) => r.kind === "destroys");
+  // Of the reader's findings, only a plainly written rm of build output can be vouched for.
   if (found.some((r) => !r.plain || !WORKSPACE_DELETE.test(r.text))) return "deny";
-  const run = dataText(cmd);
-  const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
   if (!hits.length && !found.length) return "allow";
   if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");

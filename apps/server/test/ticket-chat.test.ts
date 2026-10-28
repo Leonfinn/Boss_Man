@@ -130,6 +130,22 @@ describe("ticket conversation (R65)", () => {
     expect((await c.req("GET", `/api/tickets/${t.id}/messages`)).json().items).toEqual([expect.objectContaining({ author: "agent", agent: "Engineer", text: "Which footer, the app or the site?" })]);
   });
 
+  it("points an agent to raise a decision when its reply asks the owner to act and none covers it (BOS-122)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.scheduler.tick();
+    const client = await c.mcp(c.starts()[0]!.runId);
+    // A plain status reply gets no hint.
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "The footer is done. Details: the app and the site now match." } }))).toBe("Posted on the ticket's conversation.");
+    // Asking the owner to do something without a decision on their queue gets the hint.
+    const ask = textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } }));
+    expect(ask).toContain("Call raise_decision with blocksTicketId set to this ticket");
+    // Once an open decision blocks this ticket, the reply needs no hint.
+    await client.callTool({ name: "raise_decision", arguments: { question: "Apply the deploy by hand?", options: ["Done", "Not now"], recommended: "Done", blocksTicketId: t.id, triedFirst: "I tried to deploy from here, but the change touches deployment files the host refuses." } });
+    expect(textOf(await client.callTool({ name: "ticket_reply", arguments: { ticketId: t.id, text: "Please run scripts/deploy.sh on the server, then let me know." } }))).toBe("Posted on the ticket's conversation.");
+    await client.close();
+  });
+
   it("moves the card to the new state's column when an agent sets the state", async () => {
     const c = (ctx = await setup());
     const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Fix the footer", assigneeAgentId: c.worker.id })).json() as { id: string };
