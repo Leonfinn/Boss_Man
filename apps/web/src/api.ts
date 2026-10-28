@@ -69,7 +69,7 @@ export type PermissionExplanation = { title: string; summary: string; effect: "r
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
 export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string; originalQuestion?: string };
 /** A decision the CEO settled: by advice (advice), or a permission request it answered itself (settled, BOS-111). */
-export type AdvisedDecision = { id: string; companyId: string; question: string; about?: Array<{ ticketId: string; ref: string | null; title: string }>; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean } };
+export type AdvisedDecision = { id: string; companyId: string; question: string; about?: Array<{ ticketId: string; ref: string | null; title: string }>; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean } };
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
 
 export type Decision = {
@@ -128,6 +128,8 @@ export type Ticket = {
   workingSince?: string | null;
   branch: string | null;
   risk: Risk | null;
+  /** Relative size: 1, 2, 3, 5 or 8. */
+  size?: number | null;
   planFirst: boolean;
   plan: string | null;
   planApprovedAt: string | null;

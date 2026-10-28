@@ -102,7 +102,7 @@ describe("archived projects", () => {
     await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Work", assigneeAgentId: c.worker.id });
     await c.scheduler.tick();
     const client = await c.mcp(c.starts()[0]!.runId);
-    expect(textOf(await client.callTool({ name: "create_ticket", arguments: { title: "Sneak in", project: "LLM Wiki" } }))).toContain("Name the project: one of Site.");
+    expect(textOf(await client.callTool({ name: "create_ticket", arguments: { size: 3, title: "Sneak in", project: "LLM Wiki" } }))).toContain("Name the project: one of Site.");
     await client.close();
 
     expect((await c.req("PATCH", `/api/projects/${old.id}`, { archived: false })).json()).toMatchObject({ archivedAt: null });

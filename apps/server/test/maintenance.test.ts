@@ -8,7 +8,7 @@ import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, notifications, runners, settings, tickets, wakes } from "../src/db/schema.js";
-import { getHold, HOLD_REASON } from "../src/services/maintenance.js";
+import { getHold, HOLD_REASON, WRAP_UP } from "../src/services/maintenance.js";
 import { MISSED_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -73,6 +73,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const req = (method: "GET" | "POST", url: string, payload?: unknown) => built.app.inject({ method, url, headers: { cookie }, ...(payload !== undefined ? { payload: payload as object } : {}) });
 
   const commands: Array<Extract<RunnerCommand, { type: "run.start" }> & { company: string }> = [];
+  const messages: Array<Extract<RunnerCommand, { type: "run.message" }>> = [];
   let seq = 0;
   /** A company with its runner (connected unless said otherwise) and a launcher slug. */
   const company = async (name: string, slug: string, connect = true) => {
@@ -82,6 +83,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
     if (connect)
       built.runners.connect(reg.runnerId, (cmd) => {
         if (cmd.type === "run.start") commands.push({ ...cmd, company: name });
+        if (cmd.type === "run.message") messages.push(cmd);
         return true;
       });
     await db.insert(settings).values({ key: `runner-slug:${c.id}`, value: slug }).onConflictDoUpdate({ target: settings.key, set: { value: slug } });
@@ -104,7 +106,7 @@ async function setup(opts: { launcher?: boolean; reconnectMs?: number } = {}) {
   const maint = () => req("GET", "/api/maintenance").then((r) => r.json());
   const open = async () => (await db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type: string }).type === "maintenance");
   const titles = async () => (await db.select().from(notifications)).map((n) => `${n.level}: ${n.title}`);
-  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, advance, maint, open, titles };
+  return { ...built, db, close, dir, fake, finish, req, company, wake, commands, messages, advance, maint, open, titles };
 }
 
 describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
@@ -146,6 +148,17 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.maint()).toMatchObject({ on: false, last: { ok: true, title: "Runners updated" } });
     expect(await c.titles()).toContain("note: Runners updated");
     expect(c.commands.map((x) => x.company).sort()).toEqual(["App Co", "App Co", "Home Lab"]);
+  });
+
+  it("tells each running agent once to wrap up when the hold starts", async () => {
+    const c = (ctx = await setup());
+    const a = await c.company("App Co", "app-co");
+    await c.company("Home Lab", "home-lab");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.req("POST", "/api/maintenance/start", {});
+    await c.req("POST", "/api/maintenance/start", {}); // already on: nobody is told twice
+    expect(c.messages).toEqual([{ type: "run.message", runId: c.commands[0]!.runId, text: `Message from Boss Man: ${WRAP_UP}`, interrupt: false }]);
   });
 
   it("asks the owner once at the deadline; each answer does what it says", async () => {

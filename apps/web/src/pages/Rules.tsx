@@ -4,7 +4,7 @@ import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
-type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean };
+type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; workingCopyOnly?: boolean };
 type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number };
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }> };
 
@@ -26,6 +26,7 @@ function describeMatch(m: Match) {
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
   if (m.scratchOnly) parts.push("everything it changes or deletes is in /tmp");
+  if (m.workingCopyOnly) parts.push("its deletes are plain paths in the agent's own working copy (or /tmp)");
   return parts.join(" and ");
 }
 
