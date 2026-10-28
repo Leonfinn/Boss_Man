@@ -9,7 +9,7 @@
 // Lessons from cline/kanban: creation is serialised per repo, an existing worktree is never
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
@@ -17,6 +17,7 @@ import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 
 const run = promisify(execFile);
+const VERIFY_KILL_GRACE_MS = 2000;
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
 export type WorkspaceInfo = { path: string; branch: string; baseCommit: string; created: boolean; restoredPatch: boolean };
@@ -432,19 +433,49 @@ export class Workspaces {
   async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = 10 * 60_000): Promise<VerifyResult> {
     const dir = await this.reopen(spec);
     const started = Date.now();
-    try {
-      const { stdout, stderr } = await run("sh", ["-c", command], {
+    return new Promise<VerifyResult>((resolve) => {
+      // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
+      const child = spawn("sh", ["-c", command], {
         cwd: dir,
-        timeout: timeoutMs,
-        maxBuffer: 32 * 1024 * 1024,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
         env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1" } as NodeJS.ProcessEnv,
       });
-      return { ok: true, exitCode: 0, timedOut: false, output: `${stdout}${stderr}`.slice(-8192), ms: Date.now() - started };
-    } catch (err) {
-      const e = err as { code?: number; killed?: boolean; signal?: string; stdout?: string; stderr?: string };
-      const timedOut = !!e.killed && e.signal === "SIGTERM";
-      return { ok: false, exitCode: typeof e.code === "number" ? e.code : null, timedOut, output: `${e.stdout ?? ""}${e.stderr ?? ""}`.slice(-8192), ms: Date.now() - started };
-    }
+      const killGroup = (signal: NodeJS.Signals) => {
+        try {
+          if (child.pid) process.kill(-child.pid, signal);
+        } catch {
+          // group already gone
+        }
+      };
+      let tail = "";
+      const onData = (chunk: Buffer) => {
+        tail = (tail + chunk.toString()).slice(-8192);
+      };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      let timedOut = false;
+      let finished = false;
+      let hardKill: NodeJS.Timeout | undefined;
+      const finish = (exitCode: number | null) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        clearTimeout(hardKill);
+        killGroup("SIGKILL"); // strays left behind by a check that has already exited
+        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started });
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killGroup("SIGTERM");
+        hardKill = setTimeout(() => finish(null), VERIFY_KILL_GRACE_MS);
+      }, timeoutMs);
+      child.on("error", (err) => {
+        tail += String(err.message);
+        finish(null);
+      });
+      child.on("close", (code) => finish(code));
+    });
   }
 
   /**
