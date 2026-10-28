@@ -112,6 +112,8 @@ export type DecisionContext =
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
   | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
 export const DROP = "Drop dependency";
@@ -905,8 +907,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
       // The ticket a card is about: what it holds up, plus the ticket named in its context (which may be done, or hold nothing up).
       const aboutIds = (d: typeof decisions.$inferSelect): string[] => {
-        const own = (d.context as { ticketId?: unknown }).ticketId;
-        return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : [])])];
+        const c = d.context as DecisionContext;
+        const own = (c as { ticketId?: unknown }).ticketId;
+        // A hire lists the tickets that wait for the new agent.
+        const hireFor = c.type === "hire" ? (c.proposal.forTickets ?? []).filter((id) => UUID.test(id)) : [];
+        return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : []), ...hireFor])];
       };
       const wantedAbout = [...new Set(open.flatMap(({ d }) => aboutIds(d)))];
       const aboutRows = wantedAbout.length
@@ -1102,11 +1107,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
+      // The ticket each card was about: the one in its context, or else the one its run was working on.
+      const runIds = [...new Set([...rows, ...permissions].flatMap((r) => { const c = r.context as { ticketId?: unknown; runId?: unknown }; return typeof c.ticketId !== "string" && typeof c.runId === "string" ? [c.runId] : []; }))];
+      const runTicket = new Map(runIds.length ? (await db.select({ id: runs.id, ticketId: runs.ticketId }).from(runs).where(inArray(runs.id, runIds))).map((r) => [r.id, r.ticketId]) : []);
+      const ticketIdOf = (c: unknown) => { const x = c as { ticketId?: unknown; runId?: unknown }; return typeof x.ticketId === "string" ? x.ticketId : typeof x.runId === "string" ? (runTicket.get(x.runId) ?? null) : null; };
+      const ticketIds = [...new Set([...rows, ...permissions].flatMap((r) => ticketIdOf(r.context) ?? []))];
+      const found = ticketIds.length
+        ? await db.select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix }).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId)).where(inArray(tickets.id, ticketIds))
+        : [];
+      const aboutOf = (r: { companyId: string; context: unknown }) => {
+        const id = ticketIdOf(r.context);
+        const t = found.find((f) => f.id === id);
+        return t && t.companyId === r.companyId ? [{ ticketId: t.id, title: t.title, ref: ticketRef(t.prefix, t.number) }] : [];
+      };
       return [
-        ...rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)! })),
+        ...rows.map((r) => ({ id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), advice: adviceOf(r.context)!, about: aboutOf(r) })),
         ...permissions.map((r) => {
           const ctx = r.context as Extract<DecisionContext, { type: "permission" }>;
-          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), settled: { by: ctx.settled!.name, answer: r.answer ?? "", note: ctx.settled!.note, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true } };
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), about: aboutOf(r), settled: { by: ctx.settled!.name, answer: r.answer ?? "", note: ctx.settled!.note, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true } };
         }),
       ];
     },
