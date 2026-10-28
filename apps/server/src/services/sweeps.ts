@@ -6,6 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
+import { VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
@@ -21,6 +22,12 @@ export type SweepLimits = {
   stallAfterMs: number;
   /** A ready, assigned ticket with no activity for this long counts as forgotten (R82). */
   missedAfterMs: number;
+  /**
+   * An approved ticket whose merge never finished is tried again after this long. It is longer than
+   * the server's wait for a merge check, so a check that is still running is never mistaken for one
+   * that stopped.
+   */
+  mergeMissedAfterMs: number;
   /** An agent is nudged about the same ticket at most once per this long (R82). */
   missedEveryMs: number;
   /** "Keep waiting" holds a stall alert off for this long; if the run is still quiet it is raised again. */
@@ -28,7 +35,15 @@ export type SweepLimits = {
   /** A run whose runner is offline (or never reported it) this long past the stall limit is ended by the server. */
   lostAfterMs: number;
 };
-export const DEFAULT_SWEEP_LIMITS: SweepLimits = { staleAfterMs: 24 * 3_600_000, stallAfterMs: 5 * 60_000, missedAfterMs: 30 * 60_000, missedEveryMs: 4 * 3_600_000, keepWaitingMs: 30 * 60_000, lostAfterMs: 30 * 60_000 };
+export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
+  staleAfterMs: 24 * 3_600_000,
+  stallAfterMs: 5 * 60_000,
+  missedAfterMs: 30 * 60_000,
+  mergeMissedAfterMs: VERIFY_ASK_TIMEOUT_MS + 5 * 60_000,
+  missedEveryMs: 4 * 3_600_000,
+  keepWaitingMs: 30 * 60_000,
+  lostAfterMs: 30 * 60_000,
+};
 // After this many nudges in a day the owner is told instead (R82).
 const MISSED_NUDGES_PER_DAY = 2;
 
@@ -292,7 +307,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.missedAfterMs))));
+      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.mergeMissedAfterMs))));
     let raised = 0;
     for (const ticket of stuck) {
       const rows = await latestRows(db, ticket.id);

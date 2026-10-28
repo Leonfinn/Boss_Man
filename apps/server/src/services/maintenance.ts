@@ -12,6 +12,8 @@ import { CANCEL_UPDATE, KEEP_WAITING_MORE, STOP_AND_UPDATE } from "./decisions.j
 import type { NotifyInput } from "./notifications.js";
 
 export const MAINTENANCE_KEY = "maintenance";
+/** Said to every running agent when a runner update starts waiting, and after each ticket move while it waits. */
+export const WRAP_UP = "A runner update is waiting for your run to end. Commit your work, update your ticket, then end your turn now. Don't start anything new: you'll be woken again once the update is done.";
 /** How the last runner update ended, for Settings: {at, startedAt, ok, title, body}. */
 export const MAINTENANCE_LAST_KEY = "maintenance:last";
 /** The status_reason a held wake carries; it stays queued (like a paused company's) and launches once the hold lifts. */
@@ -47,6 +49,8 @@ export type MaintenanceDeps = {
   settled: () => Promise<unknown>;
   tick: () => Promise<unknown>;
   notify: (n: NotifyInput) => Promise<unknown>;
+  /** Sends a message into every run still going, so agents wrap up instead of looking for more work. */
+  tellRunning?: (text: string) => Promise<unknown>;
   /** The deployer folder; update-runner.sh drops inbox/drain.json there to ask for a drain. */
   dir?: string;
   drainMinutes?: number;
@@ -114,6 +118,7 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
       const t = now();
       const h: Hold = { reason: opts.reason ?? "runner update", since: t.toISOString(), deadline: new Date(t.getTime() + minutes * 60_000).toISOString(), minutes };
       await save(h);
+      await deps.tellRunning?.(WRAP_UP).catch((err) => deps.log?.(`telling running agents to wrap up failed: ${(err as Error).message}`));
       await deps.notify({ companyId: null, level: "note", title: "Update pending: waiting for runs to finish", body: `Nothing new starts in any company. Each runner is swapped as its company goes idle. If runs are still going after ${minutes} minutes, you will be asked.`, link: "#/settings" });
       return h;
     },

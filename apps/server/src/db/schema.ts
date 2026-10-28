@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -303,6 +303,8 @@ export const tickets = pgTable(
     risk: riskTier("risk"),
     /** Plan-first (R40): the agent starts in plan mode until its plan is approved. */
     planFirst: boolean("plan_first").notNull().default(false),
+    /** Relative size, 1, 2, 3, 5 or 8 (docs/19 part 6), set by whoever creates the task; null is unsized. */
+    size: integer("size"),
     /** The CEO's order for this ticket's reviews (slots by name); null or empty means all at once. */
     reviewOrder: jsonb("review_order").$type<string[]>(),
     plan: text("plan"),
@@ -336,7 +338,7 @@ export const tickets = pgTable(
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number)],
+  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number), check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`)],
 );
 
 // ---------- Decisions and engagements ----------
@@ -723,6 +725,95 @@ export const reviewRequests = pgTable(
     decidedAt: timestamp("decided_at", { withTimezone: true }),
   },
   (t) => [uniqueIndex("review_requests_slot").on(t.ticketId, t.round, t.kind)],
+);
+
+/**
+ * One row per ticket state change, written by the same database trigger that keeps state_changed_at,
+ * so every write path counts (docs/19-workflow-retros.md).
+ */
+// shortcut: history starts at deploy; older tickets have only the activity log. Upgrade if a retro needs them.
+export const ticketTransitions = pgTable(
+  "ticket_transitions",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** Null for the first state of a new ticket. */
+    fromState: text("from_state"),
+    toState: text("to_state").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("ticket_transitions_company_at").on(t.companyId, t.at), index("ticket_transitions_ticket_at").on(t.ticketId, t.at)],
+);
+
+/** One row per CI or verify result on a commit; tickets.pull_request_ci keeps only the latest CI result. */
+export const checkResults = pgTable(
+  "check_results",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    sha: text("sha"),
+    /** ci, verify or deep_verify. */
+    kind: text("kind").notNull(),
+    passed: boolean("passed").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    detail: text("detail"),
+  },
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+);
+
+/** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
+export const retros = pgTable(
+  "retros",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    /** The period: from the last retro's end (or the company's start) to when this one started. */
+    since: timestamp("since", { withTimezone: true }).notNull(),
+    until: timestamp("until", { withTimezone: true }).notNull(),
+    doneCount: integer("done_count").notNull(),
+    /** Null until save_retro; then the ranked list of findings. */
+    findings: jsonb("findings").$type<RetroFinding[]>(),
+    savedAt: timestamp("saved_at", { withTimezone: true }),
+  },
+  (t) => [index("retros_company_started").on(t.companyId, t.startedAt)],
+);
+
+/** One proposed change to how the team works, from a retro (part 3). Part 4 adds the kept and reverted statuses. */
+export const workflowChanges = pgTable(
+  "workflow_changes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    retroId: uuid("retro_id").notNull().references(() => retros.id, { onDelete: "cascade" }),
+    /** One of WORKFLOW_LEVERS. */
+    lever: text("lever").notNull(),
+    targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    targetRole: text("target_role"),
+    summary: text("summary").notNull(),
+    /** What the setting was when proposed, so Revert can put it back; and what Apply sets. */
+    before: jsonb("before"),
+    after: jsonb("after"),
+    /** One of WORKFLOW_METRICS, the scope it is measured over ({role} | {agentId} | {from, to, kind}) and its value when proposed. */
+    metric: text("metric").notNull(),
+    metricScope: jsonb("metric_scope").notNull().default({}),
+    baseline: real("baseline"),
+    /** Ticket ids. */
+    evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
+    approver: text("approver").$type<"ceo" | "owner">().notNull(),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    checkDueAt: timestamp("check_due_at", { withTimezone: true }),
+    /** Part 4: what the check measured (value, when, how many relevant tickets or handoffs, whether the 30-day cap raised it) and the Keep / Revert decision. */
+    result: jsonb("result").$type<{ value: number | null; measuredAt: string; sample: number; capped: boolean }>(),
+    checkDecisionId: uuid("check_decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("workflow_changes_company").on(t.companyId, t.createdAt), index("workflow_changes_retro").on(t.retroId)],
 );
 
 /** Normalised failures (run errors, failed checks), to spot an agent going round in circles. */
@@ -1201,9 +1292,9 @@ export const watchdogFlags = pgTable(
     /** Snoozes in a row in this episode; after two, the next time it is due it goes to the CEO. */
     snoozeCount: integer("snooze_count").notNull().default(0),
     escalatedAt: timestamp("escalated_at", { withTimezone: true }),
-    /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
     /** Hand-offs in a row with nothing happening on the ticket in between; each doubles the wait before the next (BOS-121). */
     backoffSteps: integer("backoff_steps").notNull().default(0),
+    /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
     detail: jsonb("detail").notNull().default({}),
   },
   (t) => [
@@ -1240,7 +1331,7 @@ export const watchdogActions = pgTable(
 
 // ---------- Skills (R71) ----------
 
-export const skillSource = pgEnum("skill_source", ["written", "link", "upload"]);
+export const skillSource = pgEnum("skill_source", ["written", "link", "upload", "retro"]);
 
 /**
  * A company's skill library: Agent Skills folders (a SKILL.md and any supporting files) that
