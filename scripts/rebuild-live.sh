@@ -51,7 +51,14 @@ docker compose up -d --no-deps --force-recreate "server-$colour" || die "the res
 docker compose kill -s SIGUSR2 "server-$colour" || die "couldn't signal server-$colour; send it by hand: docker compose kill -s SIGUSR2 server-$colour"
 
 step "5/5 Wait until it leads at ${commit:0:7}"
-field() { python3 -I -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1" 2>/dev/null || true; }
+# JSON field from stdin. python3 is on the host (docs/09); a runner image, where scripts/check-all.sh
+# runs the shell tests, has jq instead.
+if command -v python3 >/dev/null 2>&1; then
+  field() { python3 -I -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1" 2>/dev/null || true; }
+else
+  # Same output as the python version, booleans included (True/False), so callers compare one way.
+  field() { jq -r --arg k "$1" '.[$k] | if . == true then "True" elif . == false then "False" elif . == null then "" else . end' 2>/dev/null || true; }
+fi
 end=$((SECONDS + WAIT_SECONDS)) body="" sent=$SECONDS
 while :; do
   body="$(docker compose exec -T "server-$colour" node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>{console.log(await r.text())}).catch(()=>{})" 2>/dev/null || true)"

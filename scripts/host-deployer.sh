@@ -58,7 +58,70 @@ g() { git -C "$REPO" "$@"; }
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { ((DRY)) || printf '%s %s\n' "$(now)" "$*" >>"$LOG"; printf '%s\n' "$*"; }
-json() { python3 -I -c 'import json,sys; print(json.dumps(dict(a.split("=", 1) for a in sys.argv[1:])))' "$@"; }
+
+# JSON in and out. The host has python3 (docs/09); a runner image, where scripts/check-all.sh runs the
+# shell tests, has jq instead. Pick one implementation once, so the rest of the script does not care.
+if command -v python3 >/dev/null 2>&1; then
+  json() { python3 -I -c 'import json,sys; print(json.dumps(dict(a.split("=", 1) for a in sys.argv[1:])))' "$@"; }
+  jfield() { python3 -I -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1" 2>/dev/null || true; }
+  # Reads a field of scripts/deploy.sh's own status file.
+  deploy_status_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" "$1" 2>/dev/null || true; }
+  write_available() { # head tip commits paths: the offer, as JSON, on stdout
+    python3 -I - "$1" "$2" "$3" "$4" "$INFRA" "$NOT_INFRA" "$RUNNER_PATHS" "$(now)" <<'PY'
+import json, re, sys
+head, tip, cf, pf, infra, notinfra, runner, at = sys.argv[1:]
+commits = [dict(zip(("sha", "subject"), l.rstrip("\n").split(" ", 1))) for l in open(cf) if l.strip()]
+paths = [l.rstrip("\n") for l in open(pf) if l.strip()]
+print(json.dumps({"version": 1, "checkedAt": at, "deployed": head, "tip": tip, "commits": commits,
+                  "paths": paths[:300], "infraPaths": [p for p in paths if re.search(infra, p) and not re.search(notinfra, p)][:50],
+                  "runnerChanged": any(re.search(runner, p) for p in paths)}))
+PY
+  }
+  parse_request() { # file: "id target commit" on stdout; exit 1 unless it has the expected shape
+    python3 -I - "$1" <<'PY'
+import json, re, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+ok = isinstance(d, dict) and all(isinstance(d.get(k), str) for k in ("id", "target", "commit", "requestedAt", "approvedBy"))
+ok = ok and re.fullmatch(r"[0-9a-fA-F-]{36}", d["id"]) and d["target"] in ("server", "runner") and re.fullmatch(r"[0-9a-f]{40}", d["commit"])
+ok = ok and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", d["approvedBy"]) and re.fullmatch(r"[0-9T:.+Z-]{10,40}", d["requestedAt"])
+if not ok:
+    sys.exit(1)
+print(d["id"], d["target"], d["commit"])
+PY
+  }
+else
+  json() {
+    local kv pairs=()
+    for kv in "$@"; do pairs+=("${kv%%=*}" "${kv#*=}"); done
+    jq -cn '$ARGS.positional as $a | reduce range(0; $a|length; 2) as $i ({}; .[$a[$i]] = $a[$i+1])' --args "${pairs[@]}"
+  }
+  # Same output as the python version, booleans included (True/False), so callers compare one way.
+  jfield() { jq -r --arg k "$1" '.[$k] | if . == true then "True" elif . == false then "False" elif . == null then "" else . end' 2>/dev/null || true; }
+  deploy_status_field() { jq -r --arg k "$1" '.[$k] // ""' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" 2>/dev/null || true; }
+  write_available() {
+    jq -n --arg head "$1" --arg tip "$2" --arg at "$(now)" --arg infra "$INFRA" --arg notinfra "$NOT_INFRA" \
+      --arg runner "$RUNNER_PATHS" --rawfile cf "$3" --rawfile pf "$4" '
+      def lines: split("\n") | map(select(length > 0));
+      ($cf | lines | map(capture("^(?<sha>[^ ]+) (?<subject>.*)$"))) as $cs |
+      ($pf | lines) as $ps |
+      {version: 1, checkedAt: $at, deployed: $head, tip: $tip, commits: $cs,
+       paths: $ps[:300],
+       infraPaths: [$ps[] | select(test($infra)) | select((test($notinfra)) | not)][:50],
+       runnerChanged: any($ps[]; test($runner))}'
+  }
+  parse_request() {
+    jq -er '
+      def str: type == "string";
+      if type == "object" and (.id|str) and (.target|str) and (.commit|str) and (.requestedAt|str) and (.approvedBy|str)
+         and (.id|test("^[0-9a-fA-F-]{36}$")) and (.target == "server" or .target == "runner")
+         and (.commit|test("^[0-9a-f]{40}$")) and (.approvedBy|test("^[A-Za-z0-9_.-]{1,64}$"))
+         and (.requestedAt|test("^[0-9T:.+Z-]{10,40}$"))
+      then "\(.id) \(.target) \(.commit)" else error("the request file does not match the expected format") end' "$1" 2>/dev/null
+  }
+fi
 
 [[ -d $INBOX && -d $OUTBOX ]] || { echo "ERROR: $INBOX and $OUTBOX must exist (docs/06-install-truenas.md, Install the host deployer)." >&2; exit 1; }
 mkdir -p "$STATE"
@@ -117,15 +180,7 @@ refresh_available() {
       tip="" # main is not a fast-forward of what runs: nothing can be offered
     fi
   fi
-  python3 -I - "$head" "$tip" "$commits" "$paths" "$INFRA" "$NOT_INFRA" "$RUNNER_PATHS" "$(now)" >"$f.tmp" <<'PY'
-import json, re, sys
-head, tip, cf, pf, infra, notinfra, runner, at = sys.argv[1:]
-commits = [dict(zip(("sha", "subject"), l.rstrip("\n").split(" ", 1))) for l in open(cf) if l.strip()]
-paths = [l.rstrip("\n") for l in open(pf) if l.strip()]
-print(json.dumps({"version": 1, "checkedAt": at, "deployed": head, "tip": tip, "commits": commits,
-                  "paths": paths[:300], "infraPaths": [p for p in paths if re.search(infra, p) and not re.search(notinfra, p)][:50],
-                  "runnerChanged": any(re.search(runner, p) for p in paths)}))
-PY
+  write_available "$head" "$tip" "$commits" "$paths" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
@@ -203,7 +258,6 @@ probe() { # service port path
   if [[ $1 == proxy ]]; then compose exec -T proxy wget -q -T 5 -O - "http://127.0.0.1:$2$3"
   else compose exec -T "$1" node -e "fetch('http://127.0.0.1:$2$3').then(async r=>{console.log(await r.text());process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"; fi
 }
-jfield() { python3 -I -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1" 2>/dev/null || true; }
 
 # Polls /api/ready of a service until it is ok, has this role and (when given) this commit.
 wait_ready() { # service role commit seconds
@@ -376,9 +430,6 @@ do_rollback_bluegreen() {
   BG_MSG="Rolled back to ${ocommit:0:8}: $BG_IDLE is live; $BG_LIVE is stopped. The database was not changed. Backup: $BG_BACKUP"
 }
 
-# Reads a field of scripts/deploy.sh's own status file.
-deploy_status_field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" "$1" 2>/dev/null || true; }
-
 main() {
   local req="$INBOX/request.json"
   if ((ROLLBACK)); then
@@ -405,23 +456,10 @@ main() {
 
   [[ -f $mine && ! -L $mine && $(stat -c %s "$mine") -le 4096 ]] || finish rejected "Rejected: the request file is not a plain file under 4 KB."
   local parsed
-  parsed="$(python3 -I - "$mine" <<'PY'
-import json, re, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(1)
-ok = isinstance(d, dict) and all(isinstance(d.get(k), str) for k in ("id", "target", "commit", "requestedAt", "approvedBy"))
-ok = ok and re.fullmatch(r"[0-9a-fA-F-]{36}", d["id"]) and d["target"] in ("server", "runner") and re.fullmatch(r"[0-9a-f]{40}", d["commit"])
-ok = ok and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", d["approvedBy"]) and re.fullmatch(r"[0-9T:.+Z-]{10,40}", d["requestedAt"])
-if not ok:
-    sys.exit(1)
-print(d["id"], d["target"], d["commit"])
-PY
-)" || finish rejected "Rejected: the request file does not match the expected format."
+  parsed="$(parse_request "$mine")" || finish rejected "Rejected: the request file does not match the expected format."
   read -r REQ_ID TARGET COMMIT <<<"$parsed"
 
-  if [[ -s $OUTBOX/history.jsonl ]] && grep -qF "\"id\": \"$REQ_ID\"" "$OUTBOX/history.jsonl"; then
+  if [[ -s $OUTBOX/history.jsonl ]] && grep -qF "\"id\":\"$REQ_ID\"" "$OUTBOX/history.jsonl"; then
     finish rejected "Rejected: this request was already handled."
   fi
 
