@@ -55,6 +55,7 @@ import { dashboardService } from "./services/dashboard.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
+import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
@@ -384,6 +385,7 @@ export async function buildApp(opts: AppOptions) {
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
+    expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
   });
@@ -394,6 +396,16 @@ export async function buildApp(opts: AppOptions) {
     onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
   });
+  // The CEO's proposed skills (BOS-86): review by the Security Reviewer where required, the owner's decision, then install.
+  const skillProposals = skillProposalsService(db, skillsSvc, {
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    raiseDecision: (input) => decisionsSvc.raiseSkill(input),
+    withdrawDecision: (id) => decisionsSvc.withdraw(id),
+    tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
+    closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
+    now: opts.now,
+  });
+  decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
   const loops = loopGuards(db, { limits: opts.loopLimits, now: opts.now, alert: (input) => alerts.raise(input) });
   // The Scrum Master watchdog (BOS-58): its sweep runs on the leader's timer (main.ts), its actions through the Scrum Master's MCP tool.
   const watchdog = watchdogService(db, {
@@ -451,7 +463,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -483,6 +495,13 @@ export async function buildApp(opts: AppOptions) {
       secure: opts.secureCookies ?? true,
       expires: expiresAt,
     });
+  }
+
+  /** The signed-in owner's username, for the log. */
+  async function ownerName(req: FastifyRequest) {
+    const token = req.cookies[SESSION_COOKIE];
+    const [row] = token ? await db.select({ username: owners.username }).from(sessions).innerJoin(owners, eq(owners.id, sessions.ownerId)).where(eq(sessions.tokenHash, hashToken(token))) : [];
+    return row?.username ?? "the owner";
   }
 
   async function requireOwner(req: FastifyRequest, reply: FastifyReply) {
@@ -1321,6 +1340,12 @@ export async function buildApp(opts: AppOptions) {
     };
     const SkillParams = z.object({ id: Uuid, skillId: Uuid });
     const SkillFiles = z.array(z.object({ path: z.string().min(1).max(500), content: z.string().max(4_000_000) })).min(1).max(200);
+    // Skills the CEO proposed: the owner answers through the decision; these show what is behind it.
+    owner.get("/api/companies/:id/skill-proposals", async (req) => skillProposals.list(IdParam.parse(req.params).id));
+    owner.get("/api/companies/:id/skill-proposals/:pid", async (req, reply) => {
+      const { id, pid } = z.object({ id: Uuid, pid: Uuid }).parse(req.params);
+      return skillProposals.detail(id, pid).catch(skillErrors(reply));
+    });
     owner.get("/api/companies/:id/skills", async (req) => skillsSvc.list(IdParam.parse(req.params).id));
     owner.post("/api/companies/:id/skills", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1333,7 +1358,9 @@ export async function buildApp(opts: AppOptions) {
         .parse(req.body);
       try {
         const added = b.from === "link" ? await skillsSvc.fromLink(id, b.url) : b.from === "written" ? [await skillsSvc.write(id, b)] : [await skillsSvc.upload(id, b.files, b.name)];
-        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name })));
+        // The owner's own add is their call, but it skips the review: say so in the log.
+        for (const x of added) await record(db, { companyId: id, kind: "skill.added_by_owner", summary: `The owner added the skill ${x.name} directly (${b.from === "link" ? `from ${b.url}` : b.from}). Added by the owner, not security-reviewed.` });
+        return reply.code(201).send(added.map((s) => ({ id: s.id, name: s.name, sourceRef: s.sourceRef })));
       } catch (err) {
         return skillErrors(reply)(err);
       }
@@ -1360,7 +1387,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
-      return skillsSvc.refresh(id, skillId).then((r) => ({ changed: r.changed, sourceRef: r.skill.sourceRef }), skillErrors(reply));
+      return skillProposals.proposeRefresh(id, skillId).then((p) => ({ changed: !!p, proposalId: p?.id ?? null, status: p?.status ?? null }), skillErrors(reply));
     });
     owner.delete("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
@@ -1377,7 +1404,7 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/skill-packs/refresh", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const { pack } = z.object({ pack: PackName }).parse(req.body);
-      return skillsSvc.refreshPack(id, pack).catch(skillErrors(reply));
+      return skillProposals.proposeRefreshPack(id, pack).catch(skillErrors(reply));
     });
     owner.delete("/api/companies/:id/skill-packs", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
@@ -1992,7 +2019,7 @@ export async function buildApp(opts: AppOptions) {
         .object({ answer: z.string().trim().min(1).max(4000), assigneeAgentId: Uuid.optional(), note: z.string().trim().max(2000).optional(), custom: z.boolean().optional(), picks: z.array(z.number().int().min(0)).max(20).optional() })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
@@ -2137,5 +2164,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skillProposals, ticketChat };
 }
