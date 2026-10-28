@@ -29,6 +29,12 @@ export const numbered = (text: string) => text.replace(/\n$/, "").split("\n").ma
 const lineCount = (text: string) => text.replace(/\n$/, "").split("\n").length;
 const SEVERITIES = ["critical", "high", "medium", "low"];
 
+/** A Postgres unique violation (23505), also when the driver wraps it (the unique index on a skill's name). */
+function uniqueSkillName(e: unknown) {
+  for (let x = e as { code?: string; cause?: unknown } | null; x; x = x.cause as { code?: string; cause?: unknown } | null) if (x.code === "23505") return true;
+  return false;
+}
+
 /** The title the review task is created with. */
 export const reviewTitle = (p: Pick<Proposal, "name" | "replacesSkillId">) => `Security review: skill ${p.name}${p.replacesSkillId ? " (new version)" : ""}`;
 
@@ -388,21 +394,30 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.decided", summary: `${by} decided to add ${p.name}${advise ? " against the Security Reviewer's advice" : ""}.`, at });
       if (conditional) await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.conditions_accepted", summary: `${by} accepted the Security Reviewer's conditions for ${p.name}: ${(p.conditions ?? []).join("; ")}.`, at });
       if (advise) await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.overridden", summary: `OVERRIDE: ${by} added ${p.name} although the Security Reviewer advised against it (${(p.findings ?? []).length} finding(s)).`, at });
+      const installed = () => db.select({ id: skills.id, name: skills.name, files: skills.files }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, p.name)));
       let skill;
       try {
         // A retry after a crash between install and the patch below: the same files are already in the library, so carry on to the rest.
-        const [there] = await db.select({ id: skills.id, name: skills.name, files: skills.files }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.name, p.name)));
+        const [there] = await installed();
         skill = there && hashFiles(there.files).bundleHash === p.bundleHash ? there : await skillsSvc.save(companyId, { files: p.files, source: p.source === "link" ? "link" : "written", sourceUrl: p.sourceUrl, sourceRef: p.pinnedRef, name: p.name, replaceId: p.replacesSkillId });
       } catch (e) {
-        if (!(e instanceof SkillError)) throw e;
-        p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
-        await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${p.name} could not be installed: ${e.message}` });
-        await told(`The skill ${p.name} could not be installed: ${e.message}`);
-        return p;
+        // Two answers at once: the other call saved this skill first. The unique name index is the
+        // same "already installed with the same files" path, not a database error for the owner.
+        if (!(e instanceof SkillError) && uniqueSkillName(e)) {
+          const [there] = await installed();
+          if (!there || hashFiles(there.files).bundleHash !== p.bundleHash) throw new SkillError(409, `There's already a skill called ${p.name}.`);
+          skill = there;
+        } else {
+          if (!(e instanceof SkillError)) throw e;
+          p = await patch(p.id, { status: "stale", decidedBy: by, decidedAt: at, updatedAt: at });
+          await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.stale", summary: `${p.name} could not be installed: ${e.message}` });
+          await told(`The skill ${p.name} could not be installed: ${e.message}`);
+          return p;
+        }
       }
-      p = await patch(p.id, { status: "installed", decidedBy: by, decidedAt: at, installedSkillId: skill.id, ...(advise ? { overridden: true, overriddenBy: by, overriddenAt: at } : {}), updatedAt: at });
-      await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.installed", summary: `Installed ${skill.name}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}, ${p.files.length} files, fingerprint ${p.bundleHash.slice(0, 12)}.`, at });
       // Who gets it: the agents asked for, on top of whoever already has it (an update takes nobody away).
+      // Give first, then mark installed: if a give fails with anything but a SkillError, the proposal
+      // stays awaiting_owner and the owner's answer can be applied again.
       const given: string[] = [];
       const failed: string[] = [];
       for (const agentId of p.proposedAgentIds) {
@@ -415,7 +430,10 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
           failed.push(`${a?.name ?? agentId} (${e.message})`);
         }
       }
+      // Log the giving before the status: a proposal that reaches installed always has its skill.given entry.
       await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.given", summary: `${skill.name} given to ${given.join(", ") || "nobody"}${failed.length ? `; not given to ${failed.join(", ")}` : ""}.`, at });
+      p = await patch(p.id, { status: "installed", decidedBy: by, decidedAt: at, installedSkillId: skill.id, ...(advise ? { overridden: true, overriddenBy: by, overriddenAt: at } : {}), updatedAt: at });
+      await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.installed", summary: `Installed ${skill.name}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}, ${p.files.length} files, fingerprint ${p.bundleHash.slice(0, 12)}.`, at });
       await told(`The owner added the skill ${skill.name}. Given to: ${given.join(", ") || "nobody"}.${failed.length ? ` Not given: ${failed.join(", ")}.` : ""}`);
       return p;
     },
