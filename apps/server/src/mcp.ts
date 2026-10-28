@@ -16,7 +16,7 @@ import { record } from "./services/activity.js";
 import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
-import { AnswerError, adviceOf, checkAsk, type decisionsService } from "./services/decisions.js";
+import { AnswerError, adviceOf, checkAsk, isSystemCard, type decisionsService } from "./services/decisions.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
@@ -766,9 +766,9 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "decisions",
     {
       description:
-        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for an alert or a temp-file cleanup request only the owner can settle (a secret, host access, sign-off, an owner-only choice, a delete you can't vouch for): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests, except a lesson for a project brief that your own review raised. Permission requests: answer them with a note saying why (the owner reads it). Ones marked TEMP-FILE CLEANUP only delete entries directly in /tmp and came to you instead of the owner: allow them when the rest of the command looks like the agent's own work; deny or escalate (id, triedFirst) anything that reaches outside /tmp, pushes, or that you can't account for. They go to the owner if you don't answer within 5 minutes. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Plan approvers see and answer only the plans put to them. action: list (for the CEO, every open card in the company, any tier: id, kind, ticket, who raised it, age, score, options, recommendation and detail; plan approvers see only their own plans), answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back), withdraw (id, note: the reason, at least 10 characters, which the owner reads in the audit list; CEO only, for a card that is stale (its ticket is done or cancelled) or a duplicate of another open card; system and info cards may be cleared directly, but owner sign-offs, deploys, hires, model and instruction changes and owner-tier permissions only when stale or duplicated), or escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act; CEO only, for an alert or a temp-file cleanup request only the owner can settle). The owner sees the same queue and may answer first. You can't answer your own requests, except a lesson for a project brief that your own review raised. As the CEO you may answer Boss Man's system and info cards even on the owner's tier: merge retries and \"Got it\" notices and alerts. You can never answer owner sign-offs, deploys, hires, model or instruction changes or owner-tier permission requests; the server refuses, so leave them for the owner (or advise if they asked). Permission requests: answer them with a note saying why (the owner reads it). Ones marked TEMP-FILE CLEANUP only delete entries directly in /tmp and came to you instead of the owner: allow them when the rest of the command looks like the agent's own work; deny or escalate (id, triedFirst) anything that reaches outside /tmp, pushes, or that you can't account for. They go to the owner if you don't answer within 5 minutes. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
       inputSchema: {
-        action: z.enum(["list", "answer", "escalate", "advise"]),
+        action: z.enum(["list", "answer", "escalate", "advise", "withdraw"]),
         outcome: z.enum(["reissue", "handled"]).optional(),
         question: z.string().min(1).max(1000).optional(),
         options: z.array(z.string().min(1).max(200)).min(2).max(6).optional(),
@@ -788,6 +788,46 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       // A plan approver answers only plans put to them, never permission requests.
       const mine = (d: typeof decisionsTable.$inferSelect) => isCeo || (!!scope.agentId && d.forAgentId === scope.agentId && (d.context as { plan?: boolean }).plan === true);
       if (input.action === "list") {
+        if (isCeo) {
+          // The CEO's view of the whole queue (BOS-149): every open card, any tier.
+          const rows = await decisions.queue({ includeAll: true, companyId: scope.companyId });
+          if (!rows.length) return text("No decisions are waiting for you.");
+          const ago = (at: Date) => {
+            const mins = Math.max(1, Math.round((Date.now() - at.getTime()) / 60_000));
+            return mins >= 2880 ? `${Math.floor(mins / 1440)} days` : mins >= 120 ? `${Math.floor(mins / 60)} hours` : `${mins} min`;
+          };
+          return text(
+            rows
+              .map((r) => {
+                const ctx = r.context as {
+                  type?: string;
+                  planText?: string | null;
+                  explain?: { command?: string };
+                  tempCleanup?: boolean;
+                  output?: string;
+                  triedFirst?: string;
+                  steps?: string[];
+                  lastFailure?: { note: string };
+                };
+                const tickets = [...new Set([...(r.about ?? []).map((a) => (a.ref ? `${a.ref} "${a.title}"` : a.title)), ...(r.blocks ?? []).map((b) => b.ref ?? "")].filter((x): x is string => !!x))];
+                const advice = adviceOf(r.context);
+                return [
+                  `${r.id}: ${ctx.tempCleanup ? "TEMP-FILE CLEANUP: " : ""}[${r.kind}/${r.tier}] ${r.question}`,
+                  `Ticket: ${tickets.join(", ") || "none"} · Raised by: ${r.agentName ?? "Boss Man"} · Age: ${ago(r.createdAt)} · Score: ${Math.round(r.score)}`,
+                  ...(r.reasons?.length ? [`Why it ranks here: ${r.reasons.join("; ")}`] : []),
+                  `Options: ${(r.options as string[]).join(" | ") || "none"} (recommended: ${r.recommendedOption ?? "none"})`,
+                  ...(ctx.explain?.command ? [`Command: ${ctx.explain.command}`] : []),
+                  ...(ctx.planText ? ["Plan:", ctx.planText.slice(0, 8000)] : []),
+                  ...(ctx.output ? ["Last output:", ctx.output.slice(0, 4000)] : []),
+                  ...(ctx.triedFirst ? [`What was tried first: ${ctx.triedFirst}`] : []),
+                  ...(ctx.steps?.length ? [`Steps for the owner: ${ctx.steps.join(" / ")}`] : []),
+                  ...(ctx.lastFailure ? [`Last failure: ${ctx.lastFailure.note}`] : []),
+                  ...(advice?.state === "asking" ? [`ASKED FOR YOUR ADVICE${advice.note ? `: ${advice.note}` : ""} — use action advise.`] : []),
+                ].join("\n");
+              })
+              .join("\n\n"),
+          );
+        }
         const open = (
           await db
             .select()
@@ -798,20 +838,26 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .filter(mine)
           // Alerts still with the Scrum Master aren't the CEO's yet (BOS-64).
           .filter((d) => (d.context as { ladder?: { rung: string } }).ladder?.rung !== "scrum_master");
-        const asked = (await db.select().from(decisionsTable).where(and(eq(decisionsTable.companyId, scope.companyId), eq(decisionsTable.status, "open"), sql`${decisionsTable.context}->'advice'->>'state' = 'asking'`)).orderBy(decisionsTable.createdAt))
-          .filter(() => isCeo)
-          .map((d) => [`${d.id}: ASKED FOR YOUR ADVICE: ${d.question}`, `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption})`, ...(adviceOf(d.context)?.note ? [`What's unclear, per the owner: ${adviceOf(d.context)!.note}`] : []), "Use action advise."].join("\n"));
-        if (!open.length && !asked.length) return text("No decisions are waiting for you.");
-        if (!open.length) return text(asked.join("\n\n"));
+        if (!open.length) return text("No decisions are waiting for you.");
         return text(
           open
             .map((d) => {
               const { planText: plan, explain, tempCleanup } = d.context as { planText?: string | null; explain?: { command?: string }; tempCleanup?: boolean };
               return [`${d.id}: ${tempCleanup ? "TEMP-FILE CLEANUP: " : ""}${d.question}`, ...(explain?.command ? [`Command: ${explain.command}`] : []), `Options: ${(d.options as string[]).join(" | ")} (recommended: ${d.recommendedOption ?? "none"})`, ...(plan ? ["Plan:", plan.slice(0, 8000)] : [])].join("\n");
             })
-            .concat(asked)
             .join("\n\n"),
         );
+      }
+      if (input.action === "withdraw") {
+        if (!isCeo || !scope.agentId) return fail("Only the CEO withdraws a card.");
+        if (!input.id || !input.note) return fail("Give the card's id and a note: the reason, at least 10 characters.");
+        try {
+          const r = await decisions.withdraw({ id: input.id, companyId: scope.companyId, agentId: scope.agentId, note: input.note });
+          return r ? text(`Withdrawn ${r.id}. The owner sees why in their audit list.`) : fail("That card has already been settled.");
+        } catch (err) {
+          if (err instanceof AnswerError) return fail(err.message);
+          throw err;
+        }
       }
       if (input.action === "advise") {
         if (!isCeo || !scope.agentId) return fail("Only the CEO advises on a decision the owner asked about.");
@@ -848,11 +894,16 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       }
       if (!input.id || !input.answer) return fail("Give the decision's id and your answer.");
       const [d] = await db.select().from(decisionsTable).where(and(eq(decisionsTable.id, input.id), eq(decisionsTable.companyId, scope.companyId)));
-      if (!d || d.tier !== "ceo" || !mine(d)) return fail("No decision with that id is waiting for you.");
+      // The CEO may answer system and info cards at the owner's tier too (BOS-149); the server checks the rest.
+      const system = d ? isSystemCard(d) : false;
+      const canAnswer = !!d && (d.tier === "ceo" ? mine(d) : isCeo && system);
+      if (!canAnswer) return fail("No decision with that id is waiting for you.");
       const lessonCall = d.context && ["lesson", "lesson_replace"].includes((d.context as { type?: string }).type ?? "");
       if (d.raisedByAgentId === scope.agentId && !lessonCall) return fail("That's your own request; the owner answers it.");
-      // The owner reads why the CEO allowed or denied a request (BOS-111).
-      if (d.kind === "permission" && !(d.context as { plan?: boolean }).plan && (input.note?.trim().length ?? 0) < 10) return fail("Give a note saying why you allow or deny this request, in a short sentence: the owner reads it.");
+      // The owner reads why the CEO allowed or denied a request (BOS-111), and why it cleared a system card.
+      if ((d.kind === "permission" && !(d.context as { plan?: boolean }).plan && (input.note?.trim().length ?? 0) < 10) || (isCeo && d.tier === "owner" && system && (input.note?.trim().length ?? 0) < 10)) {
+        return fail("Give a note saying why, in a short sentence: the owner reads it.");
+      }
       try {
         const r = await decisions.answer(input.id, input.answer, { note: input.note, ...(scope.agentId ? { settledBy: { agentId: scope.agentId } } : {}) });
         return r ? text(`Answered: ${input.answer}.`) : fail("That decision has already been answered.");

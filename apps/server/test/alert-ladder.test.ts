@@ -170,10 +170,11 @@ describe("the alert ladder (BOS-64)", () => {
     expect(await ownerNotified(d.id)).toHaveLength(0);
   });
 
-  it("the CEO doesn't see alerts still with the Scrum Master", async () => {
+  it("the CEO can see alerts still with the Scrum Master (BOS-149), but the owner cannot", async () => {
     await ctx.switchOn();
     const d = await wakeChain();
-    expect(textOf(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(d.id);
+    // The CEO's list is the whole queue; the owner's queue still leaves the team's alerts out.
+    expect(textOf(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }))).toContain(d.id);
   });
 
   describe("fall-through", () => {

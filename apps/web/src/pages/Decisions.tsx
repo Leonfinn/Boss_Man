@@ -242,11 +242,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 {a.question}{" "}
                 <span className="muted">
                   ·{" "}
-                  {a.settled
-                    ? `${a.settled.answer === "Allow once" ? "allowed" : a.settled.answer === "Deny" ? "denied" : a.settled.answer} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
-                    : a.advice?.state === "reissued"
-                      ? "replaced by a clearer decision"
-                      : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
+                  {a.withdrawn
+                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}`
+                    : a.settled
+                      ? `${a.settled.answer === "Allow once" ? "allowed" : a.settled.answer === "Deny" ? "denied" : a.settled.answer} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
+                      : a.advice?.state === "reissued"
+                        ? "replaced by a clearer decision"
+                        : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
                 </span>
                 {a.settled?.command && (
                   <pre className="muted">
