@@ -175,7 +175,8 @@ describe("stale blockers (R21)", () => {
     ctx.advance(25 * HOUR);
     await ctx.sweep();
     const [row] = await ctx.queue();
-    expect(row!.options).toContain("Let the CEO decide");
+    const [stored] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(stored!.options).toContain("Let the CEO decide");
     const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
     expect(r.statusCode).toBe(200);
     expect(await ctx.queue()).toEqual([]);
