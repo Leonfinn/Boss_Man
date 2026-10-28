@@ -27,6 +27,7 @@ import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
+import { APPLY_CHANGE } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
@@ -110,7 +111,9 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
-  | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
+  | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } }
+  /** A change a workflow retro proposed (workflow_changes); Apply carries it out, Skip leaves things as they are. */
+  | { type: "workflow_change"; changeId: string };
 
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
@@ -302,6 +305,12 @@ export type MaintenanceHook = { answered(answer: string): Promise<unknown> };
 export type SelfDeployHook = { check(ctx: Extract<DecisionContext, { type: "self_deploy" }>): Promise<void>; send(ctx: Extract<DecisionContext, { type: "self_deploy" }>, decisionId: string): Promise<unknown> };
 
 type TeamPlanHook = (ctx: Extract<DecisionContext, { type: "team_plan" }>, companyId: string, picks: number[]) => Promise<unknown>;
+/** The workflow retro's side of its decisions (services/retro.ts): a check before Apply, and what to do once answered. */
+export type RetroHook = {
+  problemApplying(changeId: string): Promise<string | null>;
+  answered(changeId: string, answer: string): Promise<unknown>;
+  lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
+};
 type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
 
 /**
@@ -340,6 +349,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let onEngagement: EngagementHook | null = null;
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
+  let retroHook: RetroHook | null = null;
   let onTeamPlan: TeamPlanHook | null = null;
   let loopHooks: LoopHooks | null = null;
   let selfDeploy: SelfDeployHook | null = null;
@@ -408,6 +418,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
       if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
+    }
+    if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
+      const problem = await retroHook?.problemApplying(ctx.changeId);
+      if (problem) throw new AnswerError(problem);
     }
     if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
     if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !replacedLesson(answer)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
@@ -776,6 +790,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setMaintenanceHook(hook: MaintenanceHook) {
       maintenance = hook;
+    },
+
+    setRetroHook(hook: RetroHook) {
+      retroHook = hook;
     },
 
     setAgentHook(hook: AgentDecisionHook) {
@@ -1276,6 +1294,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
+        await retroHook?.lessonAnswered(id, answer, extra.note);
+      } else if (ctx.type === "workflow_change") {
+        await retroHook?.answered(ctx.changeId, answer);
       } else if (ctx.type === "lesson_replace") {
         await answerLessonReplace(db, d, ctx, answer, ownWords, extra.note);
       } else if (ctx.type === "budget_limit") {

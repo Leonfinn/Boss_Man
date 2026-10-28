@@ -1,7 +1,7 @@
 // The workflow scorecard (docs/19-workflow-retros.md, parts 1 and 5): read-only numbers from tickets, transitions,
 // reviews, runs and costs. No model calls. Ticket history before ticket_transitions existed is missing, so those
 // tickets have no cycle time.
-import { and, asc, eq, gte, inArray, isNotNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, lte, ne, or, sql } from "drizzle-orm";
 import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, costEvents, decisions, features, reviewRequests, runs, ticketDependencies, ticketReviews, ticketTransitions, tickets, watchdogFlags } from "../db/schema.js";
@@ -81,6 +81,17 @@ function stats(rows: Done[], flags: number, answered: number, overridden: number
   };
 }
 
+/** One scorecard number for a change's scope (docs/19 part 3): a role, an agent, a handoff pair, or the company's tail lag. Null when there is nothing to measure. */
+export function metricValue(sc: Awaited<ReturnType<ReturnType<typeof workflowService>["scorecard"]>>, metric: string, scope: Record<string, unknown>): number | null {
+  if (metric === "tailLagMs") return median(sc.features.flatMap((f) => (f.tailLagMs === null ? [] : [f.tailLagMs])));
+  if (metric === "medianWaitMs" || metric === "bounceRate") {
+    const h = sc.handoffs.find((x) => x.from === scope.from && x.to === scope.to && x.kind === scope.kind);
+    return h ? ((h as Record<string, unknown>)[metric] as number | null) : null;
+  }
+  const row: Record<string, unknown> | undefined = scope.agentId ? sc.byAgent.find((x) => x.agentId === scope.agentId) : sc.byRole.find((x) => x.role === scope.role);
+  return (row?.[metric] as number | null | undefined) ?? null;
+}
+
 export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
   const now = deps.now ?? (() => new Date());
   return {
@@ -100,7 +111,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
       const doneRows = await db
         .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId, stateChangedAt: tickets.stateChangedAt })
         .from(tickets)
-        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), or(sql`${tickets.outcome} is null`, ne(tickets.outcome, "cancelled")), gte(tickets.stateChangedAt, since90)));
+        .where(and(eq(tickets.companyId, companyId), eq(tickets.systemState, "done"), or(sql`${tickets.outcome} is null`, ne(tickets.outcome, "cancelled")), gte(tickets.stateChangedAt, since90), lte(tickets.stateChangedAt, t)));
       const ids = doneRows.map((r) => r.id);
       const moves = ids.length ? await db.select().from(ticketTransitions).where(inArray(ticketTransitions.ticketId, ids)) : [];
       const startAt = new Map<string, number>();
@@ -148,11 +159,11 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         .select({ agentId: tickets.assigneeAgentId })
         .from(watchdogFlags)
         .innerJoin(tickets, eq(tickets.id, watchdogFlags.ticketId))
-        .where(and(eq(watchdogFlags.companyId, companyId), gte(watchdogFlags.openedAt, since)));
+        .where(and(eq(watchdogFlags.companyId, companyId), gte(watchdogFlags.openedAt, since), lte(watchdogFlags.openedAt, t)));
       const answeredRows = await db
         .select({ agentId: decisions.raisedByAgentId, answer: decisions.answer, recommended: decisions.recommendedOption })
         .from(decisions)
-        .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "answered"), isNotNull(decisions.raisedByAgentId), gte(decisions.answeredAt, since)));
+        .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "answered"), isNotNull(decisions.raisedByAgentId), gte(decisions.answeredAt, since), lte(decisions.answeredAt, t)));
 
       const rowFor = (key: (agentId: string) => string | null) => {
         const keys = new Set<string>();
@@ -187,7 +198,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         waits.set(k, g);
       };
       // The assigner is the agent the activity row names; none means the owner or Boss Man itself.
-      const assigned = await db.select({ ticketId: activity.ticketId, agentId: activity.agentId, at: activity.at }).from(activity).where(and(eq(activity.companyId, companyId), eq(activity.kind, "assigned"), isNotNull(activity.ticketId), gte(activity.at, since))).orderBy(asc(activity.at));
+      const assigned = await db.select({ ticketId: activity.ticketId, agentId: activity.agentId, at: activity.at }).from(activity).where(and(eq(activity.companyId, companyId), eq(activity.kind, "assigned"), isNotNull(activity.ticketId), gte(activity.at, since), lte(activity.at, t))).orderBy(asc(activity.at));
       const ticketIds = [...new Set(assigned.map((a) => a.ticketId!))];
       const allAssigned = ticketIds.length ? await db.select({ ticketId: activity.ticketId, at: activity.at }).from(activity).where(and(inArray(activity.ticketId, ticketIds), eq(activity.kind, "assigned"))).orderBy(asc(activity.at)) : [];
       const ticketRuns = ticketIds.length ? await db.select({ ticketId: runs.ticketId, agentId: runs.agentId, startedAt: runs.startedAt }).from(runs).where(inArray(runs.ticketId, ticketIds)).orderBy(asc(runs.startedAt)) : [];
@@ -202,7 +213,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         .select({ created: reviewRequests.createdAt, decidedAt: reviewRequests.decidedAt, status: reviewRequests.status, reviewer: reviewRequests.reviewerAgentId, author: tickets.assigneeAgentId })
         .from(reviewRequests)
         .innerJoin(tickets, eq(tickets.id, reviewRequests.ticketId))
-        .where(and(eq(tickets.companyId, companyId), inArray(reviewRequests.status, ["approved", "changes_requested"]), gte(reviewRequests.decidedAt, since)));
+        .where(and(eq(tickets.companyId, companyId), inArray(reviewRequests.status, ["approved", "changes_requested"]), gte(reviewRequests.decidedAt, since), lte(reviewRequests.decidedAt, t)));
       for (const r of decided) {
         const from = roleOf(r.author), to = roleOf(r.reviewer);
         if (from && to) add(from, to, "review", r.decidedAt!.getTime() - r.created.getTime(), r.status === "changes_requested");
