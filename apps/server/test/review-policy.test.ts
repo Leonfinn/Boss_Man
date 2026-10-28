@@ -202,6 +202,19 @@ describe("an approval whose merge fails", () => {
     expect(c.sent.slice(before).filter((x) => x.type.startsWith("workspace."))).toEqual([]);
     expect((await c.row(t.id)).systemState).toBe("done");
   });
+  it("records a crash that is not a ReviewError too, so a background landing never leaves the ticket silent", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.scheduler.onTicketReview(t.id, c.worker.id);
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    const spy = vi.spyOn(c.review, "landOnce").mockRejectedValue(new TypeError("database is locked"));
+    const senior = await c.mcp(c.senior.id);
+    expect(textOf(await senior.callTool({ name: "review", arguments: { action: "submit", ticketId: t.id, verdict: "approved" } }))).toContain("in the background");
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${t.id}/landing`)).json().landing.state).toBe("finished"));
+    spy.mockRestore();
+    expect((await c.db.select().from(activity).where(and(eq(activity.ticketId, t.id), eq(activity.kind, "merge_failed"))))[0]?.summary).toContain("database is locked");
+    expect((await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${t.id}`)))[0]).toMatchObject({ status: "open" });
+  });
 });
 
 describe("the review tool", () => {

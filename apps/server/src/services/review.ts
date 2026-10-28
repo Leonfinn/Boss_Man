@@ -362,9 +362,19 @@ export function reviewService(
     /** Runs land() without holding the request (the check can take minutes); the outcome is kept for the page to poll. */
     async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<LandingStatus> {
       if (landings.get(ticketId)?.state === "running") throw new ReviewError(409, "This ticket is already being checked and merged.");
-      const { t, defaultBranch, verifyCommand, deepVerifyCommand, repoUrl } = await ticketWithRepo(ticketId);
+      // Claimed before the first await, so two approvals at the same moment cannot both start a landing.
+      const startedAt = new Date().toISOString();
+      landings.set(ticketId, { state: "running", startedAt, command: null });
+      let ctx: Awaited<ReturnType<typeof ticketWithRepo>>;
+      try {
+        ctx = await ticketWithRepo(ticketId);
+      } catch (err) {
+        landings.delete(ticketId);
+        throw err;
+      }
+      const { t, defaultBranch, verifyCommand, deepVerifyCommand, repoUrl } = ctx;
       const command = repoUrl ? ([verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter(Boolean) as string[]).join(" && ") || null : null;
-      const running: LandingStatus = { state: "running", startedAt: new Date().toISOString(), command };
+      const running: LandingStatus = { state: "running", startedAt, command };
       landings.set(ticketId, running);
       void (async () => {
         let text: string;
@@ -401,7 +411,7 @@ export function reviewService(
       try {
         return await this.landOnce(ticketId, reviewer, causedByRunId, opts);
       } catch (err) {
-        if (!(err instanceof ReviewError)) throw err;
+        // Any failure counts, not only ReviewError: a database or git exception would otherwise leave an approved ticket with no record and no card.
         // The approval is already recorded, so nothing else would move the ticket: say so on it and ask the owner as well.
         const [t] = await db.select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
         if (!t) throw err;
