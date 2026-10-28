@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -761,6 +761,56 @@ export const checkResults = pgTable(
   (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
 );
 
+/** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
+export const retros = pgTable(
+  "retros",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    /** The period: from the last retro's end (or the company's start) to when this one started. */
+    since: timestamp("since", { withTimezone: true }).notNull(),
+    until: timestamp("until", { withTimezone: true }).notNull(),
+    doneCount: integer("done_count").notNull(),
+    /** Null until save_retro; then the ranked list of findings. */
+    findings: jsonb("findings").$type<RetroFinding[]>(),
+    savedAt: timestamp("saved_at", { withTimezone: true }),
+  },
+  (t) => [index("retros_company_started").on(t.companyId, t.startedAt)],
+);
+
+/** One proposed change to how the team works, from a retro (part 3). Part 4 adds the kept and reverted statuses. */
+export const workflowChanges = pgTable(
+  "workflow_changes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    retroId: uuid("retro_id").notNull().references(() => retros.id, { onDelete: "cascade" }),
+    /** One of WORKFLOW_LEVERS. */
+    lever: text("lever").notNull(),
+    targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    targetRole: text("target_role"),
+    summary: text("summary").notNull(),
+    /** What the setting was when proposed, so Revert can put it back; and what Apply sets. */
+    before: jsonb("before"),
+    after: jsonb("after"),
+    /** One of WORKFLOW_METRICS, the scope it is measured over ({role} | {agentId} | {from, to, kind}) and its value when proposed. */
+    metric: text("metric").notNull(),
+    metricScope: jsonb("metric_scope").notNull().default({}),
+    baseline: real("baseline"),
+    /** Ticket ids. */
+    evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
+    approver: text("approver").$type<"ceo" | "owner">().notNull(),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    status: text("status").$type<"proposed" | "applied" | "skipped">().notNull().default("proposed"),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    checkDueAt: timestamp("check_due_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("workflow_changes_company").on(t.companyId, t.createdAt), index("workflow_changes_retro").on(t.retroId)],
+);
+
 /** Normalised failures (run errors, failed checks), to spot an agent going round in circles. */
 export const failureSignatures = pgTable(
   "failure_signatures",
@@ -1276,7 +1326,7 @@ export const watchdogActions = pgTable(
 
 // ---------- Skills (R71) ----------
 
-export const skillSource = pgEnum("skill_source", ["written", "link", "upload"]);
+export const skillSource = pgEnum("skill_source", ["written", "link", "upload", "retro"]);
 
 /**
  * A company's skill library: Agent Skills folders (a SKILL.md and any supporting files) that

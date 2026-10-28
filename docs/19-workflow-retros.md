@@ -76,6 +76,8 @@ Rules:
 - At most 3 proposals per retro.
 - `workflow_changes` keeps the old value, the new value, the metric and its baseline, so every change can be undone.
 
+Not built yet: plan-first (there is no per-company setting for it; it follows the risk tier) and hire (the hire decision is the CEO's, with its own approval setting, so a retro's change can't be tracked through it).
+
 ## 4. Check the result
 
 - Fourteen days or 10 relevant done tickets after Apply (whichever comes later, capped at 30 days), Boss Man measures the metric again.

@@ -19,6 +19,7 @@ import { effectivePolicy } from "./review-policy.js";
 import { handOverReviews, REVIEW_REASON, requestReviews, wakeReviewers } from "./review-kinds.js";
 import { buildBrief } from "./brief.js";
 import { getHold, HOLD_REASON } from "./maintenance.js";
+import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
 import type { fundingService } from "./funding.js";
@@ -496,6 +497,7 @@ export function schedulerService(
     }
     if (agent.duty === "wiki" && !w.ticketId) lines.push("", ...(await wikiDuty(agent)));
     if (w.reason === WATCH_REASON) lines.push("", ...(await watchDuty(w)));
+    if (w.reason === RETRO_REASON) lines.push("", ...RETRO_DUTY);
     if (w.reason === REVIEW_REASON) {
       lines.push("", "These tickets are ready for review. Review each one with the review tool (diff, then submit):");
       const copy = await reviewCopy(w);
@@ -700,7 +702,7 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON) {
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON && input.reason !== RETRO_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -717,6 +719,7 @@ export function schedulerService(
               sql`${wakes.reason} <> ${REVIEW_REASON}`,
               sql`${wakes.reason} <> ${ANSWER_REASON}`,
               sql`${wakes.reason} <> ${WATCHDOG_REASON}`,
+              sql`${wakes.reason} <> ${RETRO_REASON}`,
             ),
           );
         if ((recent?.n ?? 0) >= limits.ticketlessPerHour) {
@@ -766,8 +769,8 @@ export function schedulerService(
       const note = input.note ?? null;
       const priority = input.priority ?? 2;
       const t = now();
-      // Chat runs have their own tools, and a watch report and a tree-stopped brief are built from their wake's note, so none takes a steer.
-      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON) {
+      // Chat runs have their own tools, and a watch report, a tree-stopped brief or a retro (its duty lines go in the prompt) is built from its wake, so none takes a steer.
+      if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
         const [live] = await db
           .select({ id: runs.id })
           .from(runs)

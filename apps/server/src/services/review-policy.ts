@@ -1,7 +1,7 @@
 // Review routing: which policy applies to a ticket, and who it names once paused, retired, missing or
 // conflicted agents are accounted for. The CEO is always the fallback.
-import { and, asc, eq, isNull } from "drizzle-orm";
-import { MARKED, ruleFor, SENIOR_DEV, SENIOR_DEV_TEMPLATE, type ReviewPolicy, type ReviewSlot, type RiskTier } from "@boss-man/shared";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { MARKED, policyAgentIds, ReviewPolicySchema, ruleFor, SENIOR_DEV, SENIOR_DEV_TEMPLATE, type ReviewPolicy, type ReviewSlot, type RiskTier } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, projects } from "../db/schema.js";
 
@@ -14,6 +14,19 @@ export async function effectivePolicy(db: Db, t: { companyId: string; projectId:
   if (p?.policy) return p.policy;
   const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, t.companyId));
   return c!.policy;
+}
+
+/** Validates a policy, and that every agent it names is an active agent of the company; returns the policy or what is wrong with it. */
+export async function checkPolicy(db: Db, companyId: string, body: unknown): Promise<ReviewPolicy | string> {
+  const parsed = ReviewPolicySchema.safeParse(body);
+  if (!parsed.success) return parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  const named = policyAgentIds(parsed.data);
+  if (named.length) {
+    const ok = new Set((await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), inArray(agents.id, named)))).map((a) => a.id));
+    const bad = named.find((a) => !ok.has(a));
+    if (bad) return `Agent ${bad} isn't an active agent of this company.`;
+  }
+  return parsed.data;
 }
 
 /**

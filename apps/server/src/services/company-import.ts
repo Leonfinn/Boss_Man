@@ -42,7 +42,7 @@ const Agent = z.object({
   reportsTo: opt(120),
   instructions: opt(100_000),
 });
-const SkillMeta = z.object({ name: z.string().max(64), source: z.enum(["written", "link", "upload"]).optional(), sourceUrl: opt(2000), sourceRef: opt(200), pack: opt(200), packUrl: opt(2000), requiresAddons: z.array(str(64)).max(20).nullable().optional(), agents: z.array(str(120)).max(500).default([]) });
+const SkillMeta = z.object({ name: z.string().max(64), source: z.enum(["written", "link", "upload", "retro"]).optional(), sourceUrl: opt(2000), sourceRef: opt(200), pack: opt(200), packUrl: opt(2000), requiresAddons: z.array(str(64)).max(20).nullable().optional(), agents: z.array(str(120)).max(500).default([]) });
 const Column = z.object({ name: z.string().trim().min(1).max(60), systemState: z.enum(["backlog", "ready", "in_progress", "blocked", "review", "done"]), wipLimit: z.number().int().positive().nullable().optional() });
 const Project = z.object({
   name: z.string().trim().min(1).max(80),

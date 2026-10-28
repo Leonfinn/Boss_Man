@@ -37,6 +37,7 @@ import { latestRows } from "./services/review-kinds.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
 import type { alertLadder } from "./services/alert-ladder.js";
+import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -119,6 +120,7 @@ type Services = {
   images: ReturnType<typeof ticketImagesService>;
   watchdog: ReturnType<typeof watchdogService>;
   alerts: ReturnType<typeof alertLadder>;
+  retro: ReturnType<typeof retroService>;
 };
 
 /**
@@ -138,13 +140,14 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   }) as never;
 }
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images, watchdog, alerts }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>) {
+function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, agents: team, pa, images, watchdog, alerts, retro }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
     registerWatchdog(server, watchdog, alerts, scope);
   }
+  if (retroAgent) registerRetro(server, retro, scope);
 
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
@@ -1805,6 +1808,47 @@ function buildPaServer(db: Db, { notes, wiki, skills, review, agents: team, pa, 
   return server;
 }
 
+/** The workflow retro agent's tools (docs/19 parts 2 and 3): the company's configured retro agent only, and checked again on every call. */
+function registerRetro(server: McpServer, retro: Services["retro"], scope: Scope) {
+  const guarded = (run: () => Promise<string>) => async () => {
+    if (!scope.agentId || !(await retro.isRetroAgent(scope.companyId, scope.agentId))) return fail("Only the agent that runs this company's workflow retro can use this.");
+    try {
+      return text(await run());
+    } catch (err) {
+      if (err instanceof RetroError) return fail(err.message);
+      if (err instanceof z.ZodError) return fail(err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "));
+      throw err;
+    }
+  };
+  const agentId = () => scope.agentId!;
+  server.registerTool(
+    "workflow_scorecard",
+    { description: "Workflow retro only. The numbers for the retro's period against the one before (per role, handoffs, features waiting on their last tasks), digests of up to 10 of the worst tickets, and the workflow changes already proposed or applied. Start here.", inputSchema: {} },
+    guarded(() => retro.scorecardText(scope.companyId)),
+  );
+  server.registerTool(
+    "save_retro",
+    {
+      description: "Workflow retro only. Save what the retro found, once: findings ranked by how often they recur. Each has a failure label, the handoff where it went wrong (from and to roles, if it fits), the tickets it was seen on (references like HOL-12 or ids), how many tickets in all, and a note of up to 240 characters. Blame handoffs and patterns, never one agent on one ticket.",
+      inputSchema: FindingsShape,
+    },
+    async (input) => guarded(async () => `Saved ${(await retro.save(scope.companyId, agentId(), input)).saved} findings.`)(),
+  );
+  server.registerTool(
+    "propose_workflow_change",
+    {
+      description:
+        "Workflow retro only. Propose one small change; at most 3 per retro, and only one live change per kind and target. It becomes a decision with Apply and Skip; nothing changes until it is answered. Needs evidence (at least 2 tickets), a metric it should move, and what you expect. lever and what target and change hold: playbook (CEO approves) target = a role, change = {name, description, body}, a skill given to that role's agents. lesson (CEO approves) target = a project name, change = {lesson}, one line for the project's brief. instructions (owner approves) target = an agent name, change = {instructions}, the whole new text. review_policy (owner) target = a risk tier, change = any of {planApprover, reviewer, ownerSignoff}. watchdog (owner) target = watchdog, change = any of the numeric watchdog limits; it is replayed over 14 days first. model (owner) target = an agent name, change = {model}. thinking (owner) target = an agent name, change = {thinking}. metric is one of firstPassRate, meanRework, medianCycleMs, costPerDoneMicros, watchdogFlags (scope: a role or an agent name; defaults to the target), medianWaitMs or bounceRate (scope: from and to roles, optional kind), tailLagMs (whole company).",
+      inputSchema: ProposeShape,
+    },
+    async (input) =>
+      guarded(async () => {
+        const r = await retro.propose(scope.companyId, agentId(), input);
+        return `Proposed as change ${r.changeId}. It is waiting for ${r.approver === "ceo" ? "the CEO" : "the owner"} (decision ${r.decisionId}); nothing changes until it is answered.`;
+      })(),
+  );
+}
+
 /** The Scrum Master's watchdog actions (BOS-58). Each needs a one-line reason, is logged and can be undone. */
 function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], alerts: Services["alerts"], scope: Scope) {
   server.registerTool(
@@ -2045,14 +2089,15 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
     // A PA gets its read-only server whatever woke it (R87).
     const [me] = scope.agentId ? await db.select({ duty: agents.duty }).from(agents).where(eq(agents.id, scope.agentId)) : [];
     // The Scrum Master gets its restricted server for its own runs (BOS-58); the owner's chat with it keeps the chat tools.
+    const retroAgent = !!scope.agentId && run?.purpose !== "chat" && me?.duty !== "assistant" && (await services.retro.isRetroAgent(scope.companyId, scope.agentId));
     const server =
       me?.duty === "assistant"
         ? buildPaServer(db, services, scope)
         : run?.purpose === "chat"
           ? buildChatServer(db, services, scope, hooks)
           : me?.duty === SCRUM_MASTER_DUTY
-            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS)
-            : buildServer(db, services, scope, hooks);
+            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent)
+            : buildServer(db, services, scope, hooks, undefined, retroAgent);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {

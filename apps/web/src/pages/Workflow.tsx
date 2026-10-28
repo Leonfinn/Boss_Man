@@ -18,6 +18,9 @@ type Feature = {
   tailLagMs: number | null;
   criticalPath: { chain: { id: string; ref: string | null; title: string; state: string }[]; p50Ms: number | null; p85Ms: number | null; ageing: { id: string; ref: string | null; title: string; reasons: string[] }[] } | null;
 };
+type Finding = { failure: string; failureLabel: string; handoff?: { from: string; to: string }; tickets: string[]; count: number; note: string };
+type RetroInfo = { retro: { id: string; startedAt: string; since: string; until: string; doneCount: number; savedAt: string | null; agentName: string | null; findings: Finding[] } | null; changes: ChangeRow[] };
+type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped"; metricLabel: string; baselineText: string; target: string | null; appliedAt: string | null; evidence: string[] };
 type Scorecard = { days: number; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
@@ -31,6 +34,9 @@ export function span(ms: number | null) {
 }
 const pct = (n: number | null) => (n === null ? "–" : `${Math.round(n * 100)}%`);
 const dollars = (micros: number | null) => (micros === null ? "–" : `$${(micros / 1_000_000).toFixed(2)}`);
+const LEVER: Record<string, string> = { playbook: "Playbook", lesson: "Brief lesson", instructions: "Instructions", review_policy: "Review policy", watchdog: "Watchdog", model: "Model", thinking: "Thinking level" };
+const STATUS: Record<ChangeRow["status"], string> = { proposed: "Waiting for an answer", applied: "Applied", skipped: "Skipped" };
+const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 const label = (s: string) => s.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 function Ticket({ t }: { t: { id: string; ref: string | null; title: string } }) {
@@ -56,6 +62,80 @@ function StatsCells({ s }: { s: Stats }) {
 }
 
 const HEAD = ["Done", "Right first time", "Rework rounds", "Time to finish", "Cost per ticket", "Watchdog flags", "Answers changed"];
+
+/** The latest retro's findings, ranked, and every change it led to. */
+function Retro({ companyId }: { companyId: string }) {
+  const { data, error } = usePoll((signal) => api<RetroInfo>(`/api/companies/${companyId}/retros/latest`, { signal }), 60_000, `retro-${companyId}`);
+  if (error || !data) return null;
+  const r = data.retro;
+  return (
+    <>
+      <section>
+        <h2>Latest retro</h2>
+        {!r ? (
+          <p className="muted">No retro has run yet. One runs every 20 finished tickets, or after 7 days if anything was finished. You can run one from Settings.</p>
+        ) : (
+          <>
+            <p className="muted" style={{ fontSize: 14 }}>
+              {day(r.since)} to {day(r.until)}, over {r.doneCount} finished tickets{r.agentName ? `, run by ${r.agentName}` : ""}. Most frequent first.
+            </p>
+            {!r.savedAt ? (
+              <p className="muted">Waiting for the findings.</p>
+            ) : r.findings.length ? (
+              <ol>
+                {r.findings.map((f, i) => (
+                  <li key={i}>
+                    <strong>{f.failureLabel}</strong> <small className="muted">{f.count} {f.count === 1 ? "ticket" : "tickets"}{f.handoff ? ` · ${label(f.handoff.from)} to ${label(f.handoff.to)}` : ""} · {f.tickets.join(", ")}</small>
+                    <br />
+                    {f.note}
+                  </li>
+                ))}
+              </ol>
+            ) : (
+              <p className="muted">It found nothing to report.</p>
+            )}
+          </>
+        )}
+      </section>
+      <section>
+        <h2>Changes</h2>
+        <p className="muted" style={{ fontSize: 14 }}>
+          Changes a retro suggested. Nothing changes until it is approved: the CEO approves playbooks and lessons, and you approve the rest. The number is where the measure stood when it was suggested.
+        </p>
+        {data.changes.length ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Change</th>
+                  <th>Kind</th>
+                  <th>Approves</th>
+                  <th>Status</th>
+                  <th>Measure</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.changes.map((c) => (
+                  <tr key={c.id}>
+                    <td title={c.evidence.join(", ")}>{c.summary}</td>
+                    <td>{LEVER[c.lever] ?? label(c.lever)}</td>
+                    <td>{c.approver === "ceo" ? "CEO" : "You"}</td>
+                    <td>{STATUS[c.status]}{c.appliedAt ? ` ${day(c.appliedAt)}` : ""}</td>
+                    <td>
+                      {c.metricLabel} <small className="muted">was {c.baselineText}</small>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="muted">None yet.</p>
+        )}
+      </section>
+    </>
+  );
+}
 
 /** How work moves between roles, and which features wait on their last tasks. */
 export function Workflow({ company }: { company: Company | undefined }) {
@@ -225,6 +305,8 @@ export function Workflow({ company }: { company: Company | undefined }) {
               <p className="muted">No features in progress.</p>
             )}
           </section>
+
+          <Retro companyId={company.id} />
         </>
       )}
     </>
