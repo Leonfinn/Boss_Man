@@ -80,18 +80,18 @@ export function commandOf(rawInput: unknown): string | null {
   return null;
 }
 
-/** Programs that only ever use their quoted arguments as text (a message, a pattern), never run them. */
-const DATA_ONLY = /^(?:echo|printf|grep|egrep|fgrep|git\s+(?:commit|tag)|(?:gh|glab)\s+(?:pr|issue|release|mr))(?=\s|$)/;
+/** Programs that only ever use their quoted arguments as text (a message, a pattern), never run them. `printf -v` stores its text in a variable that can be run, so it's not one of them. */
+const DATA_ONLY = /^(?:echo|printf(?!\s+(?:--\s+)?-v)|grep|egrep|fgrep|git\s+(?:commit|tag)|(?:gh|glab)\s+(?:pr|issue|release|mr))(?=\s|$)/;
 
 /**
  * The command for the text patterns, with quoted text blanked only where it can't run: the
- * arguments of a DATA_ONLY program (`git commit -m 'stop rm -rf'`). Anywhere else quoted text may
- * be run by a program the reader doesn't know (tmux new 'rm -rf x', at, docker exec, sed '1e …'),
- * so it stays (BOS-116 review). Pipes, heredocs, substitutions and function or alias definitions
- * can carry an echo's text to another program, so with any of them nothing is blanked. Nor with
- * a comment or $'…' quoting, which this scan would misread (a quote opened inside a comment would
- * hide the lines after it). A data-only segment redirected into a file keeps its text, since the
- * file may be run next (`echo 'rm -rf x' > a.sh; bash a.sh`, or appended to ~/.bashrc).
+ * arguments of a DATA_ONLY program written alone (`git commit -m 'stop rm -rf'`). Anywhere else
+ * quoted text may be run by a program the reader doesn't know (tmux new 'rm -rf x', at, docker
+ * exec, sed '1e …'), so it stays (BOS-116 review). Only a lone command is exempt: chained after
+ * anything, the text can reach a runner (git's COMMIT_EDITMSG, `git log > a.sh`, an earlier
+ * `exec >file`), so with ; & && || | or a newline nothing is blanked. Nor with heredocs,
+ * substitutions, definitions, a comment or $'…' quoting, which this scan would misread. A
+ * redirect into a file keeps the text too (`echo 'rm -rf x' >> ~/.bashrc`).
  */
 function dataText(cmd: string): string {
   if (/<<|[<>]\(|`|\$\(|\$['"]|\(\s*\)|\bfunction\s|\balias\b|\bPATH=|\bhash\s/.test(cmd)) return cmd;
@@ -112,11 +112,12 @@ function dataText(cmd: string): string {
     } else if (c === "|" && cmd[i + 1] !== "|" && cmd[i - 1] !== "|") return cmd;
     else if (/[;&|\n]/.test(c)) segs.push({ start: i + 1, quotes: [] });
   }
+  // A trailing ; or & leaves an empty segment, which chains nothing.
+  const used = segs.filter((s, i) => i === 0 || cmd.slice(s.start, segs[i + 1]?.start ?? cmd.length).replace(/[;&|\n]/g, "").trim());
+  const s = segs[0]!;
+  if (used.length > 1 || s.writes || !DATA_ONLY.test(cmd.trimStart())) return cmd;
   let out = cmd;
-  for (const s of segs.reverse()) {
-    if (s.writes || !DATA_ONLY.test(cmd.slice(s.start).trimStart())) continue;
-    for (const [a, b] of s.quotes.reverse()) out = out.slice(0, a) + "''" + out.slice(b);
-  }
+  for (const [a, b] of s.quotes.reverse()) out = out.slice(0, a) + "''" + out.slice(b);
   return out;
 }
 

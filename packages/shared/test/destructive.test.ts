@@ -195,6 +195,13 @@ describe("destructive commands, however they're written (BOS-116)", () => {
       "echo 'rm -rf /x' >| a.sh",
       "echo 'rm -rf /x' >&a.sh",
       "echo 'rm -rf /x' 1>a.sh",
+      // Data-only text carried to a later command (security review round 3): only a lone command is exempt.
+      "git commit -m 'rm -rf /x' && sh .git/COMMIT_EDITMSG",
+      "git commit -m 'rm -rf /x' && git log -1 --format=%B > a.sh && sh a.sh",
+      "exec > a.sh; echo 'rm -rf /x'; exec > /dev/tty; sh a.sh",
+      "printf -v X 'rm -rf /x'; tmux new -d \"$X\"",
+      "printf -v X 'rm -rf /x'",
+      "printf '%s\\n' 'rm -rf is gone' && git commit -m 'stop rm -rf'",
     ]) {
       expect(evaluatePermission(exec(c), []).outcome, c).toBe("owner");
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
@@ -222,7 +229,8 @@ describe("destructive commands, however they're written (BOS-116)", () => {
       'grep -rn "rm -rf" .',
       "git tag -a v1 -m 'no more git push --force'",
       "gh pr create --title x --body 'drops rm -rf from the script'",
-      "printf '%s\\n' 'rm -rf is gone' && git commit -m 'stop rm -rf'",
+      "printf '%s\\n' 'rm -rf is gone'",
+      "git commit -m 'stop rm -rf';",
       "git commit -m 'stop rm -rf' > /dev/null 2>&1",
       "echo 'rm -rf is gone' &>/dev/null",
       "git commit -m 'fix #12: drop rm -rf'",
