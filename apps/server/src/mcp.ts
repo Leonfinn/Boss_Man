@@ -897,7 +897,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         }
         if (input.action === "overrule") {
           if (!input.kind || !input.reason) return fail("Give the kind of review and your reason.");
-          const r = await review.overrule(input.ticketId, { kind: input.kind, reason: input.reason, byAgentId: scope.agentId!, companyId: scope.companyId, causedByRunId: scope.runId });
+          const r = await review.overrule(input.ticketId, { kind: input.kind, reason: input.reason, byAgentId: scope.agentId!, companyId: scope.companyId, causedByRunId: scope.runId, background: true });
           return text(`Overruled the ${input.kind} review. ${reviewOutcome(r)}`);
         }
         if (input.action === "diff") {
@@ -921,6 +921,8 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           reviewerAgentId: scope.agentId,
           companyId: scope.companyId,
           causedByRunId: scope.runId,
+          // Land in the background: the check can outlast the client's 300 s call timeout, which would drop the merge.
+          background: true,
         });
         return text(reviewOutcome(r));
       } catch (err) {
@@ -953,6 +955,7 @@ function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?
   const outcome = r.outcome ?? "done";
   if (outcome === "waiting") return `Recorded: ${r.delivered}.`;
   if (r.verdict !== "approved") return `Changes requested; ${r.delivered}.`;
+  if (outcome === "landing") return "Approved; it is being checked and merged in the background. If the check fails or the merge can't finish, the ticket comes back to the assignee or raises a card.";
   return outcome === "owner_review"
     ? `Approved. ${r.delivered}: the owner signs it off before it merges.`
     : outcome === "merged" || outcome === "done"
