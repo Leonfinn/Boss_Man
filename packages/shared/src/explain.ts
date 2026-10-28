@@ -89,7 +89,7 @@ function segments(command: string): string[] {
 
 const unquote = (t: string) => t.replace(/^(['"])(.*)\1$/, "$2");
 
-type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean };
+type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; program?: string; local?: boolean; /** Also writes the repository its folder belongs to. */ repo?: boolean };
 
 function explainSegment(seg: string): Part {
   const all = (seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map(unquote);
@@ -136,8 +136,8 @@ function explainSegment(seg: string): Part {
       sub === "push" ? part("pushes", "Pushes code to the repository")
       : sub === "clean" || sub === "rm" ? part("deletes", "Deletes files from the project")
       : sub === "clone" && rest.filter((a) => !a.startsWith("-"))[1]?.startsWith("/") ? { ...part("changes", "Copies a repository on this machine", rest.filter((a) => !a.startsWith("-")).slice(2)), local: true }
-      // No targets: a worktree also writes into the repository's .git, so it never counts as /tmp-only work.
-      : sub === "worktree" ? (subArgs[0] === "list" ? part("reads", "") : part("changes", "Adds or removes a second checkout of the project (git worktree)"))
+      // A worktree also writes into the repository's .git (and add -b makes the branch there), so it never counts as /tmp-only work.
+      : sub === "worktree" ? (subArgs[0] === "list" ? part("reads", "") : { ...part("changes", "Adds or removes a second checkout of the project (git worktree)"), repo: true })
       : sub === "branch" && subArgs.some((a) => /^-[a-zA-Z]*[dDmM]|^--(delete|move)$/.test(a)) ? part("changes", "Changes the project's files or history")
       : GIT_NETWORK.has(sub) ? part("network", "Uses the network (git)")
       : GIT_CHANGES.has(sub) ? part("changes", "Changes the project's files or history")
@@ -155,7 +155,7 @@ function explainSegment(seg: string): Part {
   p.program = program;
   if (writes.length) {
     const worse = WORST.indexOf(p.effect) < WORST.indexOf("changes") ? p : null;
-    p = worse ?? { ...part("changes", "Changes files", writes), env: p.env };
+    p = worse ?? { ...part("changes", "Changes files", writes), env: p.env, repo: p.repo };
   }
   return p;
 }
@@ -195,7 +195,7 @@ function scratchOnly(segs: string[], parts: Part[]): { unchecked: string[] } | n
       cwd = to ? at(to) : null;
       continue;
     }
-    if (p.effect === "pushes" || p.effect === "network") return null;
+    if (p.effect === "pushes" || p.effect === "network" || p.repo) return null;
     if (p.effect === "unknown") {
       if (!cwd || !SCRATCH.test(cwd)) return null;
       unchecked.push(p.program || "a program");
@@ -214,6 +214,8 @@ function scratchOnly(segs: string[], parts: Part[]): { unchecked: string[] } | n
 /** One plain entry directly in /tmp: not /tmp itself, no deeper path, nothing the shell would expand or resolve. */
 const TEMP_PATH = String.raw`/tmp/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+`;
 /** A plain rm/rmdir/unlink: options first, then its paths (group 1); output may only go to /dev/null. */
+/** A delete that touches only TEMP_PATHs, as written: only these clear a /tmp entry for later writes. */
+const TEMP_DELETE = new RegExp(String.raw`^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+${TEMP_PATH})+(?:\s+(?:(?:[12]|&)?>>?\s*/dev/null|2>&1))*$`);
 const DELETE = /^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*((?:\s+[^\s>&]+)+)(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 /**
  * A plain relative path in the agent's working copy (BOS-120): no leading / - or ~, and no . .. or
@@ -234,8 +236,8 @@ const PLAIN = /^[A-Za-z0-9._+@%:=,/ \t\n;&|>-]+$/;
 /** A redirect: optional fd at the start of a word, then its target. */
 const REDIRECT = /(?:(?<=^|\s)[12&])?>>?\s*(&[12](?![^\s])|[^\s>&]*)/g;
 const TEMP_ONLY = new RegExp(`^${TEMP_PATH}$`);
-/** A new folder under /tmp, any depth: mkdir only adds, so a symlink on the way can't destroy anything. */
-const TEMP_DIR = /^\/tmp\/(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9._+@/-]+$/;
+/** rm flags that can't leave the entry in place while still succeeding (-i would answer "no" and exit 0). */
+const CLEARING_FLAG = /^(?:-[rRfvd]+|--(?:recursive|force|verbose|dir)|--)$/;
 const INSTALL_FLAGS = new Set(["--frozen-lockfile", "--no-frozen-lockfile", "--prefer-offline", "--offline", "--silent", "-s", "--reporter=silent", "--ignore-scripts"]);
 
 /**
@@ -243,18 +245,20 @@ const INSTALL_FLAGS = new Set(["--frozen-lockfile", "--no-frozen-lockfile", "--p
  * shapes of their arguments; anything not on it is not temp cleanup. mv, cp, tee, ln, touch, dd,
  * sed, interpreters and shells are left off on purpose: each can move, overwrite or delete
  * anywhere (mv /home/x /tmp/b followed by rm -rf /tmp/b is a delete outside /tmp).
+ * Anything that writes (cd for an install, mkdir, git worktree add) must aim at a /tmp entry in
+ * `cleared`: one this command has just deleted, so it can't be a shortcut link to somewhere else.
  */
-function safeBeside(words: string[], cwd: { tmp: boolean }): boolean {
+function safeBeside(words: string[], cwd: { tmp: boolean }, cleared: Set<string>): boolean {
   const [program, ...rest] = words;
   const operands = rest.filter((w) => !w.startsWith("-"));
   switch (program) {
     case "true": case "echo": case "pwd": case "ls": case "sleep": case "date":
       return true;
     case "cd":
-      cwd.tmp = rest.length === 1 && TEMP_ONLY.test(rest[0]!);
+      cwd.tmp = rest.length === 1 && cleared.has(rest[0]!);
       return rest.length <= 1;
     case "mkdir":
-      return operands.length > 0 && operands.every((w) => TEMP_DIR.test(w)) && rest.every((w) => !w.startsWith("-") || w === "-p");
+      return operands.length > 0 && operands.every((w) => cleared.has(w)) && rest.every((w) => !w.startsWith("-") || w === "-p");
     case "pnpm": case "npm":
       // Install writes node_modules into the current folder, so only in a /tmp checkout. No -C, --dir or --prefix to point it elsewhere.
       return cwd.tmp && ["install", "i", "ci"].includes(rest[0] ?? "") && rest.slice(1).every((w) => INSTALL_FLAGS.has(w));
@@ -276,7 +280,7 @@ function safeBeside(words: string[], cwd: { tmp: boolean }): boolean {
         else if (w.startsWith("-")) return false;
         else ops.push(w);
       }
-      if (!ops.length || !TEMP_ONLY.test(ops[0]!)) return false;
+      if (!ops.length || !cleared.has(ops[0]!)) return false;
       return ops.length <= 2 && !(ops[1] ?? "").startsWith("/") && !(ops[1] ?? "").includes("..");
     }
     default:
@@ -290,36 +294,63 @@ export type CleanupScope = { tmp: string[]; workingCopy: string[] };
  * What a cleanup command deletes, when every delete in it is of temp files (BOS-111) or of plain
  * relative paths in the agent's working copy (BOS-120), and nothing else in it changes anything
  * outside /tmp; otherwise null. An allow-list, per segment: each is either a plain rm/rmdir/unlink
- * of such paths or a known-safe command (safeBeside), its output going only to /dev/null or an
- * entry directly in /tmp. Temp deletes are one level only, because rm then removes a symlink as a
+ * of such paths or a known-safe command (safeBeside), its output going only to /dev/null or a /tmp
+ * entry cleared as below. Temp deletes are one level only, because rm then removes a symlink as a
  * link and never follows it. Working-copy paths go deeper, so a symlinked folder on the way would
  * be followed: only the runner's filesystem could tell, which is why these still need the CEO.
  * With any working-copy path there may be no cd anywhere, so the paths are relative to the folder
- * the run started in. The destructive-word counts stay as a second guard.
+ * each shell command starts in (the server checks the runner pinned it to the run's own worktree).
+ * The destructive-word counts stay as a second guard.
+ *
+ * Writes have the same symlink problem, so they may only go to a /tmp entry the command deleted
+ * earlier in one unbroken && chain (BOS-111 adversarial review: git worktree add, mkdir or an
+ * install through /tmp/lnk wrote into the link's target). Once rm -rf /tmp/NAME has succeeded the
+ * name is gone, and anything there afterwards was made by this chain. Any other separator ends
+ * the chain: after ; or || the rm or cd may have failed, and & or | run alongside it. Only a delete
+ * of /tmp entries alone clears them: a working-copy delete never does. Left open: another process
+ * recreating the name as a link in between, which needs a hostile agent racing it.
  */
 export function cleanupScope(command: string): CleanupScope | null {
   if (!PLAIN.test(command)) return null;
   if (/\(\)\s*\{|\bfunction\s|\balias\b|\bPATH=/.test(command)) return null;
   if (new RegExp(PUSHING, "i").test(command)) return null;
+  // PLAIN rules out quotes and heredocs, so this splits exactly where segments() does, keeping the separators.
+  const pieces = command.split(/(&&|\|\||[;|\n]|(?<!>)&(?!>))/);
   const segs = segments(command);
-  const scope: CleanupScope = { tmp: [], workingCopy: [] };
-  const deletes = segs.filter((s) => {
+  if (pieces.filter((_, i) => i % 2 === 0).map((s) => s.trim()).filter(Boolean).join("\0") !== segs.join("\0")) return null;
+  const deletePaths = (s: string) => {
     const paths = DELETE.exec(s)?.[1]?.trim().split(/\s+/);
-    if (!paths || !paths.every((p) => TEMP_ONLY.test(p) || inWorkingCopy(p))) return false;
-    for (const p of paths) (TEMP_ONLY.test(p) ? scope.tmp : scope.workingCopy).push(p);
-    return true;
-  });
+    return paths?.every((p) => TEMP_ONLY.test(p) || inWorkingCopy(p)) ? paths : null;
+  };
+  const deletes = segs.filter((s) => deletePaths(s));
   if (!deletes.length) return null;
-  if (scope.workingCopy.length && segs.some((s) => /^cd(\s|$)/.test(s.trim()))) return null;
+  const scope: CleanupScope = { tmp: [], workingCopy: [] };
+  for (const p of deletes.flatMap((s) => deletePaths(s)!)) (TEMP_ONLY.test(p) ? scope.tmp : scope.workingCopy).push(p);
+  if (scope.workingCopy.length && segs.some((s) => /^cd(\s|$)/.test(s))) return null;
   const cwd = { tmp: false };
-  for (const s of segs) {
-    if (deletes.includes(s)) continue;
+  const cleared = new Set<string>();
+  let chained = true;
+  for (let i = 0; i < pieces.length; i += 2) {
+    const sep = pieces[i - 1] ?? ";";
+    if (sep !== "&&") {
+      cleared.clear();
+      cwd.tmp = false;
+      chained = sep === ";" || sep === "\n";
+    }
+    const s = pieces[i]!.trim();
+    if (!s) continue;
+    if (deletePaths(s)) {
+      if (!TEMP_DELETE.test(s)) continue;
+      const words = s.replace(REDIRECT, " ").trim().split(/\s+/);
+      if (chained && words.slice(1).every((w) => TEMP_ONLY.test(w) || CLEARING_FLAG.test(w))) for (const w of words) if (TEMP_ONLY.test(w)) cleared.add(w);
+      continue;
+    }
     let ok = true;
     const rest = s.replace(REDIRECT, (_, to: string) => {
-      if (!(to === "/dev/null" || to === "&1" || to === "&2" || TEMP_ONLY.test(to))) ok = false;
+      if (!(to === "/dev/null" || to === "&1" || to === "&2" || cleared.has(to))) ok = false;
       return " ";
     });
-    if (!ok || /[>&]/.test(rest) || !safeBeside(rest.trim().split(/\s+/), cwd)) return null;
+    if (!ok || /[>&]/.test(rest) || !safeBeside(rest.trim().split(/\s+/), cwd, cleared)) return null;
   }
   const counted = [DESTRUCTIVE, DELETING].every((re) => {
     const count = (s: string) => s.match(new RegExp(re, "gi"))?.length ?? 0;

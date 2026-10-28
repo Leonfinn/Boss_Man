@@ -110,13 +110,15 @@ describe("temp-file cleanup (BOS-111)", () => {
   const route = (c: string) => evaluatePermission(exec(c), []);
   it("sends deletes of entries directly in /tmp to the CEO, recommended Allow", () => {
     for (const c of [
-      "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1",
+      "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1",
+      "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86 2>&1",
       "rm -rf /tmp/a /tmp/b.log 2>/dev/null",
       "rm -rf -- /tmp/.hidden-dir",
       "rm -rf /tmp/rv86 &>/dev/null; git worktree prune",
-      "rm -rf /tmp/wt && git worktree add -b bos-111 /tmp/wt origin/main 2>&1 && mkdir -p /tmp/wt-logs/a",
+      "rm -rf /tmp/wt /tmp/wt-logs && git worktree add -b bos-111 /tmp/wt origin/main 2>&1 && mkdir -p /tmp/wt-logs",
       "rm -rf /tmp/wt; git worktree prune; git worktree list",
-      "rm -rf /tmp/x && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
+      "rm -rf /tmp/x2 /tmp/x2.log && mkdir /tmp/x2 && cd /tmp/x2 && pnpm install --frozen-lockfile >> /tmp/x2.log 2>&1; echo done",
+      "rm -rf /tmp/a; rm -f /tmp/b && echo x > /tmp/b",
     ]) {
       expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
@@ -227,6 +229,28 @@ describe("temp-file cleanup (BOS-111)", () => {
       "rm -rf /tmp/a; mkdir /tmp/a/../../home/x",
       "rm -rf /tmp/a; mkdir -m 777 /tmp/b",
       "rm -rf /tmp/a\r\nrm -rf /home/node",
+      // Writes must go to a /tmp entry this command has just deleted: any other could be a shortcut link (BOS-111 adversarial review).
+      "rm -rf /tmp/a && git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/a && cd /tmp/lnk && pnpm install",
+      "rm -rf /tmp/a && mkdir -p /tmp/lnk/sub",
+      "rm -rf /tmp/a && mkdir -p /tmp/a/sub",
+      "rm -rf /tmp/a && echo x > /tmp/lnk",
+      "rm -rf /tmp/a && echo x >> /tmp/a/b",
+      // The delete may have failed, or runs alongside, so the name may still be a link.
+      "rm -rf /tmp/lnk; git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk || git worktree add -b x /tmp/lnk",
+      "false || rm -rf /tmp/lnk && git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk & git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk | git worktree add -b x /tmp/lnk",
+      "rm -rf /tmp/lnk\ngit worktree add -b x /tmp/lnk",
+      "rm -ri /tmp/lnk && git worktree add -b x /tmp/lnk",
+      "rm --interactive=always -rf /tmp/lnk && cd /tmp/lnk && pnpm install",
+      // If the cd fails, the install runs in the project.
+      "rm -rf /tmp/a && cd /tmp/a; pnpm install",
+      "rm -rf /tmp/a && cd /tmp/a || pnpm install",
+      "rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && true || pnpm install",
+      // The cleared name is only cleared until the chain breaks.
+      "rm -rf /tmp/a; true; cd /tmp/a && pnpm install",
     ]) {
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
       expect(tempCleanup(c), c).toBe(false);
@@ -259,6 +283,8 @@ describe("working-copy cleanup (BOS-120)", () => {
       ["rm -rf -- coverage && echo done", ["coverage"], []],
       ["rm -rf build >/dev/null 2>&1; ls", ["build"], []],
       ["rm -rf a.gitignore .github/x .gitmodules", ["a.gitignore", ".github/x", ".gitmodules"], []],
+      // A /tmp entry deleted on its own earlier in the && chain may still be written to.
+      ["rm -rf /tmp/x && rm -rf dist && mkdir /tmp/x", ["dist"], ["/tmp/x"]],
     ] as const) {
       expect(route(c), c).toEqual({ outcome: "ceo", rule: WORKING_COPY_RULE });
       expect(cleanupScope(c), c).toEqual({ workingCopy: files, tmp });
@@ -289,6 +315,10 @@ describe("working-copy cleanup (BOS-120)", () => {
       "rm -rf dist; ln -s /home/node dist", "rm -rf dist; mv src /tmp/x", "rm -rf dist && npx vitest run", "rm -rf dist && pnpm test", "rm -rf dist; sh x.sh",
       "rm -rf dist; node -e x", "rm -rf dist; git clean -fdx", "rm -rf dist; git checkout -- .", "rm -rf dist; mkdir src/x", "rm -rf dist; touch x",
       "rm -rf dist; git -C /home/node/repo status", "rm -rf dist; git worktree add /home/node/wt",
+      // Security Reviewer, round 2: a write through a link at /tmp/lnk. A working-copy delete never clears a /tmp write,
+      // and neither does a delete that mixes /tmp and working-copy paths.
+      "rm -rf dist && git worktree add -b x /tmp/lnk", "mkdir -p /tmp/lnk/sub; rm -rf dist", "echo x >/tmp/lnk; rm -rf dist",
+      "rm -rf dist && mkdir -p /tmp/lnk", "rm -rf dist && echo x >/tmp/lnk", "rm -rf /tmp/lnk dist && mkdir /tmp/lnk", "rm -rf /tmp/lnk; rm -rf dist; mkdir /tmp/lnk",
     ]) {
       expect(route(c).rule, c).not.toBe(WORKING_COPY_RULE);
       expect(route(c).rule, c).not.toBe(TEMP_CLEANUP_RULE);
@@ -309,5 +339,53 @@ describe("working-copy cleanup (BOS-120)", () => {
   it("lets the company's own rules win", () => {
     const mine = [{ name: "Owner sees every rm", match: { commandPattern: "\\brm\\b" }, outcome: "owner" as const }];
     expect(evaluatePermission(exec("rm -rf dist"), mine).outcome).toBe("owner");
+  });
+});
+
+describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+  const OWNER = { outcome: "owner", rule: "Destructive commands go to the owner" };
+
+  it("keeps a shortcut link at /tmp/NAME with the owner: worktree add, mkdir and installs write through it", () => {
+    for (const c of [
+      "rm -rf /tmp/a && git worktree add -b feat2 /tmp/lnk2",
+      "rm -rf /tmp/a && mkdir -p /tmp/lnk/sub",
+      "rm -rf /tmp/a && cd /tmp/lnk && pnpm install",
+      "rm -rf /tmp/a && cd /tmp/lnk && npm ci",
+      "rm -rf /tmp/a && git worktree remove --force /tmp/lnk",
+    ]) {
+      expect(tempCleanup(c), c).toBe(false);
+      expect(route(c), c).toEqual(OWNER);
+    }
+  });
+
+  it("still sends the ticket's example to the CEO with Allow, and the unprovable ones to the owner with Deny", () => {
+    const example = "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
+    expect(tempCleanup(example)).toBe(true);
+    expect(route(example)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(recommendedVerdict(exec(example))).toBe("allow");
+    for (const c of ["rm -rf /tmp/../home", "rm -rf /tmp/$X", "rm -rf /tmp /home", "rm -rf /tmp/a /home/node/x"]) {
+      expect(route(c), c).toEqual(OWNER);
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+    for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(route(c), c).toEqual(OWNER);
+  });
+
+  // Found in the BOS-126 run: a glob inside /tmp is recommended Allow, because the command counts as /tmp-only work.
+  // The doc comment on recommendedVerdict says globs are Deny. it.fails flips to a failure once that is fixed: then make it a plain it.
+  // One it.fails per pattern, so fixing one of them makes exactly that test fail.
+  for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) {
+    it.fails(`recommends Deny for a glob in /tmp, which would wipe other agents' checkouts: ${c}`, () => {
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    });
+  }
+
+  // "rm /tmp/a -rf" is a plain /tmp cleanup; routing it to the owner is a deliberately conservative side effect of the widened pattern.
+  it("pins the widened destructive pattern: flags after the file, and find -delete, go to the owner with Deny", () => {
+    for (const c of ["rm file -rf", "rm a.txt -rf", "rm /tmp/a -rf", "find . -name x -delete", "find /tmp -name x -delete"]) {
+      expect(route(c), c).toEqual(OWNER);
+      expect(tempCleanup(c), c).toBe(false);
+    }
+    for (const c of ["rm file -rf", "find . -name x -delete"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 });

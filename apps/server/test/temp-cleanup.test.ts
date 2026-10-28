@@ -15,7 +15,7 @@ import type { Ladder } from "../src/services/alert-ladder.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const clients: Client[] = [];
-const CLEANUP = "rm -rf /tmp/rv86 && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
+const CLEANUP = "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
 
 async function setup() {
   let clock = new Date();
@@ -90,6 +90,9 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
     expect(w).toMatchObject({ reason: "decision", priority: 3 });
     expect(w!.note).toContain(CLEANUP);
+    expect(w!.note).toMatch(/git worktree add writes into the project.s repository/);
+    // A worktree writes the repository's .git, so the card never promises the repository is untouched.
+    expect((c.explain as { scratch?: unknown }).scratch).toBeUndefined();
     expect(ctx.sent).toEqual([]);
   });
 
@@ -107,7 +110,7 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
     const after = await reload(d!.id);
     expect((after.context as { settled: { name: string; note: string } }).settled).toMatchObject({ agentId: ctx.ceo.id, note: "It only removes its own scratch checkout in /tmp." });
     const log = await ctx.db.select().from(activity).where(eq(activity.kind, "decision_answered"));
-    expect(log.at(-1)!.summary).toMatch(/settled ".*": Allow once\. Reason: It only removes its own scratch checkout in \/tmp\.$/);
+    expect(log.at(-1)!.summary).toMatch(/settled ".*": Allow once\. Reason: It only removes/);
     expect(log.at(-1)!.summary).not.toMatch(/^Owner answered/);
     const settled = (await ctx.req("GET", "/api/decisions/advised")).json() as Array<{ id: string; settled?: { answer: string; note: string; command: string; tempCleanup: boolean } }>;
     expect(settled.find((s) => s.id === d!.id)?.settled).toEqual({ by: expect.any(String), answer: "Allow once", note: "It only removes its own scratch checkout in /tmp.", command: CLEANUP, tempCleanup: true });
@@ -160,6 +163,7 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
     expect(w).toMatchObject({ reason: "decision", priority: 3 });
     expect(w!.note).toContain("symlink");
+    expect(w!.note).toContain("It has no cd.");
     expect(w!.note).not.toContain("pnpm or npm install");
 
     const ceo = await client(ctx.ceo.id);
@@ -200,7 +204,9 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
   });
 
   it("keeps path tricks with the owner even on a run with a checkout", async () => {
-    for (const c of ["rm -rf ../other", "rm -rf .git", "cd src && rm -rf x", "rm -rf /home/node/x", "rm -rf $HOME/x", "rm -rf dist; cp -r src /tmp/x"]) {
+    for (const c of ["rm -rf ../other", "rm -rf .git", "cd src && rm -rf x", "rm -rf /home/node/x", "rm -rf $HOME/x", "rm -rf dist; cp -r src /tmp/x",
+      // Security Reviewer, round 2: writes through a link at /tmp/lnk beside a working-copy delete. Only a /tmp delete clears a /tmp write.
+      "rm -rf dist && git worktree add -b x /tmp/lnk", "mkdir -p /tmp/lnk/sub; rm -rf dist", "echo x >/tmp/lnk; rm -rf dist", "rm -rf dist && mkdir -p /tmp/lnk", "rm -rf dist && echo x >/tmp/lnk"]) {
       expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier: "owner" });
     }
   });

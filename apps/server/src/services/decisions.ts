@@ -647,13 +647,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             `Command: ${explain.command ?? ""}`,
             ...(workingCopy
               ? [
-                  `Its deletes are plain relative paths in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${workingCopy.files.join(", ").slice(0, 1000)}. Any others are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands that change nothing outside /tmp, so it came to you rather than the owner.`,
+                  `Its deletes are plain relative paths in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${workingCopy.files.join(", ").slice(0, 1000)}. It has no cd. Any other deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner.`,
                   "Boss Man can't see the runner's files: if a folder on one of those paths is a symlink, the delete follows it out of the checkout. Allow it when the paths are the agent's own throwaway files (a probe or test file it made, build output such as dist or node_modules) and its ticket explains them.",
                   "Deny it, or escalate it to the owner (decisions tool, action escalate), if it deletes source folders or files the ticket doesn't account for, or anything you can't explain.",
                 ]
               : [
-                  "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands that change nothing outside /tmp, so it came to you rather than the owner.",
-                  "One exception on that list: pnpm or npm install runs the project's own install scripts, which can do anything. If the command installs, check that the folder is a checkout of the asking agent's own ticket branch.",
+                  "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
+                  "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
                   "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
                 ]),
             "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",

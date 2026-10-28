@@ -127,10 +127,22 @@ describe("work only in a temporary folder", () => {
     expect(scratch("cd /tmp/x && git push origin main")).toBeUndefined();
     expect(scratch("cd /tmp && git clone https://example.com/r.git r")).toBeUndefined();
     expect(scratch("cd /tmp/x && git checkout main && cd /home/node && git checkout main")).toBeUndefined();
+    // A worktree writes the repository's .git and makes its branch there (BOS-111 adversarial review).
+    expect(scratch("rm -rf /tmp/a && cd /tmp/b && git worktree add -b feature-x /tmp/c")).toBeUndefined();
+    expect(scratch("cd /tmp/b && git worktree prune > /tmp/b/log")).toBeUndefined();
     expect(scratch("rm -rf /tmp/$DIR")).toBeUndefined();
     expect(scratch("node build.js")).toBeUndefined();
     // Only reading isn't the case this line is for.
     expect(scratch("cat /tmp/x")).toBeUndefined();
+  });
+});
+
+describe("repository promise (BOS-126)", () => {
+  it("makes no promise that the repository is untouched for a command that runs git worktree add", () => {
+    for (const c of ["rm -rf /tmp/a && git worktree add -b feat2 /tmp/a", "rm -rf /tmp/a && git worktree add /tmp/a origin/main && cd /tmp/a && pnpm install"]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+    }
+    expect(explainCommand("rm -rf /tmp/a && mkdir /tmp/a").scratch?.note).toMatch(/repository aren.t touched/);
   });
 });
 
