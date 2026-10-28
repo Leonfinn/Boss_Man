@@ -299,7 +299,9 @@ export type CleanupScope = { tmp: string[]; workingCopy: string[] };
  * link and never follows it. Working-copy paths go deeper, so a symlinked folder on the way would
  * be followed: only the runner's filesystem could tell, which is why these still need the CEO.
  * With any working-copy path there may be no cd anywhere, so the paths are relative to the folder
- * each shell command starts in (the server checks the runner pinned it to the run's own worktree).
+ * each shell command starts in. The server sends these to the CEO only when the runner reported it
+ * started the run in its ticket's worktree and the tool input names no other folder; it can't see
+ * where the shell is now, so that and the CEO's approval are what keep them inside.
  * The destructive-word counts stay as a second guard.
  *
  * Writes have the same symlink problem, so they may only go to a /tmp entry the command deleted

@@ -35,11 +35,14 @@ async function setup() {
   built.runners.connect(runner!.id, (cmd) => (sent.push(cmd), true));
   let seq = 0;
   /** An agent's run asks to run a shell command; returns the decision it made, if any. */
-  const ask = async (command: string, agentId = dev.id, opts: { ticketId?: string; rawInput?: Record<string, unknown> } = {}) => {
+  // With a ticket, the runner reports it started the run in that ticket's worktree, unless workspace says otherwise.
+  const ask = async (command: string, agentId = dev.id, opts: { ticketId?: string; rawInput?: Record<string, unknown>; workspace?: false | { ticketId: string } } = {}) => {
     const runId = randomUUID();
     const requestId = randomUUID();
     await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.started", runId, agentId, acpSessionId: "s", model: null } });
     if (opts.ticketId) await db.update(runs).set({ ticketId: opts.ticketId }).where(eq(runs.id, runId));
+    const ws = opts.workspace === false ? null : (opts.workspace ?? (opts.ticketId ? { ticketId: opts.ticketId } : null));
+    if (ws) await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.workspace", runId, ticketId: ws.ticketId, branch: `bossman/${ws.ticketId}`, baseCommit: "abc123", created: false, restoredPatch: false } });
     await built.runners.ingest(runner!, { seq: ++seq, at: clock.toISOString(), event: { type: "run.permission_request", runId, requestId, title: "Create branch worktree and install deps", kind: "execute", rawInput: { command, ...opts.rawInput }, optionKinds: ["allow_once", "reject_once"] } });
     const [d] = await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
     return { d, runId, requestId };
@@ -149,9 +152,10 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
 describe("deletes in the agent's own working copy go to the CEO first (BOS-120)", () => {
   const PROBE = "rm -f test/zz-probe.test.ts && rm -rf dist 2>/dev/null; git status";
 
-  it("waits with the CEO, recommended Allow, and every card says which checkout and which files", async () => {
+  it("waits with the CEO, and every card says which checkout and which files", async () => {
     const { d } = await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id });
-    expect(d).toMatchObject({ tier: "ceo", status: "open", recommendedOption: "Allow once" });
+    // A probe file isn't build output, so Boss Man can't vouch for it: the CEO decides from the card.
+    expect(d).toMatchObject({ tier: "ceo", status: "open", recommendedOption: "Deny" });
     const c = d!.context as { tempCleanup?: boolean; workingCopy: { ticketId: string; branch: string; files: string[] }; ladder: Ladder };
     expect(c.tempCleanup).toBeUndefined();
     expect(c.workingCopy).toMatchObject({ ticketId: ctx.ticket.id, branch: `bossman/${ctx.ticket.id}`, files: ["test/zz-probe.test.ts", "dist"] });
@@ -178,18 +182,35 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
     ctx.advance(6);
     await ctx.alerts.sweep();
     const moved = await reload(d!.id);
-    expect(moved).toMatchObject({ tier: "owner", status: "open", recommendedOption: "Allow once" });
+    expect(moved).toMatchObject({ tier: "owner", status: "open", recommendedOption: "Deny" });
     expect(moved.question).toContain("test/zz-probe.test.ts");
     expect((await ctx.decisions.queue()).map((q) => q.id)).toContain(d!.id);
   });
 
+  it("recommends Allow only for build output, never for source (adversarial review)", async () => {
+    expect((await ctx.ask("rm -rf dist apps/web/dist/ node_modules", ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "ceo", recommendedOption: "Allow once" });
+    for (const c of ["rm -rf src", "rm -rf package.json", "rm -rf .github/workflows", "rm -f .env", "rm -rf dist src"]) {
+      expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier: "ceo", recommendedOption: "Deny" });
+    }
+  });
+
+  it("says when the file list is cut short", async () => {
+    const many = Array.from({ length: 300 }, (_, i) => `out/file-${i}.txt`);
+    const { d } = await ctx.ask(`rm -f ${many.join(" ")}`, ctx.dev.id, { ticketId: ctx.ticket.id });
+    expect(d).toMatchObject({ tier: "ceo" });
+    expect(d!.question).toMatch(/out\/file-\d+\.txt, …and \d+ more\.$/);
+    expect((d!.context as { workingCopy: { files: string[] } }).workingCopy.files).toHaveLength(300);
+  });
+
   it("goes to the owner as before when Boss Man can't tell the run has a checkout", async () => {
-    // No ticket, a ticket in a project with no repo, or a command that names its own folder.
+    // No ticket, a ticket in a project with no repo, no worktree reported for the run (a review copy)
+    // or one for another ticket, or tool input with any key Claude Code's Bash tool doesn't send.
     for (const d of [
       (await ctx.ask(PROBE)).d,
       (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.noRepo.id })).d,
-      (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, rawInput: { cwd: "/home/node" } })).d,
-      (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, rawInput: { workdir: "/home/node" } })).d,
+      (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, workspace: false })).d,
+      (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, workspace: { ticketId: ctx.noRepo.id } })).d,
+      ...(await Promise.all([{ cwd: "/home/node" }, { workdir: "/home/node" }, { cwdPath: "/etc" }, { folder: "/etc" }, { path: "/etc" }, { working_dir: "/etc" }, { tool_input: { workdir: "/etc" } }].map(async (rawInput) => (await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, rawInput })).d))),
     ]) {
       expect(d).toMatchObject({ tier: "owner", recommendedOption: "Deny" });
       expect((d!.context as { workingCopy?: unknown; ladder?: unknown }).workingCopy).toBeUndefined();
@@ -200,7 +221,17 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
     // The CEO's own request, and a paused CEO.
     expect((await ctx.ask(PROBE, ctx.ceo.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "owner" });
     await ctx.db.update(agents).set({ paused: true }).where(eq(agents.id, ctx.ceo.id));
-    expect((await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "owner" });
+    const { d: paused } = await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id });
+    expect(paused).toMatchObject({ tier: "owner" });
+    // It still says it's a working-copy delete, on the card and in its record.
+    expect(paused!.question).toContain("test/zz-probe.test.ts");
+    expect((paused!.context as { workingCopy?: { files: string[] }; ladder?: unknown })).toMatchObject({ workingCopy: { files: ["test/zz-probe.test.ts", "dist"] } });
+    expect((paused!.context as { ladder?: unknown }).ladder).toBeUndefined();
+  });
+
+  it("still goes to the CEO with Claude Code's other Bash keys", async () => {
+    const rawInput = { description: "Remove probe", timeout: 60000, run_in_background: false, dangerouslyDisableSandbox: false };
+    expect((await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id, rawInput })).d).toMatchObject({ tier: "ceo" });
   });
 
   it("keeps path tricks with the owner even on a run with a checkout", async () => {

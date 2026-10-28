@@ -195,6 +195,20 @@ export type AnswerExtra = {
 
 /** Which checkout a working-copy cleanup deletes in, and what (BOS-120). */
 export type WorkingCopy = { ticketId: string; ref: string | null; branch: string; files: string[] };
+/** The keys of Claude Code's Bash tool input. None of them moves the shell to another folder. */
+const SHELL_INPUT_KEYS = new Set(["command", "description", "timeout", "run_in_background", "dangerouslyDisableSandbox"]);
+/** Files for a card, cut at whole names with a count of the rest, so a long list never looks complete. */
+function fileList(files: string[], max: number): string {
+  let out = "";
+  let shown = 0;
+  for (const f of files) {
+    const next = out ? `${out}, ${f}` : f;
+    if (next.length > max) break;
+    out = next;
+    shown++;
+  }
+  return shown < files.length ? `${out}${out ? ", " : ""}…and ${files.length - shown} more` : out;
+}
 
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
 
@@ -594,18 +608,25 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // queue and notifications, and moves to the owner if the CEO doesn't settle it in time or escalates it.
       let ladder: Ladder | undefined;
       let ceoId: string | undefined;
-      // Deletes in the working copy (BOS-120) go the same way, but only when the run has a checkout:
-      // a run on a ticket in a project with a repo starts in that ticket's worktree or a review copy
-      // (scheduler). Paths are relative to where the shell is, and the runner doesn't say, so a
-      // command that names its own folder (opencode's workdir, codex's cwd) stays with the owner.
+      // Deletes in the working copy (BOS-120) go the same way, but only when the run has a checkout.
+      // Paths are relative to where the shell starts, and the runner doesn't say where that is, so
+      // two things must hold. The runner reported (run.workspace) that it started this run in its
+      // ticket's own worktree, and that record gives the branch; a review copy or a run with no
+      // worktree sends none. And the tool input has only Claude Code's Bash keys: an allow-list,
+      // because any other key (opencode's workdir, codex's cwd, one we don't know) could point the
+      // command somewhere else (BOS-120 adversarial review).
       let workingCopy: WorkingCopy | undefined;
       if (tier === "ceo" && rule === WORKING_COPY_RULE) {
         const raw = (event.rawInput ?? {}) as Record<string, unknown>;
-        const [t] = run?.ticketId && !["cwd", "workdir", "dir", "directory"].some((k) => k in raw)
-          ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).innerJoin(companies, eq(companies.id, tickets.companyId)).where(and(eq(tickets.id, run.ticketId), eq(tickets.companyId, runner.companyId)))
+        const files = Object.keys(raw).every((k) => SHELL_INPUT_KEYS.has(k)) ? (cleanupScope(typeof raw["command"] === "string" ? raw["command"] : "")?.workingCopy ?? []) : [];
+        const [ws] = run?.ticketId && files.length
+          ? await db.select({ payload: runnerEvents.payload }).from(runnerEvents).where(and(eq(runnerEvents.runnerId, runner.id), eq(runnerEvents.type, "run.workspace"), sql`(${runnerEvents.payload}->>'runId') = ${event.runId}`, sql`(${runnerEvents.payload}->>'ticketId') = ${run.ticketId}`)).orderBy(desc(runnerEvents.seq)).limit(1)
           : [];
-        const files = cleanupScope(typeof raw["command"] === "string" ? raw["command"] : "")?.workingCopy ?? [];
-        if (t?.repoUrl && files.length) workingCopy = { ticketId: run!.ticketId!, ref: ticketRef(t.prefix, t.number), branch: `bossman/${run!.ticketId}`, files };
+        const branch = (ws?.payload as { branch?: unknown } | undefined)?.branch;
+        const [t] = ws && typeof branch === "string"
+          ? await db.select({ number: tickets.number, prefix: companies.ticketPrefix, repoUrl: projects.repoUrl }).from(tickets).innerJoin(projects, eq(projects.id, tickets.projectId)).innerJoin(companies, eq(companies.id, tickets.companyId)).where(and(eq(tickets.id, run!.ticketId!), eq(tickets.companyId, runner.companyId)))
+          : [];
+        if (t?.repoUrl && typeof branch === "string") workingCopy = { ticketId: run!.ticketId!, ref: ticketRef(t.prefix, t.number), branch, files };
         else tier = "owner";
       }
       if (tier === "ceo" && (rule === TEMP_CLEANUP_RULE || workingCopy)) {
@@ -625,14 +646,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           companyId: runner.companyId,
           kind: "permission",
           // Which checkout and which files, on every card the CEO or the owner sees (BOS-120).
-          question: `${explain.title}. ${explain.summary}${workingCopy ? ` In ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${workingCopy.files.join(", ").slice(0, 400)}.` : ""}`,
+          question: `${explain.title}. ${explain.summary}${workingCopy ? ` In ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 400)}.` : ""}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
-          // Allow only once the run is known to have a checkout; otherwise the paths could be anywhere.
-          recommendedOption: workingCopy || recommendedVerdict(info) === "allow" ? ALLOW : DENY,
+          // The same allow-list as everywhere else: build output is Allow, source or anything else is
+          // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).
+          recommendedOption: recommendedVerdict(info) === "allow" ? ALLOW : DENY,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
-          context: { ...context, rule, ...(ladder ? (workingCopy ? { workingCopy, ladder } : { tempCleanup: true, ladder }) : {}) },
+          // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
+          context: { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? (workingCopy ? { ladder } : { tempCleanup: true, ladder }) : {}) },
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
@@ -647,8 +670,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             `Command: ${explain.command ?? ""}`,
             ...(workingCopy
               ? [
-                  `Its deletes are plain relative paths in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${workingCopy.files.join(", ").slice(0, 1000)}. It has no cd. Any other deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner.`,
-                  "Boss Man can't see the runner's files: if a folder on one of those paths is a symlink, the delete follows it out of the checkout. Allow it when the paths are the agent's own throwaway files (a probe or test file it made, build output such as dist or node_modules) and its ticket explains them.",
+                  `Its deletes are plain relative paths in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 1000)}. It has no cd. Any other deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner.`,
+                  "Boss Man can't see the runner's files: if a folder on one of those paths is a symlink, the delete follows it out of the checkout. It recommends Allow only for build output (dist, node_modules and the like). Allow it when the paths are the agent's own throwaway files (a probe or test file it made, build output such as dist or node_modules) and its ticket explains them.",
                   "Deny it, or escalate it to the owner (decisions tool, action escalate), if it deletes source folders or files the ticket doesn't account for, or anything you can't explain.",
                 ]
               : [
