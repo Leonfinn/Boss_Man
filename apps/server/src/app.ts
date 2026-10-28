@@ -54,7 +54,7 @@ import { paService } from "./services/pa.js";
 import { dashboardService } from "./services/dashboard.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
-import { SkillError, skillsService } from "./services/skills.js";
+import { parseSkillMd, SkillError, skillsService } from "./services/skills.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
@@ -1383,7 +1383,19 @@ export async function buildApp(opts: AppOptions) {
     owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
       const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }).parse(req.body);
-      return skillsSvc.write(id, { ...b, replaceId: skillId }).then((s) => ({ id: s.id, name: s.name }), skillErrors(reply));
+      try {
+        // The edit replaces the skill's files: keep the old text so the log says what actually changed.
+        const old = await skillsSvc.get(id, skillId);
+        const oldBody = parseSkillMd(old.files.find((f) => f.path === "SKILL.md")?.text ?? "").body;
+        const s = await skillsSvc.write(id, { ...b, replaceId: skillId });
+        // An edited skill is new, unreviewed text: log it so an approved skill can never change without a trace.
+        // Each side is clipped so both the old and the new text survive the activity log's length cap.
+        const clip = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
+        await record(db, { companyId: id, kind: "skill.edited_by_owner", summary: `Owner edited the skill ${s.name}. Old text: "${clip(oldBody, 50)}" New text: "${clip(b.body, 100)}". Not security-reviewed.` });
+        return { id: s.id, name: s.name };
+      } catch (err) {
+        return skillErrors(reply)(err);
+      }
     });
     owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
