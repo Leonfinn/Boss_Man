@@ -825,6 +825,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
                     planText?: string | null;
                     explain?: { command?: string };
                     tempCleanup?: boolean;
+                    workingCopy?: unknown;
                     output?: string;
                     triedFirst?: string;
                     steps?: string[];
@@ -833,7 +834,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
                   const tickets = [...new Set([...(r.about ?? []).map((a) => (a.ref ? `${a.ref} "${a.title}"` : a.title)), ...(r.blocks ?? []).map((b) => b.ref ?? "")].filter((x): x is string => !!x))];
                   const advice = adviceOf(r.context);
                   return [
-                    `${r.id}: ${ctx.tempCleanup ? "TEMP-FILE CLEANUP: " : ""}[${r.kind}/${r.tier}] ${r.question}`,
+                    `${r.id}: ${ctx.tempCleanup ? "TEMP-FILE CLEANUP: " : ctx.workingCopy ? "WORKING-COPY CLEANUP: " : ""}[${r.kind}/${r.tier}] ${r.question}`,
                     `Ticket: ${tickets.join(", ") || "none"} · Raised by: ${r.agentName ?? "Boss Man"} · Age: ${ago(r.createdAt)} · Score: ${Math.round(r.score)}`,
                     ...(r.reasons?.length ? [`Why it ranks here: ${r.reasons.join("; ")}`] : []),
                     `Options: ${(r.options as string[]).join(" | ") || "none"} (recommended: ${r.recommendedOption ?? "none"})`,
