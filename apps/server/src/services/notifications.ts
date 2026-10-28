@@ -158,6 +158,8 @@ export function notificationsService(db: Db, deps: { reveal: (secretId: string) 
             gt(decisions.createdAt, new Date(now().getTime() - 7 * 86_400_000)),
             // Boss Man's own alerts (BOS-64) reach the owner only once they climb to them.
             sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`,
+            // Lesson decisions are the CEO's (BOS-105); the owner hears the outcome in the feed.
+            sql`coalesce(${decisions.context}->>'type', '') not in ('lesson', 'lesson_replace')`,
           ),
         )
         .orderBy(decisions.createdAt)

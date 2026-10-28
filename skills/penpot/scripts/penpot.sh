@@ -299,7 +299,7 @@ upload_images() { # upload_images FILE_ID LAYOUT_JSON
   local f="$1" media='{}' id path ext mime size dir tmp code entry
   while IFS=$'\t' read -r id path; do
     [ -n "$id" ] || continue
-    ext="$(printf '%s' "${path##*.}" | tr 'A-Z' 'a-z')"
+    ext="$(printf '%s' "${path##*.}" | tr '[:upper:]' '[:lower:]')"
     case "$ext" in png) mime=image/png ;; jpg|jpeg) mime=image/jpeg ;; gif) mime=image/gif ;; webp) mime=image/webp ;;
       *) echo "note: image '$path' is not a png, jpg, gif or webp; drawn as a grey Image placeholder." >&2; continue ;; esac
     if [ ! -f "$path" ] || [ ! -r "$path" ]; then echo "note: can't read image '$path'; drawn as a grey Image placeholder." >&2; continue; fi
@@ -458,7 +458,7 @@ case "${1:-}" in
     session="$(tr -d '\r' <"$hdr" | sed -n 's/^[Ss]et-[Cc]ookie: auth-token=\([^;]*\).*/\1/p' | head -n1)"
     pid="$(jq -r '.id // empty' "$tmp")"
     case "$pid" in ""|*[!0-9a-fA-F-]*) die "logged in, but Penpot gave no usable profile id. Tell the owner." ;; esac
-    [ -n "$session" ] && [ -n "$pid" ] || die "logged in, but Penpot gave no session. Tell the owner."
+    if [ -z "$session" ] || [ -z "$pid" ]; then die "logged in, but Penpot gave no session. Tell the owner."; fi
     cookie_curl() { printf 'header = "Cookie: auth-token=%s"\n' "$session" | curl -sS -K - -m 120 "$@" 2>/dev/null; }
     # End the session on every exit path (failures included); a failure here doesn't matter.
     trap 'cookie_curl -o /dev/null -X POST -H "Content-Type: application/json" --data "{}" "$base/api/rpc/command/logout" || true; rm -f "$hdr" "$tmp"' EXIT

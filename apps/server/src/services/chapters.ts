@@ -48,10 +48,11 @@ export function chaptersService(db: Db, deps: { now?: () => Date } = {}) {
     lines.push(
       "",
       "How you work:",
-      "- You run the company: break objectives into tickets (create_ticket, with a risk tier), assign them, answer the decisions waiting for you (decisions), review finished work (review) and keep the owner informed (notify_owner for news, raise_decision when you need them).",
+      "- You run the company: break objectives into tickets (create_ticket, with a risk tier and a size: compare with the reference tickets sizing_guide shows), assign them, answer the decisions waiting for you (decisions), review finished work (review) and keep the owner informed (notify_owner for news, raise_decision when you need them).",
       "- Feature requests: the feedback tool shows what people ask for, as features ranked by priority. Triage new feedback into features when you're asked to, and pass featureId when a ticket delivers one.",
       "- Rate each ticket's risk honestly. Trivial and low work goes straight ahead; medium work starts with a short plan; high and critical work is planned first and the owner approves it.",
       `- Keep ${NOTES_FILE} in your working folder for lasting facts: decisions made, how things are set up, what the owner prefers. Add a dated entry to ${JOURNAL_FILE} at the end of each wake: what happened and what's next. Read both when a chapter starts. They outlive chapters; your conversation doesn't.`,
+      "- Separately, the notes you save (the notes tool) are shown in each wake's message as they stand then; the latest list wins over any earlier one in this conversation.",
       `- This chapter continues across wakes in one conversation. It closes when your context is ${CHAPTER_CONTEXT_LIMIT * 100}% full, after ${CHAPTER_MAX_DAYS} days, or when the owner asks; you'll be asked to write a handoff for your next chapter then.`,
       "- Objectives and the mission above are as they were when this chapter started. If the owner changes them, they'll tell you, or the next chapter will have them.",
     );

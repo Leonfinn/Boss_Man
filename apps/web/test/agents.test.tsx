@@ -88,3 +88,60 @@ describe("instructions from the template", () => {
     }
   });
 });
+
+describe("CEO notes", () => {
+  it("lists the CEO's notes from chat and lets the owner edit and delete them", async () => {
+    const ceo = { id: "a2", companyId: "c1", name: "Boss", role: "ceo", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null, title: null, template: null, instructions: "", funding: null, fundingKind: null, retiredAt: null, status: "idle", current: null, openTickets: 0, pa: null, month: { costMicros: 0, runs: 0, tokens: 0 } };
+    let items = [{ id: "n1", title: "Website tasks", text: "Never say the owner forbade splitting it.", why: "I never said that", source: "chat", requestedBy: null, ticketId: null, ticketRef: null, updatedAt: new Date().toISOString() }];
+    const limits = { count: 20, title: 80, text: 500, why: 300 };
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "/api/agent-notes/n1" && init?.method === "PATCH") items = [{ ...items[0]!, ...JSON.parse(String(init.body)), source: "owner" }];
+      if (url === "/api/agent-notes/n1" && init?.method === "DELETE") items = [];
+      const body = url.includes("/notes") ? { items, limits } : url.includes("agent-templates") ? { templates: [] } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/agents") ? [ceo] : url.startsWith("/api/agent-notes") ? { ok: true } : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", () => true);
+    render(<Agents company={company} onChanged={() => {}} />);
+    expect(await screen.findByText("CEO notes (1 of 20)")).toBeTruthy();
+    expect(screen.getByText("Never say the owner forbade splitting it.")).toBeTruthy();
+    expect(screen.getByText(/Why: “I never said that” · saved by the CEO from your chat/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit note: Website tasks" }));
+    fireEvent.change(screen.getByLabelText("Note", { selector: "#note-n1-text" }), { target: { value: "Don't attribute the split to the owner." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Don't attribute the split to the owner.")).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([u, i]) => u === "/api/agent-notes/n1" && (i as RequestInit).method === "PATCH")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Delete note: Website tasks" }));
+    expect(await screen.findByText("CEO notes (0 of 20)")).toBeTruthy();
+    expect(screen.getByText("No notes yet.")).toBeTruthy();
+  });
+});
+
+describe("CEO note requests", () => {
+  it("shows where a note came from, and waiting and declined requests from the team", async () => {
+    const ceo = { id: "a2", companyId: "c1", name: "Boss", role: "ceo", agentKind: "claude", model: null, fundingSourceId: null, paused: false, starred: false, duty: null, title: null, template: null, instructions: "", funding: null, fundingKind: null, retiredAt: null, status: "idle", current: null, openTickets: 0, pa: null, month: { costMicros: 0, runs: 0, tokens: 0 } };
+    const at = new Date().toISOString();
+    const body = {
+      items: [{ id: "n1", title: "Run the linter", text: "Lint before review.", why: "Review bounced twice.", source: "request", requestedBy: "Engineer", ticketId: "t1", ticketRef: "BOS-9", updatedAt: at }],
+      requests: [
+        { id: "r1", title: "Run the linter", text: "Lint before review.", why: "Review bounced twice.", from: "Engineer", ticketId: "t1", ticketRef: "BOS-9", status: "accepted", declineReason: null, createdAt: at },
+        { id: "r2", title: "Skip tests", text: "Skip tests on docs tickets.", why: "Faster.", from: "Engineer", ticketId: "t1", ticketRef: "BOS-9", status: "declined", declineReason: "Tests always run.", createdAt: at },
+        { id: "r3", title: "Tag releases", text: "Tag every release.", why: "Hard to find releases.", from: "QA", ticketId: "t2", ticketRef: "BOS-10", status: "pending", declineReason: null, createdAt: at },
+      ],
+      limits: { count: 20, title: 80, text: 500, why: 300 },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => new Response(JSON.stringify(url.includes("/notes") ? body : url.includes("agent-templates") ? { templates: [] } : url.includes("/models") ? { runner: {}, api: [] } : url.includes("/agents") ? [ceo] : []), { status: 200 })),
+    );
+    render(<Agents company={company} onChanged={() => {}} />);
+    expect(await screen.findByText("CEO notes (1 of 20) · 1 request waiting")).toBeTruthy();
+    expect(screen.getByText(/asked by Engineer/).textContent).toMatch(/asked by Engineer on BOS-9, accepted by the CEO/);
+    // The accepted request shows as the note, not again as a request.
+    expect(screen.getAllByText("Run the linter")).toHaveLength(1);
+    expect(screen.getByText("Waiting for the CEO")).toBeTruthy();
+    expect(screen.getByText(/Declined: Tests always run\./)).toBeTruthy();
+  });
+});

@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from "react";
-import { api, type Company, type Decision, type StallEvidence, type TeamAlert } from "../api";
+import { api, type AdvisedDecision, type Company, type Decision, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
+import { SkillProposal } from "../components/SkillProposal";
 
 const KIND: Record<string, { label: string; tone: string }> = {
   permission: { label: "Permission", tone: "" },
@@ -17,7 +18,9 @@ const KIND: Record<string, { label: string; tone: string }> = {
   question: { label: "Question", tone: "" },
   deploy: { label: "Production deploy", tone: "red" },
   self_deploy: { label: "Boss Man update", tone: "blue" },
+  owner_todo: { label: "Waiting for you", tone: "amber" },
   rule_proposal: { label: "Proposed rule", tone: "blue" },
+  skill: { label: "Skill", tone: "blue" },
 };
 
 const EFFECT = {
@@ -43,7 +46,7 @@ const minutesAgo = (iso: string) => {
 const PREVIEW_LINES = 8;
 
 /** Long text shows its first lines and opens in place, so a card stays short until it's read. */
-export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { text: string; label?: string; lines?: number; chars?: number }) {
+export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars, refs }: { text: string; label?: string; lines?: number; chars?: number; refs?: Decision["refs"] }) {
   const [open, setOpen] = useState(false);
   const lines = text.split("\n");
   const byLines = lines.length > keep + 2 ? lines.slice(0, keep).join("\n") : text;
@@ -52,13 +55,49 @@ export function MoreText({ text, label, lines: keep = PREVIEW_LINES, chars }: { 
   return (
     <div>
       {label && <p style={{ fontWeight: 600, margin: "8px 0 4px" }}>{label}</p>}
-      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{long && !open ? `${preview}…` : text}</p>
+      <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{long && !open ? <><Linked text={preview} refs={refs} />…</> : <Linked text={text} refs={refs} />}</p>
       {long && (
         <button type="button" className="linkish" aria-expanded={open} onClick={() => setOpen(!open)}>
           {open ? "▾ Show less" : `▸ Show all${byLines !== text ? ` (${lines.length - keep} more lines)` : ""}`}
         </button>
       )}
     </div>
+  );
+}
+
+function TicketLink({ t }: { t: { ticketId: string; ref?: string | null; title: string } }) {
+  return (
+    <a href={`#/tickets/${t.ticketId}`}>
+      {t.ref ? `${t.ref} ` : ""}
+      {t.title}
+    </a>
+  );
+}
+
+/** The tickets a card is about, each as its own link; nothing when it has none. */
+function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string | null; title: string }> }) {
+  if (!about?.length) return null;
+  return (
+    <ul className="ticket-refs" aria-label="Tickets this is about" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2, overflowWrap: "anywhere" }}>
+      {about.map((t) => (
+        <li key={t.ticketId}>
+          <a href={`#/tickets/${t.ticketId}`}>{t.ref ? <strong>{t.ref}</strong> : null}{t.ref ? " " : ""}{t.title}</a>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Text with ticket references the server resolved (BOS-70) turned into links; anything else stays plain text. */
+function Linked({ text, refs }: { text: string; refs?: Decision["refs"] }) {
+  if (!refs || !Object.keys(refs).length) return <>{text}</>;
+  return (
+    <>
+      {text.split(/\b([A-Za-z][A-Za-z0-9]{0,9}-\d{1,9})\b/).map((part, i) => {
+        const t = i % 2 ? refs[part.toUpperCase()] : undefined;
+        return t ? <a key={i} href={`#/tickets/${t.ticketId}`} title={t.title}>{part}</a> : part;
+      })}
+    </>
   );
 }
 
@@ -95,6 +134,16 @@ function StallEvidenceView({ e }: { e: StallEvidence }) {
   );
 }
 
+/** What the team did with a decision, in the owner's words. */
+function settledWord(answer: string) {
+  if (answer === "Allow once") return "allowed";
+  if (answer === "Deny") return "denied";
+  if (answer === "Keep waiting") return "kept waiting";
+  if (answer === "Cancel run") return "cancelled the run";
+  if (answer === "Got it") return "settled it";
+  return answer;
+}
+
 function kindOf(d: Decision) {
   const ctx = (d as Decision & { context?: { type?: string } }).context;
   const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" || ctx?.type === "rule_proposal" ? ctx.type : d.options.includes("Approve plan") ? "plan" : d.kind;
@@ -113,7 +162,7 @@ function why(d: { score: number; parts: { blocking: number; liveRun: number; urg
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
 
-export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[] }) {
+export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[] }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -124,6 +173,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
   const [picks, setPicks] = useState<Record<string, number[]>>({});
+  // "Ask the CEO for advice": the optional one-line note being written, absent while not.
+  const [adviceNote, setAdviceNote] = useState<Record<string, string>>({});
+  const askAdvice = async (d: Decision) => {
+    setBusy(d.id);
+    try {
+      const note = adviceNote[d.id]?.trim();
+      await api(`/api/decisions/${d.id}/ask-advice`, { method: "POST", body: note ? { note } : {} });
+      setAdviceNote(({ [d.id]: _, ...rest }) => rest);
+      setErrors(({ [d.id]: _, ...rest }) => rest);
+      onAnswered();
+    } catch (err) {
+      setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
@@ -194,6 +259,39 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
         </details>
       )}
 
+      {advised.length > 0 && (
+        <details className="sub">
+          <summary>Settled by the team in the last day ({advised.length})</summary>
+          <ul>
+            {advised.map((a) => (
+              <li key={a.id}>
+                <TicketRefs about={a.about} />
+                {a.question}{" "}
+                <span className="muted">
+                  ·{" "}
+                  {a.settled
+                    ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
+                    : a.advice?.state === "reissued"
+                      ? "replaced by a clearer decision"
+                      : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
+                </span>
+                {a.settled?.command && (
+                  <pre className="muted">
+                    <code>{a.settled.command}</code>
+                  </pre>
+                )}
+                {a.advice?.replacedBy && (
+                  <>
+                    {" "}
+                    <a href="#/decisions">See the new one in the list</a>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
       {loaded && shown.length === 0 ? (
         agentsWorking > 0 ? (
           <State img={art.busy} alt="Agents at work, nothing needs you" title="Nothing needs you yet">
@@ -207,7 +305,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       ) : (
         <>
           <div className="formula">
-            <p>The number is each decision's priority score: the highest comes first. It adds up three things, drawn as the bar under it:</p>
+            <p>Newest first. The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
             <ul className="score-legend">
               <li>
                 <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer
@@ -228,8 +326,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const done = answered[d.id];
               const x = d.context?.explain;
               const rule = d.context?.rule;
+              const advice = d.context?.advice;
+              const asking = advice?.state === "asking";
               return (
-                <li className="decision" key={d.id}>
+                <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
                   <div className="score" title={why(d)}>
                     <b style={{ color: d.score >= 60 ? "var(--ink)" : "var(--muted)" }} aria-label={`Score ${Math.round(d.score)}`}>
                       {Math.round(d.score)}
@@ -249,23 +349,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
+                    <TicketRefs about={d.about} />
                     {d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
-                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\nNew instructions:")[0]}</h2>
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>
                         <MoreText label="New instructions" text={d.context.instructions} />
                       </>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
-                        <h2 style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n")[0]}</h2>
-                        <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} />
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>
+                        <MoreText text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} />
                       </>
                     ) : (
-                      <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : rule ? d.question.split("\n\n")[0] : d.question}</h2>
+                      <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : <Linked text={rule ? d.question.split("\n\n")[0]! : d.question} refs={d.refs} />}</h2>
                     )}
                     {rule && (
                       <>
-                        <p style={{ whiteSpace: "pre-wrap" }}>{d.question.split("\n\n").slice(1).join("\n\n")}</p>
+                        <p style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} /></p>
                         <details>
                           <summary>The exact rule</summary>
                           <ul style={{ paddingLeft: 18 }}>
@@ -278,6 +379,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         </details>
                       </>
                     )}
+                    {d.context?.type === "skill" && d.context.proposalId ? <SkillProposal companyId={d.companyId} proposalId={d.context.proposalId} /> : null}
                     {x && (
                       <>
                         {x.scratch && (
@@ -299,9 +401,35 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         )}
                       </>
                     )}
+                    {asking && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        CEO is looking at this{advice.note ? <span className="muted" style={{ fontWeight: 400 }}> · you asked: {advice.note}</span> : null}. You can still answer it yourself.
+                      </p>
+                    )}
+                    {advice?.state === "clarified" && (
+                      <>
+                        <p className="muted">Rewritten by the CEO with more detail, after you asked for advice.</p>
+                        {advice.originalQuestion && (
+                          <details>
+                            <summary>Original question (before the CEO rewrote it)</summary>
+                            <p style={{ fontSize: 14 }}>{advice.originalQuestion}</p>
+                          </details>
+                        )}
+                      </>
+                    )}
+                    {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
+                    {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
-                      {d.blocks.length > 0 && <span>Blocks {d.blocks.length === 1 ? `"${d.blocks[0]!.title}"` : `${d.blocks.length} tasks`}</span>}
+                      {d.blocks.length > 0 && (
+                        <span>
+                          Blocks{" "}
+                          {d.blocks.map((t, i) => (
+                            <span key={t.ticketId}>{i > 0 && ", "}<TicketLink t={t} /></span>
+                          ))}
+                        </span>
+                      )}
+                      <span>Raised <time dateTime={d.createdAt}>{when(d.createdAt)}</time></span>
                       {d.dueDate && <span>Due {new Date(d.dueDate).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
                       {d.reasons.map((r) => (
                         <span key={r}>{r}</span>
@@ -313,15 +441,34 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
                         <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
                           {d.context.steps.map((s, i) => (
-                            <li key={i}>{s}</li>
+                            <li key={i}><Linked text={s} refs={d.refs} /></li>
                           ))}
                         </ol>
+                      </div>
+                    )}
+                    {d.context?.check && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>How to check it worked</p>
+                        <p style={{ fontSize: 14 }}>{d.context.check}</p>
+                      </div>
+                    )}
+                    {d.context?.rollback && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>How to roll back</p>
+                        <p style={{ fontSize: 14 }}>{d.context.rollback}</p>
+                      </div>
+                    )}
+                    {d.context?.lastFailure && (
+                      <div>
+                        <p style={{ fontWeight: 600, marginBottom: 4 }}>Last step failed</p>
+                        <p style={{ fontSize: 14 }}>{d.context.lastFailure.note}</p>
+                        <p className="muted" style={{ fontSize: 12 }}>Reported {when(d.context.lastFailure.at)}</p>
                       </div>
                     )}
                     {d.context?.triedFirst && (
                       <details className="plan">
                         <summary>What {d.agentName ?? "the agent"} tried first</summary>
-                        <p style={{ fontSize: 14 }}>{d.context.triedFirst}</p>
+                        <p style={{ fontSize: 14 }}><Linked text={d.context.triedFirst} refs={d.refs} /></p>
                       </details>
                     )}
                     {d.context?.planText && (
@@ -365,9 +512,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             {d.recommendedOption}
                           </p>
                         )}
-                        {d.options.some((o) => o === "Keep planning" || o === "Send it back") && (
+                        {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (
                           <div className="field">
-                            <label htmlFor={`note-${d.id}`}>Note for the agent (if you send it back)</label>
+                            <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : "Note for the agent (if you send it back)"}</label>
                             <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
                           </div>
                         )}
@@ -421,6 +568,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               </button>
                             </div>
                           </form>
+                        )}
+                        {d.kind !== "permission" && d.context?.type !== "permission" && !asking && ownWords[d.id] === undefined && (
+                          <details className="advice">
+                            <summary>Not enough detail?</summary>
+                            <div className="field">
+                              <label htmlFor={`advice-${d.id}`}>What's unclear (optional, one line)</label>
+                              <input id={`advice-${d.id}`} type="text" maxLength={500} value={adviceNote[d.id] ?? ""} onChange={(e) => setAdviceNote((n) => ({ ...n, [d.id]: e.target.value }))} />
+                            </div>
+                            <div className="actions">
+                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => void askAdvice(d)}>
+                                Ask the CEO for advice
+                              </button>
+                            </div>
+                          </details>
                         )}
                         {errors[d.id] && (
                           <p className="error" role="alert">

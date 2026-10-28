@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { WATCHDOG_ACTION_LABEL } from "@boss-man/shared";
 import { api } from "../api";
 import { usePoll } from "../hooks";
 import { when } from "../pages/Runs";
@@ -13,24 +14,23 @@ export type SmAction = {
   undoable: boolean;
   undoneAt: string | null;
   after: { refused?: string } | null;
+  targetName?: string | null;
+  targetIsCeo?: boolean;
+  targetIsScrumMaster?: boolean;
+  ticketRef?: string | null;
+  /** For a warning's log rows: the warning's question, e.g. "Review looks stuck". */
+  warning?: string | null;
 };
 
-const KIND: Record<string, string> = {
-  sweep_wake: "Woke the Scrum Master",
-  nudge: "Nudged",
-  assign: "Assigned",
-  rewake: "Re-woke",
-  chase_review: "Chased a review",
-  snooze: "Snoozed",
-  escalate: "Escalated",
-  auto_escalate: "Escalated to the CEO",
-  raise_decision: "Asked you",
-  owner_reminder: "Reminded you",
-  urgent_alert: "Paged you",
-  daily_summary: "Sent the daily summary",
-  tripped: "Switched itself off",
-  undo: "Undone",
-};
+/** The heading for a log row: the plain label, or for a warning's journey a sentence naming who has it, which warning it was and the ticket. */
+export function actionHeading(a: Pick<SmAction, "kind" | "targetName" | "targetIsCeo" | "targetIsScrumMaster" | "warning">): string {
+  const label = (WATCHDOG_ACTION_LABEL as Record<string, string | undefined>)[a.kind] ?? "Something happened";
+  if (a.kind !== "alert_hop" && a.kind !== "alert_resolved") return label;
+  const which = a.warning ? `: ${a.warning}` : "";
+  if (a.kind === "alert_resolved") return `Warning settled${which}`;
+  const to = a.targetName ? (a.targetIsCeo ? `the CEO (${a.targetName})` : a.targetIsScrumMaster ? `the Scrum Master (${a.targetName})` : a.targetName) : "you";
+  return `Warning passed to ${to}${which}`;
+}
 
 /** What the Scrum Master and the watchdog did, each with its one-line reason and an undo while one is possible. */
 export function ScrumMasterLog({ companyId, ticketId, heading }: { companyId: string; ticketId?: string; heading?: string }) {
@@ -60,7 +60,8 @@ export function ScrumMasterLog({ companyId, ticketId, heading }: { companyId: st
         {rows.map((a) => (
           <li key={a.id} className="card" style={{ padding: "10px 14px", opacity: a.undoneAt ? 0.6 : 1 }}>
             <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
-              <strong style={{ fontWeight: 600 }}>{KIND[a.kind] ?? a.kind}</strong>
+              <strong style={{ fontWeight: 600 }}>{actionHeading(a)}</strong>
+              {a.ticketRef && a.ticketId && (a.kind === "alert_hop" || a.kind === "alert_resolved") && <a href={`#/tickets/${a.ticketId}`}>{a.ticketRef}</a>}
               {a.after?.refused && <span className="tag amber">Refused</span>}
               {a.undoneAt && <span className="tag">Undone</span>}
               <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>

@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -62,6 +62,8 @@ export const companies = pgTable("companies", {
   goalCheckDays: integer("goal_check_days").notNull().default(14),
   /** Most nudges the company's agents may send each other in an hour (BOS-73); past it they write on the ticket instead. */
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
+  /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
+  adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -301,6 +303,8 @@ export const tickets = pgTable(
     risk: riskTier("risk"),
     /** Plan-first (R40): the agent starts in plan mode until its plan is approved. */
     planFirst: boolean("plan_first").notNull().default(false),
+    /** Relative size, 1, 2, 3, 5 or 8 (docs/19 part 6), set by whoever creates the task; null is unsized. */
+    size: integer("size"),
     /** The CEO's order for this ticket's reviews (slots by name); null or empty means all at once. */
     reviewOrder: jsonb("review_order").$type<string[]>(),
     plan: text("plan"),
@@ -334,12 +338,12 @@ export const tickets = pgTable(
     createdAt: createdAt(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number)],
+  (t) => [index("tickets_company_state").on(t.companyId, t.systemState), uniqueIndex("tickets_company_number").on(t.companyId, t.number), check("tickets_size_scale", sql`${t.size} is null or ${t.size} in (1, 2, 3, 5, 8)`)],
 );
 
 // ---------- Decisions and engagements ----------
 
-export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget"]);
+export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget", "skill"]);
 export const decisionTier = pgEnum("decision_tier", ["ceo", "owner"]);
 export const decisionStatus = pgEnum("decision_status", ["open", "answered", "withdrawn"]);
 
@@ -463,7 +467,7 @@ export const wakes = pgTable(
     createdAt: createdAt(),
     launchedAt: timestamp("launched_at", { withTimezone: true }),
   },
-  (t) => [index("wakes_status_priority").on(t.status, t.priority)],
+  (t) => [index("wakes_status_priority").on(t.status, t.priority), index("wakes_run_id").on(t.runId)],
 );
 
 // ---------- Runs, funding and cost ----------
@@ -492,6 +496,14 @@ export const runs = pgTable("runs", {
   cachedReadTokens: bigint("cached_read_tokens", { mode: "number" }),
   cachedWriteTokens: bigint("cached_write_tokens", { mode: "number" }),
   purpose: text("purpose"),
+  /**
+   * What started the run, in plain words, for runs with no ticket: "nudge", "wiki upkeep",
+   * "owner_chat" and so on (the wake's reason). It may name a ticket the run was about
+   * without being on it (a nudge that passed one); that link is `runTicketId`.
+   */
+  origin: text("origin"),
+  /** The ticket the run was about, when it wasn't formally on it (a nudge naming one). */
+  runTicketId: uuid("run_ticket_id").references(() => tickets.id, { onDelete: "set null" }),
   /** The CEO chapter this run belongs to, if any. */
   chapterId: uuid("chapter_id").references((): AnyPgColumn => ceoChapters.id, { onDelete: "set null" }),
   /** How full the session's context was when last reported, in tokens. */
@@ -723,6 +735,95 @@ export const reviewRequests = pgTable(
   (t) => [uniqueIndex("review_requests_slot").on(t.ticketId, t.round, t.kind)],
 );
 
+/**
+ * One row per ticket state change, written by the same database trigger that keeps state_changed_at,
+ * so every write path counts (docs/19-workflow-retros.md).
+ */
+// shortcut: history starts at deploy; older tickets have only the activity log. Upgrade if a retro needs them.
+export const ticketTransitions = pgTable(
+  "ticket_transitions",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    /** Null for the first state of a new ticket. */
+    fromState: text("from_state"),
+    toState: text("to_state").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("ticket_transitions_company_at").on(t.companyId, t.at), index("ticket_transitions_ticket_at").on(t.ticketId, t.at)],
+);
+
+/** One row per CI or verify result on a commit; tickets.pull_request_ci keeps only the latest CI result. */
+export const checkResults = pgTable(
+  "check_results",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    sha: text("sha"),
+    /** ci, verify or deep_verify. */
+    kind: text("kind").notNull(),
+    passed: boolean("passed").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    detail: text("detail"),
+  },
+  (t) => [index("check_results_ticket_at").on(t.ticketId, t.at)],
+);
+
+/** A workflow retro (docs/19-workflow-retros.md part 2): the period it looked at and, once the agent saves them, its ranked findings. */
+export const retros = pgTable(
+  "retros",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    /** The period: from the last retro's end (or the company's start) to when this one started. */
+    since: timestamp("since", { withTimezone: true }).notNull(),
+    until: timestamp("until", { withTimezone: true }).notNull(),
+    doneCount: integer("done_count").notNull(),
+    /** Null until save_retro; then the ranked list of findings. */
+    findings: jsonb("findings").$type<RetroFinding[]>(),
+    savedAt: timestamp("saved_at", { withTimezone: true }),
+  },
+  (t) => [index("retros_company_started").on(t.companyId, t.startedAt)],
+);
+
+/** One proposed change to how the team works, from a retro (part 3). Part 4 adds the kept and reverted statuses. */
+export const workflowChanges = pgTable(
+  "workflow_changes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    retroId: uuid("retro_id").notNull().references(() => retros.id, { onDelete: "cascade" }),
+    /** One of WORKFLOW_LEVERS. */
+    lever: text("lever").notNull(),
+    targetAgentId: uuid("target_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    targetRole: text("target_role"),
+    summary: text("summary").notNull(),
+    /** What the setting was when proposed, so Revert can put it back; and what Apply sets. */
+    before: jsonb("before"),
+    after: jsonb("after"),
+    /** One of WORKFLOW_METRICS, the scope it is measured over ({role} | {agentId} | {from, to, kind}) and its value when proposed. */
+    metric: text("metric").notNull(),
+    metricScope: jsonb("metric_scope").notNull().default({}),
+    baseline: real("baseline"),
+    /** Ticket ids. */
+    evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
+    approver: text("approver").$type<"ceo" | "owner">().notNull(),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    checkDueAt: timestamp("check_due_at", { withTimezone: true }),
+    /** Part 4: what the check measured (value, when, how many relevant tickets or handoffs, whether the 30-day cap raised it) and the Keep / Revert decision. */
+    result: jsonb("result").$type<{ value: number | null; measuredAt: string; sample: number; capped: boolean }>(),
+    checkDecisionId: uuid("check_decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("workflow_changes_company").on(t.companyId, t.createdAt), index("workflow_changes_retro").on(t.retroId)],
+);
+
 /** Normalised failures (run errors, failed checks), to spot an agent going round in circles. */
 export const failureSignatures = pgTable(
   "failure_signatures",
@@ -749,6 +850,8 @@ export const nudges = pgTable(
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     /** What was said, for the owner's alert when two agents loop. */
     why: text("why"),
+    /** The wake this nudge delivered. Its run says who nudged and why (BOS-118). */
+    wakeId: uuid("wake_id").references(() => wakes.id, { onDelete: "set null" }),
     /** Dropped as a ping-pong: not delivered, and not counted again. */
     dropped: boolean("dropped").notNull().default(false),
     createdAt: createdAt(),
@@ -838,6 +941,57 @@ export const ownerChatMessages = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("owner_chat_company_time").on(t.companyId, t.createdAt), index("owner_chat_agent_time").on(t.agentId, t.createdAt)],
+);
+
+/**
+ * An agent's lasting notes (BOS-85): corrections and preferences the owner gave in chat, shown
+ * in every later chat and run. Kept apart from the owner's standing instructions. Only the CEO
+ * writes them for now; keyed by agent so others can later.
+ */
+export const agentNotes = pgTable(
+  "agent_notes",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    text: text("text").notNull(),
+    /** What the owner said, quoted; for an accepted request, the requester's reason. */
+    why: text("why").notNull(),
+    /** Where it came from: `chat` (saved from the owner chat), `ticket` (saved in a run from the owner's message on `ticketId`, BOS-95), `owner` (Agents page) or `request` (another agent asked, the CEO accepted). */
+    source: text("source").notNull(),
+    /** For `request`: who asked, and on which ticket; for `ticket`, the ticket the owner wrote on. */
+    requestedByAgentId: uuid("requested_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("agent_notes_agent").on(t.agentId, t.createdAt)],
+);
+
+export const noteRequestStatus = pgEnum("note_request_status", ["pending", "accepted", "declined"]);
+
+/** Another agent asking the CEO to keep a note (BOS-85): only the CEO's accept writes one. */
+export const noteRequests = pgTable(
+  "note_requests",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    /** The CEO it's for. */
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    requestedByAgentId: uuid("requested_by_agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    ticketId: uuid("ticket_id").notNull().references(() => tickets.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    text: text("text").notNull(),
+    why: text("why").notNull(),
+    status: noteRequestStatus("status").notNull().default("pending"),
+    declineReason: text("decline_reason"),
+    noteId: uuid("note_id").references(() => agentNotes.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [index("note_requests_agent_status").on(t.agentId, t.status), index("note_requests_requester_time").on(t.requestedByAgentId, t.createdAt)],
 );
 
 /** What the PA did with each owner question (R87): posted, or escalated to the CEO with why; the CEO may mark it right or wrong. */
@@ -1148,6 +1302,8 @@ export const watchdogFlags = pgTable(
     /** Snoozes in a row in this episode; after two, the next time it is due it goes to the CEO. */
     snoozeCount: integer("snooze_count").notNull().default(0),
     escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+    /** Hand-offs in a row with nothing happening on the ticket in between; each doubles the wait before the next (BOS-121). */
+    backoffSteps: integer("backoff_steps").notNull().default(0),
     /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
     detail: jsonb("detail").notNull().default({}),
   },
@@ -1185,7 +1341,7 @@ export const watchdogActions = pgTable(
 
 // ---------- Skills (R71) ----------
 
-export const skillSource = pgEnum("skill_source", ["written", "link", "upload"]);
+export const skillSource = pgEnum("skill_source", ["written", "link", "upload", "retro"]);
 
 /**
  * A company's skill library: Agent Skills folders (a SKILL.md and any supporting files) that
@@ -1216,6 +1372,57 @@ export const skills = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("skills_company_name").on(t.companyId, t.name)],
+);
+
+export type SkillFinding = { file: string; lineStart: number; lineEnd: number; title: string; severity: "critical" | "high" | "medium" | "low"; confidence: "confirmed" | "likely"; behaviour: string; harm: string; fix: string; blocks: boolean };
+
+/** A skill the CEO proposes (own draft or internet link). Nothing here is in the library until the owner decides; the install step is the only writer to skills. */
+export const skillProposals = pgTable(
+  "skill_proposals",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    source: text("source").$type<"draft" | "link">().notNull(),
+    sourceUrl: text("source_url"),
+    /** For a link: the commit the files were read at. Install re-reads this exact commit, never a branch. */
+    pinnedRef: text("pinned_ref"),
+    /** The reviewed bytes (base64), kept so install writes exactly what the reviewer saw. */
+    files: jsonb("files").$type<Array<{ path: string; content: string }>>().notNull(),
+    /** sha256 hex per file path, and over the whole sorted set. */
+    fileHashes: jsonb("file_hashes").$type<Record<string, string>>().notNull(),
+    bundleHash: text("bundle_hash").notNull(),
+    why: text("why").notNull(),
+    proposedAgentIds: jsonb("proposed_agent_ids").$type<string[]>().notNull().default([]),
+    proposedByAgentId: uuid("proposed_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** Set: this proposal is a new version of that installed skill. */
+    replacesSkillId: uuid("replaces_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    /** Worked out by the system from the files, never taken from the CEO. */
+    hasScripts: boolean("has_scripts").notNull(),
+    scriptFiles: jsonb("script_files").$type<string[]>().notNull().default([]),
+    reviewRequired: boolean("review_required").notNull(),
+    status: text("status").$type<"proposed" | "in_review" | "awaiting_owner" | "installed" | "rejected" | "stale" | "expired">().notNull().default("proposed"),
+    reviewTicketId: uuid("review_ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    verdict: text("verdict").$type<"recommend" | "conditions" | "advise_against">(),
+    verdictSummary: text("verdict_summary"),
+    findings: jsonb("findings").$type<SkillFinding[]>(),
+    conditions: jsonb("conditions").$type<string[]>(),
+    /** Bundle hash the verdict was given for; must equal bundleHash to count. */
+    reviewedBundleHash: text("reviewed_bundle_hash"),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    decidedBy: text("decided_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    overridden: boolean("overridden").notNull().default(false),
+    overriddenBy: text("overridden_by"),
+    overriddenAt: timestamp("overridden_at", { withTimezone: true }),
+    installedSkillId: uuid("installed_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One open proposal per name.
+    uniqueIndex("skill_proposals_open_name").on(t.companyId, t.name).where(sql`status in ('proposed','in_review','awaiting_owner')`),
+  ],
 );
 
 /** Which agents have which skills, and who gave them. */

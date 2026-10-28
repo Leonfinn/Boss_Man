@@ -80,16 +80,14 @@ describe("B1: a script in a plain document must still get a security review", ()
   });
 });
 
-describe("B2: every file of a proposal must be readable by the reviewer and the owner", () => {
-  it("a binary file is carried in the review, and a finding may name it", async () => {
+// Adapted: the CEO decided (ticket reply) that a skill with a file nobody can read is refused outright, instead of carrying it in the review.
+describe("B2: a file nobody can read is refused", () => {
+  it("a binary file, or bytes that aren't UTF-8, stop the proposal", async () => {
     const c = (ctx = await setup());
-    const bin = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 1, 2, 3]).toString("base64");
-    const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [f("SKILL.md", md("Run ./payload.")), { path: "payload", content: bin }], why: "x", agentIds: [c.worker.id] });
-    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
-    expect(t!.body).toContain(bin);
-    expect(() => checkVerdict(p, { bundleHash: p.bundleHash, verdict: "advise_against", summary: "s", findings: [{ file: "payload", lineStart: 1, lineEnd: 1, title: "t", severity: "critical", confidence: "confirmed", behaviour: "b", harm: "h", fix: "none", blocks: true }] })).not.toThrow();
-    const asReviewer = await c.mcp(c.reviewer.id);
-    expect(txt(await asReviewer.callTool({ name: "skills", arguments: { action: "proposal_file", proposalId: p.id, path: "payload" } }))).toContain(bin);
+    for (const bytes of [Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 1, 2, 3]), Buffer.from([0xff, 0xfe, 0xfd, 0x41])]) {
+      await expect(c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [f("SKILL.md", md("Steps.")), { path: "payload", content: bytes.toString("base64") }], why: "x", agentIds: [c.worker.id] })).rejects.toThrow(/isn't a readable text file/);
+    }
+    expect(await c.db.select().from(skills)).toHaveLength(0);
   });
 });
 
@@ -109,12 +107,21 @@ describe("B4: a review stays small enough to be read", () => {
   });
 });
 
-describe("B5: the owner's own add-a-skill form goes through the same flow", () => {
-  it("adding a skill from a link makes a proposal, and installs nothing until the owner decides", async () => {
+// Adapted: the CEO decided the owner's own form keeps working (it is the owner's call), but each add is logged and marked not security-reviewed.
+describe("B5: the owner's own add-a-skill form is logged and marked", () => {
+  it("adding from a link is logged as not security-reviewed and shows in the list", async () => {
     const c = (ctx = await setup());
     await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "link", url: "https://github.com/acme/kit/tree/main/tidy" });
-    expect(await c.db.select().from(skills)).toHaveLength(0);
     const log = await c.db.select().from(activity);
-    expect(log.some((l) => l.kind === "skill.proposed")).toBe(true);
+    expect(log.some((l) => l.kind === "skill.added_by_owner" && /not security-reviewed/.test(l.summary))).toBe(true);
+    const list = (await c.req("GET", `/api/companies/${c.company.id}/skills`)).json() as Array<{ addedByOwner: boolean }>;
+    expect(list[0]!.addedByOwner).toBe(true);
+  });
+});
+
+describe("B6: the review is capped and a proposal too big to read is refused", () => {
+  it("a draft over the per-file cap is refused", async () => {
+    const c = (ctx = await setup());
+    await expect(c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [f("SKILL.md", md("x".repeat(300_000)))], why: "x", agentIds: [c.worker.id] })).rejects.toThrow(/too big/);
   });
 });

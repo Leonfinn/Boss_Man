@@ -48,7 +48,7 @@ does nothing. `.env` is not in the archive: keep a private copy of
 `PENPOT_SECRET_KEY` and `PENPOT_DB_PASSWORD`.
 
 Restore to a throwaway copy first (another project name and port, so the live one is untouched).
-Make a copy of `.env` called `.env.test` with `PENPOT_HOST_PORT=9101`, then:
+Make a copy of `.env` called `.env.test` with `PENPOT_HOST_PORT=9101` and `PENPOT_PUBLIC_URI` changed to port 9101 (otherwise logging in to the copy sends you to the live one), then:
 
 1. `export P=pp-test C="docker compose -p pp-test --env-file .env.test -f deploy/penpot.yml --profile penpot"`
 2. Unpack: `mkdir /tmp/pp && tar -C /tmp/pp -xf <backup folder>/penpot-<date>.tar`

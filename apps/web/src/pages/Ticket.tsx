@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { TASK_SIZES } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
@@ -69,7 +70,7 @@ function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<st
   const criteria = t.acceptanceCriteria ?? [];
   const rows = readVerdicts(criteria, t.stateNote);
   return (
-    <Fold title="Done when" hint={criteria.length ? `${criteria.length} criterion${criteria.length === 1 ? "" : "a"}` : undefined}>
+    <Fold title="Done when" hint={criteria.length ? `${criteria.length} ${criteria.length === 1 ? "criterion" : "criteria"}` : undefined}>
       {rows.length > 0 && (
         <ul data-testid="criteria" style={{ margin: 0, paddingLeft: 18 }}>
           {rows.map((r) => (
@@ -152,8 +153,26 @@ const WATCH_EVERY: Array<[number, string]> = [
 const inText = (ms: number) => (ms <= 0 ? "Due now" : ms < 3_600_000 ? `In ${Math.ceil(ms / 60_000)}m` : `In ${Math.floor(ms / 3_600_000)}h ${Math.floor((ms % 3_600_000) / 60_000)}m`);
 const localInput = (d: Date) => new Date(d.getTime() - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 
+const PROPS_KEY = "bossman.ticket.workCollapsed";
+/** The remembered choice; with none, narrow tablets (just above the stacking width) start collapsed. */
+const readPropsCollapsed = () => {
+  try {
+    const saved = localStorage.getItem(PROPS_KEY);
+    if (saved !== null) return saved === "1";
+  } catch {}
+  return window.innerWidth > 900 && window.innerWidth < 1100;
+};
+
 export function Ticket({ id, companies }: { id: string; companies: Company[] }) {
   const ticket = usePoll((signal) => api<TicketDetail>(`/api/tickets/${id}`, { signal }), 15_000, id);
+  const [propsCollapsed, setPropsCollapsed] = useState(readPropsCollapsed);
+  const togglePanel = () => {
+    const next = !propsCollapsed;
+    setPropsCollapsed(next);
+    try {
+      localStorage.setItem(PROPS_KEY, next ? "1" : "0");
+    } catch {}
+  };
   const [diff, setDiff] = useState<WorkspaceDiff | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [summary, setSummary] = useState("");
@@ -354,7 +373,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
-      <div className="ticket-layout">
+      <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
@@ -561,7 +580,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
 
         <aside className="card ticket-props" aria-label="Properties">
-          <h2 className="section-label">Work</h2>
+          <div className="props-head">
+            <h2 className="section-label">Work</h2>
+            <button type="button" className="props-toggle" aria-expanded={!propsCollapsed} aria-controls="ticket-props-body" onClick={togglePanel}>
+              {propsCollapsed ? "Show" : "Hide"}
+            </button>
+          </div>
+          <div id="ticket-props-body" hidden={propsCollapsed}>
           <dl>
             <dt>Status</dt>
             <dd>
@@ -619,6 +644,20 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </select>
               {!t.risk && <small className="muted" style={{ display: "block" }}>Not rated yet — the CEO rates it when it reviews the task (treated as medium until then).</small>}
               <RiskHelp tiers={tiers} current={t.risk} />
+            </dd>
+            <dt>
+              <label htmlFor="t-size">Size</label>
+            </dt>
+            <dd>
+              <select id="t-size" value={t.size ?? ""} onChange={(e) => void patch({ size: e.target.value ? Number(e.target.value) : null })}>
+                <option value="">Not sized</option>
+                {TASK_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+              <small className="muted" style={{ display: "block" }}>How big this task is compared with others: 1, 2, 3, 5 or 8. Whoever creates a task sets it. The Workflow page shows what each size really takes.</small>
             </dd>
             <dt>
               <label htmlFor="t-watcher">Watcher</label>
@@ -710,6 +749,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             <dt>Last activity</dt>
             <dd>{when(t.lastActivityAt)}</dd>
           </dl>
+          </div>
         </aside>
       </div>
     </>

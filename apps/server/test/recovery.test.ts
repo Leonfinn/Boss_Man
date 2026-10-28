@@ -104,8 +104,8 @@ describe("MCP writes are safe to repeat after a resume (R42)", () => {
     const runId = "00000000-0000-4000-8000-000000000001";
     await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.ceo.id });
     const m = await c.mcp(c.ceo.id, runId);
-    const one = textOf(await m.callTool({ name: "create_ticket", arguments: { title: "Add rate limiting" } }));
-    const two = textOf(await m.callTool({ name: "create_ticket", arguments: { title: "add rate limiting" } }));
+    const one = textOf(await m.callTool({ name: "create_ticket", arguments: { size: 3, title: "Add rate limiting" } }));
+    const two = textOf(await m.callTool({ name: "create_ticket", arguments: { size: 3, title: "add rate limiting" } }));
     expect(one).toMatch(/^Created ticket/);
     expect(two).toMatch(/already exists/);
     expect(await c.db.select().from(tickets)).toHaveLength(1);

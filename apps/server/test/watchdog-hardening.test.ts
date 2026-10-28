@@ -94,7 +94,8 @@ describe("watchdog hardening", () => {
     await call({ action: "snooze", flagId: f!.id, hours: 1, reason: "waiting on CI" });
     await call({ action: "nudge", ticketId: t.id, reason: "any movement?" });
     await call({ action: "escalate", ticketId: t.id, reason: "needs the CEO" });
-    const acts = await ctx.db.select().from(watchdogActions).where(and(eq(watchdogActions.companyId, ctx.companyId), sql`${watchdogActions.kind} <> 'sweep_wake'`));
+    const acts = await ctx.db.select().from(watchdogActions).where(and(eq(watchdogActions.companyId, ctx.companyId), sql`${watchdogActions.kind} not in ('sweep_wake', 'daily_summary')`));
+    // The daily summary also goes out on any sweep after 08:00 owner time (the test clock is real time), so it is not counted.
     expect(acts).toHaveLength(1);
   });
 
