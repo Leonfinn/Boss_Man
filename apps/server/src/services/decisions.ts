@@ -101,7 +101,7 @@ export type DecisionContext =
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
-  | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null } }
+  | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null; config?: AgentModelConfig } }
   /** A permission rule the CEO drafted from the owner's plain request; added when they answer ADD_RULE. A "question" kind, so the owner can also answer in their own words. */
   | { type: "rule_proposal"; rule: { name: string; match: PolicyMatch; outcome: PolicyOutcome } };
 
@@ -1184,7 +1184,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             const applied = (await onModelChange?.(ctx, d.companyId, config)) ?? { afterRunId: null };
             await db
               .update(decisions)
-              .set({ context: { ...ctx, applied: { at: now().toISOString(), afterRunId: applied.afterRunId } } })
+              .set({ context: { ...ctx, applied: { at: now().toISOString(), afterRunId: applied.afterRunId, config } } })
               .where(eq(decisions.id, id));
           } catch (err) {
             // Nothing changed, so leave the card open for another try.
@@ -1199,7 +1199,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           // Nothing was hired or changed (a setup that no longer validates, or a card from before
           // the setup was checked), so leave the card open for another try.
           await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
-          throw err instanceof AnswerError ? err : new AnswerError((err as Error).message);
+          const message = err instanceof Error ? err.message : String(err);
+          throw err instanceof AnswerError ? err : new AnswerError(`${ctx.type === "hire" ? "Nobody was hired" : "Nothing was changed"}: ${message} The card is still open for another try.`);
         }
       } else if (ctx.type === "review_loop" || ctx.type === "ticket_cap") {
         // Free the ticket from this decision first, so the action below sets its final state.

@@ -161,7 +161,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
           raisedByAgentId: ceoId,
           kind: "approval",
           tier: "owner",
-          question: [`The CEO wants to hire ${p.name} as ${job}.`, labelConfig(config), p.reason ? `Why: ${p.reason}` : null, instructions ? `Their instructions:\n${instructions.slice(0, 3000)}` : null].filter(Boolean).join("\n\n"),
+          question: [`The CEO wants to hire ${p.name} as ${job}.`, labelConfig(config), p.reason ? `Why: ${p.reason}` : null, instructions ? `Their instructions:\n${instructions.slice(0, 3000)}` : null, "If you want different values, choose Don't hire and ask the CEO to propose it again; you can also change them on the Agents page after hiring."].filter(Boolean).join("\n\n"),
           options: [HIRE, DONT_HIRE],
           recommendedOption: HIRE,
           context: { type: "hire", proposal: { ...p, ...config, model: config.model, fundingSourceId: config.fundingSourceId, harness: config.harness, provider: config.provider, instructions }, byAgentId: ceoId },
@@ -180,16 +180,25 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       if (a.retiredAt) throw new AgentError(409, `${a.name} is retired.`);
       const [currentSource] = a.fundingSourceId ? await db.select().from(fundingSources).where(eq(fundingSources.id, a.fundingSourceId)) : [];
       const currentProvider = currentSource?.provider ?? "";
-      let fundingSourceId = p.fundingSourceId ?? a.fundingSourceId ?? "";
-      let provider = p.provider ?? "";
+      let fundingSourceId = p.fundingSourceId ?? "";
+      let provider = p.provider?.trim() ?? "";
+      // A provider-only change picks the matching source, unless the current source already
+      // pays with that provider; a source the CEO named is checked against it below.
+      const providerChanged = provider !== "" && provider !== currentProvider;
+      if (!fundingSourceId && providerChanged) fundingSourceId = await sourceFor(provider, a.fundingSourceId, currentProvider || null);
+      if (!fundingSourceId) fundingSourceId = a.fundingSourceId ?? "";
       if (fundingSourceId && !provider) {
         const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, fundingSourceId));
         provider = source?.provider ?? "";
       }
-      if (!fundingSourceId && provider) fundingSourceId = await sourceFor(provider, a.fundingSourceId, currentProvider || null);
       const config = await validateModelConfig(a.companyId, { harness: p.harness ?? a.agentKind, provider: provider || currentProvider, model: p.model ?? a.model, fundingSourceId });
       const before: AgentModelConfig = { harness: a.agentKind, provider: currentProvider, model: a.model ?? "", fundingSourceId: a.fundingSourceId ?? "", fundingSourceName: currentSource?.name };
       if (before.harness === config.harness && before.provider === config.provider && before.model === config.model && before.fundingSourceId === config.fundingSourceId) throw new AgentError(422, `${a.name} is already set up that way.`);
+      const open = await db.select({ context: decisions.context }).from(decisions).where(and(eq(decisions.companyId, a.companyId), eq(decisions.status, "open")));
+      if (open.some((d) => {
+        const ctx = d.context as { type?: string; agentId?: string } | null;
+        return ctx?.type === "model_change" && ctx.agentId === a.id;
+      })) throw new AgentError(409, `A model change for ${a.name} is already waiting for the owner.`);
       const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.agentId, a.id), isNull(runs.endedAt))).limit(1);
       const when = running ? `It takes effect after their current run ends, never during it.` : `It takes effect before their next run.`;
       const [d] = await db
@@ -212,6 +221,7 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     async applyModelChange(ctx: { agentId: string; byAgentId: string }, companyId: string, config: AgentModelConfig): Promise<{ afterRunId: string | null }> {
       const a = await agent(ctx.agentId);
       if (a.companyId !== companyId) throw new AgentError(404, "No such agent.");
+      if (a.retiredAt) throw new AgentError(409, `${a.name} is retired, so their model setup can't change.`);
       const checked = await validateModelConfig(companyId, config);
       const [running] = await db.select({ id: runs.id }).from(runs).where(and(eq(runs.agentId, a.id), isNull(runs.endedAt))).limit(1);
       await this.update(a.id, { agentKind: checked.harness, model: checked.model, fundingSourceId: checked.fundingSourceId }, ctx.byAgentId);

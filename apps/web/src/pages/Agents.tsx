@@ -609,15 +609,16 @@ function CeoNotes({ agentId }: { agentId: string }) {
   );
 }
 
-/** What the CEO may change about the team without asking (R62). */
+/** What the CEO may change about the team without asking (R62). Hires and model setup always wait, so "nothing" (no longer offered) means the same as "hires". */
 const APPROVALS: Array<[string, string]> = [
-  ["hires", "Hires and model changes wait"],
+  ["hires", "Hires and model changes wait; instructions apply at once"],
   ["hires_and_edits", "Hires, model and instruction changes wait"],
-  ["nothing", "Only hires and model changes wait"],
 ];
 
 function CeoApprovals({ companyId }: { companyId: string }) {
   const current = usePoll((signal) => api<{ approvals: string }>(`/api/companies/${companyId}/agent-approvals`, { signal }), 300_000, `approvals-${companyId}`);
+  // A company still on the retired "nothing" setting behaves like "hires" now.
+  const approval = current.data?.approvals === "hires_and_edits" ? "hires_and_edits" : "hires";
   const [error, setError] = useState<string | null>(null);
   const set = async (approvals: string) => {
     try {
@@ -631,7 +632,7 @@ function CeoApprovals({ companyId }: { companyId: string }) {
   return (
     <div className="field" style={{ maxWidth: 560 }}>
       <label htmlFor="ceo-approvals">What waits for you from the CEO</label>
-      <select id="ceo-approvals" value={current.data?.approvals ?? "hires"} onChange={(e) => void set(e.target.value)}>
+      <select id="ceo-approvals" value={approval} onChange={(e) => void set(e.target.value)}>
         {APPROVALS.map(([v, label]) => (
           <option key={v} value={v}>
             {label}

@@ -141,7 +141,8 @@ function why(d: { score: number; parts: { blocking: number; liveRun: number; urg
 function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Decision; editing: boolean; onEdit: () => void; onCancel: () => void; onSubmit: (config: ModelConfigView) => void; busy: boolean }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, `model-change-sources-${d.id}`);
   const before = d.context?.before;
-  const proposed = d.context?.proposed;
+  // Once answered, show what actually landed (the owner's Edit values), not the CEO's proposal.
+  const proposed = d.context?.applied?.config ?? d.context?.proposed;
   const [form, setForm] = useState<ModelConfigView>(proposed ?? { harness: "claude", provider: "anthropic", model: "", fundingSourceId: "" });
   if (!before || !proposed) return null;
   const paidFrom = (c: ModelConfigView) => c.fundingSourceName ?? sources.data?.find((s) => s.id === c.fundingSourceId)?.name ?? c.fundingSourceId;

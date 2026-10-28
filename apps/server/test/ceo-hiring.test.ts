@@ -131,7 +131,28 @@ describe("the CEO builds the team (R62)", () => {
     expect((await c.req("POST", `/api/decisions/${open.id}/answer`, { answer: "Approve" })).statusCode).toBe(200);
     expect((await c.db.select().from(agents).where(eq(agents.id, c.worker.id)))[0]).toMatchObject({ agentKind: "opencode", model: "qwen3:8b", fundingSourceId: ollama.id });
     const applied = (await c.db.select().from(decisions).where(eq(decisions.id, open.id)))[0]!;
-    expect((applied.context as { applied?: { afterRunId: string | null } }).applied).toEqual({ at: expect.any(String), afterRunId: null });
+    expect((applied.context as { applied?: { afterRunId: string | null; config?: unknown } }).applied).toMatchObject({ afterRunId: null, config: { harness: "opencode", provider: "ollama", model: "qwen3:8b", fundingSourceId: ollama.id } });
+    await client.close();
+  });
+
+  it("auto-picks a source for a provider-only change, refuses a second open card, and records an edited config", async () => {
+    const c = (ctx = await setup());
+    await c.db.update(agents).set({ agentKind: "opencode", model: "claude-opus-4-5", fundingSourceId: c.funding.id }).where(eq(agents.id, c.worker.id));
+    const ollama = (await c.req("POST", "/api/funding-sources", { name: "Ollama Cloud", kind: "subscription", provider: "ollama" })).json() as { id: string };
+    const client = await c.mcp(c.ceo.id);
+    const change = { agent: "Engineer", provider: "ollama", model: "qwen3:8b", reason: "Cheaper for routine work." };
+    expect(textOf(await client.callTool({ name: "propose_model_change", arguments: change }))).toMatch(/waiting for the owner/);
+    const [d] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "model_change");
+    expect((d!.context as { proposed: { fundingSourceId: string } }).proposed.fundingSourceId).toBe(ollama.id);
+    // A second card for the same agent would be a race on one setting.
+    expect(await client.callTool({ name: "propose_model_change", arguments: change })).toMatchObject({ isError: true });
+
+    // Edit goes through the validator, and the card records the values that actually landed.
+    const edited = { harness: "opencode", provider: "ollama", model: "qwen3:8b", fundingSourceId: ollama.id };
+    expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Edit", modelConfig: edited })).statusCode).toBe(200);
+    const after = (await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!;
+    expect((after.context as { applied?: { config?: unknown } }).applied?.config).toMatchObject(edited);
+    expect((await c.db.select().from(agents).where(eq(agents.id, c.worker.id)))[0]).toMatchObject({ agentKind: "opencode", model: "qwen3:8b", fundingSourceId: ollama.id });
     await client.close();
   });
 
