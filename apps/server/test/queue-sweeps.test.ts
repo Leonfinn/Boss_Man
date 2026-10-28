@@ -193,6 +193,20 @@ describe("stale blockers (R21)", () => {
     expect(t!.assigneeAgentId).toBe(ctx.ceo.id);
   });
 
+  it("won't reassign to an agent from another company", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { ceo: { id: string } };
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: other.ceo.id });
+    expect(r.statusCode).toBe(422);
+    expect(r.body).toContain("Pick someone from the list");
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+  });
+
   it("refuses to hand the card to the CEO when the company has none", async () => {
     ctx = await setup();
     await blockedPair(ctx.worker.id);
