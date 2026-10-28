@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_WATCHDOG, readWatchdogSettings } from "@boss-man/shared";
-import { evaluate, isCrash, RUN_ENDED_GRACE_MS, type SnapHold, type SnapRun, type SnapTicket } from "../src/services/watchdog-rules.js";
+import { backoffGapMs, evaluate, isCrash, RUN_ENDED_GRACE_MS, type SnapHold, type SnapRun, type SnapTicket } from "../src/services/watchdog-rules.js";
 
 const NOW = new Date("2026-10-26T12:00:00Z");
 const ago = (min: number) => new Date(NOW.getTime() - min * 60_000);
@@ -119,5 +119,12 @@ describe("watchdog rules (BOS-58)", () => {
   it("reads stored settings defensively", () => {
     expect(readWatchdogSettings(null)).toEqual(DEFAULT_WATCHDOG);
     expect(readWatchdogSettings({ enabled: true, inProgressHours: -3, reviewHours: 4, junk: 1 })).toEqual({ ...DEFAULT_WATCHDOG, enabled: true, reviewHours: 4 });
+  });
+
+  it("backs a repeat flag off: the rule's limit, then twice, then four times, up to 24 hours (BOS-121)", () => {
+    const hours = [0, 1, 2, 3, 4, 5, 6].map((n) => backoffGapMs("stale_in_progress", { ...s, inProgressHours: 2 }, n) / 3_600_000);
+    expect(hours).toEqual([2, 4, 8, 16, 24, 24, 24]);
+    // A limit already longer than a day is never shortened by the cap.
+    expect(backoffGapMs("stale_in_progress", { ...s, inProgressHours: 30 }, 3) / 3_600_000).toBe(30);
   });
 });

@@ -116,6 +116,8 @@ ul.bullets li::before { content: ""; position: absolute; left: 4px; top: 0.65em;
 .yes h3 { color: var(--green-ink); }
 .no h3 { color: var(--red-ink); }
 .needs { list-style: none; padding: 0; display: grid; gap: 20px; margin-top: 24px; }
+.needs li { position: relative; padding-left: 24px; }
+.needs li::before { content: ""; position: absolute; left: 4px; top: 0.6em; width: 8px; height: 8px; background: var(--badge); border-radius: 50%; }
 .needs strong { display: block; color: var(--head); }
 .install { list-style: none; padding: 0; display: grid; gap: 16px; margin-top: 24px; counter-reset: i; }
 .install li { display: flex; gap: 16px; align-items: flex-start; counter-increment: i; }
@@ -123,6 +125,7 @@ ul.bullets li::before { content: ""; position: absolute; left: 4px; top: 0.65em;
 .install li span { padding-top: 4px; }
 
 .qa + .qa { margin-top: 32px; }
+.qa h2 { font-size: 20px; }
 .qa p { margin-top: 8px; }
 
 /* Closing call-to-action band */
@@ -149,6 +152,7 @@ ul.bullets li::before { content: ""; position: absolute; left: 4px; top: 0.65em;
   .nav li a { min-height: 56px; width: 100%; border-bottom: 1px solid var(--line); border-left: 4px solid transparent; }
   .nav li a[aria-current="page"] { border-bottom-color: var(--line); border-left-color: var(--badge); }
   .nav .btn { margin-top: 16px; }
+  main .btn { display: flex; width: 100%; }
   .js .menu-btn { display: inline-flex; align-items: center; justify-content: center; }
   .js .nav { display: none; }
   .js .nav.open { display: flex; }
