@@ -64,10 +64,11 @@ describe("skill decision", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Add it anyway, against the advice" }) })));
   });
 
-  it("a draft with no scripts says no review was needed", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(proposal({ source: "draft", sourceUrl: null, pinnedRef: null, reviewRequired: false, hasScripts: false, verdict: null, findings: null })), { status: 200 })));
+  it("never says no review was needed: a skill with no verdict shows the review as pending", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(proposal({ source: "draft", sourceUrl: null, pinnedRef: null, reviewRequired: true, hasScripts: false, verdict: null, findings: null })), { status: 200 })));
     render(<Decisions decisions={[decision({ options: ["Add the skill", "Don't add it"], recommendedOption: "Add the skill" })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    await waitFor(() => expect(screen.getByText("No review needed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Security review pending")).toBeTruthy());
+    expect(screen.queryByText("No review needed")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

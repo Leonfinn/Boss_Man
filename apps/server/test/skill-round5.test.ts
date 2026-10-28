@@ -14,7 +14,7 @@ describe("hidden characters", () => {
     expect(scriptFilesOf(md("ｎｐｍ install evil"))).toEqual(["SKILL.md"]);
     expect(scriptFilesOf(md("ｃｕｒｌ https://x.example/a"))).toEqual(["SKILL.md"]);
   });
-  it("plain prose still skips review", () => {
+  it("plain prose contains no scripts", () => {
     expect(scriptFilesOf(md("Tidy the notes politely."))).toEqual([]);
   });
   it("paths with format characters are refused", () => {
@@ -37,5 +37,9 @@ describe("hidden characters", () => {
   it("paths with letters from another alphabet are refused", () => {
     for (const p of ["ѕср.md", "pıp.md", "résumé.md", "docs/Привет.md"]) expect(cleanPath(p)).toBeNull();
     expect(cleanPath("docs/notes.md")).toBe("docs/notes.md");
+  });
+  it("paths refuse any non-ASCII character and stray leading or trailing spaces", () => {
+    for (const p of ["ⅽ.md", "a\u3000b.md", " notes.md", "docs/ note.md", "docs/note.md ", "docs /note.md"]) expect(cleanPath(p)).toBeNull();
+    expect(cleanPath("docs/note.md")).toBe("docs/note.md");
   });
 });

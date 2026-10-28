@@ -93,8 +93,8 @@ export function checkVerdict(p: Pick<Proposal, "files" | "bundleHash">, v: Verdi
   if (!v.summary.trim()) throw new SkillError(400, "Give a short summary the owner can read.");
 }
 
-/** The owner's rule (2026-10-27): internet skills are always reviewed; a CEO draft only if it has a script. */
-export const reviewRequired = (source: "draft" | "link", hasScripts: boolean) => source === "link" || hasScripts;
+/** The owner's rule (2026-10-28, decision 21f7791b): every skill is reviewed before the owner decides, from either source. */
+export const reviewRequired = () => true;
 
 export { hashFiles, scriptFilesOf };
 
@@ -196,7 +196,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (had && hashFiles(had.files).bundleHash === bundleHash) throw new SkillError(409, `${name} is already in the library with these exact files.`);
       const scripts = scriptFilesOf(files);
       const hasScripts = scripts.length > 0;
-      const needsReview = reviewRequired(input.source, hasScripts);
+      const needsReview = reviewRequired();
 
       // A review that nobody can do must not leave a proposal stuck: check before storing.
       const reviewer = needsReview ? await securityReviewer(input.companyId, input.byAgentId) : null;
@@ -236,23 +236,15 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
         companyId: input.companyId,
         kind: "skill.proposed",
         agentId: input.byAgentId,
-        summary: `Proposed ${had ? "a new version of" : "adding"} the skill ${name} (${input.source === "link" ? `from ${sourceUrl}${pinnedRef ? ` at ${pinnedRef.slice(0, 7)}` : ""}` : "CEO draft"}, ${files.length} file${files.length === 1 ? "" : "s"}). ${
-          needsReview ? (input.source === "link" ? "Security review required: it comes from the internet." : `Security review required: the draft contains a script (${scripts.slice(0, 3).join(", ")}${scripts.length > 3 ? ", …" : ""}).`) : "No security review needed: CEO draft with no scripts."
-        }`,
+        summary: `Proposed ${had ? "a new version of" : "adding"} the skill ${name} (${input.source === "link" ? `from ${sourceUrl}${pinnedRef ? ` at ${pinnedRef.slice(0, 7)}` : ""}` : "CEO draft"}, ${files.length} file${files.length === 1 ? "" : "s"}). Security review required: every skill is reviewed.${scripts.length ? ` The draft contains a script (${scripts.slice(0, 3).join(", ")}${scripts.length > 3 ? ", …" : ""}).` : ""}`,
       });
-      if (needsReview) {
-        try {
-          const t = await deps.createTicket(projectId!, { title: reviewTitle(p), body: reviewBody(p), assigneeAgentId: reviewer!.id, state: "ready", risk: "high", planFirst: false, noCode: true, createdByAgentId: input.byAgentId });
-          p = (await db.update(skillProposals).set({ status: "in_review", reviewTicketId: t.id, updatedAt: new Date() }).where(eq(skillProposals.id, p.id)).returning())[0]!;
-          await record(db, { companyId: input.companyId, ticketId: t.id, agentId: input.byAgentId, kind: "skill.review_requested", summary: `Security review of ${name} sent to ${reviewer!.name}.` });
-        } catch (e) {
-          await db.delete(skillProposals).where(eq(skillProposals.id, p.id));
-          throw e;
-        }
-      }
-      if (!needsReview) {
-        await record(db, { companyId: input.companyId, agentId: input.byAgentId, kind: "skill.review_skipped", summary: `No security review for ${name}: a CEO draft with no scripts goes straight to the owner.` });
-        p = await this.toOwner(p);
+      try {
+        const t = await deps.createTicket(projectId!, { title: reviewTitle(p), body: reviewBody(p), assigneeAgentId: reviewer!.id, state: "ready", risk: "high", planFirst: false, noCode: true, createdByAgentId: input.byAgentId });
+        p = (await db.update(skillProposals).set({ status: "in_review", reviewTicketId: t.id, updatedAt: new Date() }).where(eq(skillProposals.id, p.id)).returning())[0]!;
+        await record(db, { companyId: input.companyId, ticketId: t.id, agentId: input.byAgentId, kind: "skill.review_requested", summary: `Security review of ${name} sent to ${reviewer!.name}.` });
+      } catch (e) {
+        await db.delete(skillProposals).where(eq(skillProposals.id, p.id));
+        throw e;
       }
       return p;
     },
@@ -293,7 +285,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       const advise = p.verdict === "advise_against";
       const conditional = p.verdict === "conditions";
       const source = p.source === "link" ? `${p.sourceUrl}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}` : "written by the CEO";
-      const review = !p.reviewRequired ? "No review needed: CEO draft with no scripts." : `Security review: ${VERDICT_WORDS[p.verdict!]}. ${p.verdictSummary ?? ""}${p.conditions?.length ? ` Conditions: ${p.conditions.join("; ")}.` : ""}${p.findings?.length ? ` ${p.findings.length} finding(s); open the card for each file and line.` : ""}`;
+      const review = p.verdict ? `Security review: ${VERDICT_WORDS[p.verdict]}. ${p.verdictSummary ?? ""}${p.conditions?.length ? ` Conditions: ${p.conditions.join("; ")}.` : ""}${p.findings?.length ? ` ${p.findings.length} finding(s); open the card for each file and line.` : ""}` : "Security review pending.";
       const question = `${advise ? "WARNING, the Security Reviewer advises against this. " : ""}${conditional ? "The Security Reviewer's recommendation has conditions; adding it means you accept them. " : ""}The CEO wants to ${p.replacesSkillId ? "update the skill" : "add the skill"} "${p.name}" (${source}) for ${names.map((n) => n.name).join(", ") || "no one yet"}. Why: ${p.why} ${review}`;
       const d = await deps.raiseDecision({ companyId: p.companyId, proposalId: p.id, agentId: p.proposedByAgentId, question, options: advise ? [SKILL_REJECT, SKILL_OVERRIDE] : conditional ? [SKILL_CONDITIONS, SKILL_REJECT] : [SKILL_ADD, SKILL_REJECT], recommended: advise ? SKILL_REJECT : conditional ? SKILL_CONDITIONS : SKILL_ADD });
       const [row] = await db.update(skillProposals).set({ status: "awaiting_owner", decisionId: d?.id ?? p.decisionId, updatedAt: now() }).where(eq(skillProposals.id, p.id)).returning();

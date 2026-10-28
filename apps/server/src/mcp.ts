@@ -1097,7 +1097,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     {
       description:
         "The company's skill library (R71): reusable instructions agents load when relevant. list shows each skill, what it's for and who has it. The CEO can give a skill to an agent (skill name and agent name) or take it away; giving a pack's name (e.g. obra/superpowers) gives every skill in it. The owner is told. " +
-        "New skills reach the library only by the owner's decision. The CEO proposes one with propose: either a draft (name, files [{path, content}] with a SKILL.md, why, agents) or an internet link (url, optionally skill to pick one from a repository, why, agents). Link skills are pinned to the exact version fetched. The system decides whether a security review is needed (always for links; for a draft only if it contains a script), sends it to the Security Reviewer, and then asks the owner; you cannot skip either step. proposals lists proposals and their state; proposal reads one. A new version of an installed skill is proposed the same way. " +
+        "New skills reach the library only by the owner's decision. The CEO proposes one with propose: either a draft (name, files [{path, content}] with a SKILL.md, why, agents) or an internet link (url, optionally skill to pick one from a repository, why, agents). Link skills are pinned to the exact version fetched. Every skill is security-reviewed before the owner decides, whatever its source: the review goes to the Security Reviewer and then the owner is asked; you cannot skip either step. proposals lists proposals and their state; proposal reads one. A new version of an installed skill is proposed the same way. " +
         "Security Reviewer: proposal (proposalId) shows a proposal's files, proposal_file (proposalId, path) reads one file with numbered lines, and review_verdict (proposalId, bundleHash from the ticket, verdict recommend | recommend with conditions | advise against, summary, conditions, findings with file and line range) gives the verdict.",
       inputSchema: {
         action: z.enum(["list", "give", "take", "propose", "proposals", "proposal", "proposal_file", "review_verdict"]),
@@ -1138,11 +1138,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
             const p = input.url
               ? await skillProposals.propose({ ...base, source: "link", url: input.url, skill: input.skill })
               : await skillProposals.propose({ ...base, source: "draft", name: input.name, files: (input.files ?? []).map((f) => ({ path: f.path, content: f.encoding === "base64" ? f.content : Buffer.from(f.content, "utf8").toString("base64") })) });
-            return text(
-              p.status === "in_review"
-                ? `Proposed ${p.name}. It needs a security review (${p.source === "link" ? "it comes from the internet" : "it contains a script"}); the Security Reviewer has a task for it. The owner decides after the review.`
-                : `Proposed ${p.name}. No security review is needed (a draft with no scripts), so it is with the owner to decide. Nothing is added until they say yes.`,
-            );
+            return text(`Proposed ${p.name}. It needs a security review (every skill is reviewed); the Security Reviewer has a task for it. The owner decides after the review.`);
           }
           if (!input.proposalId) return fail("Give the proposalId (see proposals).");
           if (action === "review_verdict") {

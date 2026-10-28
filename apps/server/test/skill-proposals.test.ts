@@ -83,12 +83,13 @@ describe("script detection", () => {
 });
 
 describe("propose", () => {
-  it("a CEO draft with no script skips review and logs why", async () => {
+  it("every CEO draft is reviewed, even one with no script", async () => {
     const c = (ctx = await setup());
     const p = await c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [{ path: "SKILL.md", content: b64(md("Steps.")) }], why: "Notes are messy", agentIds: [c.worker.id] });
-    expect(p).toMatchObject({ hasScripts: false, reviewRequired: false, status: "awaiting_owner", name: "tidy" });
+    expect(p).toMatchObject({ hasScripts: false, reviewRequired: true, status: "in_review", name: "tidy" });
+    expect(p.reviewTicketId).toBeTruthy();
     const log = await c.db.select().from(activity);
-    expect(log.some((l) => l.kind === "skill.proposed" && /No security review needed: CEO draft with no scripts/.test(l.summary))).toBe(true);
+    expect(log.some((l) => l.kind === "skill.proposed" && /Security review required: every skill is reviewed/.test(l.summary))).toBe(true);
     expect(await c.db.select().from(skills).where(eq(skills.companyId, c.company.id))).toHaveLength(0);
   });
 
@@ -176,26 +177,29 @@ const review = (c: Awaited<ReturnType<typeof setup>>, p: { id: string; bundleHas
 const script = [{ path: "run.sh", content: b64("echo hi\n") }];
 
 describe("decision and install", () => {
-  it("a CEO draft with no scripts goes straight to the owner, and nothing is installed until they say yes", async () => {
+  it("every draft waits for a verdict, and nothing is installed until the owner says yes", async () => {
     const c = (ctx = await setup());
     const p = await draft(c);
-    expect(p.status).toBe("awaiting_owner");
+    expect(p.status).toBe("in_review");
+    expect(await openDecision(c)).toHaveLength(0);
+    await review(c, p, "recommend");
     const [d] = await openDecision(c);
     expect(d).toMatchObject({ recommendedOption: SKILL_ADD });
-    expect(d!.question).toContain("No review needed: CEO draft with no scripts");
+    expect(d!.question).toContain("Security review: recommend");
     expect(await c.db.select().from(skills)).toHaveLength(0);
     const r = await c.decisions.answer(d!.id, SKILL_ADD, { by: "leon" });
     expect(r).toBeTruthy();
     const [s] = await c.db.select().from(skills);
     expect(s).toMatchObject({ name: "tidy", source: "written" });
     expect(await c.db.select().from(agentSkills)).toHaveLength(1);
-    expect(await kinds(c)).toEqual(expect.arrayContaining(["skill.proposed", "skill.review_skipped", "skill.awaiting_owner", "skill.decided", "skill.installed", "skill.given"]));
+    expect(await kinds(c)).toEqual(expect.arrayContaining(["skill.proposed", "skill.review_requested", "skill.reviewed", "skill.awaiting_owner", "skill.decided", "skill.installed", "skill.given"]));
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
   });
 
   it("rejecting installs nothing", async () => {
     const c = (ctx = await setup());
     const p = await draft(c);
+    await review(c, p, "recommend");
     await c.decisions.answer((await openDecision(c))[0]!.id, SKILL_REJECT, { by: "leon" });
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("rejected");
     expect(await c.db.select().from(skills)).toHaveLength(0);
@@ -240,7 +244,7 @@ describe("decision and install", () => {
     expect(log!.summary).toMatch(/leon accepted the Security Reviewer's conditions.*Remove the curl line/);
   });
 
-  it("plain instructions with no code stay out of review", () => {
+  it("plain instructions contain no scripts (information on the card, not a review shortcut)", () => {
     expect(scriptFilesOf([f2("SKILL.md", md("# Tidy\n\nMake sure notes are short.\n\n- Keep titles under 60 characters.\n- Run a spell check by eye.\n"))])).toEqual([]);
   });
 
@@ -292,18 +296,21 @@ describe("decision and install", () => {
     expect(hashFiles(s!.files).bundleHash).toBe(p.bundleHash);
   });
 
-  it("an update goes through the same steps, and a later version that adds a script is reviewed", async () => {
+  it("every new version is reviewed again, including one that adds a script", async () => {
     const c = (ctx = await setup());
     const v1 = await draft(c);
+    await review(c, v1, "recommend");
     await c.decisions.answer((await openDecision(c))[0]!.id, SKILL_ADD, { by: "leon" });
     expect((await c.svc.get(c.company.id, v1.id)).status).toBe("installed");
-    // Version 2: still text only → straight to the owner, nothing changes until they answer.
+    // Version 2: still text only, but it is reviewed again; nothing changes until the owner answers.
     const v2 = await draft(c, [], "Better steps.");
-    expect(v2).toMatchObject({ status: "awaiting_owner", reviewRequired: false });
+    expect(v2).toMatchObject({ status: "in_review", reviewRequired: true });
     expect(v2.replacesSkillId).toBeTruthy();
+    expect(await openDecision(c)).toHaveLength(0);
+    await review(c, v2, "recommend");
     expect((await c.db.select().from(skills))[0]!.files[0]!.content).toBe(b64(md("Steps.")));
     await c.decisions.answer((await openDecision(c))[0]!.id, SKILL_REJECT, { by: "leon" });
-    // Version 3 adds a script → must be reviewed.
+    // Version 3 adds a script → it is reviewed too.
     const v3 = await draft(c, script, "Better steps.");
     expect(v3).toMatchObject({ status: "in_review", reviewRequired: true, hasScripts: true });
     expect(await openDecision(c)).toHaveLength(0);

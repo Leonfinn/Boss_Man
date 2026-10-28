@@ -68,11 +68,7 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
           {[...p.changes.added.map((f) => `+ ${f}`), ...p.changes.changed.map((f) => `~ ${f}`), ...p.changes.removed.map((f) => `− ${f}`)].length ? `: ${[...p.changes.added.map((f) => `+ ${f}`), ...p.changes.changed.map((f) => `~ ${f}`), ...p.changes.removed.map((f) => `− ${f}`)].join(", ")}` : ""}.
         </p>
       )}
-      {!p.reviewRequired ? (
-        <p>
-          <span className="tag green">No review needed</span> CEO draft with no scripts.
-        </p>
-      ) : p.verdict ? (
+      {p.verdict ? (
         <div>
           <p>
             <span className={`tag ${against ? "red" : p.verdict === "conditions" ? "amber" : "green"}`}>Security Reviewer: {VERDICT[p.verdict]}</span> {p.verdictSummary}
@@ -103,7 +99,11 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
             <p className="muted">No findings.</p>
           )}
         </div>
-      ) : null}
+      ) : (
+        <p>
+          <span className="tag amber">Security review pending</span> Every skill is reviewed before you decide.
+        </p>
+      )}
       <details>
         <summary>
           The skill's files ({p.files.length}){p.files.some((f) => f.script) ? `, ${p.files.filter((f) => f.script).length} with scripts` : ""}

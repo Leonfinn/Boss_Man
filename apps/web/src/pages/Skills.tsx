@@ -523,7 +523,7 @@ function Proposals({ companyId }: { companyId: string }) {
         {rows.map((p) => (
           <li key={p.id}>
             <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
-            {p.reviewRequired ? ` · security review: ${p.verdict ? p.verdict.replace("_", " ") : "pending"}` : " · no review needed"}
+            {` · security review: ${p.verdict ? p.verdict.replace("_", " ") : "pending"}`}
             {p.overridden ? " · added against the reviewer's advice" : ""}
             {p.status === "awaiting_owner" ? <> · <a href="#/decisions">Decide</a></> : null}
           </li>
