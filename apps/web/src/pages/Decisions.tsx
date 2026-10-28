@@ -132,6 +132,16 @@ function StallEvidenceView({ e }: { e: StallEvidence }) {
   );
 }
 
+/** What the team did with a decision, in the owner's words. */
+function settledWord(answer: string) {
+  if (answer === "Allow once") return "allowed";
+  if (answer === "Deny") return "denied";
+  if (answer === "Keep waiting") return "kept waiting";
+  if (answer === "Cancel run") return "cancelled the run";
+  if (answer === "Got it") return "settled it";
+  return answer;
+}
+
 function kindOf(d: Decision) {
   const ctx = (d as Decision & { context?: { type?: string } }).context;
   const key = ctx?.type === "deploy" || ctx?.type === "self_deploy" || ctx?.type === "rule_proposal" ? ctx.type : d.options.includes("Approve plan") ? "plan" : d.kind;
@@ -249,7 +259,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
 
       {advised.length > 0 && (
         <details className="sub">
-          <summary>Settled by the CEO in the last day ({advised.length})</summary>
+          <summary>Settled by the team in the last day ({advised.length})</summary>
           <ul>
             {advised.map((a) => (
               <li key={a.id}>
@@ -258,7 +268,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 <span className="muted">
                   ·{" "}
                   {a.settled
-                    ? `${a.settled.answer === "Allow once" ? "allowed" : a.settled.answer === "Deny" ? "denied" : a.settled.answer} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
+                    ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
                     : a.advice?.state === "reissued"
                       ? "replaced by a clearer decision"
                       : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
