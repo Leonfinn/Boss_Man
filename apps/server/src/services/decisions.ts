@@ -709,8 +709,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return typeof own === "string" ? `ticket:${own}` : null;
   }
 
-  /** Its ticket is done or cancelled, or another open card covers the same thing (BOS-149). */
-  async function staleOrDuplicate(d: typeof decisions.$inferSelect): Promise<boolean> {
+  /** Its ticket is done or cancelled, so the card no longer asks for anything (BOS-149). */
+  async function isStale(d: typeof decisions.$inferSelect): Promise<boolean> {
     const c = d.context as DecisionContext & { ladder?: { ticketId?: string | null } };
     const ids = new Set<string>();
     const own = (c as { ticketId?: unknown }).ticketId;
@@ -718,10 +718,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     if (c.ladder?.ticketId) ids.add(c.ladder.ticketId);
     const blocked = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
     for (const b of blocked) ids.add(b.ticketId);
-    if (ids.size) {
-      const rows = await db.select({ systemState: tickets.systemState }).from(tickets).where(inArray(tickets.id, [...ids]));
-      if (rows.length === ids.size && rows.every((r) => r.systemState === "done")) return true;
-    }
+    if (!ids.size) return false;
+    const rows = await db.select({ systemState: tickets.systemState }).from(tickets).where(inArray(tickets.id, [...ids]));
+    return rows.length === ids.size && rows.every((r) => r.systemState === "done");
+  }
+
+  /** Another open card covers the same thing, so this one is a duplicate (BOS-149). */
+  async function isDuplicate(d: typeof decisions.$inferSelect): Promise<boolean> {
+    const c = d.context as DecisionContext;
     const subject = await cardSubject(d);
     if (!subject) return false;
     const others = await db.select().from(decisions).where(and(eq(decisions.companyId, d.companyId), eq(decisions.status, "open"), ne(decisions.id, d.id)));
@@ -1238,8 +1242,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     /**
      * The CEO clears a card that is stale or a duplicate (BOS-149), with a reason the owner can read.
-     * Owner-only cards may only go when they are stale or duplicated; system and info cards may be
-     * cleared directly. Returns null when it is already settled.
+     * Owner-only cards may only go when their ticket is finished (never as a duplicate); system and
+     * info cards may be cleared directly, except merge cards, which must be stale or duplicate.
+     * Returns null when it is already settled.
      */
     async withdraw(input: { id: string; companyId: string; agentId: string; note: string }) {
       const note = input.note.replace(/\s+/g, " ").trim().slice(0, 500);
@@ -1252,9 +1257,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
       if (ctx.type === "permission") throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");
-      // Fail closed: only system and info cards may be cleared outright; everything else (a live owner
-      // question, review loop, sign-off...) must be stale or a genuine duplicate (BOS-149).
-      if (!isSystemCard(d) && !(await staleOrDuplicate(d))) {
+      // Fail closed: only system and info cards may be cleared outright, and a live merge card never:
+      // it is waiting on the owner and can only be answered, not dropped (BOS-149).
+      const direct = isSystemCard(d) && ctx.type !== "check_stuck";
+      if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) {
+        // Two open sign-offs for one ticket are normal (one per approval round), so a duplicate is
+        // not a reason to clear one of the owner's own cards: only a finished ticket is.
+        if (!(await isStale(d))) {
+          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished (done or cancelled).");
+        }
+      } else if (!direct && !(await isStale(d)) && !(await isDuplicate(d))) {
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };

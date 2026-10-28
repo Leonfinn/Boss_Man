@@ -93,7 +93,7 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     expect(advised.find((a) => a.id === d.id)!.withdrawn).toMatchObject({ by: "CEO", note: "The ticket is finished, so this card no longer applies." });
   });
 
-  it("leaves an owner-only card alone unless it is stale or a duplicate", async () => {
+  it("never treats one of the owner's own cards as a duplicate", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Sign this off");
     const insert = async () =>
@@ -108,13 +108,41 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "I just don't think this is needed." } }))).toBe(true);
     expect((await row(first.id)).status).toBe("open");
 
-    // With another open card for the same ticket it is a duplicate, and may go.
+    // Two open sign-offs for one ticket are normal, so neither can be cleared as a duplicate.
     const second = await insert();
-    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This is a duplicate of the newer sign-off card." } }))).toBe(false);
-    expect((await row(first.id)).status).toBe("withdrawn");
-    // Now the other one is the only card and the ticket is still open, so it stays.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This is a duplicate of the newer sign-off card." } }))).toBe(true);
+    expect((await row(first.id)).status).toBe("open");
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: second.id, note: "This one is also a duplicate, honestly." } }))).toBe(true);
     expect((await row(second.id)).status).toBe("open");
+
+    // Once its ticket is finished it is stale, and may go.
+    await c.work.updateTicket(t.id, { state: "done", overLimit: true });
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "The ticket is finished, so this card no longer applies." } }))).toBe(false);
+    expect((await row(first.id)).status).toBe("withdrawn");
+  });
+
+  it("leaves a live merge card alone and clears it once its ticket is done", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Merge me");
+    await c.work.updateTicket(t.id, { state: "review", overLimit: true });
+    const [live] = await raiseMergeStuck(c.db, { id: t.id, title: "Merge me", companyId: c.company.id }, "The merge check timed out after 10 minutes.");
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: live!.id, note: "I will just drop this merge card for now." } }))).toBe(true);
+    expect((await row(live!.id)).status).toBe("open");
+
+    // Finishing the ticket clears the card by itself.
+    await c.work.updateTicket(t.id, { state: "done", overLimit: true, outcome: "completed" });
+    expect((await row(live!.id)).status).toBe("withdrawn");
+
+    // A merge card left on a finished ticket is stale, so the CEO may clear it.
+    const done = await c.ticket("Already finished");
+    await c.work.updateTicket(done.id, { state: "done", overLimit: true, outcome: "completed" });
+    const [stale] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "A merge card left behind", options: [CHECK_AGAIN, CHECK_SEND_BACK], recommendedOption: CHECK_AGAIN, tier: "owner", dedupeKey: `merge-stuck:${done.id}`, context: { type: "check_stuck", ticketId: done.id, command: "", output: "timed out" } })
+      .returning();
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: stale!.id, note: "The ticket is finished, so this card no longer applies." } }))).toBe(false);
+    expect((await row(stale!.id)).status).toBe("withdrawn");
   });
 
   it("leaves a live owner question or review loop alone, and never withdraws its own card", async () => {
@@ -315,5 +343,36 @@ describe("merge cards clean themselves up (BOS-149)", () => {
     // The safe choices are the only ones the guard allows.
     expect(ceoAnswerRefusal(d!, CHECK_AGAIN)).toBeNull();
     expect(ceoAnswerRefusal(d!, CHECK_SEND_BACK)).toBeNull();
+  });
+});
+
+describe("more attempts the CEO must fail (BOS-149 adversarial round 2)", () => {
+  it("cannot answer a sign-off, deploy or hire card even when it sits at the CEO's own tier", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Signed-off work");
+    const cases = [
+      { kind: "approval" as const, options: ["Approve and merge", "Send it back"], context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" } },
+      { kind: "question" as const, options: ["Hire", "Not now"], context: { type: "hire", proposal: { name: "X" }, byAgentId: c.ceo.id } },
+      { kind: "approval" as const, options: ["Approve", "Reject"], context: { type: "deploy", deployId: randomUUID() } },
+    ];
+    const ceo = await c.mcp(c.ceo.id);
+    for (const o of cases) {
+      const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: o.kind, question: `CEO tier ${o.context.type}`, options: o.options, recommendedOption: o.options[0]!, tier: "ceo", context: o.context }).returning();
+      await expect(c.decisions.answer(d!.id, o.options[0]!, { settledBy: { agentId: c.ceo.id }, note: "This looks fine to me." }), o.context.type).rejects.toThrow(/owner/i);
+      expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: o.options[0]!, note: "This looks fine to me." } })), o.context.type).toBe(true);
+      expect((await row(d!.id)).status, o.context.type).toBe("open");
+    }
+  });
+
+  it("cannot withdraw a card that holds both a finished and a live ticket", async () => {
+    const c = (ctx = await setup());
+    const done = await c.ticket("Finished work");
+    const live = await c.ticket("Live work");
+    await c.work.updateTicket(done.id, { state: "done", overLimit: true });
+    const d = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which way for both?", options: ["A", "B"], recommended: "A", blocksTicketId: live.id, triedFirst: "Read both tickets and they need a decision" });
+    await c.db.update(decisions).set({ context: { ...(d.context as object), ticketId: done.id } as never }).where(eq(decisions.id, d.id));
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: d.id, note: "One of its tickets is finished." } }))).toBe(true);
+    expect((await row(d.id)).status).toBe("open");
   });
 });
