@@ -198,6 +198,31 @@ describe("ask the CEO for advice", () => {
     expect((await row(c, d!.id)).context).toEqual({ type: "permission" });
   });
 
+  it("a skill card can't be put to the CEO, since the CEO proposed it (BOS-168)", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "skill", question: "Add this skill?", options: ["Add", "Reject"], recommendedOption: "Add", raisedByAgentId: c.ceo.id, context: { type: "skill", proposalId: randomUUID() } }).returning();
+    const r = await c.req("POST", `/api/decisions/${d!.id}/ask-advice`, {});
+    expect(r.statusCode).toBe(422);
+    expect((r.json() as { message: string }).message).toMatch(/ask the CEO about it in chat/);
+    expect((await row(c, d!.id)).context).toEqual({ type: "skill", proposalId: expect.any(String) });
+    expect((await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id))).length).toBe(0);
+  });
+
+  it("a skill card is refused a reissue, and the card is left exactly as it was (BOS-168)", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "skill", question: "Add this skill?", options: ["Add", "Reject"], recommendedOption: "Add", raisedByAgentId: c.ceo.id, context: { type: "skill", proposalId: randomUUID(), advice: { state: "asking", askedAt: new Date().toISOString() } } })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, ...reissue } });
+    expect(isError(r)).toBe(true);
+    expect(textOf(r)).toMatch(/proposed this skill/);
+    expect((await row(c, d!.id)).status).toBe("open");
+    expect((await row(c, d!.id)).question).toBe("Add this skill?");
+    expect((await row(c, d!.id)).options).toEqual(["Add", "Reject"]);
+  });
+
   it("a timeout after the CEO has advised changes nothing", async () => {
     const c = (ctx = await setup());
     const { d } = await c.question();
