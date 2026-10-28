@@ -467,7 +467,7 @@ export const wakes = pgTable(
     createdAt: createdAt(),
     launchedAt: timestamp("launched_at", { withTimezone: true }),
   },
-  (t) => [index("wakes_status_priority").on(t.status, t.priority)],
+  (t) => [index("wakes_status_priority").on(t.status, t.priority), index("wakes_run_id").on(t.runId)],
 );
 
 // ---------- Runs, funding and cost ----------
@@ -496,6 +496,14 @@ export const runs = pgTable("runs", {
   cachedReadTokens: bigint("cached_read_tokens", { mode: "number" }),
   cachedWriteTokens: bigint("cached_write_tokens", { mode: "number" }),
   purpose: text("purpose"),
+  /**
+   * What started the run, in plain words, for runs with no ticket: "nudge", "wiki upkeep",
+   * "owner_chat" and so on (the wake's reason). It may name a ticket the run was about
+   * without being on it (a nudge that passed one); that link is `runTicketId`.
+   */
+  origin: text("origin"),
+  /** The ticket the run was about, when it wasn't formally on it (a nudge naming one). */
+  runTicketId: uuid("run_ticket_id").references(() => tickets.id, { onDelete: "set null" }),
   /** The CEO chapter this run belongs to, if any. */
   chapterId: uuid("chapter_id").references((): AnyPgColumn => ceoChapters.id, { onDelete: "set null" }),
   /** How full the session's context was when last reported, in tokens. */
@@ -842,6 +850,8 @@ export const nudges = pgTable(
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     /** What was said, for the owner's alert when two agents loop. */
     why: text("why"),
+    /** The wake this nudge delivered. Its run says who nudged and why (BOS-118). */
+    wakeId: uuid("wake_id").references(() => wakes.id, { onDelete: "set null" }),
     /** Dropped as a ping-pong: not delivered, and not counted again. */
     dropped: boolean("dropped").notNull().default(false),
     createdAt: createdAt(),

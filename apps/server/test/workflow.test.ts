@@ -106,6 +106,9 @@ describe("scorecard", () => {
     const [src] = await c.db.insert(fundingSources).values({ name: "Pay as you go", kind: "api_payg", provider: "anthropic" }).returning();
     const [run] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: dee.id, ticketId: t1.id, startedAt: ago(9 * D) }).returning();
     await c.db.insert(costEvents).values({ runId: run!.id, fundingSourceId: src!.id, companyId: c.company.id, agentId: dee.id, costMicros: 3_000_000 });
+    // The reviewer's run on Dee's ticket counts in the ticket's cost, not in Dee's own.
+    const [review] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: rae.id, ticketId: t1.id, startedAt: ago(9 * D - H) }).returning();
+    await c.db.insert(costEvents).values({ runId: review!.id, fundingSourceId: src!.id, companyId: c.company.id, agentId: rae.id, costMicros: 6_000_000 });
     await c.db.insert(watchdogFlags).values({ companyId: c.company.id, ticketId: t1.id, rule: "stale_review", openedAt: ago(8 * D) });
     await c.db.insert(decisions).values([
       { companyId: c.company.id, kind: "question", question: "A?", recommendedOption: "Yes", raisedByAgentId: dee.id, status: "answered", answer: "Yes", answeredAt: ago(D) },
@@ -121,7 +124,8 @@ describe("scorecard", () => {
     const c = await seed();
     const card = await c.svc.scorecard(c.company.id, 14);
     const dev = card.byRole.find((r) => r.role === "developer")!;
-    expect(dev).toMatchObject({ done: 3, agents: 1, watchdogFlags: 1, answered: 2, overrideShare: 0.5, medianCycleMs: D, costPerDoneMicros: 1_000_000 });
+    expect(dev).toMatchObject({ done: 3, agents: 1, watchdogFlags: 1, answered: 2, overrideShare: 0.5, medianCycleMs: D, costPerDoneMicros: 3_000_000, ownCostPerDoneMicros: 1_000_000 });
+    expect(card.costBasis).toBe("estimate");
     expect(dev.firstPassRate).toBeCloseTo(2 / 3);
     expect(dev.meanRework).toBeCloseTo(1 / 3);
     expect(card.byAgent).toEqual([expect.objectContaining({ agentId: c.dee.id, name: "Dee", role: "developer", done: 3 })]);

@@ -176,12 +176,16 @@ const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-
  */
 export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const cmd = commandOf(info.rawInput) ?? info.title ?? "";
-  // A command that only works in /tmp, with nothing in it Boss Man can't check, is safe too.
-  const scratch = explainCommand(cmd).scratch;
-  if (tempCleanup(cmd) || (scratch && !scratch.unchecked.length)) return "allow";
+  // Temp cleanup is Allow whatever else is in it: cleanupScope already refuses shred, pushes and other destructive words, and a later cd can't move a /tmp/NAME delete.
+  if (tempCleanup(cmd)) return "allow";
   // Quoted text is data (a sed script, a commit message) unless a shell runs it.
   const run = /\b(sh|bash|zsh)\s+-c\b|\beval\b/.test(cmd) ? cmd : cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
   const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
+  // Destructive commands that aren't file deletes are Deny even in /tmp (shred /tmp/a); find -delete counts as a delete.
+  if (hits.some((h) => !/^(rm|find)\b/i.test(h))) return "deny";
+  // A command that only works in /tmp, with nothing in it Boss Man can't check, is safe too.
+  const scratch = explainCommand(cmd).scratch;
+  if (scratch && !scratch.unchecked.length) return "allow";
   if (!hits.length) return "allow";
   if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");

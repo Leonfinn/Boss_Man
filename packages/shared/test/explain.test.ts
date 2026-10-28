@@ -111,12 +111,17 @@ describe("alwaysChoices", () => {
 describe("work only in a temporary folder", () => {
   const scratch = (c: string) => explainCommand(c).scratch;
 
-  it("says so when every change and delete is under /tmp, following cd, and names programs it can't check", () => {
-    const s = scratch(`cd /tmp && rm -rf hol398-parent && git clone -q /home/node/workspaces/tickets/abc hol398-parent 2>&1 | tail -2; cd hol398-parent && git checkout -q 6471aee^ && cp /home/node/workspaces/tickets/abc/tests/x.test.mjs tests/ && node tests/x.test.mjs; echo "EXIT=$?"`);
-    expect(s?.unchecked).toEqual(["node"]);
+  it("says so when every change and delete names an absolute path under /tmp", () => {
+    const s = scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && touch /tmp/opencode/mut/x.js");
+    expect(s?.unchecked).toEqual([]);
     expect(s?.note).toMatch(/^Works only in a temporary folder \(\/tmp\)/);
-    expect(s?.note).toContain("It also runs node in that folder");
-    expect(scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && sed -i 's/a/b/' /tmp/opencode/mut/x.js")?.unchecked).toEqual([]);
+  });
+
+  it("doesn't follow cd, so any cd, pushd or popd means not /tmp-only (BOS-111 security re-checks)", () => {
+    expect(scratch(`cd /tmp && rm -rf hol398-parent && git clone -q /home/node/workspaces/tickets/abc hol398-parent 2>/dev/null && cd hol398-parent && git checkout -q 6471aee^ && node tests/x.test.mjs`)).toBeUndefined();
+    for (const c of ["cd /tmp/a && rm -rf x", "cd /tmp/a && rm -rf /tmp/a/x", "cd /tmp/a && node x.js", "cd /tmp/a && cd -- /home && rm -rf x", "CDPATH=/home cd x && rm -rf y", "pushd /tmp/a && rm -rf /tmp/a/x", "popd; rm -rf /tmp/a"]) {
+      expect(scratch(c), c).toBeUndefined();
+    }
   });
 
   it("doesn't when anything could reach outside /tmp", () => {
@@ -150,7 +155,7 @@ describe("git subcommands (BOS-111)", () => {
   it("recognises worktrees, -C and branch deletes", () => {
     expect(explainCommand("git worktree list").effect).toBe("reads");
     for (const c of ["git worktree add /tmp/rv86 origin/main", "git worktree remove --force /tmp/rv86", "git worktree prune"]) {
-      expect(explainCommand(c), c).toMatchObject({ effect: "changes", summary: "Adds or removes a second checkout of the project (git worktree)." });
+      expect(explainCommand(c), c).toMatchObject({ effect: "changes", summary: "Adds or removes a second checkout of the project (git worktree). The git worktree step also writes into the project's repository (.git), and can create a branch there." });
       // It also writes the repository's .git, so it isn't /tmp-only work.
       expect(explainCommand(c).scratch, c).toBeUndefined();
     }
@@ -161,5 +166,32 @@ describe("git subcommands (BOS-111)", () => {
     expect(explainCommand("git branch -D old").effect).toBe("changes");
     expect(explainCommand("git branch --list").effect).toBe("reads");
     expect(explainCommand("git frobnicate").summary).toBe("Runs a git command Boss Man doesn't recognise: frobnicate.");
+  });
+});
+
+describe("round-5 regression pins (BOS-153)", () => {
+  it("says so on the card when an install in a temp checkout or a worktree prune reaches outside /tmp (finding 3)", () => {
+    const install = explainCommand("rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && npm install");
+    expect(install.scratch).toBeUndefined();
+    expect(install.summary).toMatch(/install scripts/);
+    const prune = explainCommand("rm -rf /tmp/a && git worktree prune");
+    expect(prune.scratch).toBeUndefined();
+    expect(prune.summary).toMatch(/writes into the project's repository/);
+  });
+
+  it("gives no /tmp note when an option carries the real target (finding 1)", () => {
+    for (const c of [
+      "rm -rf /tmp/a && cp -t /home/node /tmp/a",
+      "rm -rf /tmp/a && cp --target-directory=/home/node /tmp/a",
+      "rm -rf /tmp/a && diff --output=/home/node/x /tmp/a /tmp/b",
+      "rm -rf /tmp/a && sort -o/home/node/x /tmp/a",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+    }
+  });
+
+  it("keeps the /tmp note for find -delete, and gives none for shred (finding 4)", () => {
+    expect(explainCommand("find /tmp/x -delete").scratch?.note).toMatch(/^Works only in a temporary folder/);
+    expect(explainCommand("shred /tmp/a").scratch).toBeUndefined();
   });
 });

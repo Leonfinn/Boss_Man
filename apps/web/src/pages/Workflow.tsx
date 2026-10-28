@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 
-type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
+type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; ownCostPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
 type Role = Stats & { role: string; agents: number };
 type AgentRow = Stats & { agentId: string; name: string; title: string | null; role: string };
 type Handoff = { from: string; to: string; kind: "assign" | "review"; count: number; medianWaitMs: number | null; bounceRate: number | null };
@@ -23,7 +23,7 @@ type RetroInfo = { retro: { id: string; startedAt: string; since: string; until:
 type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[] };
 type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
 type SizeNote = { role: string; size: number; likeSize: number };
-type Scorecard = { days: number; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
+type Scorecard = { days: number; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
 
 /** "45m", "3.5h", "2d"; a dash for no number. */
 export function span(ms: number | null) {
@@ -56,6 +56,7 @@ function StatsCells({ s }: { s: Stats }) {
       <td>{pct(s.firstPassRate)}</td>
       <td>{s.meanRework === null ? "–" : s.meanRework.toFixed(1)}</td>
       <td>{span(s.medianCycleMs)}</td>
+      <td>{dollars(s.ownCostPerDoneMicros)}</td>
       <td>{dollars(s.costPerDoneMicros)}</td>
       <td>{s.watchdogFlags}</td>
       <td>{pct(s.overrideShare)}</td>
@@ -63,7 +64,7 @@ function StatsCells({ s }: { s: Stats }) {
   );
 }
 
-const HEAD = ["Done", "Right first time", "Rework rounds", "Time to finish", "Cost per ticket", "Watchdog flags", "Answers changed"];
+const HEAD = ["Done", "Right first time", "Rework rounds", "Time to finish", "Own cost", "Ticket cost", "Watchdog flags", "Answers changed"];
 
 /** The latest retro's findings, ranked, and every change it led to. */
 function Retro({ companyId }: { companyId: string }) {
@@ -171,7 +172,7 @@ export function Workflow({ company }: { company: Company | undefined }) {
           <section>
             <h2>Roles</h2>
             <p className="muted" style={{ fontSize: 14 }}>
-              <strong>Done</strong> is tickets finished in this period. <strong>Right first time</strong> is the share of reviewed tickets that were never sent back. <strong>Rework rounds</strong> is how many times a ticket was sent back, on average. <strong>Time to finish</strong> is the middle time from first starting a ticket to finishing it. <strong>Cost per ticket</strong> is every run on those tickets. <strong>Watchdog flags</strong> counts tickets the watchdog raised. <strong>Answers changed</strong> is how often the answer to a decision this role raised was not the one it recommended.
+              <strong>Done</strong> is tickets finished in this period. <strong>Right first time</strong> is the share of reviewed tickets that were never sent back. <strong>Rework rounds</strong> is how many times a ticket was sent back, on average. <strong>Time to finish</strong> is the middle time from first starting a ticket to finishing it. <strong>Own cost</strong> is what this role's own runs on those tickets cost, per ticket. <strong>Ticket cost</strong> is every run on them, per ticket: reviews, the CEO and rework included, so a ticket sent back often costs more. {d.costBasis === "billed" ? "Costs are what the provider billed." : "Costs are estimates at list price from the tokens used, not what a subscription actually charges you."} <strong>Watchdog flags</strong> counts tickets the watchdog raised. <strong>Answers changed</strong> is how often the answer to a decision this role raised was not the one it recommended.
             </p>
             {d.byRole.length ? (
               <>
