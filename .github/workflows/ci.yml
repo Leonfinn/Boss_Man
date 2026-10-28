@@ -1,13 +1,14 @@
 name: CI
 
-# Pull requests always get the full run. Pushes to main are Boss Man's merges, which already passed
-# scripts/check-all.sh on the owner's machine, so each job runs only for what that can't cover
-# (see "changes"); both run nightly and on demand as a backstop.
+# Pull requests get the full run unless they change only docs. Pushes to main are Boss Man's merges,
+# which already passed scripts/check-all.sh on the owner's machine, so each job runs only for what that
+# can't cover (see "changes"); both run nightly and on demand as a backstop.
 on:
   push:
     branches: [main]
     paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:

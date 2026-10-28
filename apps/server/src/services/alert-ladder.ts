@@ -14,9 +14,9 @@
 import { and, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { readWatchdogSettings, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, watchdogActions } from "../db/schema.js";
+import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkAsk } from "./decisions.js";
+import { CANCEL_RUN, checkAsk } from "./decisions.js";
 import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, type watchdogService } from "./watchdog.js";
 
 export type Rung = "scrum_master" | "ceo" | "owner";
@@ -28,11 +28,13 @@ export type Ladder = {
   rung: Rung;
   /** When it reached this rung; the timeout counts from here. */
   since: string;
-  /** Overrides the company's alert time, e.g. temp-file cleanup, which must reach the owner before the runner gives up (BOS-111). */
+  /** Overrides the company's alert time, e.g. a permission or plan request, which must reach the owner before the runner gives up (BOS-111, BOS-119). */
   minutes?: number;
   ticketId: string | null;
   /** Agents the alert is about: a rung they hold is skipped. */
   about: string[];
+  /** A duty alert (a stalled run): the Scrum Master takes it even when the watchdog is switched off (BOS-119). */
+  duty?: boolean;
   /** The wake that was dropped, which the Scrum Master may start again with a fresh chain. */
   rewake?: { agentId: string; ticketId: string | null; reason: string } | null;
   hops: Array<{ to: Rung; at: string; why: string }>;
@@ -46,8 +48,11 @@ export type AlertInput = {
   /** The lowest rung allowed to settle it: "ceo" when the fix is beyond the Scrum Master (stopping work, a review outcome, host access). */
   from?: Rung;
   rewake?: Ladder["rewake"];
-  /** Defaults to a "Got it" question; the review loop brings its own options and context. */
-  kind?: "question" | "approval";
+  /** A duty alert goes to the Scrum Master even while the watchdog is off. */
+  duty?: boolean;
+  raisedByAgentId?: string | null;
+  /** Defaults to a "Got it" question; the review loop and the stall sweep bring their own options and context. */
+  kind?: "question" | "approval" | "stalled_run";
   options?: string[];
   recommended?: string;
   context?: Record<string, unknown>;
@@ -60,8 +65,10 @@ export function alertLadder(
   db: Db,
   deps: {
     notify: Notify;
-    answer: (decisionId: string, answer: string) => Promise<unknown>;
+    answer: (decisionId: string, answer: string, extra?: { settledBy?: { agentId: string }; note?: string }) => Promise<unknown>;
     watchdog: ReturnType<typeof watchdogService>;
+    /** Passes the Scrum Master's nudge to a colleague; used on stalled-run alerts. */
+    nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
     now?: () => Date;
   },
 ) {
@@ -73,12 +80,13 @@ export function alertLadder(
   }
 
   /** Who holds this rung now, or why nobody can. */
-  async function holder(companyId: string, rung: Exclude<Rung, "owner">, about: string[]): Promise<{ agent: typeof agents.$inferSelect } | { skip: string }> {
+  async function holder(companyId: string, rung: Exclude<Rung, "owner">, about: string[], duty = false): Promise<{ agent: typeof agents.$inferSelect } | { skip: string }> {
     const [c] = await db.select().from(companies).where(eq(companies.id, companyId));
     if (!c || c.paused) return { skip: "the company is paused" };
     if (rung === "scrum_master") {
       const s = readWatchdogSettings(c.watchdog);
-      if (!s.enabled || c.watchdogTrippedAt) return { skip: "the watchdog is off" };
+      // A stalled run is the Scrum Master's duty whether or not the watchdog is switched on (BOS-119).
+      if ((!s.enabled || c.watchdogTrippedAt) && !duty) return { skip: "the watchdog is off" };
       const [sm] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY), isNull(agents.retiredAt)));
       if (!sm) return { skip: "there is no Scrum Master" };
       if (sm.paused) return { skip: "the Scrum Master is paused" };
@@ -145,7 +153,7 @@ export function alertLadder(
         await log(d.companyId, { kind: "alert_hop", ticketId: ladder.ticketId, decisionId: d.id, reason, summary: `Alert sent to the owner: ${reason}` });
         return "owner";
       }
-      const h = await holder(d.companyId, rung, ladder.about);
+      const h = await holder(d.companyId, rung, ladder.about, ladder.duty);
       if ("skip" in h) {
         reason = `${LABEL[rung]} was skipped: ${h.skip}`;
         continue;
@@ -169,6 +177,16 @@ export function alertLadder(
     return "owner";
   }
 
+  /**
+   * The Scrum Master may act on an alert while the watchdog is off (BOS-119): a stalled run is
+   * their duty either way. Still refuse anyone who isn't the company's active Scrum Master.
+   */
+  async function dutyActor(companyId: string, agentId: string) {
+    const [sm] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY), isNull(agents.retiredAt)));
+    if (!sm || sm.id !== agentId) throw new WatchdogError(403, "Only the company's Scrum Master can settle these alerts.");
+    return { sm };
+  }
+
   async function openAlert(companyId: string, decisionId: string) {
     const [d] = await db.select().from(decisions).where(and(eq(decisions.id, decisionId), eq(decisions.companyId, companyId), eq(decisions.status, "open")));
     const ladder = (d?.context as { ladder?: Ladder } | undefined)?.ladder;
@@ -184,6 +202,7 @@ export function alertLadder(
         since: now().toISOString(),
         ticketId: input.ticketId ?? null,
         about: [...new Set(input.about?.filter((x): x is string => !!x) ?? [])],
+        duty: input.duty ?? false,
         rewake: input.rewake ?? null,
         hops: [],
       };
@@ -195,6 +214,7 @@ export function alertLadder(
           question: input.question,
           options: input.options ?? [GOT_IT],
           recommendedOption: input.recommended ?? GOT_IT,
+          raisedByAgentId: input.raisedByAgentId ?? null,
           // Not on any rung's queue until place() puts it there; the owner is not notified before.
           tier: "ceo",
           dedupeKey: input.dedupeKey,
@@ -227,7 +247,7 @@ export function alertLadder(
 
     /** The Scrum Master's open alerts. */
     async mine(companyId: string, agentId: string) {
-      await deps.watchdog.actor(companyId, agentId);
+      await dutyActor(companyId, agentId);
       const rows = await db
         .select()
         .from(decisions)
@@ -240,18 +260,23 @@ export function alertLadder(
     },
 
     /** The Scrum Master settled it (and may wake the dropped agent again, with a fresh chain). */
-    async resolve(companyId: string, agentId: string, input: { alertId: string; reason: string; rewake?: boolean }) {
+    async resolve(companyId: string, agentId: string, input: { alertId: string; reason: string; rewake?: boolean; answer?: string; nudge?: boolean; runId?: string }) {
       const reason = input.reason.replace(/\s+/g, " ").trim().slice(0, 240);
       if (reason.length < 3) throw new WatchdogError(422, "Give a one-line reason.");
-      const { sm, s } = await deps.watchdog.actor(companyId, agentId);
+      const { sm } = await dutyActor(companyId, agentId);
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung !== "scrum_master" || d.forAgentId !== sm.id) throw new WatchdogError(409, `That alert is with ${LABEL[ladder.rung]} now.`);
-      // Settling only acknowledges; an alert that asks for a choice (an approval) isn't the Scrum Master's to make.
+      // A plain alert is settled by acknowledging it. A stalled run also offers a choice the
+      // Scrum Master may make (BOS-119): keep waiting, or cancel the run. Anything else goes to the CEO.
       const options = d.options as string[];
-      if (options.length !== 1 || options[0] !== GOT_IT) throw new WatchdogError(409, "This alert needs a choice the Scrum Master can't make: pass it to the CEO.");
+      const ctx = d.context as { type?: string; runId?: string };
+      const plain = options.length === 1 && options[0] === GOT_IT;
+      const canChoose = ctx.type === "stalled_run" && input.answer !== undefined && options.includes(input.answer);
+      if (!plain && !canChoose) throw new WatchdogError(409, "This alert needs a choice the Scrum Master can't make: pass it to the CEO.");
       if (input.rewake) {
         if (!ladder.rewake) throw new WatchdogError(409, "This alert has no dropped wake to start again.");
-        await deps.watchdog.capOrFail(companyId, s);
+        const [c] = await db.select({ watchdog: companies.watchdog }).from(companies).where(eq(companies.id, companyId));
+        await deps.watchdog.capOrFail(companyId, readWatchdogSettings(c?.watchdog));
         // No causedByRunId: the point is a fresh chain, which the owner used to start by hand.
         const w = await deps.notify(ladder.rewake.agentId, {
           ticketId: ladder.rewake.ticketId,
@@ -261,8 +286,17 @@ export function alertLadder(
         if (w.status === "dropped") throw new WatchdogError(409, w.statusReason ?? "The wake was dropped.");
         await deps.watchdog.log({ companyId, kind: "rewake", ticketId: ladder.rewake.ticketId, actorAgentId: sm.id, targetAgentId: ladder.rewake.agentId, reason, after: { wakeIds: [w.id], decisionId: d.id }, undoable: true, summary: `${sm.name} woke the agent again after checking the wake chain: ${reason}` });
       }
-      await deps.answer(d.id, d.recommendedOption);
-      await log(companyId, { kind: "alert_resolved", ticketId: ladder.ticketId, actorAgentId: sm.id, decisionId: d.id, reason, summary: `${sm.name} settled the alert: ${reason}` });
+      const answer = input.answer ?? d.recommendedOption;
+      // Asking the agent to say why it is quiet is a nudge; it only makes sense if the run carries on.
+      if (input.nudge && ctx.type === "stalled_run" && answer !== CANCEL_RUN) {
+        const [run] = ctx.runId ? await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, ctx.runId)) : [];
+        if (!run?.agentId || !deps.nudge) throw new WatchdogError(409, "That stalled run has no agent to nudge.");
+        const n = await deps.nudge({ runId: input.runId ?? ctx.runId!, fromAgentId: sm.id, to: run.agentId, ticketId: run.ticketId, why: reason });
+        if (!n.ok) throw new WatchdogError(409, n.error);
+      }
+      // Recorded as the Scrum Master's, so the owner sees who settled it and why (BOS-111, BOS-119).
+      await deps.answer(d.id, answer, { settledBy: { agentId: sm.id }, note: reason });
+      await log(companyId, { kind: "alert_resolved", ticketId: ladder.ticketId, actorAgentId: sm.id, decisionId: d.id, reason, summary: `${sm.name} settled the alert (${answer}): ${reason}` });
       return { id: d.id };
     },
 
@@ -270,7 +304,7 @@ export function alertLadder(
     async pass(companyId: string, agentId: string, input: { alertId: string; reason: string }) {
       const reason = input.reason.replace(/\s+/g, " ").trim().slice(0, 240);
       if (reason.length < 3) throw new WatchdogError(422, "Give a one-line reason.");
-      const { sm } = await deps.watchdog.actor(companyId, agentId);
+      const { sm } = await dutyActor(companyId, agentId);
       const { d, ladder } = await openAlert(companyId, input.alertId);
       if (ladder.rung !== "scrum_master" || d.forAgentId !== sm.id) throw new WatchdogError(409, `That alert is with ${LABEL[ladder.rung]} now.`);
       const to = await place(d, ladder, "ceo", `${sm.name} passed it on: ${reason}`);

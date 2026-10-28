@@ -72,6 +72,20 @@ function TicketLink({ t }: { t: { ticketId: string; ref?: string | null; title: 
   );
 }
 
+/** The tickets a card is about, each as its own link; nothing when it has none. */
+function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string | null; title: string }> }) {
+  if (!about?.length) return null;
+  return (
+    <ul className="ticket-refs" aria-label="Tickets this is about" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2, overflowWrap: "anywhere" }}>
+      {about.map((t) => (
+        <li key={t.ticketId}>
+          <a href={`#/tickets/${t.ticketId}`}>{t.ref ? <strong>{t.ref}</strong> : null}{t.ref ? " " : ""}{t.title}</a>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /** Text with ticket references the server resolved (BOS-70) turned into links; anything else stays plain text. */
 function Linked({ text, refs }: { text: string; refs?: Decision["refs"] }) {
   if (!refs || !Object.keys(refs).length) return <>{text}</>;
@@ -116,6 +130,16 @@ function StallEvidenceView({ e }: { e: StallEvidence }) {
       )}
     </div>
   );
+}
+
+/** What the team did with a decision, in the owner's words. */
+function settledWord(answer: string) {
+  if (answer === "Allow once") return "allowed";
+  if (answer === "Deny") return "denied";
+  if (answer === "Keep waiting") return "kept waiting";
+  if (answer === "Cancel run") return "cancelled the run";
+  if (answer === "Got it") return "settled it";
+  return answer;
 }
 
 function kindOf(d: Decision) {
@@ -235,17 +259,18 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
 
       {advised.length > 0 && (
         <details className="sub">
-          <summary>Settled by the CEO in the last day ({advised.length})</summary>
+          <summary>Settled by the team in the last day ({advised.length})</summary>
           <ul>
             {advised.map((a) => (
               <li key={a.id}>
+                <TicketRefs about={a.about} />
                 {a.question}{" "}
                 <span className="muted">
                   ·{" "}
                   {a.withdrawn
                     ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}`
                     : a.settled
-                      ? `${a.settled.answer === "Allow once" ? "allowed" : a.settled.answer === "Deny" ? "denied" : a.settled.answer} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
+                      ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
                       : a.advice?.state === "reissued"
                         ? "replaced by a clearer decision"
                         : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
@@ -280,7 +305,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       ) : (
         <>
           <div className="formula">
-            <p>The number is each decision's priority score: the highest comes first. It adds up three things, drawn as the bar under it:</p>
+            <p>Newest first. The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
             <ul className="score-legend">
               <li>
                 <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer
@@ -324,6 +349,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         {d.tier === "ceo" ? ` · for ${d.forAgentName ?? "the CEO"}` : ""}
                       </span>
                     </div>
+                    <TicketRefs about={d.about} />
                     {d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
@@ -394,13 +420,6 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
-                      {d.about && d.about.length > 0 && (
-                        <span>
-                          About: {d.about.map((t, i) => (
-                            <span key={t.ticketId}>{i > 0 && ", "}<TicketLink t={t} /></span>
-                          ))}
-                        </span>
-                      )}
                       {d.blocks.length > 0 && (
                         <span>
                           Blocks{" "}

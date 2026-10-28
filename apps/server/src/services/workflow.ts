@@ -83,10 +83,11 @@ export function sizeSignals(rows: SizeRow[], timed: (r: SizeRow) => number = (r)
   return out;
 }
 
-export type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
-type Done = { agentId: string; cycleMs: number | null; rework: number; reviewed: boolean; costMicros: number };
+export type Stats = { done: number; firstPassRate: number | null; meanRework: number | null; medianCycleMs: number | null; costPerDoneMicros: number | null; ownCostPerDoneMicros: number | null; watchdogFlags: number; overrideShare: number | null; answered: number };
+/** costBy: what each agent's runs on the ticket cost (null key: runs with no agent), so a row can count only its own. */
+type Done = { agentId: string; cycleMs: number | null; rework: number; reviewed: boolean; costMicros: number; costBy: Map<string | null, number> };
 
-function stats(rows: Done[], flags: number, answered: number, overridden: number): Stats {
+function stats(rows: Done[], flags: number, answered: number, overridden: number, own: (runAgentId: string | null) => boolean): Stats {
   const reviewed = rows.filter((r) => r.reviewed);
   return {
     done: rows.length,
@@ -94,6 +95,7 @@ function stats(rows: Done[], flags: number, answered: number, overridden: number
     meanRework: mean(rows.map((r) => r.rework)),
     medianCycleMs: median(rows.flatMap((r) => (r.cycleMs === null ? [] : [r.cycleMs]))),
     costPerDoneMicros: rows.length ? rows.reduce((a, r) => a + r.costMicros, 0) / rows.length : null,
+    ownCostPerDoneMicros: rows.length ? rows.reduce((a, r) => a + [...r.costBy].reduce((b, [who, m]) => b + (own(who) ? m : 0), 0), 0) / rows.length : null,
     watchdogFlags: flags,
     overrideShare: answered ? overridden / answered : null,
     answered,
@@ -217,10 +219,25 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         if (r.verdict === "changes_requested") rework.set(r.ticketId, (rework.get(r.ticketId) ?? 0) + 1);
       }
       const costs = windowIds.length
-        ? await db.select({ ticketId: runs.ticketId, micros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8` }).from(costEvents).innerJoin(runs, eq(runs.id, costEvents.runId)).where(inArray(runs.ticketId, windowIds)).groupBy(runs.ticketId)
+        ? await db
+            .select({ ticketId: runs.ticketId, agentId: runs.agentId, micros: sql<number>`coalesce(sum(${costEvents.costMicros}), 0)::float8`, billed: sql<boolean>`bool_or(${costEvents.basis} = 'billed')` })
+            .from(costEvents)
+            .innerJoin(runs, eq(runs.id, costEvents.runId))
+            .where(inArray(runs.ticketId, windowIds))
+            .groupBy(runs.ticketId, runs.agentId)
         : [];
-      const costOf = new Map(costs.map((c) => [c.ticketId, Number(c.micros)]));
-      const done: Done[] = inWindow.map((r) => ({ agentId: r.assigneeAgentId!, cycleMs: cycleOf.get(r.id) ?? null, rework: rework.get(r.id) ?? 0, reviewed: reviewed.has(r.id), costMicros: costOf.get(r.id) ?? 0 }));
+      const costBy = new Map<string, Map<string | null, number>>();
+      for (const c of costs) {
+        const m = costBy.get(c.ticketId!) ?? new Map<string | null, number>();
+        m.set(c.agentId, Number(c.micros));
+        costBy.set(c.ticketId!, m);
+      }
+      // Costs are list-price estimates unless the provider reported what it billed.
+      const costBasis = !costs.length ? null : costs.every((c) => c.billed) ? "billed" : costs.some((c) => c.billed) ? "mixed" : "estimate";
+      const done: Done[] = inWindow.map((r) => {
+        const by = costBy.get(r.id) ?? new Map<string | null, number>();
+        return { agentId: r.assigneeAgentId!, cycleMs: cycleOf.get(r.id) ?? null, rework: rework.get(r.id) ?? 0, reviewed: reviewed.has(r.id), costMicros: [...by.values()].reduce((a, b) => a + b, 0), costBy: by };
+      });
 
       const flagRows = await db
         .select({ agentId: tickets.assigneeAgentId })
@@ -247,7 +264,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         const d = bucket(done), f = bucket(flagRows), a = bucket(answeredRows);
         return [...keys].map((k) => {
           const ans = a.get(k) ?? [];
-          return { key: k, ...stats(d.get(k) ?? [], (f.get(k) ?? []).length, ans.length, ans.filter((x) => x.answer !== x.recommended).length) };
+          return { key: k, ...stats(d.get(k) ?? [], (f.get(k) ?? []).length, ans.length, ans.filter((x) => x.answer !== x.recommended).length, (who) => !!who && key(who) === k) };
         });
       };
       const byRole = rowFor(roleOf).map(({ key, ...s }) => ({ role: key, agents: team.filter((a) => roleOf(a.id) === key).length, ...s })).sort((x, y) => y.done - x.done || x.role.localeCompare(y.role));
@@ -353,7 +370,7 @@ export function workflowService(db: Db, deps: { now?: () => Date } = {}) {
         featureRows.push(row);
       }
 
-      return { days, since: since.toISOString(), byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
+      return { days, since: since.toISOString(), costBasis, byRole, byAgent, handoffs, features: featureRows, sizes, sizeNotes, sizeExamples: examples };
     },
   };
 }
