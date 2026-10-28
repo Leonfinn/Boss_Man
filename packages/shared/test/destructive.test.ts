@@ -183,11 +183,24 @@ describe("destructive commands, however they're written (BOS-116)", () => {
       "printf -v X 'rm -rf /x'; $X",
       "IFS= read -r X <<< 'rm -rf /x'; $X",
       "git commit -m 'x' && git push --force",
+      // A comment or $'…' quoting that would throw the quote scan off (security review round 2).
+      'echo x #"\ntmux new -d \'rm -rf /x\'\n#"',
+      "git commit -m x # don't\ndocker exec c sh -c \"rm -rf /x\" # '",
+      "echo $'\\'' ; tmux new -d \"rm -rf /x\" #'",
+      // Data-only text written into a file, which may be run next.
+      "echo 'rm -rf /' > notes.txt",
+      "echo 'rm -rf /x' > a.sh; bash a.sh",
+      "echo 'rm -rf /x' >> ~/.bashrc",
+      "printf 'rm -rf /x' &> a.sh && sh a.sh",
+      "echo 'rm -rf /x' >| a.sh",
+      "echo 'rm -rf /x' >&a.sh",
+      "echo 'rm -rf /x' 1>a.sh",
     ]) {
       expect(evaluatePermission(exec(c), []).outcome, c).toBe("owner");
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
     }
     expect(evaluatePermission(exec("tmux new -d 'git push --force'"), []).outcome).toBe("owner");
+    expect(evaluatePermission(exec("echo 'git push --force' > a.sh; sh a.sh"), []).outcome).toBe("owner");
   });
 
   it("finds pushes however they're written", () => {
@@ -210,10 +223,12 @@ describe("destructive commands, however they're written (BOS-116)", () => {
       "git tag -a v1 -m 'no more git push --force'",
       "gh pr create --title x --body 'drops rm -rf from the script'",
       "printf '%s\\n' 'rm -rf is gone' && git commit -m 'stop rm -rf'",
+      "git commit -m 'stop rm -rf' > /dev/null 2>&1",
+      "echo 'rm -rf is gone' &>/dev/null",
+      "git commit -m 'fix #12: drop rm -rf'",
       "rsync -a src/ /tmp/y/",
       "node -r dotenv/config app.js",
       "perl -Mstrict script.pl",
-      "echo 'rm -rf /' > notes.txt",
       "python3 -c 'print(1)'",
       "python3 -c 'import json,sys; print(json.load(sys.stdin)[\"a\"])' < x.json",
       "node -e 'console.log(process.version)'",

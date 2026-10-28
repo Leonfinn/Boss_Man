@@ -88,14 +88,21 @@ const DATA_ONLY = /^(?:echo|printf|grep|egrep|fgrep|git\s+(?:commit|tag)|(?:gh|g
  * arguments of a DATA_ONLY program (`git commit -m 'stop rm -rf'`). Anywhere else quoted text may
  * be run by a program the reader doesn't know (tmux new 'rm -rf x', at, docker exec, sed '1e …'),
  * so it stays (BOS-116 review). Pipes, heredocs, substitutions and function or alias definitions
- * can carry an echo's text to another program, so with any of them nothing is blanked.
+ * can carry an echo's text to another program, so with any of them nothing is blanked. Nor with
+ * a comment or $'…' quoting, which this scan would misread (a quote opened inside a comment would
+ * hide the lines after it). A data-only segment redirected into a file keeps its text, since the
+ * file may be run next (`echo 'rm -rf x' > a.sh; bash a.sh`, or appended to ~/.bashrc).
  */
 function dataText(cmd: string): string {
-  if (/<<|[<>]\(|`|\$\(|\(\s*\)|\bfunction\s|\balias\b|\bPATH=|\bhash\s/.test(cmd)) return cmd;
-  const segs: Array<{ start: number; quotes: Array<[number, number]> }> = [{ start: 0, quotes: [] }];
+  if (/<<|[<>]\(|`|\$\(|\$['"]|\(\s*\)|\bfunction\s|\balias\b|\bPATH=|\bhash\s/.test(cmd)) return cmd;
+  const segs: Array<{ start: number; quotes: Array<[number, number]>; writes?: boolean }> = [{ start: 0, quotes: [] }];
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i]!;
     if (c === "\\") i++;
+    else if (c === "#") return cmd;
+    else if (c === ">" && !/^>>?\|?\s*(?:\/dev\/null|&\d)(?=[\s;&|)]|$)/.test(cmd.slice(i))) segs.at(-1)!.writes = true;
+    // &> and >& are redirects, not a background &: the segment (and its writes) goes on.
+    else if (c === "&" && (cmd[i + 1] === ">" || cmd[i - 1] === ">")) continue;
     else if (c === "'" || c === '"') {
       let e = i + 1;
       for (; e < cmd.length && cmd[e] !== c; e++) if (c === '"' && cmd[e] === "\\") e++;
@@ -107,7 +114,7 @@ function dataText(cmd: string): string {
   }
   let out = cmd;
   for (const s of segs.reverse()) {
-    if (!DATA_ONLY.test(cmd.slice(s.start).trimStart())) continue;
+    if (s.writes || !DATA_ONLY.test(cmd.slice(s.start).trimStart())) continue;
     for (const [a, b] of s.quotes.reverse()) out = out.slice(0, a) + "''" + out.slice(b);
   }
   return out;
