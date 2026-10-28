@@ -348,6 +348,8 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
       return {
         ...s,
         agents: held,
+        // The same fingerprint the reviewed mark and the log use, so a reader can pin exact bytes.
+        bundleHash: hashFiles(s.files).bundleHash,
         hasScripts: scriptFilesOf(s.files).length > 0,
         files: s.files.map((f) => {
           const bytes = unb64(f.content);

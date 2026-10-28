@@ -1270,6 +1270,11 @@ export const activity = pgTable(
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     kind: text("kind").notNull(),
     summary: text("summary").notNull(),
+    /**
+     * The full record behind a summary that has to be shortened, such as both sides of a skill edit
+     * (BOS-178). Null when the summary says all there is.
+     */
+    detail: jsonb("detail").$type<Record<string, unknown> | null>(),
   },
   (t) => [index("activity_company_at").on(t.companyId, t.at)],
 );
