@@ -305,7 +305,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       ) : (
         <>
           <div className="formula">
-            <p>The number is each decision's priority score: the highest comes first. It adds up three things, drawn as the bar under it:</p>
+            <p>Newest first. The number is each decision's priority score, a guide to how much it holds up. It adds up three things, drawn as the bar under it:</p>
             <ul className="score-legend">
               <li>
                 <span className="swatch" style={{ background: "var(--accent)" }} /> what it holds up: tasks it blocks, or 5 when an agent is paused until you answer

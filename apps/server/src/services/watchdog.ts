@@ -898,14 +898,33 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     },
 
     async actions(companyId: string, q: { ticketId?: string; since?: Date; limit?: number; excludeKind?: string }) {
-      return db
-        .select({ action: watchdogActions, actor: agents.name })
+      const rows = await db
+        .select({ action: watchdogActions, actor: agents.name, ticketNumber: tickets.number })
         .from(watchdogActions)
         .leftJoin(agents, eq(agents.id, watchdogActions.actorAgentId))
+        .leftJoin(tickets, eq(tickets.id, watchdogActions.ticketId))
         .where(and(eq(watchdogActions.companyId, companyId), q.ticketId ? eq(watchdogActions.ticketId, q.ticketId) : undefined, q.since ? gte(watchdogActions.createdAt, q.since) : undefined, q.excludeKind ? ne(watchdogActions.kind, q.excludeKind) : undefined))
         .orderBy(desc(watchdogActions.createdAt))
-        .limit(Math.min(q.limit ?? 200, 500))
-        .then((rows) => rows.map((r) => ({ ...r.action, actorName: r.actor ?? (r.action.actorAgentId ? null : "Boss Man") })));
+        .limit(Math.min(q.limit ?? 200, 500));
+      // Display-only extras for the plain-English log line: who a warning was passed to, which warning it was, the ticket number.
+      const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+      const targetIds = [...new Set(rows.map((r) => r.action.targetAgentId).filter((x): x is string => !!x))];
+      const targets = new Map(targetIds.length ? (await db.select({ id: agents.id, name: agents.name, role: agents.role, duty: agents.duty }).from(agents).where(inArray(agents.id, targetIds))).map((a) => [a.id, a]) : []);
+      const decisionIds = [...new Set(rows.map((r) => (r.action.after as { decisionId?: string } | null)?.decisionId).filter((x): x is string => typeof x === "string"))];
+      const questions = new Map(decisionIds.length ? (await db.select({ id: decisions.id, question: decisions.question }).from(decisions).where(inArray(decisions.id, decisionIds))).map((d) => [d.id, d.question.split("\n")[0]!.slice(0, 200)]) : []);
+      return rows.map((r) => {
+        const t = r.action.targetAgentId ? targets.get(r.action.targetAgentId) : undefined;
+        const decisionId = (r.action.after as { decisionId?: string } | null)?.decisionId;
+        return {
+          ...r.action,
+          actorName: r.actor ?? (r.action.actorAgentId ? null : "Boss Man"),
+          targetName: t?.name ?? null,
+          targetIsScrumMaster: t?.duty === SCRUM_MASTER_DUTY,
+          targetIsCeo: t?.role === "ceo",
+          ticketRef: ticketRef(c?.prefix, r.ticketNumber),
+          warning: (decisionId && questions.get(decisionId)) || null,
+        };
+      });
     },
 
     /** What the rules would have flagged over the last few days, with the current settings (switched on or not). */

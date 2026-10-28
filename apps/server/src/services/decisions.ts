@@ -1091,7 +1091,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
-      const sorted = rows.sort((a, b) => b.score - a.score || a.createdAt.getTime() - b.createdAt.getTime());
+      // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).
+      const sorted = rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       return Promise.all(
         sorted.map(async (r) => {
           const withRefs = { ...r, refs: refs.get(r.id) ?? {} };
