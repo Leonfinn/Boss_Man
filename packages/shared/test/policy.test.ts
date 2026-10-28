@@ -367,6 +367,30 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     }
   });
 
+  it("gives no /tmp note to a command that sets a variable (security round 11)", () => {
+    for (const c of [
+      "export PATH=/tmp/x && ls /tmp",
+      "PATH=/tmp/x ls /tmp",
+      "PATH=/tmp/x:/usr/bin; ls /tmp",
+      "unset PATH && rm -rf /tmp/a",
+      "read -r PATH < /tmp/p && ls /tmp",
+      "set -a && PATH=/tmp/x && ls /tmp",
+      "X=1",
+      "X=1 rm -rf /tmp/a",
+      "declare PATH=/tmp/x && ls /tmp",
+      // The same with a /tmp write, which the note needs: these got it before the fix.
+      "export PATH=/tmp/x && rm -rf /tmp/a",
+      "PATH=/tmp/x:/usr/bin; rm -rf /tmp/a",
+      "read -r PATH < /tmp/p && rm -rf /tmp/a",
+      "set -a && PATH=/tmp/x && rm -rf /tmp/a",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    expect(explainCommand("rm -rf /tmp/a").scratch).toBeDefined();
+    expect(evaluatePermission(exec("rm -rf /tmp/a"), [SCRATCH_RULE]).rule).toBe(SCRATCH_RULE.name);
+  });
+
   it("recommends Deny for shred even in /tmp", () => {
     for (const c of ["shred /tmp/a", "shred -u /tmp/a", "rm -rf /tmp/a && shred /tmp/b"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
     expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");

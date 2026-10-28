@@ -97,7 +97,10 @@ type Part = { effect: Effect; text: string; targets: string[]; env?: boolean; pr
  * diff --output=, find -fprint, git log --output=), so any option not listed, or a program not
  * listed, means no note. Left off on purpose: sed (its script can w a file or e a command), uniq
  * (its second operand is an output file), trap (runs a command), shred (always Deny) and every
- * program not named here.
+ * program not named here. So are the shell's variable commands (export, set, unset, read, declare
+ * and the like): PATH=/tmp/x points every later program at a script planted in /tmp (BOS-111
+ * security round 11). For the same reason a segment with any NAME=value assignment, prefix or
+ * alone, is never scratchSafe, whichever variable it sets.
  */
 const SCRATCH_OPTS: Record<string, RegExp> = {
   rm: /^(?:-[rRfvd]+|--(?:recursive|force|verbose|dir)|--)$/,
@@ -124,7 +127,7 @@ const SCRATCH_OPTS: Record<string, RegExp> = {
   sort: /^-[rnu]+$/,
   echo: /^-[ne]+$/,
   stat: /^$/, pwd: /^$/, date: /^$/, whoami: /^$/, uname: /^-[a]$/, which: /^$/, file: /^$/, cut: /^$/, tr: /^$/,
-  true: /^$/, sleep: /^$/, test: /^$/, "[": /^$/, set: /^[-+][eux]+$|^-o$/, export: /^$/, unset: /^$/, exit: /^$/, read: /^-r$/,
+  true: /^$/, sleep: /^$/, test: /^$/, "[": /^$/, exit: /^$/,
 };
 /** git subcommands that only read, with the options they may use; git's own options before the subcommand (-C, -c) aren't allowed. */
 const GIT_SCRATCH_OPTS: Record<string, RegExp> = {
@@ -168,7 +171,8 @@ function explainSegment(seg: string): Part {
   }
   const nested = /^\w+=\$\((.+)$/.exec(args[0] ?? "");
   if (nested) args[0] = nested[1]!.replace(/\)$/, "");
-  while (args[0] && (/^\w+=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) args.shift();
+  let assigns = Boolean(nested);
+  while (args[0] && (/^\w+=/.test(args[0]) || KEYWORDS.has(args[0]) || /^[\w-]+\(\)$|^[\w-]*\)$/.test(args[0]))) assigns = /^\w+=/.test(args.shift()!) || assigns;
   const program = (args[0] ?? "").split("/").pop() ?? "";
   const rest = args.slice(1);
   const flags = rest.filter((a) => a.startsWith("-"));
@@ -212,7 +216,7 @@ function explainSegment(seg: string): Part {
 
   if (/\$\(|`/.test(nested ? seg.slice(seg.indexOf("$(") + 2) : seg) && p.effect === "reads") p = part("unknown", "Runs a command nested inside another");
   p.program = program;
-  p.safe = scratchSafe(seg, program, rest);
+  p.safe = !assigns && scratchSafe(seg, program, rest);
   if (writes.length) {
     const worse = WORST.indexOf(p.effect) < WORST.indexOf("changes") ? p : null;
     p = worse ?? { ...part("changes", "Changes files", writes), env: p.env, repo: p.repo, install: p.install, program: p.program, safe: p.safe };
