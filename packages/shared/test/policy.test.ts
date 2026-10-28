@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tempCleanup } from "../src/explain.js";
+import { explainCommand, tempCleanup } from "../src/explain.js";
 import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
@@ -268,6 +268,19 @@ describe("temp-file cleanup (BOS-111)", () => {
   it("doesn't recommend Deny just because a command deletes files", () => {
     for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null", "cd /tmp/x && rm -rf build"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
     for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+  });
+
+  it("doesn't follow a cd that may have failed (BOS-111 security re-check)", () => {
+    // After ; || | & or a newline the rm runs from the agent's own folder when the cd fails.
+    const unsure = ["cd /tmp/missing; rm -rf ../x", "cd /tmp/missing\nrm -rf ../x", "cd /tmp/missing || rm -rf ../x", "cd /tmp/missing | rm -rf ../x", "cd /tmp/missing & rm -rf ../x", "cd /tmp/a && true; rm -rf ../x", "true || cd /tmp/a && rm -rf ../x", "cd /tmp/missing; rm -rf build"];
+    for (const c of unsure) {
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+    // Joined by &&, the rm only runs if the cd worked, so ../x is /tmp/x.
+    expect(recommendedVerdict(exec("cd /tmp/a && rm -rf ../x"))).toBe("allow");
+    expect(explainCommand("cd /tmp/a && rm -rf ../x").scratch).toBeDefined();
   });
 });
 

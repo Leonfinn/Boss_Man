@@ -111,7 +111,7 @@ describe("work only in a temporary folder", () => {
   const scratch = (c: string) => explainCommand(c).scratch;
 
   it("says so when every change and delete is under /tmp, following cd, and names programs it can't check", () => {
-    const s = scratch(`cd /tmp && rm -rf hol398-parent && git clone -q /home/node/workspaces/tickets/abc hol398-parent 2>&1 | tail -2; cd hol398-parent && git checkout -q 6471aee^ && cp /home/node/workspaces/tickets/abc/tests/x.test.mjs tests/ && node tests/x.test.mjs; echo "EXIT=$?"`);
+    const s = scratch(`cd /tmp && rm -rf hol398-parent && git clone -q /home/node/workspaces/tickets/abc hol398-parent 2>/dev/null && cd hol398-parent && git checkout -q 6471aee^ && cp /home/node/workspaces/tickets/abc/tests/x.test.mjs tests/ && node tests/x.test.mjs; echo "EXIT=$?"`);
     expect(s?.unchecked).toEqual(["node"]);
     expect(s?.note).toMatch(/^Works only in a temporary folder \(\/tmp\)/);
     expect(s?.note).toContain("It also runs node in that folder");
