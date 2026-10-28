@@ -5,6 +5,7 @@ import { State } from "../components/State";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
+import { SkillProposal } from "../components/SkillProposal";
 
 const KIND: Record<string, { label: string; tone: string }> = {
   permission: { label: "Permission", tone: "" },
@@ -19,6 +20,7 @@ const KIND: Record<string, { label: string; tone: string }> = {
   self_deploy: { label: "Boss Man update", tone: "blue" },
   owner_todo: { label: "Waiting for you", tone: "amber" },
   rule_proposal: { label: "Proposed rule", tone: "blue" },
+  skill: { label: "Skill", tone: "blue" },
 };
 
 const EFFECT = {
@@ -377,6 +379,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         </details>
                       </>
                     )}
+                    {d.context?.type === "skill" && d.context.proposalId ? <SkillProposal companyId={d.companyId} proposalId={d.context.proposalId} /> : null}
                     {x && (
                       <>
                         {x.scratch && (

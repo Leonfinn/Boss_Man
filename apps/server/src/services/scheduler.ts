@@ -10,7 +10,7 @@ import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
-import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -27,6 +27,7 @@ import type { runnersService } from "./runners.js";
 import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
+import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 
@@ -457,7 +458,9 @@ export function schedulerService(
         lines.push("", `Ticket ${ref ? `${ref} (id ${t.t.id})` : t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
         const note = stateNoteLine(t.t, now());
-        if (note) lines.push("", note);
+        // On an open skill-review ticket the note is a way to talk to the reviewer, so it is
+        // untrusted like the ticket body, whoever wrote it (BOS-86, round 9).
+        if (note) lines.push("", (await openReviewProposal(db, t.t.companyId, t.t.id)) ? untrusted("state note on a skill review ticket", note) : note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) {
           const serious = t.t.risk === "high" || t.t.risk === "critical";
@@ -873,8 +876,11 @@ export function schedulerService(
       if (to.id === from.id) return { ok: false, error: "That's you." };
       const ticketId = input.ticketId ?? null;
       if (ticketId) {
-        const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
+        const [tk] = await db.select({ id: tickets.id, companyId: tickets.companyId, assigneeAgentId: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
         if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
+        // An open skill-review ticket is a gate: the proposal's author must not nudge the reviewer into a verdict.
+        const refusal = await reviewTicketWriteRefusal(db, tk.companyId, ticketId, from.id);
+        if (refusal) return { ok: false, error: `${refusal} Don't nudge the reviewer about the verdict.` };
       }
       // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
       // Master's nudges come only from the watchdog, which has its own hourly cap, so they neither count nor are refused:
