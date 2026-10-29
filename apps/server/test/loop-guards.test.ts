@@ -48,7 +48,7 @@ describe("bounded review loops (R49)", () => {
     const third = (await send()).json();
     expect(third.delivered).toMatch(/^held: the review looks stuck/);
     // Only the CEO is woken, with the alert (BOS-64); the assignee isn't.
-    expect((await c.db.select().from(wakes)).map((w) => [w.agentId, w.reason])).toEqual([[c.ceo.id, "alert"]]);
+    expect((await c.db.select().from(wakes)).map((w) => [w.agentId, w.reason])).toEqual([[c.ceo.id, "decision"]]);
     expect((await c.state()).systemState).toBe("blocked");
     const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
     expect(d!.question).toMatch(/the same comment has now come back 3 times: "src\/limit\.ts: Read the limit from config\."/);
