@@ -1,3 +1,4 @@
+import { nameSecurityReviewer } from "./helpers.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -49,7 +50,7 @@ async function setup() {
   const { company, ceo } = (await req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string }; ceo: { id: string } };
   const worker = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Engineer" })).json() as { id: string };
   const reviewer = (await req("POST", `/api/companies/${company.id}/agents`, { name: "Security Reviewer" })).json() as { id: string };
-  await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
+  await nameSecurityReviewer(db, reviewer.id);
   await req("POST", `/api/companies/${company.id}/projects`, { name: "Site" });
   const svc = built.skillProposals;
   const mcp = async (agentId: string) => {
@@ -196,7 +197,7 @@ describe("review", () => {
 
   it("refuses a script draft when there is no Security Reviewer, and stores nothing", async () => {
     const c = (ctx = await setup());
-    await c.db.update(agents).set({ reviewKind: null }).where(eq(agents.id, c.reviewer.id));
+    await nameSecurityReviewer(c.db, c.reviewer.id, false);
     await expect(withScript(c)).rejects.toThrow(/no Security Reviewer/);
     expect(await c.svc.list(c.company.id)).toHaveLength(0);
   });

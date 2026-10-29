@@ -22,6 +22,7 @@ import {
   WatchdogSettings,
   leverApprover,
   readWatchdogSettings,
+  normaliseMarked,
   ticketRef,
   untrusted,
   type ReviewPolicy,
@@ -32,7 +33,7 @@ import {
 import type { Db } from "../db/client.js";
 import { activity, agentSkills, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skills as skillsTable, ticketReviews, tickets, watchdogFlags, wikiPages, wikiRevisions, workflowChanges } from "../db/schema.js";
 import { record } from "./activity.js";
-import { checkPolicy } from "./review-policy.js";
+import { checkPolicy, legacyMarks } from "./review-policy.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
 import { skillName, type skillsService } from "./skills.js";
 import type { agentsService } from "./agents.js";
@@ -657,7 +658,8 @@ export function retroService(
         await deps.agents.update(c.targetAgentId!, after, retro?.agentId ?? null);
       } else if (c.lever === "review_policy") {
         const [co] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.companyId));
-        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [after.tier]: after.rule } }).where(eq(companies.id, c.companyId));
+        // A rule stored before BOS-198 may still say "marked": write the agent it meant instead.
+        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [after.tier]: normaliseMarked(after.rule, await legacyMarks(db, c.companyId)) } }).where(eq(companies.id, c.companyId));
       } else if (c.lever === "watchdog") {
         await deps.watchdog.update(c.companyId, after);
       } else if (c.lever === "playbook") {
@@ -780,7 +782,7 @@ export function retroService(
         await deps.agents.update(c.targetAgentId!, before, null);
       } else if (c.lever === "review_policy") {
         const [co] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, c.companyId));
-        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [before.tier]: before.rule } }).where(eq(companies.id, c.companyId));
+        await db.update(companies).set({ reviewPolicy: { ...co!.policy, [before.tier]: normaliseMarked(before.rule, await legacyMarks(db, c.companyId)) } }).where(eq(companies.id, c.companyId));
       } else if (c.lever === "watchdog") {
         await deps.watchdog.update(c.companyId, before);
       } else if (c.lever === "playbook") {

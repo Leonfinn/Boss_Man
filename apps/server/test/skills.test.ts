@@ -1,3 +1,4 @@
+import { nameSecurityReviewer } from "./helpers.js";
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq, like } from "drizzle-orm";
@@ -131,7 +132,7 @@ describe("skills library (R71)", () => {
     ]);
     // The same link again clashes; a check with no new commit changes nothing.
     expect((await c.req("POST", base, { from: "link", url: "https://github.com/acme/kit/tree/main/skills/triage" })).statusCode).toBe(409);
-    await c.db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, c.worker.id));
+    await nameSecurityReviewer(c.db, c.worker.id);
     expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toEqual({ changed: false, proposalId: null, status: null });
     const before = commit;
     commit = "2222222222222222222222222222222222222222";
@@ -341,7 +342,7 @@ describe("skills library (R71)", () => {
     commit = "4444444444444444444444444444444444444444";
     files["skills/triage/SKILL.md"] = "---\nname: triage\ndescription: \"Sorts bug reports by severity.\"\n---\nNew steps.\n";
     files["skills/deploy/SKILL.md"] = "---\nname: deploy\ndescription: Deploys.\n---\n";
-    await c.db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, c.worker.id));
+    await nameSecurityReviewer(c.db, c.worker.id);
     // The changed skill becomes a proposal; nothing in the library moves.
     expect((await c.req("POST", `${packs}/refresh`, { pack: "acme/kit" })).json()).toEqual({ proposed: ["triage"], unchanged: 1, problems: [] });
     expect((await c.req("GET", base)).json().map((s: { name: string; sourceRef: string }) => [s.name, s.sourceRef])).toEqual([["release-notes", before], ["triage", before]]);
