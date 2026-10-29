@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, wakes } from "../src/db/schema.js";
+import { companies, decisions, notifications, projects, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -69,7 +69,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(d!.question).toContain("4 files changed, 1 database migration.");
     expect(await c.open()).toHaveLength(1);
     expect(d).toMatchObject({ tier: "owner", options: ["Deploy", "Not now"], recommendedOption: "Deploy", context: { type: "self_deploy", target: "server", commit: B, fromCommit: A } });
-    expect(d!.question).toContain("Add rate limiting");
+    expect((d!.context as { update: { total: number; otherCommits: string[] } }).update).toMatchObject({ total: 1, otherCommits: ["Add rate limiting"] });
     expect(await c.notes.syncDecisions()).toBe(1);
     expect((await c.db.select().from(notifications))[0]).toMatchObject({ level: "ask", decisionId: d!.id });
 
@@ -83,6 +83,69 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.available({ tip: C });
     await c.selfDeploy.sync();
     expect(await c.open()).toHaveLength(0);
+  });
+
+  it("names the merged tickets and what changes the risk, on the card and the to-do (BOS-213)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [t191] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "rebuild-live.sh waits on hosts without node", number: 191 }).returning();
+    const [t200] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Plan page titles are cut off", number: 200 }).returning();
+    await c.available({
+      commits: [
+        { sha: C, subject: `Merge "rebuild-live.sh waits on hosts without node" (${t191!.id})` },
+        { sha: B, subject: `Merge "Plan page titles are cut off" (${t200!.id})` },
+        { sha: A, subject: "Bump a dependency" },
+      ],
+      paths: ["scripts/rebuild-live.sh", "apps/server/drizzle/0050_x.sql", "apps/launcher/src/main.ts", "scripts/host-deployer.sh", "apps/runner/Dockerfile"],
+      infraPaths: ["scripts/rebuild-live.sh", "scripts/host-deployer.sh"],
+      runnerChanged: true,
+    });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    type Update = { from: string; to: string; total: number; changes: Array<{ ticketId: string; ref: string; title: string }>; otherCommits: string[]; handBecause?: string; handFiles?: string[]; risks: string[] };
+    const update = (d!.context as { update: Update }).update;
+    expect(update).toMatchObject({
+      from: A,
+      to: B,
+      total: 3,
+      changes: [
+        { ticketId: t191!.id, ref: "BOS-191", title: "rebuild-live.sh waits on hosts without node" },
+        { ticketId: t200!.id, ref: "BOS-200", title: "Plan page titles are cut off" },
+      ],
+      otherCommits: ["Bump a dependency"],
+    });
+    expect(update.handBecause).toContain("scripts/rebuild-live.sh");
+    expect(update.handFiles).toEqual(["scripts/rebuild-live.sh", "scripts/host-deployer.sh"]);
+    expect(update.risks.join(" ")).toContain("database migration");
+    expect(update.risks.join(" ")).toContain("host-deployer.sh");
+    expect(update.risks.join(" ")).toContain("launcher");
+    expect(update.risks.join(" ")).toContain("runner");
+    // The steps are on the approval card before it is approved (BOS-213).
+    expect((d!.context as { handSteps: string[] }).handSteps.length).toBeGreaterThan(0);
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    expect((todo!.context as { update: Update }).update).toEqual(update);
+  });
+
+  it("shows the first 20 tickets and says how many more there are (BOS-213)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const commits: Array<{ sha: string; subject: string }> = [];
+    for (let i = 1; i <= 21; i++) {
+      const [t] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `Change ${i}`, number: 300 + i }).returning();
+      commits.push({ sha: `${i}`.padStart(40, "0"), subject: `Merge "Change ${i}" (${t!.id})` });
+    }
+    await c.available({ commits, paths: ["apps/server/src/x.ts"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    const update = (d!.context as { update: { total: number; changes: unknown[]; more: number } }).update;
+    expect(update.total).toBe(21);
+    expect(update.changes).toHaveLength(20);
+    expect(update.more).toBe(1);
   });
 
   it("will not take a second approval while a deploy is running, and withdraws a question main has outrun", async () => {

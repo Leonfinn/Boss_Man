@@ -78,6 +78,27 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
   );
 }
 
+/** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
+export type DeployChange = { ticketId: string; ref: string; title: string };
+/**
+ * What a Boss Man update contains, in the owner's words (BOS-213): the tickets merged in the range,
+ * the commits that aren't a ticket, why it needs a hand-apply, and what in it changes the risk.
+ * Kept on both the approval card and the to-do it leaves behind, so both say the same thing.
+ */
+export type DeployUpdate = {
+  from: string;
+  to: string;
+  /** Every commit in the range: tickets plus other commits. */
+  total: number;
+  changes: DeployChange[];
+  /** Tickets beyond the first 20. */
+  more: number;
+  otherCommits: string[];
+  handBecause?: string;
+  handFiles?: string[];
+  risks: string[];
+};
+
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
@@ -95,9 +116,9 @@ export type DecisionContext =
    * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
    * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string } }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; result?: { result: string; message: string; at: string } }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
@@ -287,7 +308,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -300,7 +321,7 @@ export async function raiseOwnerTodo(
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -1771,6 +1792,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             target: ctx.target,
             commit: ctx.commit,
             fromCommit: ctx.fromCommit,
+            update: ctx.update,
           });
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
           try {

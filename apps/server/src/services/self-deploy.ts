@@ -5,12 +5,13 @@
 import { randomBytes } from "node:crypto";
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
+import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, decisions, owners, settings } from "../db/schema.js";
+import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -66,6 +67,55 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     return c?.id ?? null;
   }
 
+  /**
+   * What the owner is approving (BOS-213): Boss Man's merges record the ticket as
+   * `Merge "<title>" (<ticket id>)`, so each one maps back to its ticket and title. Commits that
+   * aren't a ticket keep their subject line. Long ranges show the first 20 tickets.
+   */
+  async function updateFor(commit: string, fromCommit: string, a: Available | null, extras: { handBecause?: string; handFiles?: string[]; risks: string[] }): Promise<DeployUpdate | undefined> {
+    const commits = a?.commits ?? [];
+    if (!commits.length) return undefined;
+    const entries = commits.flatMap((c) => {
+      if (!c.subject) return [];
+      const m = c.subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i);
+      return [{ subject: c.subject, ticketId: m ? m[1]!.toLowerCase() : null }];
+    });
+    const wanted = [...new Set(entries.flatMap((e) => (e.ticketId ? [e.ticketId] : [])))];
+    const rows = wanted.length
+      ? await db
+          .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+          .from(tickets)
+          .innerJoin(companies, eq(companies.id, tickets.companyId))
+          .where(inArray(tickets.id, wanted))
+      : [];
+    const found = new Map(rows.flatMap((r) => {
+      const ref = ticketRef(r.prefix, r.number);
+      return ref ? [[r.id, { ticketId: r.id, ref, title: r.title }] as const] : [];
+    }));
+    const all: DeployUpdate["changes"] = [];
+    const otherCommits: string[] = [];
+    const seen = new Set<string>();
+    for (const e of entries) {
+      const t = e.ticketId ? found.get(e.ticketId) : undefined;
+      // A merge whose ticket can't be found (removed, or another install) is still shown as a commit.
+      if (t && !seen.has(t.ticketId)) {
+        seen.add(t.ticketId);
+        all.push(t);
+      } else if (!t) otherCommits.push(e.subject);
+    }
+    return {
+      from: fromCommit,
+      to: commit,
+      total: entries.length,
+      changes: all.slice(0, 20),
+      more: Math.max(0, all.length - 20),
+      otherCommits,
+      ...(extras.handBecause ? { handBecause: extras.handBecause } : {}),
+      ...(extras.handFiles?.length ? { handFiles: extras.handFiles } : {}),
+      risks: extras.risks,
+    };
+  }
+
   async function openFor(target: string) {
     return db
       .select()
@@ -104,17 +154,27 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       : [];
     const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
     const rollback = infra ? `Blue/green: cd ${SRC} && git checkout ${fromCommit} && scripts/rebuild-live.sh. Single server: cd ${SRC} && scripts/deploy.sh --rollback. Database restore isn't a fallback yet.` : undefined;
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
-    const subjects = changes.slice(0, 5).map((c) => `- ${c}`).join("\n");
     const n = a?.paths.length ?? 0;
     const migrations = (a?.paths ?? []).filter((p) => /^apps\/server\/drizzle\/[^/]+\.sql$/.test(p)).length;
+    // What changes the risk of the update, in plain words (BOS-213). The deploy itself is unchanged.
+    const risks: string[] = [];
+    if (migrations) risks.push(`${migrations} database migration${migrations === 1 ? "" : "s"} ${migrations === 1 ? "is" : "are"} included. Boss Man backs the database up first.`);
+    if (hostDeployerChanged) risks.push("It changes host-deployer.sh, the script that runs deploys on your server. The hand steps include copying it into place.");
+    if (launcherChanged) risks.push("It changes the launcher. The hand steps include rebuilding it.");
+    if (a?.runnerChanged) risks.push("It changes the runner, the containers agents work in. You'll be asked separately about building the new runners.");
+    const infraCount = a?.infraPaths.length ?? 0;
+    const handBecause = infra
+      ? `Needs applying by hand because this update changes ${a!.infraPaths[0]}${infraCount > 1 ? ` and ${infraCount - 1} other deployment file${infraCount === 2 ? "" : "s"}` : ""} (${infraCount > 1 ? "files that run" : "a file that runs"} on your server).`
+      : undefined;
+    const update = target === "server" ? await updateFor(commit, fromCommit, a, { ...(handBecause ? { handBecause } : {}), ...(infra ? { handFiles: a!.infraPaths } : {}), risks }) : undefined;
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     const question =
       target === "runner"
         ? `Update the runners to ${short(commit)}? The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
-          ? `Main has moved to ${short(commit)}, but the change touches deployment files (${a!.infraPaths.slice(0, 5).join(", ")}), so Boss Man cannot deploy it. Approve this and a to-do stays on your queue with the steps to apply it by hand on the machine that runs Boss Man (scripts/deploy.sh, or the blue/green steps in docs/06-install-truenas.md section 9d), how to check it worked and how to roll back. It clears when you mark it done or the live commit changes.`
-          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}.${subjects ? `\n${subjects}` : ""}\nThe database is backed up first, then Boss Man restarts (a minute or two).`;
+          ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue (scripts/deploy.sh, or the blue/green steps in docs/06-install-truenas.md section 9d) until it's applied or you mark it done.`
+          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`;
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
     const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
