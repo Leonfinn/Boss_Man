@@ -178,6 +178,16 @@ describe("permission cards", () => {
     expect(screen.getByText(/Works only in a temporary folder/)).toBeTruthy();
   });
 
+  it("says where a push goes, links its ticket branch and shows danger in red", () => {
+    const ticketId = "11111111-2222-4333-8444-555555555555";
+    const explain = { title: "Dev wants to run a command", summary: "Pushes to its ticket branch. Pushes to main.", effect: "pushes" as const, command: "git push origin HEAD:main", push: { kind: "ticket" as const, headline: "Pushes to its ticket branch", ticketId, ref: "BOS-208", warnings: ["Pushes to main."], dangerous: true } };
+    render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Deny", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByRole("link", { name: "BOS-208" }).getAttribute("href")).toBe(`#/tickets/${ticketId}`);
+    expect(screen.getByText("Pushes to main.")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Pushes to main.");
+    expect(screen.getByRole("button", { name: "Deny" }).className).toContain("primary");
+  });
+
   it("lead with plain words and keep the command behind a fold", () => {
     const explain = { title: "Wiki Maintainer wants to run a command", summary: "Only reads information (the machine's memory); it doesn't change anything.", effect: "reads" as const, command: "grep MemTotal /proc/meminfo", reason: "Check how much memory is available" };
     render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Allow once", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
