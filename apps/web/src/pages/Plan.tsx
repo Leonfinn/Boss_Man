@@ -1,12 +1,31 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, type Company, type Plan as PlanData, type PlanNode } from "../api";
 import { usePoll } from "../hooks";
 
-const W = 230;
-const H = 84;
+const MIN_W = 230;
+const MAX_W = 360;
+const H = 108;
 const GAP_X = 70;
 const GAP_Y = 18;
 const PAD = 12;
+
+/** Cards fill the width, within a readable range; many columns still scroll on a phone. */
+function cardWidth(available: number, columns: number) {
+  if (!available || columns < 1) return MIN_W;
+  const room = (available - PAD * 2 - (columns - 1) * GAP_X) / columns;
+  return Math.max(MIN_W, Math.min(MAX_W, Math.floor(room)));
+}
+
+/** "just now", "4 min ago", "2h ago", "3d ago". */
+function ageLabel(ms: number) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
 
 const KIND = { ticket: "Task", engagement: "Engagement", decision: "Decision" } as const;
 
@@ -37,17 +56,26 @@ function related(id: string, edges: PlanData["edges"]) {
 
 function Graph({ plan }: { plan: PlanData }) {
   const [focus, setFocus] = useState<string | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [available, setAvailable] = useState(0);
+  useEffect(() => {
+    if (!scrollRef.current || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([e]) => setAvailable(e!.contentRect.width));
+    ro.observe(scrollRef.current);
+    return () => ro.disconnect();
+  }, []);
+  const W = cardWidth(available, plan.columns.length);
   const byId = useMemo(() => new Map(plan.nodes.map((n) => [n.id, n])), [plan]);
   const pos = useMemo(() => {
     const p = new Map<string, { x: number; y: number }>();
     plan.columns.forEach((col, c) => col.forEach((id, r) => p.set(id, { x: PAD + c * (W + GAP_X), y: PAD + r * (H + GAP_Y) })));
     return p;
-  }, [plan]);
+  }, [plan, W]);
   const lit = focus ? related(focus, plan.edges) : null;
   const width = PAD * 2 + plan.columns.length * W + (plan.columns.length - 1) * GAP_X;
   const height = PAD * 2 + Math.max(...plan.columns.map((c) => c.length)) * (H + GAP_Y) - GAP_Y;
   return (
-    <div className="pl-scroll" role="region" aria-label="Dependency graph" tabIndex={0}>
+    <div ref={scrollRef} className="pl-scroll" role="region" aria-label="Dependency graph" tabIndex={0}>
       <div className="pl-canvas" style={{ width, height }}>
         <svg width={width} height={height} aria-hidden="true">
           <defs>
@@ -147,7 +175,19 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const plan = usePoll((signal) => (company ? api<PlanData>(`/api/companies/${company.id}/plan`, { signal }) : Promise.resolve(null)), 30_000, company?.id ?? "none");
   const p = plan.data;
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (p) setUpdatedAt(Date.now());
+  }, [p]);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, []);
   const blocked = p?.nodes.filter((n) => n.blocked).length ?? 0;
+  const updated = updatedAt
+    ? `Last updated ${new Date(updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} (${ageLabel(now - updatedAt)})`
+    : "";
   return (
     <>
       <header className="page-head">
@@ -166,6 +206,12 @@ export function Plan({ companies, companyId, go }: { companies: Company[]; compa
           <p className="muted" style={{ fontSize: 14 }}>
             {blocked} blocked task{blocked === 1 ? "" : "s"} across {p.nodes.length} items.
           </p>
+          <div className="pl-meta">
+            <span className="muted pl-updated" style={{ fontSize: 13 }}>{updated}</span>
+            <button type="button" className="btn pl-refresh" onClick={() => plan.reload()}>
+              Refresh
+            </button>
+          </div>
           <Causes plan={p} />
           <Graph plan={p} />
         </>
