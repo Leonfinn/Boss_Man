@@ -400,7 +400,7 @@ export async function buildApp(opts: AppOptions) {
   const skillProposals = skillProposalsService(db, skillsSvc, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     raiseDecision: (input, tx) => decisionsSvc.raiseSkill(input, tx),
-    withdrawDecision: (id) => decisionsSvc.withdraw(id),
+    withdrawDecision: (id) => decisionsSvc.withdrawSkill(id),
     tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
     closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
     now: opts.now,

@@ -512,6 +512,13 @@
       "when": 1793211776467,
       "tag": "0072_fluffy_rictor",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1793219880883,
+      "tag": "0073_medical_tyger_tiger",
+      "breakpoints": true
     }
   ]
 }
