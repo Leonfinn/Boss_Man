@@ -215,6 +215,9 @@ describe("review", () => {
     const verdict = { bundleHash: p.bundleHash, verdict: "recommend" as const, summary: "Fine.", findings: [] };
     await expect(c.svc.recordVerdict(c.company.id, c.worker.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
     await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, verdict)).rejects.toThrow(/given to another reviewer/);
+    // The CEO proposes skills, so naming it in the list never makes it a Security Reviewer.
+    await c.db.update(companies).set({ reviewPolicy: { ...co!.reviewPolicy, critical: { ...co!.reviewPolicy.critical, kinds: { security: [c.ceo.id] } } } }).where(eq(companies.id, c.company.id));
+    await expect(c.svc.recordVerdict(c.company.id, c.ceo.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
     // Taken off the list mid-review: no longer a Security Reviewer, so no verdict.
     await c.db.update(companies).set({ reviewPolicy: co!.reviewPolicy }).where(eq(companies.id, c.company.id));
     await expect(c.svc.recordVerdict(c.company.id, second.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
