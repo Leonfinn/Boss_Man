@@ -1675,12 +1675,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         answer = ALLOW;
       }
       if (ctx.type === "rule_proposal" && answer === ADD_RULE && !extra.custom) await policyRulesService(db).create({ companyId: d.companyId, ...ctx.rule });
-      // Kept on the decision so the owner can see who settled it and why (BOS-111). ctx is the same object, so later context writes keep it.
+      // Kept on the decision so the owner can see who settled it and why (BOS-111). Written on a copy, not
+      // on ctx itself, so reopening a card later restores the pre-answer context without this record.
       let settled: Settled | undefined;
+      let settledContext: DecisionContext | undefined;
       if (extra.settledBy) {
         const [who] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, extra.settledBy.agentId));
         settled = { agentId: extra.settledBy.agentId, name: who?.name ?? "the CEO", note: extra.note?.trim().replace(/\s+/g, " ").slice(0, 500) || null, at: now().toISOString() };
-        (ctx as { settled?: Settled }).settled = settled;
+        settledContext = { ...(ctx as object), settled } as DecisionContext;
       }
       // Conditional on still being open (and, for the CEO, still asked), so whoever closes it first wins and the loser changes nothing.
       const [closed] = await db
@@ -1692,7 +1694,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           answer,
           answeredAt: now(),
           ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
-          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : settled ? { context: ctx } : {}),
+          ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : settled ? { context: settledContext! } : {}),
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
@@ -1816,7 +1818,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           await onSkill?.(ctx, d.companyId, answer, extra.by ?? "the owner");
         } catch (err) {
           // Not an expected refusal: keep the question open so the answer can be given again.
-          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+          // Restore the pre-answer context, so a CEO's settled-by record doesn't stay on the reopened card.
+          await db.update(decisions).set({ status: "open", answer: null, answeredAt: null, context: d.context as object }).where(eq(decisions.id, id));
           throw err;
         }
       } else if (ctx.type === "hire" || ctx.type === "instructions") {
@@ -1855,7 +1858,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
           } catch (err) {
             // The retry couldn't start: keep the card open so the answer can be given again.
-            await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+            // Restore the pre-answer context, so a CEO's settled-by record doesn't stay on the reopened card.
+            await db.update(decisions).set({ status: "open", answer: null, answeredAt: null, context: d.context as object }).where(eq(decisions.id, id));
             throw new AnswerError(`The check wasn't run again: ${(err as Error).message}`);
           }
       } else if (ctx.type === "lesson") {

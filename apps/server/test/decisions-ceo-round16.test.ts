@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, ticketDependencies, tickets } from "../src/db/schema.js";
+import { activity, decisions, ticketDependencies, tickets } from "../src/db/schema.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK } from "../src/services/decisions.js";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -249,6 +249,49 @@ describe("BOS-149 round 15/16 regressions (BOS-186)", () => {
     expect(isError(r), textOf(r)).toBe(true);
     expect((await row(merge.id)).status).toBe("open");
     expect((await openRows(c)).map((d) => d.id).sort()).toEqual(before);
+  });
+
+  // The CEO's settled-by record must not survive a retry that couldn't start (BOS-188).
+  it("4: a reopened merge card drops the CEO's settled-by record when the owner answers", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Needs sign-off", { assigneeAgentId: c.worker.id });
+    await c.work.updateTicket(t.id, { state: "review", overLimit: true });
+    await c.db.insert(decisions).values({
+      companyId: c.company.id,
+      kind: "approval",
+      question: "Sign off the release",
+      options: ["Approve and merge", "Send it back"],
+      recommendedOption: "Approve and merge",
+      tier: "owner",
+      context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" },
+    });
+    const merge = await mergeCard(c, t.id);
+    // The open sign-off makes the landing refuse, so the CEO's answer leaves the card open again.
+    const refused = await ceoCall(c, {
+      action: "answer",
+      id: merge.id,
+      answer: CHECK_AGAIN,
+      note: "Running the check again.",
+    });
+    expect(isError(refused), textOf(refused)).toBe(true);
+    const reopened = await row(merge.id);
+    expect(reopened.status).toBe("open");
+    expect(reopened.context).not.toHaveProperty("settled");
+
+    // The owner answers the reopened card from the UI.
+    expect(await c.decisions.answer(merge.id, CHECK_SEND_BACK)).not.toBeNull();
+    const after = await row(merge.id);
+    expect(after.status).toBe("answered");
+    expect(after.answer).toBe(CHECK_SEND_BACK);
+    expect(after.context).not.toHaveProperty("settled");
+    const logged = (
+      await c.db
+        .select()
+        .from(activity)
+        .where(and(eq(activity.kind, "decision_answered"), eq(activity.companyId, c.company.id)))
+    )[0]!;
+    expect(logged.summary).toContain("Owner answered");
+    expect(logged.summary).not.toMatch(/settled/i);
   });
 
   // The CEO pages the queue with offset, so the oldest stale cards stay reachable.
