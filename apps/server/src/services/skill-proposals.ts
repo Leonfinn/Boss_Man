@@ -111,6 +111,8 @@ export type ProposeInput = {
   byAgentId: string | null;
   why: string;
   agentIds: string[];
+  /** A caller that must record the id before this call (the retro links a change to its proposal first). */
+  id?: string;
   /** The owner pressed "check for updates": the agents are whoever already holds the skill, possibly nobody. */
   refresh?: boolean;
 } & ({ source: "draft" | "retro"; files: SkillFile[]; name?: string | null } | { source: "link"; url: string; skill?: string | null });
@@ -251,6 +253,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
         [row] = await db
           .insert(skillProposals)
           .values({
+            ...(input.id ? { id: input.id } : {}),
             companyId: input.companyId,
             name,
             source: input.source,
@@ -263,6 +266,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
             proposedAgentIds: agentIds,
             proposedByAgentId: input.byAgentId,
             replacesSkillId: had?.id ?? null,
+            replacesBundleHash: had ? hashFiles(had.files).bundleHash : null,
             hasScripts,
             scriptFiles: scripts,
             reviewRequired: needsReview,
@@ -348,6 +352,13 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
     /** Re-reads the source at the pinned version, if it has one, and says what differs from the files that were reviewed. */
     async sourceMatches(p: Proposal): Promise<{ ok: true } | { ok: false; reason: string }> {
       if (hashFiles(p.files).bundleHash !== p.bundleHash) return { ok: false, reason: "the stored files no longer match their fingerprint" };
+      // An update writes over an installed skill: if that skill has been edited since the proposal was
+      // made, installing would silently throw away the newer version. Say so instead, like a moved link.
+      if (p.replacesSkillId) {
+        const [there] = await db.select({ files: skills.files }).from(skills).where(and(eq(skills.id, p.replacesSkillId), eq(skills.companyId, p.companyId)));
+        if (!there) return { ok: false, reason: "the skill it would replace has been deleted since the review" };
+        if (p.replacesBundleHash && hashFiles(there.files).bundleHash !== p.replacesBundleHash) return { ok: false, reason: "the skill it would replace has been edited since this was proposed" };
+      }
       if (p.source !== "link") return { ok: true };
       let again: SkillFile[] | null = null;
       try {

@@ -1397,6 +1397,8 @@ export const skillProposals = pgTable(
     proposedByAgentId: uuid("proposed_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** Set: this proposal is a new version of that installed skill. */
     replacesSkillId: uuid("replaces_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    /** Fingerprint of the skill this replaces when the proposal was made: install refuses if it was edited since. */
+    replacesBundleHash: text("replaces_bundle_hash"),
     /** Worked out by the system from the files, never taken from the CEO. */
     hasScripts: boolean("has_scripts").notNull(),
     scriptFiles: jsonb("script_files").$type<string[]>().notNull().default([]),

@@ -59,6 +59,9 @@ const MAX_FINDINGS = 12;
 const OUTPUT_CAP = 12_000;
 const WORST = 10;
 const DAY = 86_400_000;
+/** A playbook still waiting for its security review or the owner's Add is checked again this much later, not given a Keep/Revert card yet. */
+const PENDING_CHECK_RETRY_MS = DAY;
+const PENDING_PROPOSAL_STATUS = ["proposed", "in_review", "awaiting_owner"];
 
 /** What a retro run is told, after the wake's own note. */
 export const RETRO_DUTY = [
@@ -636,6 +639,11 @@ export function retroService(
         const [have] = await db.select().from(skillsTable).where(and(eq(skillsTable.companyId, c.companyId), eq(skillsTable.name, name)));
         const was = (before as { skillId: string | null }).skillId;
         if (was ? have?.id !== was : have) return `A skill called ${name} has changed since this was proposed, so the playbook can't be applied. Choose Skip.`;
+        // The bytes matter, not only the id: an edit after the proposal would be overwritten by Apply,
+        // and Revert would later put back the older copy captured when the retro planned the change.
+        const beforeFiles = (before as { files?: Array<{ path: string; content: string }> }).files;
+        if (was && have && beforeFiles && hashFiles(have.files).bundleHash !== hashFiles(beforeFiles).bundleHash)
+          return `The playbook ${name} has been edited since this was proposed, so applying it would overwrite that edit. Choose Skip; the next retro can propose it again.`;
       }
       return null;
     },
@@ -681,7 +689,15 @@ export function retroService(
         const holders = team.filter((a) => roleOf(a) === c.targetRole && a.duty !== "assistant");
         const holderIds = holders.map((a) => a.id).sort();
         const refs = [...(await refsFor(c.companyId, c.evidence)).values()];
-        const proposal = await deps.skillProposals.propose({
+        // Record the proposal id on the change first: propose() writes several rows, and a crash
+        // between them used to leave the change unable to find (and so unable to undo) its proposal.
+        const proposalId = randomUUID();
+        await db
+          .update(workflowChanges)
+          .set({ after: { ...after, proposalId, assignedAgentIds: before.skillId ? [] : holderIds } })
+          .where(eq(workflowChanges.id, c.id));
+        await deps.skillProposals.propose({
+          id: proposalId,
           companyId: c.companyId,
           byAgentId: retro?.agentId ?? null,
           source: "retro",
@@ -690,12 +706,6 @@ export function retroService(
           why: `A workflow retro proposed this playbook for ${c.targetRole} agents: ${plain(c.summary)}. Evidence: ${refs.join(", ")}.`,
           agentIds: holderIds,
         });
-        // Which agents would get it from this change, so Revert takes it back from them only. An
-        // update leaves the existing holders in place, and Revert puts the old version back instead.
-        await db
-          .update(workflowChanges)
-          .set({ after: { ...after, proposalId: proposal.id, assignedAgentIds: before.skillId ? [] : holderIds } })
-          .where(eq(workflowChanges.id, c.id));
       }
     },
 
@@ -718,6 +728,26 @@ export function retroService(
     /** Measures one change again over the time since Apply and raises the decision, unless too few relevant tickets have been done and the cap isn't up. */
     async check(c: typeof workflowChanges.$inferSelect): Promise<boolean> {
       const t = now();
+      // A playbook change has not happened until the add-a-skill flow installs it. Its Keep/Revert card
+      // would promise a Revert of something no agent has, so wait for the nomination to finish instead.
+      if (c.lever === "playbook") {
+        const after = (c.after ?? {}) as Record<string, any>;
+        const [proposal] = after.proposalId
+          ? await db.select().from(skillProposals).where(and(eq(skillProposals.id, after.proposalId), eq(skillProposals.companyId, c.companyId)))
+          : [];
+        const installed = await installedPlaybook(c.companyId, after);
+        if (!installed) {
+          if (proposal && PENDING_PROPOSAL_STATUS.includes(proposal.status)) {
+            await db.update(workflowChanges).set({ checkDueAt: new Date(t.getTime() + PENDING_CHECK_RETRY_MS) }).where(eq(workflowChanges.id, c.id));
+            return false;
+          }
+          // Rejected, stale, expired, or never recorded: it never reached an agent, so there is no
+          // effect to check and no Keep/Revert card to raise.
+          await db.update(workflowChanges).set({ status: "skipped", checkDueAt: null }).where(and(eq(workflowChanges.id, c.id), eq(workflowChanges.status, "applied")));
+          await record(db, { companyId: c.companyId, kind: "workflow_change", summary: `Workflow change not applied (${c.lever}): the playbook never reached the agents.`, at: t });
+          return false;
+        }
+      }
       const since = c.appliedAt!;
       const capped = t.getTime() - since.getTime() >= CHECK_CAP_DAYS * DAY;
       const sc = await workflowService(db, { now }).scorecard(c.companyId, Math.max((t.getTime() - since.getTime()) / DAY, 1 / 24));
