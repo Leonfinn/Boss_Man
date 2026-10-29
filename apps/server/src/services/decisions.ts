@@ -562,6 +562,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
       if (!ceo) throw new AnswerError("This company has no CEO to hand it to.");
     }
+    if (ctx.type === "check_stuck" && answer !== CHECK_SEND_BACK) {
+      // A retry must not merge past the owner's sign-off. Checked before the card closes, so a refused
+      // retry leaves it open on the queue instead of swapping it for a new one (BOS-149).
+      const [signoff] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ctx.ticketId}`))
+        .limit(1);
+      if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still waiting, so the check was not run again. Answer that card first.");
+    }
     if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
       const problem = await retroHook?.problemApplying(ctx.changeId);
       if (problem) throw new AnswerError(problem);
@@ -847,17 +857,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return rows.length === ids.size && rows.every((r) => r.systemState === "done");
   }
 
-  /** Another open card covers the same thing, so this one is a duplicate (BOS-149). */
-  async function isDuplicate(d: typeof decisions.$inferSelect): Promise<boolean> {
+  /** Another open card of the same kind asks the same thing (BOS-149). */
+  async function hasOpenSibling(d: typeof decisions.$inferSelect, subject: string): Promise<boolean> {
     const c = d.context as DecisionContext;
-    const subject = await cardSubject(d);
-    if (!subject) return false;
     const others = await db.select().from(decisions).where(and(eq(decisions.companyId, d.companyId), eq(decisions.status, "open"), ne(decisions.id, d.id)));
     for (const o of others) {
       if ((o.context as DecisionContext).type !== c.type) continue;
       if ((await cardSubject(o)) === subject) return true;
     }
     return false;
+  }
+
+  /** Another open card covers the same thing, so this one is a duplicate (BOS-149). */
+  async function isDuplicate(d: typeof decisions.$inferSelect): Promise<boolean> {
+    const subject = await cardSubject(d);
+    return subject ? hasOpenSibling(d, subject) : false;
   }
 
   return {
@@ -1484,6 +1498,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (!direct && !(await isStale(d)) && !(await isDuplicate(d))) {
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
+      const subject = await cardSubject(d);
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
       const [closed] = await db
         .update(decisions)
@@ -1492,9 +1507,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .returning({ id: decisions.id });
       if (!closed) return null;
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
-      // A card that was holding a ticket no longer holds it.
+      // A card that was holding a ticket no longer holds it, unless an identical open card still asks
+      // the same question: then the owner's hold stays until they answer it (BOS-149).
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
-      if (freed.length) {
+      if (freed.length && !(subject && (await hasOpenSibling(d, subject)))) {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
         for (const f of freed) await releaseIfFree(f.ticketId);
       }
@@ -1765,7 +1781,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
         if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but ${ctx.command ? `the check \`${ctx.command}\`` : "the merge"} couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");
-        else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
+        else
+          try {
+            await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
+          } catch (err) {
+            // The retry couldn't start: keep the card open so the answer can be given again.
+            await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+            throw new AnswerError(`The check wasn't run again: ${(err as Error).message}`);
+          }
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
         await retroHook?.lessonAnswered(id, answer, extra.note);

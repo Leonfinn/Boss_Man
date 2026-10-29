@@ -194,13 +194,76 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     expect((await row(stale!.id)).status).toBe("open");
   });
 
-  it("caps the CEO's list and says how many cards were left out", async () => {
+  it("pages through the CEO's list newest first, so the oldest cards are reachable", async () => {
     const c = (ctx = await setup());
+    const base = Date.now();
     for (let i = 0; i < 25; i++) {
-      await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: `Question ${i}`, options: ["Got it"], recommendedOption: "Got it", tier: "ceo" });
+      await c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", question: `Question ${i}`, options: ["Got it"], recommendedOption: "Got it", tier: "ceo", createdAt: new Date(base - (25 - i) * 60_000) });
     }
-    const body = textOf(await (await c.mcp(c.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }));
-    expect(body).toContain("5 more open cards are not shown; the list shows the top 20 by score.");
+    const ceo = await c.mcp(c.ceo.id);
+    const first = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }));
+    expect(first).toContain("Showing cards 1–20 of 25, newest first.");
+    expect(first).toContain("5 older open cards after these; call list again with offset: 20 to see them.");
+    // The oldest card - the stale ones this ticket exists to clear - is only on the second page.
+    expect(first).not.toContain("Question 0</untrusted>");
+    const second = textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list", offset: 20 } }));
+    expect(second).toContain("Showing cards 21–25 of 25, newest first.");
+    expect(second).toContain("Question 0");
+    expect(second).not.toContain("older open cards");
+    // A page past the end says how big the queue is instead of pretending it is empty.
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list", offset: 25 } }))).toContain("There are 25 open cards; offset 25 is past the end.");
+  });
+
+  it("keeps a ticket held when a duplicate card still asks the same question", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Held work");
+    const insert = async () =>
+      (
+        await c.db
+          .insert(decisions)
+          .values({
+            companyId: c.company.id,
+            kind: "question",
+            question: "The reviewer was woken several times without a verdict.",
+            options: ["Got it"],
+            recommendedOption: "Got it",
+            tier: "owner",
+            context: { type: "question", ladder: { rung: "owner", since: new Date().toISOString(), ticketId: t.id, about: [], hops: [] } },
+          })
+          .returning()
+      )[0]!;
+    const first = await insert();
+    await insert();
+    await c.db.insert(ticketDependencies).values({ blockerDecisionId: first.id, blockedTicketId: t.id });
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This duplicates the other card that asks the same thing." } }))).toBe(false);
+    expect((await row(first.id)).status).toBe("withdrawn");
+    // The identical card is still open, so the owner's hold on the ticket stays.
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, first.id))).toHaveLength(1);
+  });
+
+  it("leaves a merge-retry card open when the owner's sign-off is still waiting", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Signed off but not answered");
+    await c.db.insert(decisions).values({
+      companyId: c.company.id,
+      kind: "approval",
+      question: "Merge it, or send it back?",
+      options: ["Approve and merge", "Send it back"],
+      recommendedOption: "Approve and merge",
+      tier: "owner",
+      context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" },
+    });
+    const [merge] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "question", question: "The merge check timed out", options: [CHECK_AGAIN, CHECK_SEND_BACK], recommendedOption: CHECK_AGAIN, tier: "owner", context: { type: "check_stuck", ticketId: t.id, command: "pnpm test", output: "timed out" } })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: merge!.id, answer: CHECK_AGAIN, note: "The runner is back, so run the check again." } }))).toBe(true);
+    // The original card stays open; no replacement card is raised and no merge starts.
+    expect((await row(merge!.id)).status).toBe("open");
+    const merges = (await c.db.select().from(decisions).where(eq(decisions.status, "open"))).filter((d) => (d.context as { type?: string }).type === "check_stuck");
+    expect(merges.map((d) => d.id)).toEqual([merge!.id]);
   });
 
   it("needs a reason for a system card on the CEO's own tier too", async () => {
