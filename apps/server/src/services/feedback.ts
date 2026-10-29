@@ -4,7 +4,7 @@
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
-import { demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Importance, type NoteSource } from "@boss-man/shared";
+import { demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
@@ -28,6 +28,8 @@ type FeaturePatch = {
   areaId?: string | null;
   parentId?: string | null;
   effort?: number | null;
+  rank?: number | null;
+  horizon?: Horizon | null;
   driverScores?: Record<string, number | null>;
   milestoneId?: string | null;
   objectiveId?: string | null;
