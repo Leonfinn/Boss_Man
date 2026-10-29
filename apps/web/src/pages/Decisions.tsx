@@ -259,7 +259,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
 
       {advised.length > 0 && (
         <details className="sub">
-          <summary>Settled by the team in the last day ({advised.length})</summary>
+          <summary>Settled or withdrawn by the team in the last 30 days ({advised.length})</summary>
           <ul>
             {advised.map((a) => (
               <li key={a.id}>
@@ -417,7 +417,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </>
                     )}
                     {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
-                    {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
+                    {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled or withdrawn by the team" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
                       {d.blocks.length > 0 && (

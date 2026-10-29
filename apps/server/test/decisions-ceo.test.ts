@@ -56,16 +56,22 @@ describe("the CEO sees the whole Decisions queue (BOS-149)", () => {
       .returning();
 
     const list = textOf(await (await c.mcp(c.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }));
-    expect(list).toContain(`${ownerCard.id}: [question/owner] Which payment provider?`);
-    expect(list).toContain(`${ceoCard!.id}: [question/ceo] A plan to approve`);
-    // The CEO now sees cards it used to be kept from (BOS-149).
-    expect(list).toContain(held!.id);
+    expect(list).toContain(`${ownerCard.id}: [question/owner]`);
+    expect(list).toContain("Which payment provider?");
+    expect(list).toContain(`${ceoCard!.id}: [question/ceo]`);
+    expect(list).toContain("A plan to approve");
+    // An alert still with the Scrum Master is not the CEO's yet (BOS-64), so it stays off this list.
+    expect(list).not.toContain(held!.id);
+    expect(list).not.toContain("still with the Scrum Master");
     expect(list).toContain("Raised by: Engineer");
     expect(list).toContain("Age:");
     expect(list).toContain("Score:");
     expect(list).toContain("Options: Stripe | Mollie (recommended: Stripe)");
-    expect(list).toContain("What was tried first: Compared both providers");
+    expect(list).toContain("What was tried first:");
+    expect(list).toContain("Compared both providers");
     expect(list).toContain("Ship the app");
+    // Card text is marked as untrusted data, not orders for the CEO.
+    expect(list).toContain('<untrusted source="decision card">');
     // The owner's own queue is unchanged.
     const ownerQueue = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>;
     expect(ownerQueue.map((d) => d.id)).not.toContain(held!.id);
@@ -374,5 +380,103 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 2)", () => 
     const ceo = await c.mcp(c.ceo.id);
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: d.id, note: "One of its tickets is finished." } }))).toBe(true);
     expect((await row(d.id)).status).toBe("open");
+  });
+});
+
+describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => {
+  it("cannot answer an alert still with the Scrum Master, and never lists it", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Some work");
+    const insert = async (tier: "ceo" | "owner") =>
+      (
+        await c.db
+          .insert(decisions)
+          .values({
+            companyId: c.company.id,
+            kind: "question",
+            question: "A run has stalled; keep waiting or cancel it?",
+            options: ["Got it"],
+            recommendedOption: "Got it",
+            tier,
+            context: { type: "question", ladder: { rung: "scrum_master", since: new Date().toISOString(), ticketId: t.id, about: [], hops: [] } },
+          })
+          .returning()
+      )[0]!;
+    const ceo = await c.mcp(c.ceo.id);
+    const ceoTier = await insert("ceo");
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(ceoTier.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: ceoTier.id, answer: "Got it", note: "I looked at the stuck run and it is fine." } }))).toBe(true);
+    expect((await row(ceoTier.id)).status).toBe("open");
+    // The server's own guard refuses it too, so the alert can still reach the owner.
+    await expect(c.decisions.answer(ceoTier.id, "Got it", { settledBy: { agentId: c.ceo.id }, note: "I looked at the stuck run and it is fine." })).rejects.toThrow(/Scrum Master|owner/i);
+    const ownerTier = await insert("owner");
+    await expect(c.decisions.answer(ownerTier.id, "Got it", { settledBy: { agentId: c.ceo.id }, note: "I looked at the stuck run and it is fine." })).rejects.toThrow(/Scrum Master|owner/i);
+    expect((await row(ownerTier.id)).status).toBe("open");
+  });
+
+  it("never withdraws one of two review-loop escalations as a duplicate", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Review bounces");
+    const insert = async () =>
+      (
+        await c.db
+          .insert(decisions)
+          .values({ companyId: c.company.id, kind: "approval", question: "Review looks stuck", options: ["Send it back again", "Stop work on it"], recommendedOption: "Stop work on it", tier: "owner", context: { type: "review_loop", ticketId: t.id, message: "still wrong", reviewer: "the reviewer" } })
+          .returning()
+      )[0]!;
+    const first = await insert();
+    const second = await insert();
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This one duplicates the newer review-loop card." } }))).toBe(true);
+    expect((await row(first.id)).status).toBe("open");
+    expect((await row(second.id)).status).toBe("open");
+    // Once the ticket is finished they are stale, and may go.
+    await c.work.updateTicket(t.id, { state: "done", overLimit: true });
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "The ticket is finished, so this card no longer applies." } }))).toBe(false);
+  });
+
+  it("never withdraws one of two merge cards as a duplicate", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Merge me twice");
+    const insert = async () =>
+      (
+        await c.db
+          .insert(decisions)
+          .values({ companyId: c.company.id, kind: "question", question: "The merge check timed out", options: [CHECK_AGAIN, CHECK_SEND_BACK], recommendedOption: CHECK_AGAIN, tier: "owner", context: { type: "check_stuck", ticketId: t.id, command: "pnpm test", output: "timed out" } })
+          .returning()
+      )[0]!;
+    const first = await insert();
+    await insert();
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This merge card duplicates the other one." } }))).toBe(true);
+    expect((await row(first.id)).status).toBe("open");
+  });
+
+  it("never dismisses the owner's merge-failure notice", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Merge failed");
+    const d = await c.decisions.raise({
+      companyId: c.company.id,
+      agentId: null,
+      question: `You approved "${t.id}", but it couldn't be merged: the runner is offline. Approve it again from the ticket once that's fixed.`,
+      options: ["Got it"],
+      recommended: "Got it",
+      steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."],
+    });
+    expect(isSystemCard(d)).toBe(false);
+    expect(ceoAnswerRefusal(d, "Got it")).not.toBeNull();
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it", note: "Acknowledged, the owner will see it." } }))).toBe(true);
+    expect((await row(d.id)).status).toBe("open");
+  });
+
+  it("does not merge a ticket whose owner sign-off is still open", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Waiting for sign-off");
+    await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "approval", question: "Sign off the release", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" } });
+    await expect(c.review.land(t.id, "the owner")).rejects.toThrow(/sign-off/i);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).not.toBe("done");
   });
 });

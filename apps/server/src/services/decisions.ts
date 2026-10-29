@@ -165,8 +165,12 @@ export function isSystemCard(d: { kind: string; tier: string; options: unknown; 
  * caller, not just the MCP tool: owner sign-offs, deploys, hires, instruction changes, owner-only
  * permissions and the rest stay the owner's.
  */
-export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unknown; context: unknown }, answer?: string): string | null {
-  const ctx = d.context as DecisionContext;
+export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unknown; context: unknown }, answer?: string, opts: { ladder?: boolean } = {}): string | null {
+  const ctx = d.context as DecisionContext & { ladder?: { rung?: string } };
+  // An alert still with the Scrum Master is not the CEO's yet (BOS-64): settling it here would close it
+  // and the owner would never see the escalation (BOS-149). The rung rule is for the CEO only, because
+  // the Scrum Master settles its own alerts through the same path.
+  if (opts.ladder !== false && ctx.ladder?.rung === "scrum_master") return "This alert is still with the Scrum Master, so it isn't yours to settle yet. Leave it for the ladder to hand over.";
   if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) return "Only the owner can answer this kind of decision. Leave it for them; if they asked for your advice, use action advise.";
   if (ctx.type === "question" && ctx.steps?.length) return "This asks the owner to do something, so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
   if (d.tier === "owner" && !isSystemCard(d)) return "This card is the owner's to answer. Leave it for them; if they asked for your advice, use action advise.";
@@ -200,6 +204,13 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "rule_proposal",
   "goal_check",
 ]);
+
+/**
+ * Cards the CEO may withdraw only when their ticket is finished, never as a duplicate (BOS-149).
+ * Two review-loop or merge cards about one ticket can be open at once, and each holds the owner's
+ * choice: dropping one as a "duplicate" would take away that choice.
+ */
+const STALE_ONLY_WITHDRAW_TYPES = new Set(["review_loop", "check_stuck"]);
 
 /**
  * Withdraws every open merge card for a ticket (BOS-149): one ticket never shows two, and a card for a
@@ -1375,9 +1386,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Fail closed: only system and info cards may be cleared outright, and a live merge card never:
       // it is waiting on the owner and can only be answered, not dropped (BOS-149).
       const direct = isSystemCard(d) && ctx.type !== "check_stuck";
-      if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) {
-        // Two open sign-offs for one ticket are normal (one per approval round), so a duplicate is
-        // not a reason to clear one of the owner's own cards: only a finished ticket is.
+      const staleOnly = OWNER_ONLY_ANSWER_TYPES.has(ctx.type) || STALE_ONLY_WITHDRAW_TYPES.has(ctx.type);
+      if (staleOnly) {
+        // Two open sign-offs or loop cards for one ticket are normal (one per round), so a duplicate
+        // is not a reason to clear one of the owner's own cards: only a finished ticket is.
         if (!(await isStale(d))) {
           throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished (done or cancelled).");
         }
@@ -1483,7 +1495,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!d) return null;
       // The server's own guard (BOS-149): a CEO answer may never settle an owner-only card, whatever the tool text says.
       if (extra.settledBy) {
-        const refusal = ceoAnswerRefusal(d, answer);
+        // The Scrum Master settles its own alerts through `settledBy` too, so the "not yours yet" rung
+        // rule only applies when the settler is the CEO (BOS-64) — the rest of the refusal does not.
+        const [who] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, extra.settledBy.agentId));
+        const refusal = ceoAnswerRefusal(d, answer, { ladder: who?.role === "ceo" });
         if (refusal) throw new AnswerError(refusal);
       }
       const options = d.options as string[];

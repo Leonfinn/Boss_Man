@@ -173,11 +173,15 @@ describe("the alert ladder (BOS-64)", () => {
     expect(await ownerNotified(d.id)).toHaveLength(0);
   });
 
-  it("the CEO can see alerts still with the Scrum Master (BOS-149), but the owner cannot", async () => {
+  it("the CEO cannot see or settle alerts still with the Scrum Master (BOS-64), so the ladder still reaches the owner", async () => {
     await ctx.switchOn();
     const d = await wakeChain();
-    // The CEO's list is the whole queue; the owner's queue still leaves the team's alerts out.
-    expect(textOf(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }))).toContain(d.id);
+    // An alert still with the team is not the CEO's to settle: it stays off the CEO's list, as it does off the owner's.
+    const ceo = await client(ctx.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(d.id);
+    const answered = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it", note: "I looked into it and the team has it." } });
+    expect(isError(answered)).toBe(true);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
   });
 
   describe("fall-through", () => {

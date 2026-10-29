@@ -431,13 +431,13 @@ export async function buildApp(opts: AppOptions) {
     land: (ticketId, reviewer) =>
       review.land(ticketId, reviewer).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     // An answer that arrives after the ticket moved on is told to the owner, not thrown back at them.
     landAgain: (ticketId, skipChecks) =>
       review.startLanding(ticketId, "the owner", null, { skipChecks }).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message}`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     stopTicket: async (ticketId) => {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));

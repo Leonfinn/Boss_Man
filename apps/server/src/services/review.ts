@@ -1,7 +1,7 @@
 // Review (R39): the review state carries the ticket's diff against its base, line comments
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
@@ -441,6 +441,14 @@ export function reviewService(
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
+      // A retry must not merge past the owner's sign-off (BOS-149): if a "Merge it, or send it back?"
+      // card is still open, this ticket waits for the owner, whatever answered the merge card.
+      const [signoff] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`))
+        .limit(1);
+      if (signoff) throw new ReviewError(409, "The owner's sign-off for this ticket is still waiting, so nothing was merged. Answer that card first.");
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
       const touch = () => db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
       await touch();
