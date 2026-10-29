@@ -1,5 +1,5 @@
 {
-  "id": "35c9f316-9cac-43c8-a5cd-0c914d3734f0",
+  "id": "0b655af5-bde7-4abf-8376-98acbc1fd1d5",
   "prevId": "472b0dbe-c350-4007-8e71-92b7033911a0",
   "version": "7",
   "dialect": "postgresql",
@@ -1625,6 +1625,18 @@
         "answered_at": {
           "name": "answered_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stale_at": {
+          "name": "stale_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "stale_reason": {
+          "name": "stale_reason",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         }
@@ -6000,12 +6012,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "replaces_bundle_hash": {
-          "name": "replaces_bundle_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "has_scripts": {
           "name": "has_scripts",
           "type": "boolean",
@@ -7430,6 +7436,12 @@
         },
         "state_note_at": {
           "name": "state_note_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "state_note_stale_at": {
+          "name": "state_note_stale_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

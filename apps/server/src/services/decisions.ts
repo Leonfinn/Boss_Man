@@ -24,6 +24,7 @@ import {
   type PolicyRuleSpec,
   type RunnerCommand,
   type RunnerEvent,
+  untrusted,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -35,6 +36,7 @@ import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
 import { agents, budgetPolicies, companies, decisions, deploys, engagementMessages, engagements, keyResults, milestones, objectives, policyRules, projects, runnerEvents, runners, runs, ticketArtifacts, ticketDependencies, tickets, wakes, watchdogActions, wikiPages } from "../db/schema.js";
+import { decisionTicketIds, ownerActed, recentOwnerAnswer, quotedAnswer } from "./stale-requests.js";
 
 type PermissionEvent = Extract<RunnerEvent, { type: "run.permission_request" }>;
 type Sender = (runnerId: string, command: RunnerCommand) => boolean;
@@ -79,7 +81,7 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[] }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -127,6 +129,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const CHASE = "Chase";
 export const REASSIGN = "Reassign";
 export const DROP = "Drop dependency";
+/** On a stale-blocker card: hand it to the company's CEO to settle. */
+export const LET_CEO_DECIDE = "Let the CEO decide";
 const BOSSMAN_TOOL = /^(mcp__bossman__|mcp\.bossman\.)/;
 export const KEEP_WAITING = "Keep waiting";
 export const CANCEL_RUN = "Cancel run";
@@ -450,10 +454,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.type === "stale_blocker" && answer === REASSIGN) {
       if (!ctx.blockerTicketId) throw new AnswerError("Only a ticket can be reassigned.");
-      if (!extra.assigneeAgentId) throw new AnswerError("Say who to reassign it to (assigneeAgentId).");
+      if (!extra.assigneeAgentId) throw new AnswerError("Pick who should take this ticket.");
       const [t] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId));
       const [a] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.id, extra.assigneeAgentId), eq(agents.companyId, t?.companyId ?? "")));
-      if (!a) throw new AnswerError("That agent isn't in the blocking ticket's company.");
+      if (!a) throw new AnswerError("That person isn't on this ticket's team. Pick someone from the list.");
+    }
+    if (ctx.type === "stale_blocker" && answer === LET_CEO_DECIDE) {
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
+      if (!ceo) throw new AnswerError("This company has no CEO to hand it to.");
     }
     if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
       const problem = await retroHook?.problemApplying(ctx.changeId);
@@ -463,7 +471,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const problem = await retroHook?.problemReverting(ctx.changeId);
       if (problem) throw new AnswerError(problem);
     }
-    if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Say the lesson's corrected wording as the note.");
+    if (ctx.type === "lesson" && answer === LESSON_EDIT && !extra.note?.trim()) throw new AnswerError("Write the corrected lesson in the note box.");
     if (ctx.type === "lesson_replace" && !extra.custom && answer !== LESSON_DONT_ADD && !replacedLesson(answer)) throw new AnswerError(`Answer must be one of the listed lessons, or "${LESSON_DONT_ADD}".`);
     if (ctx.type === "lesson_replace" && !extra.custom) {
       const dropped = replacedLesson(answer);
@@ -562,12 +570,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     }
     if (ctx.blockerTicketId) {
       const assignee = answer === REASSIGN ? extra.assigneeAgentId! : undefined;
+      const [before] = assignee ? await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId)) : [];
       // Chasing restarts the stale clock; so does a new owner.
       const [t] = await db
         .update(tickets)
         .set({ lastActivityAt: now(), ...(assignee ? { assigneeAgentId: assignee, assignedToOwner: false } : {}) })
         .where(eq(tickets.id, ctx.blockerTicketId))
         .returning();
+      if (assignee && before) await record(db, { companyId: before.companyId, ticketId: ctx.blockerTicketId, kind: "assigned", summary: `Reassigned from the stale-blocker card by ${extra.settledBy ? "the CEO" : "the owner"}`, at: now() });
       if (t?.assigneeAgentId && wake) {
         await wake({
           agentId: t.assigneeAgentId,
@@ -603,6 +613,27 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   async function tellCeo(companyId: string, question: string, agentId?: string) {
     const [ceo] = agentId ? [{ id: agentId }] : await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
     if (ceo && wake) await wake({ agentId: ceo.id, reason: "decision", note: `A decision is waiting for you: ${question}\nUse the decisions tool to read it and answer.` });
+  }
+
+  /**
+   * The owner hands a stale-blocker card to the company's CEO: it moves to the CEO's rung of the alert
+   * ladder (off the owner's queue, listed under "Being handled by the team"), the CEO is woken, and it
+   * climbs back to the owner if the CEO doesn't settle it in time.
+   */
+  async function handToCeo(d: typeof decisions.$inferSelect) {
+    const ctx = d.context as Extract<DecisionContext, { type: "stale_blocker" }>;
+    const at = now().toISOString();
+    const ladder = { rung: "ceo", since: at, ticketId: ctx.blockerTicketId ?? ctx.blockedTicketId, about: [] as string[], hops: [{ to: "ceo", at, why: "the owner asked the CEO to decide" }] };
+    const [moved] = await db
+      .update(decisions)
+      .set({ tier: "ceo", forAgentId: null, context: { ...ctx, ladder } })
+      .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (!moved) return null;
+    const [blocker] = ctx.blockerTicketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, ctx.blockerTicketId)) : [];
+    await record(db, { companyId: d.companyId, ticketId: ladder.ticketId, kind: "decision_answered", summary: `The owner handed "${d.question}" to the CEO to decide`, at: now() });
+    await tellCeo(d.companyId, `${untrusted("Boss Man decision", d.question)}\nThe owner asked you to settle this ${blocker ? `(the blocking ticket is "${blocker.title}")` : ""}. Answer decision ${d.id} with Chase, Reassign (give assigneeAgentId) or Drop dependency.`);
+    return { id: d.id, answer: LET_CEO_DECIDE, delivered: null as boolean | null, endedHere: false };
   }
 
   /** A plan from a plan-first ticket, put to the CEO, or to the owner for high-risk work (R40, R48). */
@@ -805,7 +836,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[] }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string }) {
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -816,7 +847,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}) },
+            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}) },
           })
           .returning();
         if (input.blocksTicketId) {
@@ -939,7 +970,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     },
 
     /** Takes a skill decision off the owner's queue when the proposal ended some other way. */
-    async withdraw(id: string) {
+    async withdrawSkill(id: string) {
       await db.update(decisions).set({ status: "withdrawn", dedupeKey: null, answeredAt: now() }).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
     },
 
@@ -1117,6 +1148,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Pressing twice is harmless.
       if (adviceOf(d.context)?.state === "asking") return { id, advice: adviceOf(d.context)! };
       if (d.kind === "permission") throw new AnswerError("A permission request holds a live run, so it can't be put to the CEO. Answer it, or deny it.");
+      // The CEO proposed the skill on this card, so it must not get to reword the card the owner decides on (BOS-168).
+      if (d.kind === "skill") throw new AnswerError("The CEO proposed this skill, so it can't rewrite this card. If something is unclear, ask the CEO about it in chat.");
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo || !wake) throw new AnswerError("This company has no CEO to ask.");
       const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}), ...(adviceOf(d.context)?.originalQuestion ? { originalQuestion: adviceOf(d.context)!.originalQuestion } : {}) };
@@ -1161,6 +1194,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
       const at = now().toISOString();
       if (input.outcome === "reissue") {
+        // The CEO proposed this skill, so it must not get to reword the card the owner decides on (BOS-168).
+        if (d.kind === "skill") throw new AnswerError("The CEO proposed this skill, so it can't rewrite this card. If something is unclear, the owner can ask the CEO about it in chat.");
         const ctx = d.context as DecisionContext;
         const asking = sql`${decisions.context}->'advice'->>'state' = 'asking'`;
         if (!(d.kind === "question" && ctx.type === "question")) {
@@ -1317,8 +1352,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // answer (a permission, a deploy, a budget) keeps to its options.
       const ownWords = extra.custom === true && d.kind === "question";
       if (extra.custom && !ownWords) throw new AnswerError("This decision needs one of its options; only an agent's question takes your own answer.");
-      if (options.length > 0 && !ownWords && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
+      const handOff = (d.context as DecisionContext).type === "stale_blocker" && answer === LET_CEO_DECIDE; // also on cards raised before the option existed
+      if (handOff && extra.settledBy) throw new AnswerError("Only the owner can hand this to the CEO; answer Chase, Reassign or Drop dependency.");
+      if (options.length > 0 && !ownWords && !handOff && !options.includes(answer)) throw new AnswerError(`Answer must be one of: ${options.join(", ")}`);
       await validate(d, answer, extra);
+      if (handOff) return handToCeo(d);
       const ctx = d.context as DecisionContext;
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
@@ -1352,6 +1390,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
       if (!closed) return null;
+
+      // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
+      // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
+      if (ctx.type !== "permission") {
+        const about = await decisionTicketIds(db, d);
+        if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+      }
 
       let delivered: boolean | null = null;
       let endedHere = false;
@@ -1522,6 +1567,26 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (wake && t.assigneeAgentId && t.assigneeAgentId !== d.raisedByAgentId) await wake({ agentId: t.assigneeAgentId, reason: "unblocked", ticketId: t.id, note: await unblockedNote(db, t.id, { question: d.question, answer }) });
       }
       return { id, answer, delivered, endedHere };
+    },
+
+    /** The agent that raised a card takes it back (BOS-123); what it blocked can move again. */
+    async withdraw(id: string, actor: { agentId: string | null }, reason?: string) {
+      const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
+      if (!d) return null;
+      if (!actor.agentId || d.raisedByAgentId !== actor.agentId) throw new AnswerError("You can only withdraw a decision you raised.");
+      // Only a question asked through raise_decision may be taken back. System cards that also
+      // record an agent (owner sign-off, permission, deploy, engagement, lesson, review loop,
+      // ticket cap, stalled run) must go through their own answer path: withdrawing a risk_review
+      // card would delete the dependency and let the ticket merge without the owner's sign-off.
+      const type = (d.context as { type?: string } | null)?.type;
+      if (d.kind !== "question" || type !== "question") throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
+      const [closed] = await db.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+      if (!closed) return null;
+      const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+      await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+      for (const f of freed) await releaseIfFree(f.ticketId, false);
+      await record(db, { companyId: d.companyId, agentId: actor.agentId, ticketId: freed[0]?.ticketId, kind: "decision_withdrawn", summary: `Withdrew "${d.question}"${reason ? `: ${reason}` : ""}`, at: now() });
+      return { id, withdrawn: true };
     },
   };
 }
