@@ -214,32 +214,33 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list", offset: 25 } }))).toContain("There are 25 open cards; offset 25 is past the end.");
   });
 
-  it("keeps a ticket held when a duplicate card still asks the same question", async () => {
+  it("never treats two different questions about one ticket as duplicates", async () => {
     const c = (ctx = await setup());
-    const t = await c.ticket("Held work");
-    const insert = async () =>
-      (
-        await c.db
-          .insert(decisions)
-          .values({
-            companyId: c.company.id,
-            kind: "question",
-            question: "The reviewer was woken several times without a verdict.",
-            options: ["Got it"],
-            recommendedOption: "Got it",
-            tier: "owner",
-            context: { type: "question", ladder: { rung: "owner", since: new Date().toISOString(), ticketId: t.id, about: [], hops: [] } },
-          })
-          .returning()
-      )[0]!;
-    const first = await insert();
-    await insert();
-    await c.db.insert(ticketDependencies).values({ blockerDecisionId: first.id, blockedTicketId: t.id });
+    const t = await c.ticket("Two questions");
+    const first = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which region should we deploy in?", options: ["EU", "US"], recommended: "EU", blocksTicketId: t.id, triedFirst: "Both need a secret only the owner can add." });
+    await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which payment provider should we use?", options: ["Stripe", "Mollie"], recommended: "Stripe", blocksTicketId: t.id, triedFirst: "Compared both providers." });
+    const ceo = await c.mcp(c.ceo.id);
+    // Both name the same ticket, but they ask entirely different things, so neither is a duplicate.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This duplicates the other card on the same ticket." } }))).toBe(true);
+    expect((await row(first.id)).status).toBe("open");
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, first.id))).toHaveLength(1);
+  });
+
+  it("withdraws a true duplicate and drops the hold its withdrawn card had on the ticket", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Held twice");
+    const first = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Should we ship on Friday?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: t.id, triedFirst: "Read the release notes." });
+    const second = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Should we ship on Friday?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: t.id, triedFirst: "Read the release notes." });
     const ceo = await c.mcp(c.ceo.id);
     expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "This duplicates the other card that asks the same thing." } }))).toBe(false);
     expect((await row(first.id)).status).toBe("withdrawn");
-    // The identical card is still open, so the owner's hold on the ticket stays.
-    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, first.id))).toHaveLength(1);
+    // The withdrawn card no longer holds the ticket; the identical open card still does.
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, first.id))).toHaveLength(0);
+    expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, second.id))).toHaveLength(1);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).not.toBe("ready");
+    // Answering the surviving card releases the ticket: no stale hold is left behind.
+    await c.decisions.answer(second.id, "Yes", {});
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("ready");
   });
 
   it("leaves a merge-retry card open when the owner's sign-off is still waiting", async () => {
@@ -280,9 +281,36 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
 });
 
 describe("the CEO may answer only system and info cards (BOS-149)", () => {
-  it("answers a 'Got it' alert at the owner's tier with a logged reason", async () => {
+  it("answers a 'Got it' notice at the owner's tier with a logged reason", async () => {
     const c = (ctx = await setup());
-    const t = await c.ticket("Some work");
+    await c.ticket("Some work");
+    const [d] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "question",
+        question: "Your answer couldn't reach the runner, so it will try again.",
+        options: ["Got it"],
+        recommendedOption: "Got it",
+        tier: "owner",
+        context: { type: "question" },
+      })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    const bare = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Got it" } });
+    expect(isError(bare)).toBe(true);
+    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Got it", note: "I checked the reviewer and woke it again; it is working." } });
+    expect(isError(ok)).toBe(false);
+    const after = await row(d!.id);
+    expect(after.status).toBe("answered");
+    expect(after.context).toMatchObject({ settled: { note: "I checked the reviewer and woke it again; it is working." } });
+    const logged = (await c.db.select().from(activity).where(eq(activity.kind, "decision_answered")))[0]!;
+    expect(logged.summary).toContain("Reason: I checked the reviewer");
+  });
+
+  it("never answers or withdraws an alert the ladder has already handed to the owner", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Looped work");
     const [d] = await c.db
       .insert(decisions)
       .values({
@@ -296,15 +324,11 @@ describe("the CEO may answer only system and info cards (BOS-149)", () => {
       })
       .returning();
     const ceo = await c.mcp(c.ceo.id);
-    const bare = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Got it" } });
-    expect(isError(bare)).toBe(true);
-    const ok = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Got it", note: "I checked the reviewer and woke it again; it is working." } });
-    expect(isError(ok)).toBe(false);
-    const after = await row(d!.id);
-    expect(after.status).toBe("answered");
-    expect(after.context).toMatchObject({ settled: { note: "I checked the reviewer and woke it again; it is working." } });
-    const logged = (await c.db.select().from(activity).where(eq(activity.kind, "decision_answered")))[0]!;
-    expect(logged.summary).toContain("Reason: I checked the reviewer");
+    // It failed both the Scrum Master and the CEO, so it is the owner's now.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d!.id, answer: "Got it", note: "I have looked into it and it is fine." } }))).toBe(true);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: d!.id, note: "This alert is noise and the owner does not need it." } }))).toBe(true);
+    await expect(c.decisions.answer(d!.id, "Got it", { settledBy: { agentId: c.ceo.id }, note: "Bypassing the tool." })).rejects.toThrow(/owner/i);
+    expect((await row(d!.id)).status).toBe("open");
   });
 
   it("refuses every owner-only kind on the server, even when the tool is bypassed", async () => {

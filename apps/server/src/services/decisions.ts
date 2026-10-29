@@ -184,6 +184,9 @@ export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unkno
   // and the owner would never see the escalation (BOS-149). The rung rule is for the CEO only, because
   // the Scrum Master settles its own alerts through the same path.
   if (opts.ladder !== false && ctx.ladder?.rung === "scrum_master") return "This alert is still with the Scrum Master, so it isn't yours to settle yet. Leave it for the ladder to hand over.";
+  // An alert that has climbed to the owner has already failed the Scrum Master and the CEO, so it is
+  // the owner's now: closing it here would take it off their queue without their seeing it (BOS-149).
+  if (opts.ladder !== false && ctx.ladder?.rung === "owner") return "This alert is already with the owner, so it isn't yours to settle. Leave it for them.";
   if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) return "Only the owner can answer this kind of decision. Leave it for them; if they asked for your advice, use action advise.";
   if (ctx.type === "question" && ctx.steps?.length) return "This asks the owner to do something, so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
   if (d.tier === "owner" && !isSystemCard(d)) return "This card is the owner's to answer. Leave it for them; if they asked for your advice, use action advise.";
@@ -831,6 +834,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       case "permission":
         // Keyed on the request, not the run: two different requests in one run are not duplicates (BOS-149).
         return c.requestId ? `request:${c.requestId}` : null;
+      case "question":
+      case "stalled_run": {
+        // Two different questions about one ticket are not duplicates (BOS-149): key on what is asked,
+        // never on the ticket alone, so a live owner question is never cleared as a "duplicate".
+        const own = (c as { ticketId?: unknown }).ticketId;
+        const ticket = typeof own === "string" ? own : c.ladder?.ticketId;
+        return `question:${ticket ?? "-"}:${d.question}`;
+      }
       case "check_stuck":
       case "review_loop":
       case "ticket_cap":
@@ -872,20 +883,20 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** Another open card of the same kind asks the same thing (BOS-149). */
-  async function hasOpenSibling(d: typeof decisions.$inferSelect, subject: string): Promise<boolean> {
+  async function openSibling(d: typeof decisions.$inferSelect, subject: string): Promise<typeof decisions.$inferSelect | null> {
     const c = d.context as DecisionContext;
     const others = await db.select().from(decisions).where(and(eq(decisions.companyId, d.companyId), eq(decisions.status, "open"), ne(decisions.id, d.id)));
     for (const o of others) {
       if ((o.context as DecisionContext).type !== c.type) continue;
-      if ((await cardSubject(o)) === subject) return true;
+      if ((await cardSubject(o)) === subject) return o;
     }
-    return false;
+    return null;
   }
 
   /** Another open card covers the same thing, so this one is a duplicate (BOS-149). */
   async function isDuplicate(d: typeof decisions.$inferSelect): Promise<boolean> {
     const subject = await cardSubject(d);
-    return subject ? hasOpenSibling(d, subject) : false;
+    return subject ? (await openSibling(d, subject)) !== null : false;
   }
 
   return {
@@ -1500,6 +1511,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // An alert still with the Scrum Master is not the CEO's to clear (BOS-149): withdrawing it would
       // keep it from ever reaching the owner. Leave it for the ladder to hand over.
       if (ctx.ladder?.rung === "scrum_master") throw new AnswerError("This alert is still with the Scrum Master, so it isn't yours to withdraw yet. Leave it for the ladder to hand over.");
+      // An alert that has climbed to the owner is theirs: withdrawing it would take it off their queue
+      // without their seeing it, exactly what the ladder exists to prevent (BOS-149).
+      if (ctx.ladder?.rung === "owner") throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
       if (ctx.type === "permission") throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");
@@ -1516,7 +1530,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       } else if (!direct && !(await isStale(d)) && !(await isDuplicate(d))) {
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
-      const subject = await cardSubject(d);
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
       const [closed] = await db
         .update(decisions)
@@ -1525,12 +1538,23 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .returning({ id: decisions.id });
       if (!closed) return null;
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
-      // A card that was holding a ticket no longer holds it, unless an identical open card still asks
-      // the same question: then the owner's hold stays until they answer it (BOS-149).
-      const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
-      if (freed.length && !(subject && (await hasOpenSibling(d, subject)))) {
-        await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
-        for (const f of freed) await releaseIfFree(f.ticketId);
+      // A withdrawn card must never be left holding a ticket (BOS-149): move its hold to an identical
+      // open card when there is one, so the owner's surviving question still holds it, and drop it
+      // otherwise. A ticket is never blocked on a decision nobody can answer.
+      const freed = await db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
+      if (freed.length) {
+        const subject = await cardSubject(d);
+        const sibling = subject ? await openSibling(d, subject) : null;
+        for (const f of freed) {
+          if (sibling) {
+            const [already] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, f.blockedTicketId), eq(ticketDependencies.blockerDecisionId, sibling.id)));
+            if (!already) await db.update(ticketDependencies).set({ blockerDecisionId: sibling.id }).where(eq(ticketDependencies.id, f.id));
+            else await db.delete(ticketDependencies).where(eq(ticketDependencies.id, f.id));
+          } else {
+            await db.delete(ticketDependencies).where(eq(ticketDependencies.id, f.id));
+          }
+          await releaseIfFree(f.blockedTicketId);
+        }
       }
       return { id: d.id, name: ceo.name };
     },
