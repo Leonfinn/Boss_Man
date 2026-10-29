@@ -96,7 +96,7 @@ describe("round 16: what the cards show about a retro playbook", () => {
     const [change] = await c.db.select().from(workflowChanges);
     expect(change).toBeTruthy();
     const ceo = await c.mcp(c.ceo.id);
-    const answered = await tool(ceo, "decisions", { action: "answer", id: change!.decisionId, answer: "Apply" });
+    const answered = await tool(ceo, "decisions", { action: "answer", id: change!.decisionId, answer: "Apply", note: "Adds a reviewed skill for the engineers." });
     expect(isError(answered)).toBe(false);
     const [proposal] = await c.db.select().from(skillProposals);
     expect(proposal).toBeTruthy();
