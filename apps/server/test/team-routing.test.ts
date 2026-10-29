@@ -256,8 +256,8 @@ describe("stalled runs go to the Scrum Master first (BOS-119)", () => {
     expect(await queueIds()).not.toContain(a!.id);
     expect(await teamIds()).toContain(a!.id);
     expect(await ownerNotified(a!.id)).toEqual([]);
-    // The CEO settles it: the owner never hears about it.
-    expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Got it" } }))).toBe(false);
+    // The CEO settles it: the owner never hears about it. A system card needs the CEO's reason (BOS-149).
+    expect(isError(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: a!.id, answer: "Got it", note: "I looked at the review and the reviewer is working through it." } }))).toBe(false);
     expect(await ownerNotified(a!.id)).toEqual([]);
 
     // A second stuck review the CEO leaves alone reaches the owner with what was tried.
