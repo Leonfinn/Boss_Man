@@ -1379,7 +1379,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!ceo) throw new AnswerError("Only the CEO withdraws a card.");
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId), eq(decisions.status, "open")));
       if (!d) return null;
-      const ctx = d.context as DecisionContext;
+      const ctx = d.context as DecisionContext & { ladder?: { rung?: string } };
+      // An alert still with the Scrum Master is not the CEO's to clear (BOS-149): withdrawing it would
+      // keep it from ever reaching the owner. Leave it for the ladder to hand over.
+      if (ctx.ladder?.rung === "scrum_master") throw new AnswerError("This alert is still with the Scrum Master, so it isn't yours to withdraw yet. Leave it for the ladder to hand over.");
       // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
       // stale or not. It expires on its own (BOS-149).
       if (ctx.type === "permission") throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");

@@ -432,6 +432,52 @@ describe("BOS-149 round 6 regressions (BOS-184)", () => {
     ).toEqual([]);
   });
 
+  it("9: the CEO cannot withdraw an alert still with the Scrum Master (Security r8)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Some work");
+    const [d] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "question",
+        question: "Boss Man alert still with the Scrum Master",
+        options: ["Got it"],
+        recommendedOption: "Got it",
+        tier: "owner",
+        context: {
+          type: "question",
+          ladder: {
+            rung: "scrum_master",
+            since: new Date().toISOString(),
+            ticketId: t.id,
+            about: [],
+            hops: [],
+          },
+        },
+      })
+      .returning();
+    expect(
+      isError(
+        await ceoCall(c, {
+          action: "withdraw",
+          id: d!.id,
+          note: "This alert is stale, dropping it from the queue.",
+        }),
+      ),
+    ).toBe(true);
+    expect((await row(d!.id)).status).toBe("open");
+    // The service refuses it too, so the guard does not depend on the tool layer.
+    await expect(
+      c.decisions.withdraw({
+        id: d!.id,
+        companyId: c.company.id,
+        agentId: c.ceo.id,
+        note: "This alert is stale, dropping it from the queue.",
+      }),
+    ).rejects.toThrow(/Scrum Master/i);
+    expect((await row(d!.id)).status).toBe("open");
+  });
+
   it("8: the audit list label matches the 30 days that withdrawals are kept", () => {
     const page = readFileSync(
       fileURLToPath(
