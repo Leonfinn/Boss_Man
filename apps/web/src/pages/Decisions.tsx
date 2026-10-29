@@ -640,6 +640,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                                 </label>
                               );
                             })}
+                            <small className="muted">A reviewer you hire does code, security, infra or adversarial reviews once you name them in Settings › Reviews.</small>
                           </fieldset>
                         )}
                         {d.recommendedOption && (

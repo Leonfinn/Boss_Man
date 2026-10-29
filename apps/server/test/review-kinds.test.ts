@@ -74,7 +74,7 @@ async function setup() {
     await emit({ type: "run.permission_request", runId, requestId, title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once"], detail: PLAN });
     return (await db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`)))[0]!;
   };
-  return { ...built, db, req, company, ceo, worker, other, senior: senior!, project, ticket, row, mcp, setPolicy, plan, sent };
+  return { ...built, db, req, base, company, ceo, worker, other, senior: senior!, project, ticket, row, mcp, setPolicy, plan, sent };
 }
 
 
@@ -359,6 +359,23 @@ describe("review cells that list several agents", () => {
     const left = await handOverReviews(c.db, { agentId: c.ann.id, note: w!.note }, () => false, async () => undefined, 11 * 60_000);
     expect(await c.holder(t.id)).toBe(c.bo.id);
     expect(left).toBeNull();
+  });
+
+  it("shows the CEO each agent's reviews on the board, from the same settings", async () => {
+    const c = await lists();
+    await c.policy([c.ann.id, c.bo.id], [c.ann.id]);
+    // The board tool is the CEO's chat view of the team.
+    const [run] = await c.db.insert(runs).values({ companyId: c.company.id, agentId: c.ceo.id, purpose: "chat" }).returning();
+    const token = await issueRunToken(c.db, { companyId: c.company.id, agentId: c.ceo.id, runId: run!.id });
+    const client = new Client({ name: "test", version: "0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://${c.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    const board = JSON.parse(textOf(await client.callTool({ name: "board", arguments: {} }))) as { agents: Array<{ name: string; reviews?: string }> };
+    const of = (name: string) => board.agents.find((a) => a.name === name)!.reviews;
+    expect(of("Ann")).toBe("Code (Medium), Security (Medium)");
+    expect(of("Bo")).toBe("Security (Medium)");
+    expect(of("Sam")).toBe("Code (High+)");
+    expect(of("Cy")).toBeUndefined();
+    await client.close();
   });
 
   it("names everyone listed in the risk help", async () => {

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agentSkills, agents, decisions, skillProposals, skills, tickets } from "../src/db/schema.js";
+import { activity, agentSkills, agents, companies, decisions, skillProposals, skills, tickets } from "../src/db/schema.js";
 import { checkVerdict, hashFiles, numbered, RECONCILE_GRACE_MS, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
@@ -200,6 +200,24 @@ describe("review", () => {
     await nameSecurityReviewer(c.db, c.reviewer.id, false);
     await expect(withScript(c)).rejects.toThrow(/no Security Reviewer/);
     expect(await c.svc.list(c.company.id)).toHaveLength(0);
+  });
+
+  // BOS-198: the Security Reviewer is whoever Settings > Reviews names for security, a list included.
+  it("gives the review to an available agent from the Security cell, and only listed agents may judge", async () => {
+    const c = (ctx = await setup());
+    const second = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Second Reviewer" })).json() as { id: string };
+    const [co] = await c.db.select().from(companies).where(eq(companies.id, c.company.id));
+    await c.db.update(companies).set({ reviewPolicy: { ...co!.reviewPolicy, high: { ...co!.reviewPolicy.high, kinds: { security: [c.reviewer.id, second.id] } } } }).where(eq(companies.id, c.company.id));
+    await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.reviewer.id));
+    const p = await withScript(c);
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(t!.assigneeAgentId).toBe(second.id);
+    const verdict = { bundleHash: p.bundleHash, verdict: "recommend" as const, summary: "Fine.", findings: [] };
+    await expect(c.svc.recordVerdict(c.company.id, c.worker.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
+    await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, verdict)).rejects.toThrow(/given to another reviewer/);
+    // Taken off the list mid-review: no longer a Security Reviewer, so no verdict.
+    await c.db.update(companies).set({ reviewPolicy: co!.reviewPolicy }).where(eq(companies.id, c.company.id));
+    await expect(c.svc.recordVerdict(c.company.id, second.id, p.id, verdict)).rejects.toThrow(/Only the Security Reviewer/);
   });
 
   const finding = (o = {}) => ({ file: "run.sh", lineStart: 2, lineEnd: 2, title: "Pipes the internet into a shell", severity: "critical" as const, confidence: "confirmed" as const, behaviour: "Downloads and runs code.", harm: "Anyone can run code as the agent.", fix: "Remove it.", blocks: true, ...o });
