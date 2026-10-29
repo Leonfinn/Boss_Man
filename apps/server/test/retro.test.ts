@@ -695,6 +695,22 @@ describe("checking a change's result (part 4)", () => {
     expect((await changeRow(c, id)).status).toBe("reverted");
   });
 
+  it("Revert of a playbook update puts the earlier version back in place, and says so", async () => {
+    const { c, apply, checked } = await ready();
+    const [existing] = await c.db
+      .insert(skills)
+      .values({ companyId: c.company.id, name: "null-checks", description: "Old", source: "retro", files: [{ path: "SKILL.md", content: Buffer.from("---\nname: null-checks\ndescription: \"Old\"\n---\n\nOLD\n").toString("base64") }], sizeBytes: 10 })
+      .returning();
+    const id = await apply({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "New", body: "NEW" } });
+    expect(Buffer.from((await c.db.select().from(skills).where(eq(skills.id, existing!.id)))[0]!.files[0]!.content, "base64").toString("utf8")).toContain("NEW");
+    const d = await checked(id);
+    expect(d.question).toContain("earlier version");
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
+    const [back] = await c.db.select().from(skills).where(eq(skills.id, existing!.id));
+    expect(Buffer.from(back!.files[0]!.content, "base64").toString("utf8")).toContain("OLD");
+    expect((await changeRow(c, id)).status).toBe("reverted");
+  });
+
   it("Revert drops a lesson from the brief, and refuses when it is no longer there", async () => {
     const { c, apply, checked } = await ready();
     const id = await apply({ lever: "lesson", target: "Notes", change: { lesson: "Always cover the null case in importers." }, metric: "meanRework" });

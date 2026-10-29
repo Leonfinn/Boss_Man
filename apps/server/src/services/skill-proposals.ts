@@ -357,7 +357,10 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       if (p.replacesSkillId) {
         const [there] = await db.select({ files: skills.files }).from(skills).where(and(eq(skills.id, p.replacesSkillId), eq(skills.companyId, p.companyId)));
         if (!there) return { ok: false, reason: "the skill it would replace has been deleted since the review" };
-        if (p.replacesBundleHash && hashFiles(there.files).bundleHash !== p.replacesBundleHash) return { ok: false, reason: "the skill it would replace has been edited since this was proposed" };
+        const current = hashFiles(there.files).bundleHash;
+        // `current === p.bundleHash` is a retry after a crash between install and the status write: the
+        // new bytes are already there, so carry on rather than calling the proposal stale.
+        if (current !== p.bundleHash && p.replacesBundleHash && current !== p.replacesBundleHash) return { ok: false, reason: "the skill it would replace has been edited since this was proposed" };
       }
       if (p.source !== "link") return { ok: true };
       let again: SkillFile[] | null = null;

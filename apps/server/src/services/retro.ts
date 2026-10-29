@@ -881,11 +881,14 @@ export function retroService(
 }
 
 /** What Revert does, for the check's question. */
-function revertText(c: { lever: string; after: unknown }) {
+function revertText(c: { lever: string; before: unknown; after: unknown }) {
   const after = (c.after ?? {}) as Record<string, unknown>;
   if (c.lever === "review_policy") return `puts the old review policy for ${after.tier}-risk tickets back`;
   if (c.lever === "watchdog") return "puts the old watchdog limits back";
-  if (c.lever === "playbook") return "takes the playbook away from the agents it was given to. It stays in the library, with nobody using it";
+  if (c.lever === "playbook") {
+    // An update puts the earlier version back in place; only a new playbook is taken away.
+    return (c.before as { skillId?: string | null }).skillId ? "puts the playbook's earlier version back, leaving it with the agents that already had it" : "takes the playbook away from the agents it was given to. It stays in the library, with nobody using it";
+  }
   if (c.lever === "lesson") return "drops the lesson from the brief";
   return `puts the agent's earlier ${c.lever} back`;
 }
