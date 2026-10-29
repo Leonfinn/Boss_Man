@@ -1,11 +1,11 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { AGENT_TEMPLATES } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runs, tickets } from "../src/db/schema.js";
+import { ceoChapters, fundingSources, runs, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -60,6 +60,29 @@ describe("the Agents tab (R62)", () => {
     expect(start.prompt).toContain("You report; you do not do the work");
     // The model comes from the agent's setting, which wins over any model its instructions name.
     expect(start.prompt).toContain("Your model is set in Boss Man: deepseek/deepseek-4.1-flash, with low thinking. If anything in your instructions names a different model, this setting is the right one.");
+  });
+
+  it("clears stored resume sessions when the harness or provider changes", async () => {
+    const c = (ctx = await setup());
+    const eng = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", template: "engineer" })).json() as { id: string };
+    await c.db.insert(ceoChapters).values({ companyId: c.company.id, agentId: c.ceo.id, number: 1, directive: "Chapter one.", acpSessionId: "claude-session" });
+    const [first] = await c.db.insert(wakes).values({ companyId: c.company.id, agentId: eng.id, reason: "recovery", resumeRunId: randomUUID(), status: "queued" }).returning();
+    // A harness change on the CEO drops the chapter's Claude Code session.
+    await c.req("PATCH", `/api/agents/${c.ceo.id}`, { agentKind: "opencode" });
+    expect((await c.db.select().from(ceoChapters).where(eq(ceoChapters.agentId, c.ceo.id)))[0]!.acpSessionId).toBeNull();
+    // A harness change on a worker drops a queued recovery resume that pointed at an old session.
+    await c.req("PATCH", `/api/agents/${eng.id}`, { agentKind: "opencode" });
+    expect((await c.db.select().from(wakes).where(eq(wakes.id, first!.id)))[0]!.resumeRunId).toBeNull();
+    // A funding-source (provider) change does the same.
+    const [fund] = await c.db.insert(fundingSources).values({ name: "Claude Max", kind: "subscription", provider: "anthropic" }).returning();
+    await c.req("PATCH", `/api/agents/${eng.id}`, { fundingSourceId: fund!.id });
+    const [second] = await c.db.insert(wakes).values({ companyId: c.company.id, agentId: eng.id, reason: "recovery", resumeRunId: randomUUID(), status: "queued" }).returning();
+    await c.req("PATCH", `/api/agents/${eng.id}`, { fundingSourceId: null });
+    expect((await c.db.select().from(wakes).where(eq(wakes.id, second!.id)))[0]!.resumeRunId).toBeNull();
+    // A model-only change leaves the session alone.
+    await c.db.update(ceoChapters).set({ acpSessionId: "keep-me" }).where(eq(ceoChapters.agentId, c.ceo.id));
+    await c.req("PATCH", `/api/agents/${c.ceo.id}`, { model: "claude-opus-4-5" });
+    expect((await c.db.select().from(ceoChapters).where(eq(ceoChapters.agentId, c.ceo.id)))[0]!.acpSessionId).toBe("keep-me");
   });
 
   it("keeps a thinking level, refuses an unknown one, and sends it with the run", async () => {

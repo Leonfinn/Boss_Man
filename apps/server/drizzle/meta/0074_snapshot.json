@@ -1,5 +1,5 @@
 {
-  "id": "f293c460-4b13-45d0-9650-65900bce0060",
+  "id": "ec74ed94-9011-44b0-b26c-1b8f245f2cbe",
   "prevId": "0b655af5-bde7-4abf-8376-98acbc1fd1d5",
   "version": "7",
   "dialect": "postgresql",
@@ -51,6 +51,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "detail": {
+          "name": "detail",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -6009,12 +6015,6 @@
         "replaces_skill_id": {
           "name": "replaces_skill_id",
           "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "replaces_bundle_hash": {
-          "name": "replaces_bundle_hash",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

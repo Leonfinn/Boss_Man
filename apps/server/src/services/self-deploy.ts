@@ -40,6 +40,9 @@ const Status = z.object({
 export type DeployStatus = z.infer<typeof Status>;
 
 const short = (sha: string) => sha.slice(0, 8);
+// The install's folders, as docs/06-install-truenas.md names them: every hand-apply command is written in full.
+const SRC = "/mnt/NVME_Apps/Container_files/boss-man/src";
+const DEPLOYER = "/mnt/NVME_Apps/Container_files/boss-man/deployer";
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 
@@ -81,16 +84,26 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // are kept structured so the approval card and the to-do it leaves behind both show them (BOS-122).
     // The approved commit is pinned in every step (BOS-124): `main` may have moved on by the time the
     // owner applies it, and an unpinned step would bring in changes they never approved.
+    const changed = new Set([...(a?.infraPaths ?? []), ...(a?.paths ?? [])]);
+    const hostDeployerChanged = changed.has("scripts/host-deployer.sh");
+    const launcherChanged = [...changed].some((p) => p.startsWith("apps/launcher/"));
     const handSteps = infra
       ? [
           "Check your setup first: Settings → Server and runner → Server. \"Blue/green: On\" or Live/Standby means blue/green; anything else is a single server.",
-          `On the server that runs Boss Man, in the folder it deploys from, pin the approved commit: git checkout main; git fetch origin; git merge --ff-only ${commit}; git rev-parse HEAD. The last command must print ${commit}; if it prints anything else, stop and tell us.`,
-          `Apply it: on blue/green run scripts/rebuild-live.sh; on a single server run scripts/deploy.sh --commit ${commit}. Copy the deployer's host-deployer.sh to its folder if the change touches it.`,
+          `On the server that runs Boss Man, in the folder it deploys from, pin the approved commit: cd ${SRC} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD. The last command must print ${commit}; if it prints anything else, stop and tell us.`,
+          `Apply it: on blue/green run cd ${SRC} && scripts/rebuild-live.sh; on a single server run cd ${SRC} && scripts/deploy.sh --commit ${commit}.`,
+          hostDeployerChanged
+            ? `Copy the changed host-deployer script to the deployer folder: cp ${SRC}/scripts/host-deployer.sh ${DEPLOYER}/host-deployer.sh && chown root:root ${DEPLOYER}/host-deployer.sh && chmod 750 ${DEPLOYER}/host-deployer.sh`
+            : "host-deployer.sh didn't change; no copy needed.",
+          ...(launcherChanged
+            ? [`Rebuild the launcher: cd ${SRC} && docker compose build launcher && docker compose up -d --no-deps launcher. Runners keep their old limits until the next runner update.`]
+            : []),
+          `Blue/green only: check the new server has taken charge. Find the live colour: grep reverse_proxy ${DEPLOYER}/proxy/active.caddy. Then run cd ${SRC} && docker compose exec -T server-<colour> node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))", with <colour> blue or green. If it says standby, run cd ${SRC} && docker compose kill -s SIGUSR2 server-<colour>.`,
           "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners.",
         ]
       : [];
-    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
-    const rollback = infra ? `Blue/green: git checkout ${fromCommit} and run scripts/rebuild-live.sh. Single server: scripts/deploy.sh --rollback. Database restore isn't a fallback yet.` : undefined;
+    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
+    const rollback = infra ? `Blue/green: cd ${SRC} && git checkout ${fromCommit} && scripts/rebuild-live.sh. Single server: cd ${SRC} && scripts/deploy.sh --rollback. Database restore isn't a fallback yet.` : undefined;
     const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
     const subjects = changes.slice(0, 5).map((c) => `- ${c}`).join("\n");
     const n = a?.paths.length ?? 0;
