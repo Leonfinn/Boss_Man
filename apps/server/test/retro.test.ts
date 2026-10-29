@@ -7,9 +7,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agentChanges, agentSkills, agents, companies, decisions, retros, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
+import { agentChanges, agentSkills, agents, companies, decisions, retros, skillProposals, skills, ticketReviews, tickets, wakes, wikiPages, workflowChanges } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { LESSON_ADD, LESSON_DROP } from "../src/services/project-brief.js";
+import { SKILL_ADD, SKILL_REJECT } from "../src/services/decisions.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -22,7 +23,7 @@ afterEach(async () => {
 const D = 86_400_000;
 const ago = (ms: number) => new Date(Date.now() - ms);
 
-async function setup(opts: { pm?: boolean } = {}) {
+async function setup(opts: { pm?: boolean; reviewer?: boolean } = {}) {
   const { db: pg, close } = await openPglite();
   const built = await buildApp({ db: pg, master: { version: 1, key: randomBytes(32) }, secureCookies: false, workspaceRoot: "/ws", tickOnWake: false });
   await built.app.listen({ host: "127.0.0.1", port: 0 });
@@ -38,6 +39,8 @@ async function setup(opts: { pm?: boolean } = {}) {
   const pm = opts.pm === false ? null : await hire("Pat", "product-manager");
   const eng = await hire("Eve", "engineer");
   const eng2 = await hire("Ed", "engineer");
+  const reviewer = opts.reviewer === false ? null : await hire("Sam", "security-reviewer");
+  if (reviewer) await db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, reviewer.id));
   const clients: Client[] = [];
   const mcp = async (agentId: string) => {
     const token = await issueRunToken(pg, { companyId: company.id, agentId, runId: randomUUID() });
@@ -54,7 +57,7 @@ async function setup(opts: { pm?: boolean } = {}) {
   };
   const priorRetro = (age: number) => db.insert(retros).values({ companyId: company.id, agentId: pm?.id ?? ceo.id, startedAt: ago(age), since: ago(age + 7 * D), until: ago(age), doneCount: 5 }).returning().then((r) => r[0]!);
   const wakeFor = async (reason = "retro") => db.select().from(wakes).where(and(eq(wakes.companyId, company.id), eq(wakes.reason, reason)));
-  return { ...built, db, close, clients, req, company, ceo, project, pm, eng, eng2, mcp, done, priorRetro, wakeFor };
+  return { ...built, db, close, clients, req, company, ceo, project, pm, eng, eng2, reviewer, mcp, done, priorRetro, wakeFor };
 }
 const textOf = (r: unknown) => (r as { content: Array<{ text: string }> }).content[0]?.text ?? "";
 /** A tool call whose refusal may come back as an error result or a thrown protocol error. */
@@ -254,7 +257,7 @@ describe("proposing a change", () => {
   const propose = (pm: Client, over: Record<string, unknown> = {}) =>
     tool(pm, "propose_workflow_change", { lever: "instructions", target: "Eve", change: { instructions: "Always test the null case." }, evidence: ["A", "B"], metric: "firstPassRate", scope: { role: "engineer" }, expected: "Fewer send-backs.", ...over });
 
-  async function ready(opts: { pm?: boolean } = {}) {
+  async function ready(opts: { pm?: boolean; reviewer?: boolean } = {}) {
     const c = (ctx = await setup(opts));
     const rows = await c.done(5, D);
     for (const r of rows.slice(0, 3)) await c.db.insert(ticketReviews).values({ ticketId: r.id, reviewer: "Ed", verdict: "changes_requested", comments: [] });
@@ -422,7 +425,7 @@ describe("proposing a change", () => {
     expect((await c.db.select().from(decisions).where(eq(decisions.id, ch!.decisionId!)))[0]!.tier).toBe("owner");
   });
 
-  it("a playbook becomes a retro-made skill for the role's agents, approved by the CEO", async () => {
+  it("a playbook is only nominated: it reaches the library and agents after the security review and the owner's Add", async () => {
     const { c, p } = await ready();
     const clash = await c.db.insert(skills).values({ companyId: c.company.id, name: "taken", description: "d", source: "written", files: [], sizeBytes: 0 }).returning();
     expect(clash).toHaveLength(1);
@@ -432,12 +435,49 @@ describe("proposing a change", () => {
     const { id, ch } = await decisionOf(c, "playbook");
     expect(ch).toMatchObject({ approver: "ceo", targetRole: "engineer", targetAgentId: null, before: { skillId: null } });
     expect((await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.tier).toBe("ceo");
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.question).toContain("the agents get it only after the owner adds it");
+    // Apply is the nomination: nothing is in the library and no agent has it.
     expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
+    const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
+    expect(proposal).toMatchObject({ source: "retro", status: "in_review", proposedByAgentId: c.pm!.id, proposedAgentIds: [c.eng.id, c.eng2.id].sort() });
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.after).toMatchObject({ proposalId: proposal!.id });
+    // The Security Reviewer recommends it; then the owner's skill card adds it.
+    await c.skillProposals.recordVerdict(c.company.id, c.reviewer!.id, proposal!.id, { bundleHash: proposal!.bundleHash, verdict: "recommend", summary: "No scripts; a plain checklist." });
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `skill:${proposal!.id}`));
+    expect(card).toMatchObject({ kind: "skill", tier: "owner", status: "open" });
+    expect((await answer(c, card!.id, SKILL_ADD)).statusCode).toBe(200);
     const [skill] = await c.db.select().from(skills).where(eq(skills.name, "null-checks"));
     expect(skill).toMatchObject({ source: "retro", description: "Check the null case first." });
     const held = (await c.db.select().from(agentSkills).where(eq(agentSkills.skillId, skill!.id))).map((r) => r.agentId).sort();
     expect(held).toEqual([c.eng.id, c.eng2.id].sort());
-    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "applied", after: { skillId: skill!.id, assignedAgentIds: expect.any(Array) } });
+    expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]).toMatchObject({ status: "installed", installedSkillId: skill!.id });
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "applied", after: { proposalId: proposal!.id, assignedAgentIds: [c.eng.id, c.eng2.id].sort() } });
+  });
+
+  it("a playbook is skipped, and reaches nobody, when there is no Security Reviewer", async () => {
+    const { c, p } = await ready({ reviewer: false });
+    await p({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } });
+    const { id, ch } = await decisionOf(c, "playbook");
+    expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
+    expect(await c.db.select().from(skillProposals)).toHaveLength(0);
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("skipped");
+  });
+
+  it("a playbook the owner rejects reaches nobody", async () => {
+    const { c, p } = await ready();
+    await p({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } });
+    const { id, ch } = await decisionOf(c, "playbook");
+    await answer(c, id, "Apply");
+    const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
+    await c.skillProposals.recordVerdict(c.company.id, c.reviewer!.id, proposal!.id, { bundleHash: proposal!.bundleHash, verdict: "recommend", summary: "No scripts." });
+    const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `skill:${proposal!.id}`));
+    expect((await answer(c, card!.id, SKILL_REJECT)).statusCode).toBe(200);
+    expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+    expect((await c.db.select().from(skillProposals).where(eq(skillProposals.id, proposal!.id)))[0]!.status).toBe("rejected");
+    expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]!.status).toBe("applied");
   });
 
   it("a lesson raises the existing lesson decision for the CEO, and counts as applied once it is added", async () => {
@@ -487,7 +527,7 @@ describe("checking a change's result (part 4)", () => {
   };
 
   /** A retro with 5 finished tickets (40% first-time pass) and an agent that can propose. `apply` moves the tickets out of every later window. */
-  async function ready(opts: { pm?: boolean } = {}) {
+  async function ready(opts: { pm?: boolean; reviewer?: boolean } = {}) {
     const c = (ctx = await setup(opts));
     const rows = await c.done(5, D);
     for (const [i, r] of rows.entries()) await c.db.insert(ticketReviews).values({ ticketId: r.id, reviewer: "Ed", verdict: i < 3 ? "changes_requested" : "approved", comments: [] });
@@ -500,6 +540,12 @@ describe("checking a change's result (part 4)", () => {
       const [ch] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.lever, (over.lever as string) ?? "instructions"));
       const a = (over.lever as string) === "lesson" ? LESSON_ADD : "Apply";
       expect((await answer(c, ch!.decisionId!, a)).statusCode).toBe(200);
+      if ((over.lever as string) === "playbook") {
+        const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, (over.change as { name: string }).name));
+        await c.skillProposals.recordVerdict(c.company.id, c.reviewer!.id, proposal!.id, { bundleHash: proposal!.bundleHash, verdict: "recommend", summary: "No scripts." });
+        const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `skill:${proposal!.id}`));
+        expect((await answer(c, card!.id, SKILL_ADD)).statusCode).toBe(200);
+      }
       await c.db.update(tickets).set({ stateChangedAt: ago(25 * D) }).where(eq(tickets.companyId, c.company.id));
       await c.db.update(workflowChanges).set({ appliedAt: ago(ageDays * D), checkDueAt: ago((ageDays - 14) * D) }).where(eq(workflowChanges.id, ch!.id));
       return ch!.id;
@@ -663,6 +709,26 @@ describe("checking a change's result (part 4)", () => {
     const body = (await c.db.select().from(wikiPages))[0]!.body;
     expect(body).not.toContain("null case");
     expect(body).toContain("Keep this one.");
+  });
+
+  it("Revert while the add-a-skill flow is still pending refuses, and changes nothing", async () => {
+    const { c, rows, pm } = await ready();
+    const evidence = [await ref(c, rows[0]!.id), await ref(c, rows[1]!.id)];
+    expect(isError(await propose(pm, { evidence, lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } }))).toBe(false);
+    const [ch] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.lever, "playbook"));
+    expect((await answer(c, ch!.decisionId!, "Apply")).statusCode).toBe(200);
+    await c.db.update(tickets).set({ stateChangedAt: ago(25 * D) }).where(eq(tickets.companyId, c.company.id));
+    await c.db.update(workflowChanges).set({ appliedAt: ago(20 * D), checkDueAt: ago(6 * D) }).where(eq(workflowChanges.id, ch!.id));
+    await finish(c, 10, "approved");
+    expect(await c.retro.checkSweep()).toBe(1);
+    const d = await decisionRow(c, (await changeRow(c, ch!.id)).checkDecisionId!);
+    const refused = await answer(c, d.id, "Revert");
+    expect(refused.statusCode).toBe(422);
+    expect(refused.json().message).toMatch(/never reached the agents/);
+    expect((await decisionRow(c, d.id)).status).toBe("open");
+    expect((await changeRow(c, ch!.id)).status).toBe("applied");
+    expect(await c.db.select().from(skills).where(eq(skills.name, "null-checks"))).toHaveLength(0);
+    expect((await answer(c, d.id, "Keep")).statusCode).toBe(200);
   });
 
   it("goes to the owner when the CEO ran the retro", async () => {

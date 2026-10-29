@@ -500,7 +500,7 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
-type ProposalRow = { id: string; name: string; source: "draft" | "link"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
+type ProposalRow = { id: string; name: string; source: "draft" | "link" | "retro"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
 const PROPOSAL_STATUS: Record<string, string> = {
   proposed: "Waiting",
   in_review: "With the Security Reviewer",
