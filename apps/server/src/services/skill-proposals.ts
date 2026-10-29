@@ -481,6 +481,22 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
     },
 
     /**
+     * Stops a nomination that never installed, because the workflow check's Revert was answered.
+     * Nothing is in the library and no agent has the skill, so no install is undone: the review is
+     * closed and the owner's card, if one was raised, is withdrawn.
+     */
+    async cancel(companyId: string, proposalId: string): Promise<void> {
+      const p = await this.get(companyId, proposalId);
+      if (!["proposed", "in_review", "awaiting_owner"].includes(p.status)) return;
+      const at = now();
+      await patch(p.id, { status: "rejected", decidedBy: "reverted", decidedAt: at, updatedAt: at });
+      await withdrawStrayCards(p.id);
+      if (p.reviewTicketId) await deps.closeReview?.(p.reviewTicketId, "The workflow check's Revert closed this review: the playbook will not be added.");
+      await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.decided", summary: `Revert stopped the nomination of ${p.name} before it reached anyone.`, at });
+      if (p.proposedByAgentId) await deps.tell?.(p.proposedByAgentId, `The workflow check reverted the change, so the playbook ${p.name} will not be added.`);
+    },
+
+    /**
      * Picks up a proposal a crash left half-decided. `decide()` is only reached from a card, so a
      * proposal whose card is gone would otherwise sit until the 14-day expiry holding its name:
      * - `awaiting_owner` with no open card (its card closed without installing), or

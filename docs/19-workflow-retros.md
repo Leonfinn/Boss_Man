@@ -90,7 +90,7 @@ Not built yet: plan-first (there is no per-company setting for it; it follows th
   - Keep is recommended if it improved or held, or if either number can't be measured. Revert is recommended if it got worse.
 - Revert puts the saved old value back through the same code the Apply used. If the value has changed again since, Revert is refused and the decision stays open: Boss Man never overwrites a newer change.
 - A playbook that is reverted is taken away from the agents Apply gave it to, and stays in the library. Boss Man has no archive for skills, so "nobody uses it" is the archive. If the add-a-skill flow never installed it, Revert says so and leaves everything alone.
-- A playbook's check waits until the add-a-skill flow has installed it. While the nomination is with the Security Reviewer or the owner, the check is put off; if the nomination ends without installing, the change is closed as skipped and no Keep/Revert card is raised for something no agent ever had.
+- A playbook's check can come round while the add-a-skill flow still has the nomination. The card then says Revert cancels the pending nomination, and answering it closes the change and the review; nothing ever reached an agent. If the nomination ends without installing, the change is closed as skipped with no Keep/Revert card.
 - A lesson that is reverted is dropped from the brief's Lessons section.
 
 ## Skipped

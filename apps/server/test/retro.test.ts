@@ -455,6 +455,22 @@ describe("proposing a change", () => {
     expect((await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id)))[0]).toMatchObject({ status: "applied", after: { proposalId: proposal!.id, assignedAgentIds: [c.eng.id, c.eng2.id].sort() } });
   });
 
+  it("links the change to its proposal before the proposal is written, so a crash cannot orphan it", async () => {
+    const { c, p } = await ready();
+    await p({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" }, scope: { role: "engineer" } });
+    const { id, ch } = await decisionOf(c, "playbook");
+    const original = c.skillProposals.propose.bind(c.skillProposals);
+    let linkedAtPropose: string | undefined;
+    c.skillProposals.propose = (async (input: Parameters<typeof original>[0]) => {
+      const [seen] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id));
+      linkedAtPropose = (seen!.after as { proposalId?: string }).proposalId;
+      return original(input);
+    }) as typeof c.skillProposals.propose;
+    expect((await answer(c, id, "Apply")).statusCode).toBe(200);
+    const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
+    expect(linkedAtPropose).toBe(proposal!.id);
+  });
+
   it("a playbook is skipped, and reaches nobody, when there is no Security Reviewer", async () => {
     const { c, p } = await ready({ reviewer: false });
     await p({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } });
@@ -771,7 +787,7 @@ describe("checking a change's result (part 4)", () => {
     expect((await changeRow(c, ch!.id)).status).toBe("applied");
   });
 
-  it("waits for a playbook's nomination before raising its check, and closes it when the nomination ends without installing", async () => {
+  it("a playbook's check while the nomination is pending offers a Revert that cancels it, and the card can be closed", async () => {
     const { c, rows, pm } = await ready();
     const evidence = [await ref(c, rows[0]!.id), await ref(c, rows[1]!.id)];
     expect(isError(await propose(pm, { evidence, lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } }))).toBe(false);
@@ -780,19 +796,34 @@ describe("checking a change's result (part 4)", () => {
     await c.db.update(tickets).set({ stateChangedAt: ago(25 * D) }).where(eq(tickets.companyId, c.company.id));
     await c.db.update(workflowChanges).set({ appliedAt: ago(20 * D), checkDueAt: ago(6 * D) }).where(eq(workflowChanges.id, ch!.id));
     await finish(c, 10, "approved");
-    // Nothing has reached an agent yet: no card, and the check is put off rather than left unanswerable.
-    expect(await c.retro.checkSweep()).toBe(0);
-    const waiting = await changeRow(c, ch!.id);
-    expect(waiting.checkDecisionId).toBeNull();
-    expect(waiting.status).toBe("applied");
-    expect(waiting.checkDueAt!.getTime()).toBeGreaterThan(Date.now());
-    expect(await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `workflow-check:${ch!.id}`))).toHaveLength(0);
-    // The owner rejects the nomination: the change never took effect, so it is closed without a card.
+    // Nothing has reached an agent: the card says Revert cancels the nomination, and it can be answered.
+    expect(await c.retro.checkSweep()).toBe(1);
+    const d = await decisionRow(c, (await changeRow(c, ch!.id)).checkDecisionId!);
+    expect(d.question).toContain("cancels the pending skill nomination");
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+    expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
+    expect((await decisionRow(c, d.id)).status).toBe("answered");
+    expect((await changeRow(c, ch!.id)).status).toBe("reverted");
+    const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
+    expect(proposal!.status).toBe("rejected");
+    expect(await c.db.select().from(skills)).toHaveLength(0);
+    expect(await c.db.select().from(agentSkills)).toHaveLength(0);
+  });
+
+  it("closes a playbook change as skipped, with no card, when its nomination ends without installing", async () => {
+    const { c, rows, pm } = await ready();
+    const evidence = [await ref(c, rows[0]!.id), await ref(c, rows[1]!.id)];
+    expect(isError(await propose(pm, { evidence, lever: "playbook", target: "engineer", change: { name: "null-checks", description: "d", body: "b" } }))).toBe(false);
+    const [ch] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.lever, "playbook"));
+    expect((await answer(c, ch!.decisionId!, "Apply")).statusCode).toBe(200);
     const [proposal] = await c.db.select().from(skillProposals).where(eq(skillProposals.name, "null-checks"));
     await c.skillProposals.recordVerdict(c.company.id, c.reviewer!.id, proposal!.id, { bundleHash: proposal!.bundleHash, verdict: "recommend", summary: "No scripts." });
     const [card] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `skill:${proposal!.id}`));
     expect((await answer(c, card!.id, SKILL_REJECT)).statusCode).toBe(200);
-    await c.db.update(workflowChanges).set({ checkDueAt: ago(1) }).where(eq(workflowChanges.id, ch!.id));
+    await c.db.update(tickets).set({ stateChangedAt: ago(25 * D) }).where(eq(tickets.companyId, c.company.id));
+    await c.db.update(workflowChanges).set({ appliedAt: ago(20 * D), checkDueAt: ago(6 * D) }).where(eq(workflowChanges.id, ch!.id));
+    await finish(c, 10, "approved");
+    // The change never took effect, so there is no effect to check and no card to raise.
     expect(await c.retro.checkSweep()).toBe(0);
     expect((await changeRow(c, ch!.id)).status).toBe("skipped");
     expect(await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `workflow-check:${ch!.id}`))).toHaveLength(0);
