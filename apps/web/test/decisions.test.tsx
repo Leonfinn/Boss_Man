@@ -341,3 +341,42 @@ describe("model change cards (BOS-128)", () => {
     expect(JSON.parse(String((call[1] as { body: string }).body))).toEqual({ answer: "Edit", modelConfig: { harness: "opencode", provider: "ollama", model: "qwen3:14b", fundingSourceId: "f2" } });
   });
 });
+
+describe("write my own answer", () => {
+  const open = (over: Partial<Decision> = {}) => {
+    const d = decision({ kind: "question", question: "Merge check failed.", options: ["Run the check again", "Skip"], recommendedOption: "Run the check again", ...over });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    return screen.getByRole("textbox") as HTMLTextAreaElement;
+  };
+
+  it("opens empty with the suggestion as placeholder and Send disabled", () => {
+    const box = open();
+    expect(box.value).toBe("");
+    expect(box.placeholder).toBe("Run the check again");
+    expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("Tab on the empty box accepts the suggestion", () => {
+    const box = open();
+    fireEvent.keyDown(box, { key: "Tab" });
+    expect(box.value).toBe("Run the check again");
+    expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("the Use suggestion link does the same and Tab does nothing once there is text", () => {
+    const box = open();
+    fireEvent.click(screen.getByRole("button", { name: "Use suggestion" }));
+    expect(box.value).toBe("Run the check again");
+    expect(screen.queryByRole("button", { name: "Use suggestion" })).toBeNull();
+    fireEvent.change(box, { target: { value: "mine" } });
+    expect(fireEvent.keyDown(box, { key: "Tab" })).toBe(true);
+    expect(box.value).toBe("mine");
+  });
+
+  it("whitespace alone does not enable Send", () => {
+    const box = open();
+    fireEvent.change(box, { target: { value: "   " } });
+    expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
