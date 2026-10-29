@@ -1335,7 +1335,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const hireFor = c.type === "hire" ? (c.proposal.forTickets ?? []).filter((id) => UUID.test(id)) : [];
         return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : []), ...hireFor])];
       };
-      const wantedAbout = [...new Set(open.flatMap(({ d }) => aboutIds(d)))];
+      // A push card names the branch it goes to, which can be a ticket other than the run's own.
+      const pushTicketIds = open.flatMap(({ d }) => {
+        const explain = (d.context as DecisionContext).type === "permission" ? (d.context as { explain?: PermissionExplanation }).explain : undefined;
+        return explain?.push?.ticketId ? [explain.push.ticketId] : [];
+      });
+      const wantedAbout = [...new Set([...open.flatMap(({ d }) => aboutIds(d)), ...pushTicketIds])];
       const aboutRows = wantedAbout.length
         ? await db
             .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
@@ -1364,7 +1369,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
         const about = aboutIds(d).flatMap((id) => { const r = aboutInfo.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
-        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
+        const c = d.context as DecisionContext;
+        const push = c.type === "permission" ? c.explain?.push : undefined;
+        const pushTicket = push?.ticketId ? aboutInfo.get(push.ticketId) : undefined;
+        const context = pushTicket && c.type === "permission" && c.explain
+          ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
+          : d.context;
+        return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
       // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).

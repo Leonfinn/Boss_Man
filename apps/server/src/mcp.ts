@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
+import { AGENT_TEMPLATES, FEATURE_STATUSES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -718,16 +718,19 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "feedback",
     {
       description:
-        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features: size (featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null.",
+        "Your company's feature requests. Anyone can: inbox (unprocessed feedback, oldest first; long notes are cut, note noteId reads one in full), features (each feature's id, status, rank, column, demand and priority), log (feedback you heard: text, optional from and title; set fromOutside when it came from outside the company). The CEO also triages: link (noteId, featureId, importance nice_to_have|important|critical, optional highlight copied exactly from the note), create_feature (title, optional description, optional objectiveId or milestoneId from board when the feature serves one), mark (noteId, state processed|archived). The CEO, managers and product managers size features (size: featureId, effort 1 tiny to 5 huge, optional scores by the company's criteria, each 0 to 5, from features' criteria list, and a reason) and place them on the roadmap (update_feature: featureId plus any of objectiveId or milestoneId, rank 1 to 5, horizon now|next|later, status, and a reason). Priority is value divided by effort, so an unsized feature can't be ranked: size the ones features lists with effort null. Rank is a person's own 1 to 5 ordering; horizon is the Now / Next / Later column.",
       inputSchema: {
-        action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size"]),
+        action: z.enum(["inbox", "note", "features", "log", "link", "create_feature", "mark", "size", "update_feature"]),
         effort: z.number().int().min(1).max(5).optional(),
+        rank: z.number().int().min(1).max(5).nullable().optional(),
+        horizon: z.enum(HORIZONS).nullable().optional(),
+        status: z.enum(FEATURE_STATUSES).optional(),
         scores: z.record(z.string().min(1).max(100), z.number().int().min(0).max(5)).optional(),
         reason: z.string().trim().min(1).max(240).optional(),
         noteId: z.string().uuid().optional(),
         featureId: z.string().uuid().optional(),
-        objectiveId: z.string().uuid().optional(),
-        milestoneId: z.string().uuid().optional(),
+        objectiveId: z.string().uuid().nullable().optional(),
+        milestoneId: z.string().uuid().nullable().optional(),
         importance: z.enum(IMPORTANCE).optional(),
         highlight: z.string().max(2000).optional(),
         title: z.string().min(1).max(200).optional(),
@@ -764,8 +767,32 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
             .filter((f) => f.status !== "declined")
             .sort((a, b) => b.priority - a.priority)
             .slice(0, 60)
-            .map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, demand: f.demand, people: f.customerCount, effort: f.effort, scores: Object.fromEntries(all.drivers.map((d) => [d.name, f.driverScores[d.id] ?? null])), value: f.value, priority: f.priority, tickets: f.tickets }));
+            .map((f) => ({ id: f.id, title: f.title, status: f.status, parentId: f.parentId, objectiveId: f.objectiveId, milestoneId: f.milestoneId, rank: f.rank, horizon: f.horizon, demand: f.demand, people: f.customerCount, effort: f.effort, scores: Object.fromEntries(all.drivers.map((d) => [d.name, f.driverScores[d.id] ?? null])), value: f.value, priority: f.priority, tickets: f.tickets }));
           return text(JSON.stringify({ criteria: all.drivers.map((d) => ({ name: d.name, weight: d.weight })), features: list }));
+        }
+        if (input.action === "update_feature") {
+          const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+          if (!me || (me.role !== "ceo" && me.role !== "manager" && me.template !== "product-manager")) return fail("Only the CEO, a manager or a product manager can place features on the roadmap.");
+          if (!input.featureId) return fail("Give featureId.");
+          const changes = {
+            ...(input.objectiveId !== undefined ? { objectiveId: input.objectiveId } : {}),
+            ...(input.milestoneId !== undefined ? { milestoneId: input.milestoneId } : {}),
+            ...(input.rank !== undefined ? { rank: input.rank } : {}),
+            ...(input.horizon !== undefined ? { horizon: input.horizon } : {}),
+            ...(input.status !== undefined ? { status: input.status } : {}),
+          };
+          if (!Object.keys(changes).length) return fail("Nothing to change: give objectiveId, milestoneId, rank (1 to 5), horizon (now, next or later) or status.");
+          if (!input.reason) return fail("Say why in reason (up to 240 characters); it goes in the activity log.");
+          const f = await feedback.updateFeature(input.featureId, changes, scope.companyId);
+          const parts = [
+            input.objectiveId !== undefined ? (input.objectiveId ? "linked it to an objective" : "unlinked its objective") : null,
+            input.milestoneId !== undefined ? (input.milestoneId ? "put it in a milestone" : "took it out of its milestone") : null,
+            input.rank !== undefined ? `rank ${input.rank ?? "none"}` : null,
+            input.horizon !== undefined ? `column ${input.horizon ?? "automatic"}` : null,
+            input.status !== undefined ? `status ${input.status}` : null,
+          ].filter(Boolean);
+          await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "feature_updated", summary: `${me.name} placed "${f.title}" on the roadmap: ${parts.join(", ")}. ${input.reason}` });
+          return text(`Updated "${f.title}": ${parts.join(", ")}.`);
         }
         if (input.action === "size") {
           const [me] = scope.agentId ? await db.select({ name: agents.name, role: agents.role, template: agents.template }).from(agents).where(eq(agents.id, scope.agentId)) : [];
@@ -2293,10 +2320,10 @@ function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillPro
 
   server.registerTool(
     "features",
-    { description: "The company's feature requests, highest priority first: id, title, status, demand and priority. Pass featureId to create_ticket to deliver one.", inputSchema: {} },
+    { description: "The company's feature requests, highest priority first: id, title, status, rank, column, demand and priority. Pass featureId to create_ticket to deliver one.", inputSchema: {} },
     async () => {
       const all = await feedback.scored(scope.companyId);
-      return text(JSON.stringify(all.features.filter((f) => f.status !== "declined").sort((a, b) => b.priority - a.priority).slice(0, 60).map((f) => ({ id: f.id, title: f.title, status: f.status, demand: f.demand, priority: f.priority, link: `#/features/${scope.companyId}/${f.id}` }))));
+      return text(JSON.stringify(all.features.filter((f) => f.status !== "declined").sort((a, b) => b.priority - a.priority).slice(0, 60).map((f) => ({ id: f.id, title: f.title, status: f.status, rank: f.rank, horizon: f.horizon, demand: f.demand, priority: f.priority, link: `#/features/${scope.companyId}/${f.id}` }))));
     },
   );
 
