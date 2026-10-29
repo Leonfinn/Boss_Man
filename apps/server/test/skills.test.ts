@@ -85,7 +85,8 @@ async function setup() {
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, close, req, company, worker, project, sent, emit, starts, mcp, ceo };
+  const funding = (await req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+  return { ...built, db, close, req, company, worker, project, sent, emit, starts, mcp, ceo, funding };
 }
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
@@ -256,15 +257,16 @@ describe("skills library (R71)", () => {
       await m.close();
       return r;
     };
-    const plan = { projectId: c.project.id, covered: "Engineer builds the site.", hires: [{ name: "Quinn", template: "qa", reason: "Checks each release in a browser.", skills: ["triage"] }, { name: "Rae", reason: "Writes the copy." }] };
+    const model = { harness: "claude", provider: "anthropic", model: "claude-opus-4-5", fundingSourceId: c.funding.id };
+    const plan = { projectId: c.project.id, covered: "Engineer builds the site.", hires: [{ ...model, name: "Quinn", template: "qa", reason: "Checks each release in a browser.", skills: ["triage"] }, { ...model, name: "Rae", reason: "Writes the copy." }] };
     expect(textOf(await propose(c.worker.id, plan))).toBe("Only your company's CEO can propose a team.");
-    expect(textOf(await propose(c.ceo.id, { ...plan, hires: [{ name: "X", reason: "y", skills: ["nope"] }] }))).toBe("There's no skill or pack called nope in the library.");
+    expect(textOf(await propose(c.ceo.id, { ...plan, hires: [{ ...model, name: "X", reason: "y", skills: ["nope"] }] }))).toBe("There's no skill or pack called nope in the library.");
     expect(textOf(await propose(c.ceo.id, plan))).toMatch(/^The team plan is waiting for the owner/);
     expect(textOf(await propose(c.ceo.id, plan))).toBe("A team plan for this is already waiting for the owner.");
     const [d] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "team_plan");
     expect(d).toMatchObject({ tier: "owner", options: ["Hire the ticked ones", "Not now"] });
     expect(d!.question).toContain("Team plan for Site: the CEO proposes 2 hires.");
-    expect(d!.question).toContain("1. Quinn (qa): Checks each release in a browser. Skills: triage.");
+    expect(d!.question).toContain("1. Quinn (qa) Harness: Claude Code · Provider: Anthropic · Model: claude-opus-4-5 · Paid from: Claude Max: Checks each release in a browser. Skills: triage.");
     // A pick outside the plan is refused and the decision stays open; then the owner ticks only Quinn.
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [5] })).statusCode).toBe(422);
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [0] })).statusCode).toBe(200);

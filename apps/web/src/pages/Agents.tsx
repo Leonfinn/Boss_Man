@@ -2,7 +2,7 @@
 // hiring from role templates. Every change is kept with what it was before, and can be undone.
 import { useState, type FormEvent } from "react";
 import { Star } from "lucide-react";
-import { THINKING_LEVELS } from "@boss-man/shared";
+import { HARNESSES, THINKING_LEVELS } from "@boss-man/shared";
 import { api, usd, type Company, type FundingSource } from "../api";
 import { Avatar } from "../components/Avatar";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -40,7 +40,7 @@ type Change = { c: { id: string; field: string; before: unknown; after: unknown;
 type ModelChoice = { value: string; name: string; description?: string | null };
 type ModelLists = { runner: Record<string, { models: ModelChoice[]; observedAt: string }>; api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }> };
 const OTHER = "__other__";
-const KINDS: Array<[string, string]> = [["claude", "Claude Code"], ["codex", "Codex"], ["opencode", "OpenCode"]];
+const KINDS: Array<[string, string]> = HARNESSES.map((h) => [h.value, h.label]);
 function KindSelect({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
   return (
     <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
@@ -609,15 +609,16 @@ function CeoNotes({ agentId }: { agentId: string }) {
   );
 }
 
-/** What the CEO may change about the team without asking (R62). */
+/** What the CEO may change about the team without asking (R62). Hires and model setup always wait, so "nothing" (no longer offered) means the same as "hires". */
 const APPROVALS: Array<[string, string]> = [
-  ["hires", "Hires wait for you"],
-  ["hires_and_edits", "Hires and instruction changes wait"],
-  ["nothing", "Nothing waits; you're told"],
+  ["hires", "Hires and model changes wait; instructions apply at once"],
+  ["hires_and_edits", "Hires, model and instruction changes wait"],
 ];
 
 function CeoApprovals({ companyId }: { companyId: string }) {
   const current = usePoll((signal) => api<{ approvals: string }>(`/api/companies/${companyId}/agent-approvals`, { signal }), 300_000, `approvals-${companyId}`);
+  // A company still on the retired "nothing" setting behaves like "hires" now.
+  const approval = current.data?.approvals === "hires_and_edits" ? "hires_and_edits" : "hires";
   const [error, setError] = useState<string | null>(null);
   const set = async (approvals: string) => {
     try {
@@ -630,15 +631,15 @@ function CeoApprovals({ companyId }: { companyId: string }) {
   };
   return (
     <div className="field" style={{ maxWidth: 560 }}>
-      <label htmlFor="ceo-approvals">When the CEO builds the team</label>
-      <select id="ceo-approvals" value={current.data?.approvals ?? "hires"} onChange={(e) => void set(e.target.value)}>
+      <label htmlFor="ceo-approvals">What waits for you from the CEO</label>
+      <select id="ceo-approvals" value={approval} onChange={(e) => void set(e.target.value)}>
         {APPROVALS.map(([v, label]) => (
           <option key={v} value={v}>
             {label}
           </option>
         ))}
       </select>
-      <small className="muted">The CEO can propose hires from the templates and tailor agents' instructions. What waits for you shows in Decisions; anything else you're told about, and can undo from the agent's history.</small>
+      <small className="muted">Every hire and model change always waits for you, whatever this setting says: it shows all four fields (harness, provider, model and paid from) on a card in Decisions for you to approve, edit or reject. This setting only decides whether the CEO may change an agent's instructions without waiting. Anything else you're told about, and can undo from the agent's history.</small>
       {error && (
         <p className="error" role="alert">
           {error}
