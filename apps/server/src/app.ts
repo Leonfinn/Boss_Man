@@ -2186,7 +2186,7 @@ export async function buildApp(opts: AppOptions) {
       if ((r as { outcome?: string } | undefined)?.outcome === "landing") reply.code(202);
       return r;
     });
-    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: review.landing(IdParam.parse(req.params).id) }));
+    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
     // Try the ticket's pull request again now, rather than waiting for the sync (R59).
     owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {
