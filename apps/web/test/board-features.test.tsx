@@ -30,7 +30,7 @@ function stub() {
       if (url.endsWith("/board"))
         return json({
           project: { id: "p1", companyId: "c1", name: "App" },
-          columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Build the toggle", featureId: "f1", featureTitle: "Dark mode", working: ["Developer"] }), card({ id: "t3", title: "Need infra", parentTitle: "Build the toggle", blockedBy: [{ ticketId: "t1", ticketTitle: "Build the toggle", engagementId: null, decisionId: null }] })] }],
+          columns: [{ id: "col1", name: "Ready", systemState: "ready", wipLimit: null, tickets: [card({ id: "t1", title: "Build the toggle", featureId: "f1", featureTitle: "Dark mode", working: ["Developer working"] }), card({ id: "t3", title: "Need infra", parentTitle: "Build the toggle", blockedBy: [{ ticketId: "t1", ticketTitle: "Build the toggle", engagementId: null, decisionId: null }] })] }],
         });
       if (url.endsWith("/features")) return json(scored);
       if (url.endsWith("/objectives")) return json([{ id: "o1", title: "Complete alpha build", milestones: [{ id: "m1", title: "Beta", targetDate: null }] }]);
@@ -50,7 +50,7 @@ describe("board", () => {
     expect(within(task).getByText("Task")).toBeTruthy();
     expect(within(screen.getByText("Need infra", { selector: "a" }).closest("article")!).getByText("Sub-task")).toBeTruthy();
     // A card an agent is running on says so.
-    expect(within(task).getByRole("status").textContent).toBe("Developer working now");
+    expect(within(task).getByRole("status").textContent).toBe("Developer working");
     expect(task.className).toContain("live");
     // A blocked card links to the task it waits on.
     expect(within(screen.getByText("Need infra", { selector: "a" }).closest("article")!).getByRole("link", { name: "Build the toggle" }).getAttribute("href")).toBe("#/tickets/t1");

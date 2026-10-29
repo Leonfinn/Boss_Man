@@ -136,7 +136,7 @@ export type Ticket = {
   assignedToOwner: boolean;
   dueDate: string | null;
   blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
-  /** Agents running on the ticket right now. */
+  /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
   /** When the earliest of those runs began. */
   workingSince?: string | null;

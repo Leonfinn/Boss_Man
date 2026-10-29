@@ -4,12 +4,15 @@ import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, 
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { liveRuns } from "./runs.js";
-import { reviewWaits } from "./review-kinds.js";
+import { REVIEW_REASON, reviewWaits } from "./review-kinds.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
 import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
 
 export { WorkError };
+
+/** Ticket ids a wake's note or a nudge's reason names, the way those notes write them. */
+const NOTE_TICKET_IDS = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 
 type TicketPatch = {
   /** Who made the change, for the activity log (the assigner on an assignment). */
@@ -200,12 +203,24 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const withPr = new Set(rows.filter((r) => r.t.pullRequestUrl).map((r) => r.t.id));
       for (const id of inReview) if (!pendingAny.has(id) && !withPr.has(id) && !deps.some((d) => d.blockedTicketId === id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))) unreviewed.add(id);
       // Who is running on each ticket right now, so a card can show live work. A run counts for a
-      // ticket when it is on it (chat runs don't) or was about it without being on it (a nudge that named it).
-      const ids = rows.map((r) => r.t.id);
+      // ticket when it is on it, was about it without being on it (a nudge that named it), or a
+      // wake's note names it (a review wake can list several tickets in one run). Chat runs don't.
       const everyLive = await liveRuns(db, p.companyId);
-      const onCard = (r: (typeof everyLive)[number], id: string) => (r.purpose !== "chat" && r.ticketId === id) || r.runTicketId === id;
-      // Runs no card on this board shows: the strip lists them, so the board never under-reports.
-      const withoutCard = everyLive.filter((r) => !ids.some((id) => onCard(r, id)));
+      const named = (r: (typeof everyLive)[number]) => [...new Set(`${r.wakeNote ?? ""} ${r.originNote ?? ""}`.match(NOTE_TICKET_IDS) ?? [])];
+      // Only this board's tickets can be lit; a run about a ticket in another project has no card here.
+      const boardTicketIds = new Set(rows.map((r) => r.t.id));
+      // Every ticket on this board a run is about, so one run can light two cards and still count once.
+      const about = (r: (typeof everyLive)[number]) => {
+        const found = new Set<string>();
+        if (r.purpose === "chat") return found;
+        for (const id of [r.ticketId, r.runTicketId, ...named(r)]) if (id && boardTicketIds.has(id)) found.add(id);
+        return found;
+      };
+      // What a run is doing, after the agent's name on the card.
+      const doing = (r: (typeof everyLive)[number]) =>
+        r.origin === REVIEW_REASON ? "reviewing" : r.origin === "check due" ? "re-checking" : r.origin === "ci passed" ? "checking the merge" : r.origin === "nudge" ? "picking this up" : "working";
+      // Runs with no ticket at all: the strip lists them, so the board never under-reports.
+      const withoutCard = everyLive.filter((r) => about(r).size === 0);
       const waits = await reviewWaits(db, inReview);
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
@@ -225,9 +240,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
-        working: [...new Set(everyLive.filter((l) => onCard(l, t.id)).map((l) => l.agent ?? "An agent"))],
+        working: [...new Set(everyLive.filter((l) => about(l).has(t.id)).map((l) => `${l.agent ?? "An agent"} ${doing(l)}`))],
         // When the earliest of those runs began, so the card can say how long the work has been going.
-        workingSince: everyLive.filter((l) => onCard(l, t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
+        workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
         };
