@@ -153,6 +153,10 @@ export type Withdrawal = { by: "ceo" | "system"; agentId?: string; name?: string
 export function isSystemCard(d: { kind: string; tier: string; options: unknown; context: unknown }): boolean {
   const ctx = d.context as DecisionContext & { ladder?: unknown };
   if (ctx.type === "check_stuck") return true;
+  // A card with steps asks the owner to do something, so it is never a system card (BOS-149),
+  // even when its only option is "Got it": the ladder keeps the steps of what it escalated.
+  const steps = (ctx as { steps?: unknown }).steps;
+  if (Array.isArray(steps) && steps.length) return false;
   const options = Array.isArray(d.options) ? (d.options as string[]) : [];
   // Boss Man's alerts that only need acknowledging.
   if (ctx.ladder && options.length === 1 && options[0] === "Got it") return true;

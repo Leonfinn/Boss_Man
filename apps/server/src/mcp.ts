@@ -843,11 +843,11 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
                     `Ticket: ${tickets.join(", ") || "none"} · Raised by: ${r.agentName ?? "Boss Man"} · Age: ${ago(r.createdAt)} · Score: ${Math.round(r.score)}`,
                     ...(r.reasons?.length ? [`Why it ranks here: ${r.reasons.join("; ")}`] : []),
                     `Options: ${(r.options as string[]).join(" | ") || "none"} (recommended: ${r.recommendedOption ?? "none"})`,
-                    ...(ctx.explain?.command ? [`Command: ${ctx.explain.command}`] : []),
+                    ...(ctx.explain?.command ? [`Command: ${untrusted("decision card command", ctx.explain.command)}`] : []),
                     ...(ctx.planText ? ["Plan:", untrusted("decision card plan", ctx.planText.slice(0, 1500))] : []),
                     ...(ctx.output ? ["Last output:", untrusted("decision card check output", ctx.output.slice(0, 1500))] : []),
                     ...(ctx.triedFirst ? ["What was tried first:", untrusted("decision card", ctx.triedFirst)] : []),
-                    ...(ctx.steps?.length ? [`Steps for the owner: ${ctx.steps.join(" / ")}`] : []),
+                    ...(ctx.steps?.length ? [`Steps for the owner: ${untrusted("decision card steps", ctx.steps.join(" / "))}`] : []),
                     ...(ctx.lastFailure ? [`Last failure: ${ctx.lastFailure.note}`] : []),
                     ...(advice?.state === "asking" ? [`ASKED FOR YOUR ADVICE${advice.note ? `: ${advice.note}` : ""} — use action advise.`] : []),
                   ].join("\n");
