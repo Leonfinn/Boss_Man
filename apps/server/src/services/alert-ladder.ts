@@ -17,7 +17,7 @@ import type { Db } from "../db/client.js";
 import { agents, companies, decisions, runs, watchdogActions } from "../db/schema.js";
 import { record } from "./activity.js";
 import { CANCEL_RUN, checkAsk } from "./decisions.js";
-import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, type watchdogService } from "./watchdog.js";
+import { ALERT_REASON, SCRUM_MASTER_DUTY, WATCHDOG_REWAKE_REASON, WatchdogError, watchdogPausedUntil, type watchdogService } from "./watchdog.js";
 
 /** The most a card waits with the CEO, counted from when it was raised, whether or not a CEO run has started (BOS-180). */
 export const CEO_OUTER_CAP_MINUTES = 20;
@@ -117,7 +117,7 @@ export function alertLadder(
     if (rung === "scrum_master") {
       const s = readWatchdogSettings(c.watchdog);
       // A stalled run is the Scrum Master's duty whether or not the watchdog is switched on (BOS-119).
-      if ((!s.enabled || c.watchdogTrippedAt) && !duty) return { skip: "the watchdog is off" };
+      if ((!s.enabled || watchdogPausedUntil(c, now())) && !duty) return { skip: "the watchdog is off" };
       const [sm] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY), isNull(agents.retiredAt)));
       if (!sm) return { skip: "there is no Scrum Master" };
       if (sm.paused) return { skip: "the Scrum Master is paused" };
