@@ -155,6 +155,34 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).not.toContain("origin/main");
     expect(todo!.context).toMatchObject({ check: expect.stringContaining(B.slice(0, 8)), rollback: expect.stringContaining(A) });
     expect(todo!.question).toContain("waiting for you to apply it by hand");
+    // Every command is written in full, with the install's absolute folders.
+    expect(steps.join("\n")).toContain("/mnt/NVME_Apps/Container_files/boss-man/src");
+    // This change touches neither the deployer nor the launcher.
+    expect(steps.join("\n")).toContain("host-deployer.sh didn't change; no copy needed.");
+    expect(steps.join("\n")).not.toContain("chown root:root");
+    expect(steps.join("\n")).not.toContain("docker compose build launcher");
+    // The card still checks that the new server took charge, and how to recover it.
+    expect(steps.join("\n")).toContain("grep reverse_proxy /mnt/NVME_Apps/Container_files/boss-man/deployer/proxy/active.caddy");
+    expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-<colour>");
+    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
+    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("/mnt/NVME_Apps/Container_files/boss-man/src") });
+  });
+
+  it("copies host-deployer.sh and rebuilds the launcher only when the change touches them", async () => {
+    const c = (ctx = await setup());
+    await c.available({ infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    const steps = (todo!.context as { steps: string[] }).steps;
+    const text = steps.join("\n");
+    expect(text).toContain(
+      "cp /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh && chown root:root /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh && chmod 750 /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh",
+    );
+    expect(text).not.toContain("host-deployer.sh didn't change");
+    expect(text).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");
+    expect(text).toContain("Runners keep their old limits until the next runner update.");
   });
 
   it("clears the owner to-do when the owner marks it done", async () => {
