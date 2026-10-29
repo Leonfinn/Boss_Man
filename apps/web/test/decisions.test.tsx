@@ -373,4 +373,10 @@ describe("write my own answer", () => {
     expect(fireEvent.keyDown(box, { key: "Tab" })).toBe(true);
     expect(box.value).toBe("mine");
   });
+
+  it("whitespace alone does not enable Send", () => {
+    const box = open();
+    fireEvent.change(box, { target: { value: "   " } });
+    expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
