@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
-import { api, type AdvisedDecision, type Company, type Decision, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
@@ -87,6 +87,61 @@ function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string |
         </li>
       ))}
     </ul>
+  );
+}
+
+const shortSha = (sha: string) => sha.slice(0, 8);
+
+/**
+ * What a Boss Man update contains (BOS-213): the tickets merged since the live version, any commits
+ * that aren't a ticket, why it needs a hand-apply, and anything that changes the risk. The same
+ * block is shown on the approval card and on the to-do it leaves behind.
+ */
+function DeployUpdateView({ u }: { u: DeployUpdate }) {
+  return (
+    <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
+      <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
+        This update brings {u.total} change{u.total === 1 ? "" : "s"} since the live version ({shortSha(u.from)} → {shortSha(u.to)}).
+      </p>
+      {u.changes.length > 0 && (
+        <ul aria-label="Tickets in this update" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2 }}>
+          {u.changes.map((c) => (
+            <li key={c.ticketId} style={{ overflowWrap: "anywhere" }}>
+              <a href={`#/tickets/${c.ticketId}`}><strong>{c.ref}</strong> {c.title}</a>
+            </li>
+          ))}
+          {u.more > 0 && (
+            <li className="muted">
+              and {u.more} more. <a href="#/board">See all the tickets</a>.
+            </li>
+          )}
+        </ul>
+      )}
+      {u.otherCommits.length > 0 && (
+        <details>
+          <summary>Other commits: {u.otherCommits.length}</summary>
+          <ul style={{ paddingLeft: 20, margin: "4px 0" }}>
+            {u.otherCommits.map((s, i) => (
+              <li key={i} style={{ overflowWrap: "anywhere" }}><span className="mono muted">{s}</span></li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {u.handBecause && (
+        <p style={{ margin: "6px 0 2px" }}>
+          {u.handBecause}
+          {u.handFiles?.length ? <> Files changed: <span className="mono" style={{ overflowWrap: "anywhere" }}>{u.handFiles.join(", ")}</span>.</> : null}
+        </p>
+      )}
+      {u.risks.length > 0 && (
+        <div>
+          <p style={{ fontWeight: 600, margin: "8px 0 2px" }}>Worth knowing</p>
+          <ul style={{ paddingLeft: 20, margin: "2px 0" }}>
+            {u.risks.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -471,6 +526,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </span>
                     </div>
                     <TicketRefs about={d.about} />
+                    {d.context?.update && <DeployUpdateView u={d.context.update} />}
                     {d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
@@ -562,6 +618,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       ))}
                     </div>
                     {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
+                    {d.context?.type === "self_deploy" && d.context.handSteps && d.context.handSteps.length > 0 && (
+                      <details className="plan">
+                        <summary>What you'll need to do</summary>
+                        <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                          {d.context.handSteps.map((s, i) => (
+                            <li key={i}><Linked text={s} refs={d.refs} /></li>
+                          ))}
+                        </ol>
+                      </details>
+                    )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
