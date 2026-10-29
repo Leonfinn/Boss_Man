@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
-import { api, ApiError, type AdvisedDecision, type Company, type Decision, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
@@ -92,6 +92,74 @@ function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string |
         </li>
       ))}
     </ul>
+  );
+}
+
+const shortSha = (sha: string) => sha.slice(0, 8);
+
+const HAND_EFFECT: Record<NonNullable<DeployUpdate["handEffect"]>, string> = {
+  deployer: "This changes the script that runs deploys on your server (scripts/host-deployer.sh); Boss Man's own server doesn't change.",
+  server: "This changes how Boss Man runs on your server: its compose file, Dockerfiles or other deploy scripts.",
+  both: "This changes both the script that runs deploys on your server (scripts/host-deployer.sh) and how Boss Man runs: its compose file, Dockerfiles or other deploy scripts.",
+};
+
+/**
+ * What a Boss Man update contains (BOS-213): the tickets merged since the live version, any commits
+ * that aren't a ticket, why it needs a hand-apply, and anything that changes the risk. The same
+ * block is shown on the approval card and on the to-do it leaves behind.
+ */
+function DeployUpdateView({ u }: { u: DeployUpdate }) {
+  return (
+    <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
+      <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
+        This update brings {u.total} change{u.total === 1 ? "" : "s"} across {u.files} file{u.files === 1 ? "" : "s"} since the live version ({shortSha(u.from)} → {shortSha(u.to)}).
+      </p>
+      {u.changes.length > 0 && (
+        <ul aria-label="Tickets in this update" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2 }}>
+          {u.changes.map((c) => (
+            <li key={c.ticketId} style={{ overflowWrap: "anywhere" }}>
+              <a href={`#/tickets/${c.ticketId}`}><strong>{c.ref}</strong> {c.title}</a>
+            </li>
+          ))}
+          {u.more > 0 && (
+            <li className="muted">
+              and {u.more} more. <a href="#/board">See all the tickets</a>.
+            </li>
+          )}
+        </ul>
+      )}
+      {u.otherCommits.length > 0 && (
+        <details>
+          <summary>Other commits: {u.otherCommits.length}</summary>
+          <ul style={{ paddingLeft: 20, margin: "4px 0" }}>
+            {u.otherCommits.map((s, i) => (
+              <li key={i} style={{ overflowWrap: "anywhere" }}><span className="mono muted">{s}</span></li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {u.handBecause && (
+        <p style={{ margin: "6px 0 2px" }}>
+          {u.handBecause}
+          {u.handFiles?.length ? <> Files changed: <span className="mono" style={{ overflowWrap: "anywhere" }}>{u.handFiles.join(", ")}</span>.</> : null}
+        </p>
+      )}
+      {u.handEffect && <p style={{ margin: "2px 0" }}>{HAND_EFFECT[u.handEffect]}</p>}
+      {u.needsDeployerCopy !== undefined && (
+        <p style={{ margin: "2px 0" }}>Deployer copy: {u.needsDeployerCopy ? "needed" : "not needed"}.</p>
+      )}
+      {u.needsRunnerUpdate !== undefined && (
+        <p style={{ margin: "2px 0" }}>Runner update afterwards: {u.needsRunnerUpdate ? "needed" : "not needed"}.</p>
+      )}
+      {u.risks.length > 0 && (
+        <div>
+          <p style={{ fontWeight: 600, margin: "8px 0 2px" }}>Worth knowing</p>
+          <ul style={{ paddingLeft: 20, margin: "2px 0" }}>
+            {u.risks.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -278,6 +346,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [busy, setBusy] = useState<string | null>(null);
   const [endedHere, setEndedHere] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // A workflow-retro change's optional wiki link, e.g. a page slug with a section after it.
+  const [reasonLinks, setReasonLinks] = useState<Record<string, string>>({});
   // The owner's own answer to an agent's question, being written; absent while not.
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
@@ -351,7 +421,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
     setBusy(d.id);
     try {
       const note = notes[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(extra.custom ? { custom: true } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const reasonLink = reasonLinks[d.id]?.trim();
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
@@ -521,6 +592,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </span>
                     </div>
                     <TicketRefs about={d.about} />
+                    {d.context?.update && <DeployUpdateView u={d.context.update} />}
                     {d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
@@ -631,6 +703,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       ))}
                     </div>
                     {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
+                    {d.context?.type === "self_deploy" && d.context.handSteps && d.context.handSteps.length > 0 && (
+                      <details className="plan">
+                        <summary>What you'll need to do</summary>
+                        <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                          {d.context.handSteps.map((s, i) => (
+                            <li key={i}><Linked text={s} refs={d.refs} /></li>
+                          ))}
+                        </ol>
+                      </details>
+                    )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
@@ -738,6 +820,18 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
                           </div>
                         )}
+                        {d.context?.type === "workflow_change" && (
+                          <>
+                            <div className="field">
+                              <label htmlFor={`reason-${d.id}`}>Why (shown on the Changes table, required)</label>
+                              <textarea id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} placeholder="e.g. adds a skill; waits for BOS-172" />
+                            </div>
+                            <div className="field">
+                              <label htmlFor={`reason-link-${d.id}`}>Wiki page that explains it (optional)</label>
+                              <input id={`reason-link-${d.id}`} maxLength={400} value={reasonLinks[d.id] ?? ""} onChange={(e) => setReasonLinks((l) => ({ ...l, [d.id]: e.target.value }))} placeholder="slug or slug#Heading" />
+                            </div>
+                          </>
+                        )}
                         {d.evidence && (
                           <ul className="muted" style={{ fontSize: 13, paddingLeft: 18 }}>
                             {d.options.filter((o) => OPTION_HELP[o]).map((o) => (
@@ -782,7 +876,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         ) : ownWords[d.id] === undefined || modelEdits[d.id] ? (
                           <div className="actions">
                             {!modelEdits[d.id] && d.options.map((o) => (
-                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
+                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
                                 {o}
                               </button>
                             ))}
