@@ -8,7 +8,7 @@ import { and, asc, desc, eq, gt, ilike, inArray, isNull, ne, or, sql } from "dri
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { AGENT_TEMPLATES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
+import { AGENT_TEMPLATES, FUNDING_PROVIDERS, HARNESSES, HORIZONS, IMPORTANCE, planFirstByDefault, REVIEW_KINDS, RISK_TIERS, BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, stateNoteLine, ticketRef, untrusted, isTaskSize, SIZE_SCALE, type TaskSize } from "@boss-man/shared";
 import { hashToken } from "./auth.js";
 import type { Db } from "./db/client.js";
 import { agents, companies, decisions as decisionsTable, engagements as engagementsTable, features, keyResults, milestones, objectives, projects, runs as runsTable, runTokens, ticketDependencies, ticketImages, tickets, wakes, workflowColumns } from "./db/schema.js";
@@ -1331,16 +1331,30 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     return me?.role === "ceo" && scope.agentId ? scope.agentId : null;
   };
   server.registerTool(
+    "model_options",
+    {
+      description: "The valid model setups for hiring or changing an agent (CEO only): harnesses, providers, funding sources (paid from) and the models each harness and funding source offers, using the same names the Agents page shows. Call this before propose_hire, propose_team or propose_model_change so you pick real values. A provider must match its funding source's provider, and some harnesses cannot run on some providers.",
+      inputSchema: {},
+    },
+    async () => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can read the model choices.");
+      return text(JSON.stringify(await team.modelOptions(scope.companyId)));
+    },
+  );
+  server.registerTool(
     "propose_hire",
     {
-      description: `Hire a new agent for the company (CEO only). Start from a template (${AGENT_TEMPLATES.map((t) => `${t.id}: ${t.summary}`).join("; ")}), give it a name, and tailor its title and instructions to the company. Say why you're hiring. Pass forTickets (ticket ids) for tickets waiting for this person: they are assigned to them once the hire is approved. Unless the owner has said otherwise, the hire waits for their approval in Decisions. Use board to see who there is first.`,
+      description: `Hire a new agent for the company (CEO only). Start from a template (${AGENT_TEMPLATES.map((t) => `${t.id}: ${t.summary}`).join("; ")}), give it a name, and tailor its title and instructions to the company. Call model_options first, then fill in harness (${HARNESSES.map((h) => `${h.value}: ${h.label}`).join(", ")}), provider (${FUNDING_PROVIDERS.join(", ")}), model and fundingSourceId (paid from) with real values; the tool refuses a setup the server can't run. Say why you're hiring. Pass forTickets (ticket ids) for tickets waiting for this person: they are assigned to them once the hire is approved. Every hire waits for the owner's approval in Decisions, whatever the hire-approval setting says. Use board to see who there is first.`,
       inputSchema: {
         name: z.string().trim().min(1).max(80),
         template: z.string().max(40).optional(),
         title: z.string().trim().max(80).optional(),
         instructions: z.string().trim().max(20_000).optional(),
-        model: z.string().max(200).optional(),
-        fundingSourceId: z.string().uuid().optional(),
+        harness: z.enum(HARNESSES.map((h) => h.value) as [string, ...string[]]),
+        provider: z.enum(FUNDING_PROVIDERS),
+        model: z.string().trim().min(1).max(200),
+        fundingSourceId: z.string().uuid(),
         forTickets: z.array(z.string().uuid()).max(20).optional(),
         reason: z.string().trim().min(1).max(2000),
       },
@@ -1354,7 +1368,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       }
       try {
         const r = await team.proposeHire(scope.companyId, ceo, input);
-        return text("hired" in r ? `${r.hired.name} is hired (agent ${r.hired.id}); give them work with create_ticket.` : `The hire is waiting for the owner's approval (decision ${r.decisionId}).`);
+        return text(`The hire is waiting for the owner's approval (decision ${r.decisionId}). The card shows the harness, provider, model and paid from.`);
       } catch (err) {
         if (err instanceof AgentError) return fail(err.message);
         throw err;
@@ -1364,7 +1378,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
   server.registerTool(
     "propose_team",
     {
-      description: `Propose a team for a project, or for the company, as ONE decision the owner ticks through (CEO only). Use it when the owner asks for a team, or a project is new or its scope grew. Read the project and the current team first (board), reuse existing agents, and propose the smallest team that covers the scope. For each hire: a name, a template (${AGENT_TEMPLATES.map((t) => t.id).join(", ")}), optionally a title and model, the skills or packs from the library to give it, and the reason. Say in "covered" who already covers what.`,
+      description: `Propose a team for a project, or for the company, as ONE decision the owner ticks through (CEO only). Use it when the owner asks for a team, or a project is new or its scope grew. Read the project and the current team first (board), reuse existing agents, and propose the smallest team that covers the scope. Call model_options first. For each hire: a name, a template (${AGENT_TEMPLATES.map((t) => t.id).join(", ")}), a harness, provider, model and fundingSourceId (paid from) with real values, optionally a title, the skills or packs from the library to give it, and the reason. Say in "covered" who already covers what. Every hire waits for the owner's approval.`,
       inputSchema: {
         projectId: z.string().uuid().optional(),
         covered: z.string().trim().min(1).max(2000),
@@ -1374,7 +1388,10 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
               name: z.string().trim().min(1).max(80),
               template: z.string().max(40).optional(),
               title: z.string().trim().max(80).optional(),
-              model: z.string().max(200).optional(),
+              harness: z.enum(HARNESSES.map((h) => h.value) as [string, ...string[]]),
+              provider: z.enum(FUNDING_PROVIDERS),
+              model: z.string().trim().min(1).max(200),
+              fundingSourceId: z.string().uuid(),
               skills: z.array(z.string().max(200)).max(30).optional(),
               reason: z.string().trim().min(1).max(600),
             }),
@@ -1389,6 +1406,33 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       try {
         const r = await team.proposeTeam(scope.companyId, ceo, input);
         return text(`The team plan is waiting for the owner (decision ${r.decisionId}). They tick the hires they want; each is hired with its skills.`);
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+  server.registerTool(
+    "propose_model_change",
+    {
+      description: `Propose a change to an existing agent's harness, provider, model and/or paid from (CEO only). Call model_options first for valid values. It never applies directly: the owner gets a decision card showing the current and proposed values for all four fields, and can approve, edit or reject it. It takes effect between runs, after the agent's current run ends if one is running. Say why.`,
+      inputSchema: {
+        agent: z.string().trim().min(1).max(80),
+        harness: z.enum(HARNESSES.map((h) => h.value) as [string, ...string[]]).optional(),
+        provider: z.enum(FUNDING_PROVIDERS).optional(),
+        model: z.string().trim().min(1).max(200).optional(),
+        fundingSourceId: z.string().uuid().optional(),
+        reason: z.string().trim().min(1).max(2000),
+      },
+    },
+    async ({ agent, ...input }) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can propose a model change.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), sql`lower(${agents.name}) = lower(${agent})`, isNull(agents.retiredAt)));
+      if (!who) return fail(`No active agent called ${agent}. Use board to see who there is.`);
+      try {
+        const r = await team.proposeModelChange(who.id, ceo, input);
+        return text(`The change to ${who.name}'s model setup is waiting for the owner (decision ${r.decisionId}). It takes effect between runs.`);
       } catch (err) {
         if (err instanceof AgentError) return fail(err.message);
         throw err;
