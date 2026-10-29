@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -27,7 +27,13 @@ export class ReviewError extends Error {
 }
 
 /** What the owner sees while and after an approval lands (B): in plain words. */
-export type LandingStatus = { state: "running"; startedAt: string; command: string | null } | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
+export type LandingStatus = { state: "running"; startedAt: string; command: string | null; startedBy: string } | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
+/**
+ * A running landing as the page sees it. `stale` means the ticket has gone quiet for longer than a
+ * merge can take (the same heartbeat the unmerged-approvals sweep watches), so the marker is a
+ * leftover and the owner may start it again rather than waiting forever.
+ */
+export type LandingView = (LandingStatus & { stale?: boolean }) | null;
 
 /**
  * A check that was killed or timed out says nothing about the agent's work (the runner ran out of
@@ -155,6 +161,16 @@ export function reviewService(
       .where(eq(tickets.id, ticketId));
     if (!row || (companyId && row.t.companyId !== companyId)) throw new ReviewError(404, "No such ticket.");
     return row;
+  }
+
+  /**
+   * True when a running landing's ticket has gone quiet for longer than a merge can take. The ticket's
+   * last activity is the heartbeat every landing keeps, so this uses the same sign of life as the sweep.
+   */
+  async function landingStale(ticketId: string): Promise<boolean> {
+    const [row] = await db.select({ state: tickets.systemState, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(eq(tickets.id, ticketId));
+    if (!row || row.state !== "review") return true;
+    return Date.now() - row.lastActivityAt.getTime() > MERGE_MISSED_AFTER_MS;
   }
 
   /** The host and token for a pull request; without either, approval stops with what to set (R59). */
@@ -309,7 +325,7 @@ export function reviewService(
           .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
           .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
         if (signoff) throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
-        if (landings.get(ticketId)?.state === "running") throw new ReviewError(409, "Every review is in and the merge is running now.");
+        if (landings.get(ticketId)?.state === "running" && !(await landingStale(ticketId))) throw new ReviewError(409, "Every review is in and the merge is running now.");
         await record(db, { companyId: t.companyId, agentId: input.reviewerAgentId ?? null, ticketId, kind: "merge_restarted", summary: `All reviews were in but the merge had not run; ${input.reviewer} confirmed the approval, so Boss Man started it.` });
         return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });
       }
@@ -411,14 +427,29 @@ export function reviewService(
       return this.settle(t, { verdict: "approved", reviewer: "the CEO", reviewerAgentId: input.byAgentId, background: input.background, causedByRunId: input.causedByRunId, before });
     },
 
-    landing: (ticketId: string): LandingStatus | null => landings.get(ticketId) ?? null,
+    /**
+     * The landing the page should show. A running marker whose ticket has gone quiet for longer
+     * than a merge can take is a leftover: it is marked stale so the owner can try again.
+     */
+    async landing(ticketId: string): Promise<LandingView> {
+      const status = landings.get(ticketId);
+      if (!status) return null;
+      if (status.state === "finished") return status;
+      return { ...status, stale: await landingStale(ticketId) };
+    },
 
     /** Runs land() without holding the request (the check can take minutes); the outcome is kept for the page to poll. */
     async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<LandingStatus> {
-      if (landings.get(ticketId)?.state === "running") throw new ReviewError(409, "This ticket is already being checked and merged.");
+      const existing = landings.get(ticketId);
+      if (existing?.state === "running") {
+        if (!(await landingStale(ticketId))) throw new ReviewError(409, "This ticket is already being checked and merged.");
+        // Only replace the marker we judged stale: another approval may have claimed it while we checked the heartbeat.
+        if (landings.get(ticketId) !== existing) throw new ReviewError(409, "This ticket is already being checked and merged.");
+        landings.delete(ticketId);
+      }
       // Claimed before the first await, so two approvals at the same moment cannot both start a landing.
       const startedAt = new Date().toISOString();
-      landings.set(ticketId, { state: "running", startedAt, command: null });
+      landings.set(ticketId, { state: "running", startedAt, command: null, startedBy: reviewer });
       let ctx: Awaited<ReturnType<typeof ticketWithRepo>>;
       try {
         ctx = await ticketWithRepo(ticketId);
@@ -435,7 +466,7 @@ export function reviewService(
       }
       const { t, defaultBranch, verifyCommand, deepVerifyCommand, repoUrl } = ctx;
       const command = repoUrl ? ([verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter(Boolean) as string[]).join(" && ") || null : null;
-      const running: LandingStatus = { state: "running", startedAt, command };
+      const running: LandingStatus = { state: "running", startedAt, command, startedBy: reviewer };
       landings.set(ticketId, running);
       void (async () => {
         let text: string;
