@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from "react";
-import { api, type AdvisedDecision, type Company, type Decision, type StallEvidence, type TeamAlert } from "../api";
+import { HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
+import { api, type AdvisedDecision, type Company, type Decision, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
+import { usePoll } from "../hooks";
 import { describe, useTranscript } from "../transcript";
 import { when } from "./Runs";
 import { OUTCOMES } from "./Rules";
@@ -162,6 +164,108 @@ function why(d: { score: number; parts: { blocking: number; liveRun: number; urg
   return `Score ${Math.round(d.score)}: ${bits.join(" + ")}.`;
 }
 
+/** Current vs proposed harness, provider, model and paid from on a model-change card (BOS-128). */
+function ModelChange({ d, editing, onEdit, onCancel, onSubmit, busy }: { d: Decision; editing: boolean; onEdit: () => void; onCancel: () => void; onSubmit: (config: ModelConfigView) => void; busy: boolean }) {
+  const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 60_000, `model-change-sources-${d.id}`);
+  const before = d.context?.before;
+  // Once answered, show what actually landed (the owner's Edit values), not the CEO's proposal.
+  const proposed = d.context?.applied?.config ?? d.context?.proposed;
+  const [form, setForm] = useState<ModelConfigView>(proposed ?? { harness: "claude", provider: "anthropic", model: "", fundingSourceId: "" });
+  if (!before || !proposed) return null;
+  const paidFrom = (c: ModelConfigView) => c.fundingSourceName ?? sources.data?.find((s) => s.id === c.fundingSourceId)?.name ?? c.fundingSourceId;
+  const rows: Array<[string, string, string]> = [
+    ["Harness", harnessLabel(before.harness), harnessLabel(proposed.harness)],
+    ["Provider", providerLabel(before.provider), providerLabel(proposed.provider)],
+    ["Model", before.model || "default", proposed.model || "default"],
+    ["Paid from", paidFrom(before), paidFrom(proposed)],
+  ];
+  return (
+    <div style={{ marginTop: 8 }}>
+      <table className="table" aria-label="Current and proposed model setup">
+        <thead>
+          <tr>
+            <th />
+            <th>Current</th>
+            <th>Proposed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(([label, current, next]) => (
+            <tr key={label}>
+              <th scope="row">{label}</th>
+              <td className={current === next ? "muted" : undefined}>{current}</td>
+              <td><strong>{next}</strong></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {d.context?.applied && (
+        <p className="muted" role="status">
+          Applied {when(d.context.applied.at)}. It takes effect {d.context.applied.afterRunId ? "after the run that was in progress ended" : "from the next run"}.
+        </p>
+      )}
+      {editing ? (
+        <form
+          style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            onSubmit({ harness: form.harness, provider: form.provider, model: form.model, fundingSourceId: form.fundingSourceId });
+          }}
+        >
+          <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+            <div className="field">
+              <label htmlFor={`mc-harness-${d.id}`}>Harness</label>
+              <select id={`mc-harness-${d.id}`} value={form.harness} onChange={(e) => setForm({ ...form, harness: e.target.value, model: "" })}>
+                {HARNESSES.map((h) => (
+                  <option key={h.value} value={h.value}>{h.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor={`mc-provider-${d.id}`}>Provider</label>
+              <select id={`mc-provider-${d.id}`} value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value })}>
+                {(sources.data ?? []).map((s) => s.provider).filter((p, i, all) => all.indexOf(p) === i).map((p) => (
+                  <option key={p} value={p}>{providerLabel(p)}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor={`mc-model-${d.id}`}>Model</label>
+              <input id={`mc-model-${d.id}`} className="mono" required value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} />
+            </div>
+            <div className="field">
+              <label htmlFor={`mc-funding-${d.id}`}>Paid from</label>
+              <select
+                id={`mc-funding-${d.id}`}
+                required
+                value={form.fundingSourceId}
+                onChange={(e) => {
+                  const source = sources.data?.find((s) => s.id === e.target.value);
+                  setForm({ ...form, fundingSourceId: e.target.value, ...(source ? { provider: source.provider } : {}) });
+                }}
+              >
+                <option value="">Choose a funding source</option>
+                {(sources.data ?? []).map((s) => (
+                  <option key={s.id} value={s.id}>{s.name} ({providerLabel(s.provider)})</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="actions">
+            <button type="submit" className="btn primary" disabled={busy || !form.model || !form.fundingSourceId}>Save and approve</button>
+            <button type="button" className="btn" onClick={onCancel}>Cancel</button>
+          </div>
+          <small className="muted">The same checks apply as when the CEO proposed it. The change takes effect between runs.</small>
+        </form>
+      ) : (
+        <button type="button" className="linkish" onClick={onEdit}>
+          Edit these values before approving
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswered, banner, elsewhere = [], onPickCompany, withTeam = [], advised = [] }: { decisions: Decision[]; companies: Company[]; loaded: boolean; agentsWorking: number; onAnswered: () => void; banner?: ReactNode; elsewhere?: Array<{ id: string; name: string; count: number }>; onPickCompany?: (id: string) => void; withTeam?: TeamAlert[]; advised?: AdvisedDecision[] }) {
   const [filter, setFilter] = useState<string | null>(null);
   const [answered, setAnswered] = useState<Record<string, string>>({});
@@ -173,8 +277,22 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
   const [picks, setPicks] = useState<Record<string, number[]>>({});
+  // A model-change card being edited before approval.
+  const [modelEdits, setModelEdits] = useState<Record<string, boolean>>({});
   // "Ask the CEO for advice": the optional one-line note being written, absent while not.
   const [adviceNote, setAdviceNote] = useState<Record<string, string>>({});
+  // "Reassign" on a stale-blocker card: the agent being picked, and who has the ticket now; absent while not picking.
+  const [reassign, setReassign] = useState<Record<string, { pick: string; current: string | null }>>({});
+  const openReassign = async (d: Decision) => {
+    const id = d.context?.blockerTicketId;
+    let current: string | null = null;
+    try {
+      if (id) current = (await api<{ assigneeAgentId: string | null }>(`/api/tickets/${id}`)).assigneeAgentId;
+    } catch {
+      // The picker still works without knowing who has it now.
+    }
+    setReassign((r) => ({ ...r, [d.id]: { pick: "", current } }));
+  };
   const askAdvice = async (d: Decision) => {
     setBusy(d.id);
     try {
@@ -192,12 +310,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
 
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
-  const answer = async (d: Decision, option: string, custom = false) => {
+  const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
     setBusy(d.id);
     try {
       const note = notes[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(custom ? { custom: true } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(extra.custom ? { custom: true } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
+      setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
@@ -261,7 +380,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
 
       {advised.length > 0 && (
         <details className="sub">
-          <summary>Settled by the team in the last day ({advised.length})</summary>
+          <summary>Settled or withdrawn by the team in the last 30 days ({advised.length})</summary>
           <ul>
             {advised.map((a) => (
               <li key={a.id}>
@@ -269,11 +388,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                 {a.question}{" "}
                 <span className="muted">
                   ·{" "}
-                  {a.settled
-                    ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
-                    : a.advice?.state === "reissued"
-                      ? "replaced by a clearer decision"
-                      : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
+                  {a.withdrawn
+                    ? `withdrawn by ${a.withdrawn.by}: ${a.withdrawn.note}`
+                    : a.settled
+                      ? `${settledWord(a.settled.answer)} by ${a.settled.by}${a.settled.tempCleanup ? " (temp-file cleanup)" : a.settled.workingCopy ? " (working-copy cleanup)" : ""}: ${a.settled.note ?? "no reason given"}`
+                      : a.advice?.state === "reissued"
+                        ? "replaced by a clearer decision"
+                        : `handled by the CEO: ${a.advice?.summary ?? "done"}`}
                 </span>
                 {a.settled?.command && (
                   <pre className="muted">
@@ -364,6 +485,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     ) : (
                       <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : <Linked text={rule ? d.question.split("\n\n")[0]! : d.question} refs={d.refs} />}</h2>
                     )}
+                    {d.staleAt && !done && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        May be out of date{d.staleReason ? `: ${d.staleReason}` : ""}. The agent that raised it has been asked to confirm or withdraw it.
+                      </p>
+                    )}
                     {rule && (
                       <>
                         <p style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} /></p>
@@ -418,7 +544,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </>
                     )}
                     {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
-                    {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled by the CEO" with what it asked.</p>}
+                    {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled or withdrawn by the team" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
                       {d.blocks.length > 0 && (
@@ -483,8 +609,18 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <pre>{d.context.output}</pre>
                       </details>
                     )}
+                    {d.context?.type === "model_change" && (
+                      <ModelChange
+                        d={d}
+                        editing={!!modelEdits[d.id]}
+                        onEdit={() => setModelEdits((m) => ({ ...m, [d.id]: true }))}
+                        onCancel={() => setModelEdits(({ [d.id]: _, ...rest }) => rest)}
+                        onSubmit={(config) => void answer(d, "Edit", { modelConfig: config })}
+                        busy={busy === d.id}
+                      />
+                    )}
                     {done ? (
-                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
+                      <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
                     ) : (
                       <>
                         {d.context?.hires && (
@@ -525,14 +661,48 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             ))}
                           </ul>
                         )}
-                        {ownWords[d.id] === undefined ? (
+                        {reassign[d.id] ? (
+                          <form
+                            style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              if (reassign[d.id]!.pick) void answer(d, "Reassign", { assigneeAgentId: reassign[d.id]!.pick });
+                              else setErrors((x) => ({ ...x, [d.id]: "Pick who should take this ticket." }));
+                            }}
+                          >
+                            <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+                              <legend style={{ fontWeight: 600, marginBottom: 4 }}>Who should take this ticket?</legend>
+                              {(companies.find((c) => c.id === d.companyId)?.agents ?? []).map((a) => (
+                                <label key={a.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 14 }}>
+                                  <input type="radio" name={`assignee-${d.id}`} checked={reassign[d.id]!.pick === a.id} onChange={() => setReassign((r) => ({ ...r, [d.id]: { ...r[d.id]!, pick: a.id } }))} />
+                                  <span>
+                                    <strong>{a.name}</strong>
+                                    {a.title ? `, ${a.title}` : ""}
+                                    {a.id === reassign[d.id]!.current ? <span className="muted"> (has it now)</span> : null}
+                                  </span>
+                                </label>
+                              ))}
+                            </fieldset>
+                            <div className="actions">
+                              <button type="submit" className="btn primary" disabled={busy === d.id}>
+                                Reassign to the one I picked
+                              </button>
+                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => void answer(d, "Let the CEO decide")}>
+                                Let the CEO decide
+                              </button>
+                              <button type="button" className="btn" onClick={() => setReassign(({ [d.id]: _, ...rest }) => rest)}>
+                                Back to the options
+                              </button>
+                            </div>
+                          </form>
+                        ) : ownWords[d.id] === undefined || modelEdits[d.id] ? (
                           <div className="actions">
-                            {d.options.map((o) => (
-                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id} onClick={() => answer(d, o)}>
+                            {!modelEdits[d.id] && d.options.map((o) => (
+                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
                                 {o}
                               </button>
                             ))}
-                            {d.kind === "question" && (
+                            {!modelEdits[d.id] && d.kind === "question" && (
                               <button type="button" className="btn" disabled={busy === d.id} onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption ?? "" }))}>
                                 Write my own answer
                               </button>
@@ -544,7 +714,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             onSubmit={(e) => {
                               e.preventDefault();
                               const text = ownWords[d.id]!.trim();
-                              if (text) void answer(d, text, true);
+                              if (text) void answer(d, text, { custom: true });
                             }}
                           >
                             <div className="field">

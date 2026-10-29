@@ -689,3 +689,14 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 @media (min-width: 840px) {
   .app > nav.side { position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
 }
+.related { display: flex; flex-direction: column; gap: 8px; }
+.related .section-label { margin: 6px 0 0; }
+.related-group { display: flex; flex-direction: column; gap: 2px; }
+.related-label { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); }
+.related-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.related-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.related-row a { display: flex; gap: 6px; min-width: 0; flex: 1 1 auto; }
+.related-row a strong { flex: none; }
+.related-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.related-row .tag { flex: none; }
+.related-more { align-self: flex-start; background: none; border: 0; padding: 2px 0; font-size: 13px; color: var(--link, inherit); text-decoration: underline; cursor: pointer; min-height: 0; }

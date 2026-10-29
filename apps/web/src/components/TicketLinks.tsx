@@ -48,11 +48,6 @@ export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; o
               </option>
             ))}
         </select>
-        {t.featureId && (
-          <small>
-            <a href={`#/features/${t.companyId}/${t.featureId}`}>Open the feature</a>
-          </small>
-        )}
       </div>
       <div className="field" style={{ maxWidth: 420 }}>
         <label htmlFor="t-milestone">Milestone</label>
@@ -118,19 +113,6 @@ export function TicketLinks({ t, onChanged, bare = false }: { t: TicketDetail; o
         </form>
       </div>
 
-      {links.data && links.data.blocks.length > 0 && (
-        <div>
-          <p className="label">Waiting on this</p>
-          <ul className="link-list">
-            {links.data.blocks.map((b) => (
-              <li key={b.dependencyId}>
-                <span className="tag">{b.state.replace(/_/g, " ")}</span>
-                <a href={b.link}>{b.title}</a>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
       {error && (
         <p className="error" role="alert">
           {error}

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
@@ -66,7 +66,7 @@ async function wakeChain() {
   return d!;
 }
 const ladderOf = async (id: string) => ((await ctx.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.context as { ladder: Ladder; triedFirst?: string; steps?: string[] });
-const alertWakes = () => ctx.db.select().from(wakes).where(eq(wakes.reason, "alert"));
+const alertWakes = () => ctx.db.select().from(wakes).where(inArray(wakes.reason, ["alert", "decision"]));
 const ownerNotified = async (id: string) => {
   await ctx.notes.syncDecisions();
   return ctx.db.select().from(notifications).where(eq(notifications.decisionId, id));
@@ -133,6 +133,18 @@ describe("the alert ladder (BOS-64)", () => {
     expect((await ctx.alerts.sweep()).moved).toBe(0);
   });
 
+  it("a card no CEO run ever picks up still reaches the owner at the company's alert time (BOS-180)", async () => {
+    await ctx.switchOn();
+    const d = await wakeChain();
+    ctx.advance(31);
+    await ctx.alerts.sweep();
+    ctx.advance(29);
+    expect((await ctx.alerts.sweep()).moved).toBe(0);
+    ctx.advance(2);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    expect((await ladderOf(d.id)).ladder.rung).toBe("owner");
+  });
+
   it("the time limit is a setting", async () => {
     await ctx.switchOn();
     await ctx.req("PATCH", `/api/companies/${ctx.companyId}/watchdog`, { alertMinutes: 10 });
@@ -163,17 +175,25 @@ describe("the alert ladder (BOS-64)", () => {
     expect(await ownerNotified(d.id)).toHaveLength(1);
   });
 
-  it("the CEO can settle an alert with a plain answer", async () => {
+  it("the CEO can settle an alert with a plain answer, with a reason the owner can read", async () => {
     const d = await wakeChain();
-    const r = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });
+    const bare = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });
+    expect(isError(bare)).toBe(true);
+    const r = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it", note: "I checked the alert and the team has it." } });
     expect(isError(r)).toBe(false);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.context).toMatchObject({ settled: { note: "I checked the alert and the team has it." } });
     expect(await ownerNotified(d.id)).toHaveLength(0);
   });
 
-  it("the CEO doesn't see alerts still with the Scrum Master", async () => {
+  it("the CEO cannot see or settle alerts still with the Scrum Master (BOS-64), so the ladder still reaches the owner", async () => {
     await ctx.switchOn();
     const d = await wakeChain();
-    expect(textOf(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(d.id);
+    // An alert still with the team is not the CEO's to settle: it stays off the CEO's list, as it does off the owner's.
+    const ceo = await client(ctx.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(d.id);
+    const answered = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it", note: "I looked into it and the team has it." } });
+    expect(isError(answered)).toBe(true);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
   });
 
   describe("fall-through", () => {

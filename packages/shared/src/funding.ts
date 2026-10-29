@@ -3,6 +3,27 @@ export const FUNDING_PROVIDERS = ["anthropic", "openai", "bedrock", "foundry", "
 export type FundingProvider = (typeof FUNDING_PROVIDERS)[number];
 export const FUNDING_KINDS = ["api_credit", "subscription", "usage_credits", "api_payg"] as const;
 
+/** The harnesses an agent can run on, with the names the Agents page shows. */
+export const HARNESSES = [
+  { value: "claude", label: "Claude Code" },
+  { value: "codex", label: "Codex" },
+  { value: "opencode", label: "OpenCode" },
+] as const;
+export type Harness = (typeof HARNESSES)[number]["value"];
+export const harnessLabel = (value: string) => HARNESSES.find((h) => h.value === value)?.label ?? value;
+
+/** The providers a funding source can pay, with the names the Agents page and Settings show. */
+export const PROVIDER_LABELS: Record<FundingProvider, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+  bedrock: "Amazon Bedrock",
+  foundry: "Microsoft Foundry",
+  gateway: "LLM gateway",
+  openrouter: "OpenRouter",
+  ollama: "Ollama",
+};
+export const providerLabel = (value: string) => PROVIDER_LABELS[value as FundingProvider] ?? value;
+
 /** A subscription is a Claude, ChatGPT or Ollama Cloud plan, so only those providers can have one. */
 export function fundingComboError(kind: string, provider: string): string | null {
   if (kind === "subscription" && provider !== "anthropic" && provider !== "openai" && provider !== "ollama") return "A subscription can only be Anthropic (Claude Pro/Max), OpenAI (ChatGPT plan) or Ollama (Ollama Cloud plan). Use an API kind for this provider.";

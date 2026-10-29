@@ -7,6 +7,7 @@ import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAtt
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
+import { TicketRelated } from "../components/TicketRelated";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { TicketOutputs, type Artifact } from "../components/TicketOutputs";
 import { readVerdicts } from "@boss-man/shared";
@@ -742,6 +743,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </>
             )}
           </dl>
+          <TicketRelated ticketId={t.id} companyId={t.companyId} />
           <h2 className="section-label">About</h2>
           <dl>
             <dt>Created</dt>

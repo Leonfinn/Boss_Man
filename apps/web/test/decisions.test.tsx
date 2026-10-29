@@ -277,4 +277,67 @@ describe("raised time", () => {
     expect(times[0]).toBe(when(earlier));
     expect(times[1]).toBe(when(now));
   });
+
+  it("Reassign on a stale-blocker card opens a picker of that company's agents, and won't send without a pick", async () => {
+    const fetch = vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/tickets/") ? { assigneeAgentId: "a1" } : { ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const co: Company = { ...company, agents: [{ id: "a1", name: "Celebrimbor", title: "Dev" }, { id: "a2", name: "Galadriel", title: "QA" }] as Company["agents"] };
+    const other: Company = { id: "c2", name: "Other Co", mission: null, paused: false, agents: [{ id: "x1", name: "Elsewhere" }] as Company["agents"] };
+    const d = decision({ kind: "stale_blocker", question: "A is stuck.", options: ["Chase", "Reassign", "Let the CEO decide", "Drop dependency"], recommendedOption: "Chase", context: { type: "stale_blocker", blockerTicketId: "t9" } });
+    render(<Decisions decisions={[d]} companies={[co, other]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Reassign" }));
+    await waitFor(() => expect(screen.getByText("(has it now)")).toBeTruthy());
+    expect(screen.getByRole("radio", { name: /Galadriel, QA/ })).toBeTruthy();
+    expect(screen.queryByText(/Elsewhere/)).toBeNull();
+    expect(fetch).not.toHaveBeenCalledWith("/api/decisions/d1/answer", expect.anything());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reassign to the one I picked" }));
+    expect(screen.getByRole("alert").textContent).toBe("Pick who should take this ticket.");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Galadriel/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Reassign to the one I picked" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Reassign", assigneeAgentId: "a2" }) })));
+  });
+});
+
+describe("model change cards (BOS-128)", () => {
+  const modelChange = (over: Partial<Decision> = {}): Decision =>
+    decision({
+      kind: "approval",
+      question: "The CEO wants to change Engineer's model setup.\n\nCurrent: Harness: Claude Code · Provider: Anthropic · Model: claude-opus-4-5 · Paid from: Claude Max\n\nProposed: Harness: OpenCode · Provider: Ollama · Model: qwen3:8b · Paid from: Ollama Cloud\n\nIt takes effect before their next run.",
+      options: ["Approve", "Edit", "Reject"],
+      recommendedOption: "Approve",
+      context: {
+        type: "model_change",
+        before: { harness: "claude", provider: "anthropic", model: "claude-opus-4-5", fundingSourceId: "f1", fundingSourceName: "Claude Max" },
+        proposed: { harness: "opencode", provider: "ollama", model: "qwen3:8b", fundingSourceId: "f2", fundingSourceName: "Ollama Cloud" },
+      },
+      ...over,
+    });
+
+  it("shows current vs proposed for all four fields and sends an edited setup through the same answer", async () => {
+    const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (String(url) === "/api/funding-sources") return new Response(JSON.stringify([
+        { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
+        { id: "f2", name: "Ollama Cloud", kind: "subscription", provider: "ollama" },
+      ]), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Decisions decisions={[modelChange()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    for (const text of ["Harness", "Provider", "Paid from"]) expect(screen.getAllByText(text).length).toBeGreaterThan(0);
+    expect(screen.getByText("Claude Code")).toBeTruthy();
+    expect(screen.getByText("OpenCode")).toBeTruthy();
+    expect(screen.getByText("Claude Max")).toBeTruthy();
+    expect(screen.getByText("Ollama Cloud")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(screen.getByLabelText("Harness")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "qwen3:14b" } });
+    fireEvent.change(screen.getByLabelText("Paid from"), { target: { value: "f2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save and approve" }));
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const call = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer")!;
+    expect(JSON.parse(String((call[1] as { body: string }).body))).toEqual({ answer: "Edit", modelConfig: { harness: "opencode", provider: "ollama", model: "qwen3:14b", fundingSourceId: "f2" } });
+  });
 });

@@ -55,6 +55,7 @@ import { dashboardService } from "./services/dashboard.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
+import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
@@ -184,6 +185,7 @@ export async function buildApp(opts: AppOptions) {
   const agentsSvc = agentsService(db, {
     now: opts.now,
     notify: (n) => notes.notify(n),
+    catalog: (companyId) => models.forCompany(companyId),
     // Tickets the CEO planned for a hire go to them once hired; one already taken or finished is left alone.
     assignPlanned: async (companyId, hired, ticketIds) => {
       for (const id of ticketIds) {
@@ -313,6 +315,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   decisionsSvc.setSelfDeployHook(selfDeploy);
   decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
+  decisionsSvc.setModelChangeHook((ctx, companyId, config) => agentsSvc.applyModelChange(ctx, companyId, config));
   decisionsSvc.setTeamPlanHook((ctx, companyId, picks) => agentsSvc.hireTeam(companyId, picks.map((i) => ctx.hires[i]!), ctx.byAgentId, (agentId, skill) => skillsSvc.give(companyId, skill, agentId, ctx.byAgentId)));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   async function quotaWatch(fundingSourceId: string) {
@@ -392,15 +395,15 @@ export async function buildApp(opts: AppOptions) {
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
-    onDone: (t) => scheduler.onTicketDone(t.id),
+    onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
     onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
   });
   // The CEO's proposed skills (BOS-86): review by the Security Reviewer where required, the owner's decision, then install.
   const skillProposals = skillProposalsService(db, skillsSvc, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
-    raiseDecision: (input) => decisionsSvc.raiseSkill(input),
-    withdrawDecision: (id) => decisionsSvc.withdraw(id),
+    raiseDecision: (input, tx) => decisionsSvc.raiseSkill(input, tx),
+    withdrawDecision: (id) => decisionsSvc.withdrawSkill(id),
     tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
     closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
     now: opts.now,
@@ -443,13 +446,13 @@ export async function buildApp(opts: AppOptions) {
     land: (ticketId, reviewer) =>
       review.land(ticketId, reviewer).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     // An answer that arrives after the ticket moved on is told to the owner, not thrown back at them.
     landAgain: (ticketId, skipChecks) =>
       review.startLanding(ticketId, "the owner", null, { skipChecks }).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message}`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     stopTicket: async (ticketId) => {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
@@ -463,7 +466,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -1383,7 +1386,59 @@ export async function buildApp(opts: AppOptions) {
     owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
       const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }).parse(req.body);
-      return skillsSvc.write(id, { ...b, replaceId: skillId }).then((s) => ({ id: s.id, name: s.name }), skillErrors(reply));
+      try {
+        // The edit replaces the skill's files: keep the old text so the log says what actually changed.
+        const old = await skillsSvc.get(id, skillId);
+        const oldSkillMd = old.files.find((f) => f.path === "SKILL.md")?.text ?? "";
+        const s = await skillsSvc.write(id, { ...b, replaceId: skillId });
+        const newSkillMd = Buffer.from(s.files.find((f) => f.path === "SKILL.md")?.content ?? "", "base64").toString("utf8");
+        const newBundle = hashFiles(s.files).bundleHash;
+        // An edited skill is new, unreviewed text: log it so an approved skill can never change without a trace.
+        // The summary shows only the region that differs, so a hidden tail or a description change still shows.
+        const differing = (before: string, after: string) => {
+          const min = Math.min(before.length, after.length);
+          let start = 0;
+          while (start < min && before[start] === after[start]) start++;
+          let endBefore = before.length;
+          let endAfter = after.length;
+          while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) {
+            endBefore--;
+            endAfter--;
+          }
+          return { before: before.slice(start, endBefore), after: after.slice(start, endAfter) };
+        };
+        // Keep both ends when it is long: a payload is often added at the end, after harmless opening text.
+        const flat = (text: string, max: number) => {
+          const one = text.replace(/\s+/g, " ").trim();
+          if (one.length <= max) return one;
+          const half = Math.max(1, Math.floor((max - 1) / 2));
+          return `${one.slice(0, half)}…${one.slice(-half)}`;
+        };
+        const diff = differing(oldSkillMd, newSkillMd);
+        const head = `Owner edited the skill ${s.name}${s.name !== old.name ? ` (was ${flat(old.name, 40)})` : ""} from ${old.bundleHash.slice(0, 12)} to ${newBundle.slice(0, 12)}.`;
+        const tail = " Not security-reviewed; full text in detail.";
+        // Leave room for the head and tail, then share what is left between the two differing sides.
+        const room = Math.max(20, 300 - head.length - tail.length - 30);
+        const shown = !diff.before && !diff.after ? "The visible text is unchanged." : `Old: "${flat(diff.before, Math.floor(room / 2))}" New: "${flat(diff.after, Math.floor(room / 2))}".`;
+        await record(db, {
+          companyId: id,
+          kind: "skill.edited_by_owner",
+          summary: `${head} ${shown}${tail}`,
+          // The activity row's summary is capped, so the full old and new content is kept beside it.
+          detail: {
+            skillId,
+            name: { before: old.name, after: s.name },
+            description: { before: old.description, after: s.description },
+            bundleHash: { before: old.bundleHash, after: newBundle },
+            skillMd: { before: oldSkillMd, after: newSkillMd },
+            changedRegion: diff,
+            removedFiles: old.files.filter((f) => f.path !== "SKILL.md").map((f) => f.path),
+          },
+        });
+        return { id: s.id, name: s.name };
+      } catch (err) {
+        return skillErrors(reply)(err);
+      }
     });
     owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
@@ -1814,6 +1869,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
     owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
+    owner.get("/api/tickets/:id/related", async (req) => planning.relatedTickets(IdParam.parse(req.params).id));
     owner.delete("/api/dependencies/:id", async (req, reply) => {
       await planning.removeDependency(IdParam.parse(req.params).id);
       return reply.code(204).send();
@@ -2015,11 +2071,20 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, custom, picks } = z
-        .object({ answer: z.string().trim().min(1).max(4000), assigneeAgentId: Uuid.optional(), note: z.string().trim().max(2000).optional(), custom: z.boolean().optional(), picks: z.array(z.number().int().min(0)).max(20).optional() })
+      const { answer, assigneeAgentId, note, custom, picks, modelConfig } = z
+        .object({
+          answer: z.string().trim().min(1).max(4000),
+          assigneeAgentId: Uuid.optional(),
+          note: z.string().trim().max(2000).optional(),
+          custom: z.boolean().optional(),
+          picks: z.array(z.number().int().min(0)).max(20).optional(),
+          modelConfig: z
+            .object({ harness: z.string().trim().min(1).max(40), provider: z.string().trim().min(1).max(40), model: z.string().trim().min(1).max(200), fundingSourceId: Uuid })
+            .optional(),
+        })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, by: await ownerName(req) });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, modelConfig, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
@@ -2164,5 +2229,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skillProposals, ticketChat };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }

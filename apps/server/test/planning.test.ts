@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { decisions, ticketDependencies, tickets } from "../src/db/schema.js";
+import { decisions, features, ticketDependencies, tickets } from "../src/db/schema.js";
 import { makeApp, signIn, type TestApp } from "./helpers.js";
 
 let t: TestApp | undefined;
@@ -104,5 +104,53 @@ describe("plan", () => {
     expect((await c.req("DELETE", `/api/dependencies/${dep1.id}`)).statusCode).toBe(204);
     expect((await c.db.select().from(tickets).where(eq(tickets.id, api.id)))[0]!.systemState).toBe("ready");
     expect((await c.req("GET", `/api/companies/${c.company.id}/open-tickets`)).json()).toHaveLength(4);
+  });
+});
+
+describe("related tickets", () => {
+  it("lists feature, parent, sub-tasks, peers, dependencies and tickets named in the description, each once", async () => {
+    const c = await setup();
+    const [f] = await c.db.insert(features).values({ companyId: c.company.id, title: "Rate limits" }).returning();
+    const origin = await c.ticket("The big one");
+    const me = await c.ticket("Split-out piece");
+    const peer = await c.ticket("Same feature");
+    const sibling = await c.ticket("Same parent");
+    const child = await c.ticket("Child");
+    const waits = await c.ticket("Needed first");
+    const refOf = async (id: string) => `${(await c.req("GET", `/api/tickets/${id}`)).json().ref}`;
+    await c.db.update(tickets).set({ featureId: f!.id, parentTicketId: origin.id, body: `Split out of ${await refOf(origin.id)}, see also ${await refOf(waits.id)} and BOS-9999.` }).where(eq(tickets.id, me.id));
+    await c.db.update(tickets).set({ featureId: f!.id }).where(eq(tickets.id, peer.id));
+    await c.db.update(tickets).set({ parentTicketId: origin.id, featureId: f!.id }).where(eq(tickets.id, sibling.id));
+    await c.db.update(tickets).set({ parentTicketId: me.id, featureId: f!.id }).where(eq(tickets.id, child.id));
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: me.id, blockerTicketId: waits.id });
+
+    const r = (await c.req("GET", `/api/tickets/${me.id}/related`)).json();
+    expect(r.feature).toMatchObject({ id: f!.id, title: "Rate limits" });
+    expect(r.parent).toMatchObject({ id: origin.id, title: "The big one" });
+    expect(r.subtasks.map((x: { id: string }) => x.id)).toEqual([child.id]);
+    expect(r.peers.map((x: { id: string }) => x.id).sort()).toEqual([peer.id, sibling.id].sort());
+    expect(r.waitsOn.map((x: { id: string }) => x.id)).toEqual([waits.id]);
+    expect(r.blocks).toEqual([]);
+    // Already shown as parent / waits-on, and BOS-9999 matches nothing.
+    expect(r.mentioned).toEqual([]);
+    expect(r.peers[0].ref).toMatch(/-\d+$/);
+  });
+
+  it("is empty for a ticket with no links, and 404 for an unknown ticket", async () => {
+    const c = await setup();
+    const lone = await c.ticket("Alone");
+    const r = (await c.req("GET", `/api/tickets/${lone.id}/related`)).json();
+    expect(r).toEqual({ feature: null, parent: null, subtasks: [], peers: [], waitsOn: [], blocks: [], mentioned: [] });
+    expect((await c.req("GET", "/api/tickets/00000000-0000-4000-8000-000000000000/related")).statusCode).toBe(404);
+  });
+
+  it("shows a ticket named only in the description under Mentioned", async () => {
+    const c = await setup();
+    const a = await c.ticket("Origin");
+    const b = await c.ticket("Follow-up");
+    const ref = (await c.req("GET", `/api/tickets/${a.id}`)).json().ref;
+    await c.db.update(tickets).set({ body: `Came from ${ref}.` }).where(eq(tickets.id, b.id));
+    const r = (await c.req("GET", `/api/tickets/${b.id}/related`)).json();
+    expect(r.mentioned.map((x: { id: string }) => x.id)).toEqual([a.id]);
   });
 });
