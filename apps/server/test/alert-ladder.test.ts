@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
@@ -66,7 +66,7 @@ async function wakeChain() {
   return d!;
 }
 const ladderOf = async (id: string) => ((await ctx.db.select().from(decisions).where(eq(decisions.id, id)))[0]!.context as { ladder: Ladder; triedFirst?: string; steps?: string[] });
-const alertWakes = () => ctx.db.select().from(wakes).where(eq(wakes.reason, "alert"));
+const alertWakes = () => ctx.db.select().from(wakes).where(inArray(wakes.reason, ["alert", "decision"]));
 const ownerNotified = async (id: string) => {
   await ctx.notes.syncDecisions();
   return ctx.db.select().from(notifications).where(eq(notifications.decisionId, id));
@@ -131,6 +131,18 @@ describe("the alert ladder (BOS-64)", () => {
     // At the top it stays put.
     ctx.advance(120);
     expect((await ctx.alerts.sweep()).moved).toBe(0);
+  });
+
+  it("a card no CEO run ever picks up still reaches the owner at the company's alert time (BOS-180)", async () => {
+    await ctx.switchOn();
+    const d = await wakeChain();
+    ctx.advance(31);
+    await ctx.alerts.sweep();
+    ctx.advance(29);
+    expect((await ctx.alerts.sweep()).moved).toBe(0);
+    ctx.advance(2);
+    expect((await ctx.alerts.sweep()).moved).toBe(1);
+    expect((await ladderOf(d.id)).ladder.rung).toBe("owner");
   });
 
   it("the time limit is a setting", async () => {

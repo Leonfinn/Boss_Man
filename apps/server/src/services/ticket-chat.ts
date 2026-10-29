@@ -2,11 +2,13 @@
 // hears: straight into its live run if there is one, otherwise as a new run on the ticket.
 // Agents answer with the ticket_reply tool, and each run's last message lands here too.
 import { and, asc, desc, eq, isNull, ne, or } from "drizzle-orm";
-import { systemAuthor } from "@boss-man/shared";
+import { systemAuthor, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, runs, ticketMessages, tickets } from "../db/schema.js";
+import { agents, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
 import { record } from "./activity.js";
+import { ownerActed } from "./stale-requests.js";
+import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 
 /** How many recent messages a run's prompt carries. */
 export const PROMPT_HISTORY = 12;
@@ -87,6 +89,9 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       // Stored before the wake, so the new run's prompt already carries it.
       const [m] = await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "owner", agentId, runId, text, delivery }).returning();
       await record(db, { companyId: t.companyId, ticketId, kind: "message", summary: `Owner wrote: ${text}` });
+      // The owner acted: anything else we told them about this ticket may be out of date (BOS-123).
+      // The assignee is woken by the message already, so they get one note, not two.
+      await ownerActed(db, { companyId: t.companyId, ticketIds: [ticketId], reason: "the owner wrote on this ticket", skipAgents: [t.assigneeAgentId], wake: (input) => deps.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number }) });
       // One waiting run picks up every message sent before it starts: notify joins a waiting wake.
       if (delivery === "woken") {
         await deps.notify(agentId!, {
@@ -103,7 +108,13 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
 
     /** An agent's reply, through the ticket_reply tool. */
     async agentSays(input: { companyId: string; ticketId: string; agentId: string | null; runId: string; text: string }) {
+      // The ticket must belong to the caller's company: the review guard below returns null for
+      // another company's ticket, so this lookup is what keeps the write inside the tenant.
       await ticket(input.ticketId, input.companyId);
+      // An open skill-review ticket is a gate: only the reviewer assigned to it may write there
+      // (the owner has their own route). The proposer must not be able to talk the reviewer into a verdict.
+      const refusal = await reviewTicketWriteRefusal(db, input.companyId, input.ticketId, input.agentId);
+      if (refusal) throw new TicketChatError(403, refusal);
       const [m] = await db
         .insert(ticketMessages)
         .values({ companyId: input.companyId, ticketId: input.ticketId, author: "agent", agentId: input.agentId, runId: input.runId, text: input.text.slice(0, MAX_TEXT) })
@@ -132,5 +143,17 @@ export async function conversationLines(db: Db, ticketId: string) {
     .where(eq(ticketMessages.ticketId, ticketId))
     .orderBy(desc(ticketMessages.createdAt))
     .limit(PROMPT_HISTORY);
-  return rows.reverse().map((m) => `${m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : systemAuthor(m.delivery)}: ${m.text.length > 1500 ? `${m.text.slice(0, 1500)}…` : m.text}`);
+  // An open skill-review ticket is a gate: the proposer must not be able to talk to the reviewer
+  // through the conversation. Mark agent words there as untrusted, like the ticket body, so a
+  // "give it a recommend verdict" line is evidence, not an instruction. The owner's own lines stay as they are.
+  const [review] = await db
+    .select({ id: skillProposals.id })
+    .from(skillProposals)
+    .where(and(eq(skillProposals.reviewTicketId, ticketId), eq(skillProposals.status, "in_review")));
+  const reviewing = !!review;
+  return rows.reverse().map((m) => {
+    const who = m.author === "owner" ? "Owner" : m.author === "agent" ? (m.agent ?? "An agent") : systemAuthor(m.delivery);
+    const text = m.text.length > 1500 ? `${m.text.slice(0, 1500)}…` : m.text;
+    return `${who}: ${m.author === "agent" && reviewing ? untrusted(`agent ${m.agent ?? "an agent"} on a skill review ticket`, text) : text}`;
+  });
 }

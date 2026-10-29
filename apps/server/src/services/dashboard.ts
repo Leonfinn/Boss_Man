@@ -3,6 +3,7 @@
 import { and, desc, eq, gte, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, costEvents, decisions, fundingSources, notifications, runs, tickets } from "../db/schema.js";
+import { liveRuns, runOriginQuery } from "./runs.js";
 
 export const DAYS = 14;
 
@@ -31,7 +32,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
       // Each agent's latest run: the one going now, or the last one that ended.
       const latest = team.length
         ? await db
-            .selectDistinctOn([runs.agentId], { agentId: runs.agentId, id: runs.id, ticketId: runs.ticketId, ticket: tickets.title, purpose: runs.purpose, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome })
+            .selectDistinctOn([runs.agentId], { agentId: runs.agentId, id: runs.id, ticketId: runs.ticketId, ticket: tickets.title, purpose: runs.purpose, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome, ...runOriginQuery("runs") })
             .from(runs)
             .leftJoin(tickets, eq(tickets.id, runs.ticketId))
             .where(inArray(runs.agentId, team.map((a) => a.id)))
@@ -42,7 +43,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
       const agentCards = team
         .map((a) => {
           const r = byAgent.get(a.id);
-          return { id: a.id, name: a.name, role: a.role, paused: a.paused, duty: a.duty, run: r ? { id: r.id, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, startedAt: r.startedAt, endedAt: r.endedAt, result: r.endedAt ? runResult(r.outcome) : ("running" as const) } : null };
+          return { id: a.id, name: a.name, role: a.role, paused: a.paused, duty: a.duty, run: r ? { id: r.id, ticketId: r.ticketId, ticket: r.ticket, purpose: r.purpose, origin: r.origin, originFrom: r.originFrom, originNote: r.originNote, wakeNote: r.wakeNote, runTicketId: r.runTicketId, startedAt: r.startedAt, endedAt: r.endedAt, result: r.endedAt ? runResult(r.outcome) : ("running" as const) } : null };
         })
         .sort((x, y) => Number(!!y.run && !y.run.endedAt) - Number(!!x.run && !x.run.endedAt) || rank[x.role] - rank[y.role] || x.name.localeCompare(y.name));
 
@@ -75,7 +76,7 @@ export function dashboardService(db: Db, deps: { now?: () => Date } = {}) {
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .where(and(eq(runs.companyId, companyId), gte(runs.startedAt, monthStart), onSubscription));
-      const live = await db.select({ agentId: runs.agentId }).from(runs).where(and(eq(runs.companyId, companyId), isNull(runs.endedAt)));
+      const live = await liveRuns(db, companyId);
 
       // The last 14 days, one entry per day, oldest first.
       const days = Array.from({ length: DAYS }, (_, i) => day(new Date(since.getTime() + i * 86_400_000)));

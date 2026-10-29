@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "../src/api";
 import { CompanyReviews, ProjectReviews } from "../src/components/ReviewPolicy";
-import { TicketReviews } from "../src/components/TicketReviews";
+import { reviewsSummary, TicketReviews } from "../src/components/TicketReviews";
 
 afterEach(() => {
   cleanup();
@@ -117,6 +117,27 @@ describe("ticket reviews", () => {
     expect(screen.getByText("Approved")).toBeTruthy();
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
     expect(screen.getByText(/review by Sam · round 2/)).toBeTruthy();
+  });
+
+  it("folds to a summary heading, opens one review on its own and opens them all from the heading", async () => {
+    const reviews = [
+      { id: "r1", kind: "code", round: 2, seq: 0, status: "approved", reviewer: "Sam", notes: "Looks fine.", overruleReason: null },
+      { id: "r2", kind: "infra", round: 2, seq: 0, status: "changes_requested", reviewer: "Ivy", notes: "No rollback.", overruleReason: null },
+    ];
+    const { container } = render(<TicketReviews reviews={reviews} />);
+    const open = () => [...container.querySelectorAll("details")].map((d) => d.open);
+    expect(screen.getByText("2 reviews · round 2 · 1 asks for changes")).toBeTruthy();
+    expect(open()).toEqual([false, false]);
+    container.querySelector("details")!.open = true;
+    expect(open()).toEqual([true, false]);
+    fireEvent.click(screen.getByRole("button", { name: /Reviews/ }));
+    expect(open()).toEqual([true, true]);
+    fireEvent.click(screen.getByRole("button", { name: /Reviews/ }));
+    expect(open()).toEqual([false, false]);
+  });
+
+  it("summarises one approved review in the singular", () => {
+    expect(reviewsSummary([{ id: "r1", kind: "code", round: 1, seq: 0, status: "approved", reviewer: "Sam", notes: null, overruleReason: null }])).toBe("1 review · round 1 · all approved");
   });
 
   it("renders nothing when the ticket has no reviews", async () => {

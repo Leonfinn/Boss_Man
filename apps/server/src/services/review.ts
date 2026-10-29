@@ -4,7 +4,8 @@
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, tickets } from "../db/schema.js";
+import { addTicketDependency } from "./ticket-links.js";
 import type { runnersService } from "./runners.js";
 import type { workService } from "./work.js";
 import { DIFFERENT_APPROACH, type loopGuards } from "./loop-guards.js";
@@ -40,6 +41,20 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
   if (v.exitCode === 137 || v.exitCode === 143 || v.exitCode === null || /\bSIGKILL\b|\bKilled\b|Worker exited unexpectedly/i.test(tail)) return "killed";
   return null;
 }
+
+/**
+ * True when the check gave up only because it waited too long for the shared heavy-phase lock:
+ * scripts/check-all.sh exits 75 with this wording before any step runs, so nothing the agent wrote failed.
+ */
+export function checkWaitedForLock(v: { exitCode: number | null; output: string }): boolean {
+  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock/.test(v.output);
+}
+/** Tries a merge check that only timed out on the lock this many times, pausing LOCK_RETRY_BASE_MS, then double, between them. */
+export const LOCK_RETRY_ATTEMPTS = 6;
+export let LOCK_RETRY_BASE_MS = 60_000;
+/** For tests. */
+export const setLockRetryBase = (ms: number) => { LOCK_RETRY_BASE_MS = ms; };
+export const LOCK_RETRY_TEXT = "Merge check waiting for lock, retrying";
 
 /** How long the server waits for the runner to merge or push an approved branch. */
 export const MERGE_WAIT_MS = 10 * 60_000;
@@ -80,6 +95,23 @@ export type LandOptions = { skipChecks?: boolean };
 
 export type GitTemplates = { commit: string; pr: string };
 type NotifyHook = (agentId: string, input: { reason: string; note: string; ticketId?: string | null; priority?: number; causedByRunId?: string | null }) => Promise<unknown>;
+
+/** The owner decides what to do with a check that couldn't finish; the ticket stays in review and the loop detector never hears of it. */
+async function raiseCheckStuck(db: Db, t: { companyId: string; id: string; title: string }, command: string, reason: string, output: string) {
+  await db
+    .insert(decisions)
+    .values({
+      companyId: t.companyId,
+      kind: "question",
+      question: `"${t.title}": the merge check \`${command}\` couldn't finish (it ${reason}). This isn't a problem with the agent's work.`,
+      options: [CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP],
+      recommendedOption: CHECK_AGAIN,
+      tier: "owner",
+      dedupeKey: `check-stuck:${t.id}:${command}`,
+      context: { type: "check_stuck", ticketId: t.id, command, output: output.slice(-1500) },
+    })
+    .onConflictDoNothing();
+}
 
 export function reviewService(
   db: Db,
@@ -261,6 +293,20 @@ export function reviewService(
 
       // An agent's verdict fills one of the ticket's required reviews.
       const mine = rows.filter((r) => r.reviewerAgentId === input.reviewerAgentId && r.status === "pending" && (!input.kind || r.kind === input.kind));
+      // Every review is already in (approved or overruled) but the merge never ran: nothing is left to fill, so say so,
+      // and let an approval from a reviewer who held a slot start the merge instead of refusing it ("no open review").
+      if (!mine.length && t.systemState === "review" && evaluate(rows) === "passed" && rows.some((r) => r.reviewerAgentId === input.reviewerAgentId)) {
+        if (input.verdict !== "approved") throw new ReviewError(409, "Every review on this ticket is already in and approved; it is waiting to merge. Ask the CEO if it should go back to the agent.");
+        const [signoff] = await db
+          .select({ id: decisions.id })
+          .from(ticketDependencies)
+          .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+          .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
+        if (signoff) throw new ReviewError(409, "Every review is in; the ticket is waiting on the owner's decision before it merges.");
+        if (landings.get(ticketId)?.state === "running") throw new ReviewError(409, "Every review is in and the merge is running now.");
+        await record(db, { companyId: t.companyId, agentId: input.reviewerAgentId ?? null, ticketId, kind: "merge_restarted", summary: `All reviews were in but the merge had not run; ${input.reviewer} confirmed the approval, so Boss Man started it.` });
+        return this.approve(t, { reviewer: input.reviewer, reviewerAgentId: input.reviewerAgentId, background: input.background, causedByRunId: input.causedByRunId });
+      }
       if (!mine.length) throw new ReviewError(rows.some((r) => r.reviewerAgentId === input.reviewerAgentId) ? 409 : 403, "You have no open review on this ticket. The CEO can overrule a review that asked for changes.");
       const active = activeRows(rows);
       const ready = mine.filter((r) => active.some((a) => a.id === r.id));
@@ -317,7 +363,7 @@ export function reviewService(
             context: { type: "risk_review", ticketId, reviewer: o.reviewer },
           })
           .returning({ id: decisions.id });
-        await db.insert(ticketDependencies).values({ blockedTicketId: ticketId, blockerDecisionId: d!.id });
+        await addTicketDependency(db, { companyId: t.companyId, blockedTicketId: ticketId, blockerDecisionId: d!.id, actor: { type: "system" } });
         return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
       }
       if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
@@ -416,9 +462,33 @@ export function reviewService(
      * default branch, and the merge closes the ticket. A failed check, a conflict or
      * uncommitted work sends the ticket back to the agent with what to do.
      */
-    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
       try {
-        return await this.landOnce(ticketId, reviewer, causedByRunId, opts);
+        // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
+        // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
+        for (let attempt = 1; ; attempt++) {
+          const r = await this.landOnce(ticketId, reviewer, causedByRunId, opts);
+          if (r.outcome !== "lock_wait") return r;
+          const { t } = await ticketWithRepo(ticketId);
+          const d = r.detail as { command: string; output: string };
+          if (attempt >= LOCK_RETRY_ATTEMPTS) {
+            await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `Merge check gave up waiting for the lock after ${attempt} tries; it's in your Decisions.` });
+            await raiseCheckStuck(db, t, d.command, "kept waiting for the shared lock, which other checks held", d.output);
+            return { outcome: "check_stuck", delivered: null, detail: r.detail };
+          }
+          const pause = LOCK_RETRY_BASE_MS * 2 ** (attempt - 1);
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `${LOCK_RETRY_TEXT} (try ${attempt} of ${LOCK_RETRY_ATTEMPTS}, next in ${Math.max(1, Math.round(pause / 60_000))} min). Nothing failed; no need to run it by hand.` });
+          const beat = setInterval(() => void db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId)).catch(() => undefined), MERGE_ACTIVITY_MS);
+          beat.unref?.();
+          try {
+            await new Promise((resolve) => setTimeout(resolve, pause));
+          } finally {
+            clearInterval(beat);
+          }
+          // Approval can be withdrawn while we wait: don't merge something no longer in review.
+          const [now] = await db.select({ state: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+          if (now?.state !== "review") return { outcome: "check_stuck", delivered: null, detail: { note: "The ticket left review while the merge check waited, so it was not retried." } };
+        }
       } catch (caught) {
         const err = caught instanceof Error ? caught : new Error(String(caught));
         // Any failure counts, not only ReviewError: a database or git exception would otherwise leave an approved ticket with no record and no card.
@@ -437,7 +507,7 @@ export function reviewService(
       }
     },
 
-    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
@@ -493,23 +563,12 @@ export function reviewService(
         const v = await whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify", passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
         if (!v.ok) {
+          // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
+          if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
           const never = checkNeverFinished(v);
           if (never) {
-            // The ticket stays in review; the owner decides, and the loop detector never hears of it.
             const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
-            await db
-              .insert(decisions)
-              .values({
-                companyId: t.companyId,
-                kind: "question",
-                question: `"${t.title}": the merge check \`${command}\` couldn't finish (it ${reason}). This isn't a problem with the agent's work.`,
-                options: [CHECK_AGAIN, CHECK_SEND_BACK, CHECK_SKIP],
-                recommendedOption: CHECK_AGAIN,
-                tier: "owner",
-                dedupeKey: `check-stuck:${ticketId}:${command}`,
-                context: { type: "check_stuck", ticketId, command, output: v.output.slice(-1500) },
-              })
-              .onConflictDoNothing();
+            await raiseCheckStuck(db, t, command, reason, v.output);
             return { outcome: "check_stuck", delivered: null, detail: v };
           }
           const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;

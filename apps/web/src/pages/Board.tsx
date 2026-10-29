@@ -12,6 +12,8 @@ import { ProjectBudget } from "./ProjectBudget";
 import { WatchdogHealth } from "../components/WatchdogHealth";
 import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
 import { Avatar } from "../components/Avatar";
+import { RunLabelLink } from "./Runs";
+import { ago } from "./Dashboard";
 
 const DONE_SHOWN = 8;
 const PROJECT_TABS = [
@@ -581,6 +583,18 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <strong style={{ whiteSpace: "nowrap" }}>Review it <span aria-hidden="true">→</span></strong>
         </a>
       )}
+      {!!board.data?.withoutTicket?.length && (
+        <section className="unticketed" aria-label="Working without a ticket">
+          <strong>Working without a ticket</strong>
+          <ul>
+            {board.data.withoutTicket.map((r) => (
+              <li key={r.id}>
+                <strong>{r.agent ?? "An agent"}</strong> <RunLabelLink run={{ ...r, note: r.wakeNote }} /> <span className="muted">· started {ago(r.startedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <div className="board-bar">
         <div>
           {current && !adding && (
@@ -628,7 +642,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           )}
           {view !== "features" && (
             <button type="button" className="chip" aria-pressed={filters.working} onClick={() => setFilter({ working: !filters.working })}>
-              Working now
+              Working now{board.data ? ` (${board.data.workingAgents})` : ""}
             </button>
           )}
         </div>

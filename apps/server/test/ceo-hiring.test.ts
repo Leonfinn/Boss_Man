@@ -135,6 +135,22 @@ describe("the CEO builds the team (R62)", () => {
     await client.close();
   });
 
+  it("keeps model-change and hire cards on the owner's queue, never the team's (BOS-128)", async () => {
+    const c = (ctx = await setup());
+    const client = await c.mcp(c.ceo.id);
+    const ollama = (await c.req("POST", "/api/funding-sources", { name: "Ollama Cloud", kind: "subscription", provider: "ollama" })).json() as { id: string };
+    await client.callTool({ name: "propose_model_change", arguments: { agent: "Engineer", harness: "opencode", provider: "ollama", model: "qwen3:8b", fundingSourceId: ollama.id, reason: "Cheaper for routine work." } });
+    await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "Sam", template: "scrum-master", reason: "Someone should keep an eye on the checkout tickets." }) });
+    const [change] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "model_change");
+    const [hire] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "hire");
+    const queue = (await c.req("GET", "/api/decisions")).json() as Array<{ id: string }>;
+    const withTeam = (await c.req("GET", "/api/decisions/with-team")).json() as Array<{ id: string }>;
+    expect(queue.map((x) => x.id)).toEqual(expect.arrayContaining([change!.id, hire!.id]));
+    expect(withTeam.map((x) => x.id)).not.toContain(change!.id);
+    expect(withTeam.map((x) => x.id)).not.toContain(hire!.id);
+    await client.close();
+  });
+
   it("auto-picks a source for a provider-only change, refuses a second open card, and records an edited config", async () => {
     const c = (ctx = await setup());
     await c.db.update(agents).set({ agentKind: "opencode", model: "claude-opus-4-5", fundingSourceId: c.funding.id }).where(eq(agents.id, c.worker.id));

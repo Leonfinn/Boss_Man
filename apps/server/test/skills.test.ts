@@ -131,11 +131,14 @@ describe("skills library (R71)", () => {
     ]);
     // The same link again clashes; a check with no new commit changes nothing.
     expect((await c.req("POST", base, { from: "link", url: "https://github.com/acme/kit/tree/main/skills/triage" })).statusCode).toBe(409);
-    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toEqual({ changed: false, sourceRef: commit });
+    await c.db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, c.worker.id));
+    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toEqual({ changed: false, proposalId: null, status: null });
     const before = commit;
     commit = "2222222222222222222222222222222222222222";
     files["skills/release-notes/templates/entry.md"] = "* {change}";
-    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toEqual({ changed: true, sourceRef: commit });
+    // A newer version never replaces the library's copy: it becomes a proposal that is reviewed and decided.
+    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toMatchObject({ changed: true, status: "in_review" });
+    expect((await c.req("GET", `${base}/${notes.id}`)).json()).toMatchObject({ sourceRef: before, files: [expect.anything(), { path: "templates/entry.md", text: "- {change}" }] });
     commit = before;
     expect((await c.req("POST", base, { from: "link", url: "https://github.com/acme/nothing" })).statusCode).toBe(404);
   });
@@ -338,10 +341,10 @@ describe("skills library (R71)", () => {
     commit = "4444444444444444444444444444444444444444";
     files["skills/triage/SKILL.md"] = "---\nname: triage\ndescription: \"Sorts bug reports by severity.\"\n---\nNew steps.\n";
     files["skills/deploy/SKILL.md"] = "---\nname: deploy\ndescription: Deploys.\n---\n";
-    const apiCalls = fetched.filter((u) => u.startsWith("https://api.github.com")).length;
-    expect((await c.req("POST", `${packs}/refresh`, { pack: "acme/kit" })).json()).toEqual({ changed: 1, added: ["deploy"], gone: [] });
-    // One read of the link for the whole pack: the branch's commit and the tree.
-    expect(fetched.filter((u) => u.startsWith("https://api.github.com")).length - apiCalls).toBe(2);
+    await c.db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, c.worker.id));
+    // The changed skill becomes a proposal; nothing in the library moves.
+    expect((await c.req("POST", `${packs}/refresh`, { pack: "acme/kit" })).json()).toEqual({ proposed: ["triage"], unchanged: 1, problems: [] });
+    expect((await c.req("GET", base)).json().map((s: { name: string; sourceRef: string }) => [s.name, s.sourceRef])).toEqual([["release-notes", before], ["triage", before]]);
     commit = before;
     delete files["skills/deploy/SKILL.md"];
 

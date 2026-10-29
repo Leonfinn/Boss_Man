@@ -377,6 +377,7 @@ do_rollback_bluegreen() {
 }
 
 # Reads a field of scripts/deploy.sh's own status file.
+# Booleans print True/False because callers compare against "True".
 deploy_status_field() { node -e 'const fs=require("fs");let o;try{o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.stdout.write("");process.exit(0)}const v=o==null?undefined:o[process.argv[2]];process.stdout.write(v===true?"True":v===false?"False":v==null?"":String(v))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" "$1" 2>/dev/null || true; }
 
 main() {
@@ -418,7 +419,8 @@ process.stdout.write(d.id+" "+d.target+" "+d.commit);
 )" || finish rejected "Rejected: the request file does not match the expected format."
   read -r REQ_ID TARGET COMMIT <<<"$parsed"
 
-  if [[ -s $OUTBOX/history.jsonl ]] && grep -qF "\"id\": \"$REQ_ID\"" "$OUTBOX/history.jsonl"; then
+  # Accept both spacings: history lines written by older versions may be compact.
+  if [[ -s $OUTBOX/history.jsonl ]] && grep -qE "\"id\":[[:space:]]*\"$REQ_ID\"" "$OUTBOX/history.jsonl"; then
     finish rejected "Rejected: this request was already handled."
   fi
 

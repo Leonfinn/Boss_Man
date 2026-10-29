@@ -328,6 +328,8 @@ export const tickets = pgTable(
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** When an owner action made the state note possibly out of date (BOS-123). */
+    stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
@@ -343,7 +345,7 @@ export const tickets = pgTable(
 
 // ---------- Decisions and engagements ----------
 
-export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget"]);
+export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget", "skill"]);
 export const decisionTier = pgEnum("decision_tier", ["ceo", "owner"]);
 export const decisionStatus = pgEnum("decision_status", ["open", "answered", "withdrawn"]);
 
@@ -367,6 +369,9 @@ export const decisions = pgTable("decisions", {
   context: jsonb("context").notNull().default({}),
   createdAt: createdAt(),
   answeredAt: timestamp("answered_at", { withTimezone: true }),
+  /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
+  staleAt: timestamp("stale_at", { withTimezone: true }),
+  staleReason: text("stale_reason"),
 });
 
 export const engagementStatus = pgEnum("engagement_status", [
@@ -467,7 +472,7 @@ export const wakes = pgTable(
     createdAt: createdAt(),
     launchedAt: timestamp("launched_at", { withTimezone: true }),
   },
-  (t) => [index("wakes_status_priority").on(t.status, t.priority)],
+  (t) => [index("wakes_status_priority").on(t.status, t.priority), index("wakes_run_id").on(t.runId)],
 );
 
 // ---------- Runs, funding and cost ----------
@@ -496,6 +501,14 @@ export const runs = pgTable("runs", {
   cachedReadTokens: bigint("cached_read_tokens", { mode: "number" }),
   cachedWriteTokens: bigint("cached_write_tokens", { mode: "number" }),
   purpose: text("purpose"),
+  /**
+   * What started the run, in plain words, for runs with no ticket: "nudge", "wiki upkeep",
+   * "owner_chat" and so on (the wake's reason). It may name a ticket the run was about
+   * without being on it (a nudge that passed one); that link is `runTicketId`.
+   */
+  origin: text("origin"),
+  /** The ticket the run was about, when it wasn't formally on it (a nudge naming one). */
+  runTicketId: uuid("run_ticket_id").references(() => tickets.id, { onDelete: "set null" }),
   /** The CEO chapter this run belongs to, if any. */
   chapterId: uuid("chapter_id").references((): AnyPgColumn => ceoChapters.id, { onDelete: "set null" }),
   /** How full the session's context was when last reported, in tokens. */
@@ -842,6 +855,8 @@ export const nudges = pgTable(
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     /** What was said, for the owner's alert when two agents loop. */
     why: text("why"),
+    /** The wake this nudge delivered. Its run says who nudged and why (BOS-118). */
+    wakeId: uuid("wake_id").references(() => wakes.id, { onDelete: "set null" }),
     /** Dropped as a ping-pong: not delivered, and not counted again. */
     dropped: boolean("dropped").notNull().default(false),
     createdAt: createdAt(),
@@ -1292,9 +1307,9 @@ export const watchdogFlags = pgTable(
     /** Snoozes in a row in this episode; after two, the next time it is due it goes to the CEO. */
     snoozeCount: integer("snooze_count").notNull().default(0),
     escalatedAt: timestamp("escalated_at", { withTimezone: true }),
-    /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
     /** Hand-offs in a row with nothing happening on the ticket in between; each doubles the wait before the next (BOS-121). */
     backoffSteps: integer("backoff_steps").notNull().default(0),
+    /** The facts when it last tripped: idleMs, limitMs, runId, runOutcome, decisionId, holds, bounces. */
     detail: jsonb("detail").notNull().default({}),
   },
   (t) => [
@@ -1362,6 +1377,57 @@ export const skills = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("skills_company_name").on(t.companyId, t.name)],
+);
+
+export type SkillFinding = { file: string; lineStart: number; lineEnd: number; title: string; severity: "critical" | "high" | "medium" | "low"; confidence: "confirmed" | "likely"; behaviour: string; harm: string; fix: string; blocks: boolean };
+
+/** A skill the CEO proposes (own draft or internet link). Nothing here is in the library until the owner decides; the install step is the only writer to skills. */
+export const skillProposals = pgTable(
+  "skill_proposals",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    source: text("source").$type<"draft" | "link">().notNull(),
+    sourceUrl: text("source_url"),
+    /** For a link: the commit the files were read at. Install re-reads this exact commit, never a branch. */
+    pinnedRef: text("pinned_ref"),
+    /** The reviewed bytes (base64), kept so install writes exactly what the reviewer saw. */
+    files: jsonb("files").$type<Array<{ path: string; content: string }>>().notNull(),
+    /** sha256 hex per file path, and over the whole sorted set. */
+    fileHashes: jsonb("file_hashes").$type<Record<string, string>>().notNull(),
+    bundleHash: text("bundle_hash").notNull(),
+    why: text("why").notNull(),
+    proposedAgentIds: jsonb("proposed_agent_ids").$type<string[]>().notNull().default([]),
+    proposedByAgentId: uuid("proposed_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** Set: this proposal is a new version of that installed skill. */
+    replacesSkillId: uuid("replaces_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    /** Worked out by the system from the files, never taken from the CEO. */
+    hasScripts: boolean("has_scripts").notNull(),
+    scriptFiles: jsonb("script_files").$type<string[]>().notNull().default([]),
+    reviewRequired: boolean("review_required").notNull(),
+    status: text("status").$type<"proposed" | "in_review" | "awaiting_owner" | "installed" | "rejected" | "stale" | "expired">().notNull().default("proposed"),
+    reviewTicketId: uuid("review_ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    verdict: text("verdict").$type<"recommend" | "conditions" | "advise_against">(),
+    verdictSummary: text("verdict_summary"),
+    findings: jsonb("findings").$type<SkillFinding[]>(),
+    conditions: jsonb("conditions").$type<string[]>(),
+    /** Bundle hash the verdict was given for; must equal bundleHash to count. */
+    reviewedBundleHash: text("reviewed_bundle_hash"),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    decidedBy: text("decided_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    overridden: boolean("overridden").notNull().default(false),
+    overriddenBy: text("overridden_by"),
+    overriddenAt: timestamp("overridden_at", { withTimezone: true }),
+    installedSkillId: uuid("installed_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One open proposal per name.
+    uniqueIndex("skill_proposals_open_name").on(t.companyId, t.name).where(sql`status in ('proposed','in_review','awaiting_owner')`),
+  ],
 );
 
 /** Which agents have which skills, and who gave them. */

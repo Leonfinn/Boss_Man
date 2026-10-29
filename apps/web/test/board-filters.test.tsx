@@ -15,7 +15,7 @@ const company: Company = { id: "c1", name: "App Co", mission: null, paused: fals
 const card = (over: Record<string, unknown>) => ({ systemState: "ready", outcome: null, assigneeAgentId: null, assignedToOwner: false, dueDate: null, blockedBy: [], branch: null, risk: null, planFirst: false, plan: null, planApprovedAt: null, ...over });
 const feat = (id: string, title: string) => ({ id, companyId: "c1", areaId: null, parentId: null, title, description: null, status: "in_progress", effort: null, driverScores: {}, milestoneId: null, portalVisible: false, createdAt: "2026-10-19T09:00:00Z", updatedAt: "2026-10-19T09:00:00Z", releasedAt: null, demand: 0, insightCount: 0, customerCount: 0, value: 0, demandPart: 0, priority: 0, tickets: { total: 0, done: 0, items: [] } });
 
-function stub() {
+function stub(extra: Record<string, unknown> = {}) {
   const since = new Date(Date.now() - 23 * 60_000).toISOString();
   vi.stubGlobal(
     "fetch",
@@ -24,6 +24,7 @@ function stub() {
       if (url.endsWith("/board"))
         return json({
           project: { id: "p1", companyId: "c1", name: "App" },
+          ...extra,
           columns: [
             {
               id: "col1", name: "Ready", systemState: "ready", wipLimit: null,
@@ -77,7 +78,7 @@ describe("board filters", () => {
     expect(shown()).toEqual(["Delta"]);
     fireEvent.change(select, { target: { value: "any" } });
 
-    const working = screen.getByRole("button", { name: "Working now" });
+    const working = screen.getByRole("button", { name: /^Working now/ });
     fireEvent.click(working);
     expect(working.getAttribute("aria-pressed")).toBe("true");
     expect(shown()).toEqual(["Alpha", "Gamma"]);
@@ -105,11 +106,32 @@ describe("board filters", () => {
     open();
     await screen.findByRole("option", { name: "Export" });
     fireEvent.change(screen.getByLabelText("Feature"), { target: { value: "f2" } });
-    fireEvent.click(screen.getByRole("button", { name: "Working now" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Working now/ }));
     cleanup();
     open();
     await screen.findByText("Gamma task", { selector: "h3 a" });
     expect(shown()).toEqual(["Gamma"]);
-    expect(screen.getByRole("button", { name: "Working now" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: /^Working now/ }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("lists runs without a ticket in a strip, shows the count, and renders agent-written text as plain text", async () => {
+    const evil = "<img src=x onerror=alert(1)>";
+    stub({
+      workingAgents: 3,
+      withoutTicket: [{ id: "r9", agent: "Senior Developer", ticketId: null, ticket: null, purpose: null, origin: "nudge", originFrom: "CEO", originNote: evil, wakeNote: evil, runTicketId: null, startedAt: new Date(Date.now() - 5 * 60_000).toISOString() }],
+    });
+    open();
+    const strip = await screen.findByLabelText("Working without a ticket");
+    expect(strip.textContent).toContain("Senior Developer");
+    expect(strip.querySelector("img")).toBeNull();
+    expect(strip.querySelector("a[href=\"#/runs/r9\"]")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Working now (3)" })).toBeTruthy();
+  });
+
+  it("shows no strip when every working agent is on a card", async () => {
+    stub({ workingAgents: 1, withoutTicket: [] });
+    open();
+    await screen.findByText("Alpha task", { selector: "h3 a" });
+    expect(screen.queryByLabelText("Working without a ticket")).toBeNull();
   });
 });

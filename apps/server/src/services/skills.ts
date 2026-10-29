@@ -3,10 +3,13 @@
 // skill comes from a GitHub link (pinned to the commit it was read at), is written in Boss
 // Man, or is uploaded. The owner gives skills to agents, and so can the CEO.
 // Format: https://code.claude.com/docs/en/skills and https://agentskills.io.
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentSkills, agents, companies, skills } from "../db/schema.js";
+import { scriptFilesOf, sha256 } from "./skill-files.js";
+import { agentSkills, agents, companies, skillProposals, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
 // Skills may ship many example assets (e.g. cathrynlavery/diagram-design has 200+), so the caps are generous.
@@ -68,8 +71,11 @@ const unb64 = (s: string) => Buffer.from(s, "base64");
 
 /** A safe relative path inside the skill folder, or null. */
 export function cleanPath(p: string) {
+  // Only printable ASCII: no control characters (a newline in a name would write lines into the review task),
+  // no lookalike letters or spaces that aren't ordinary ones. Simpler than guessing which non-ASCII is safe.
+  if (/[^\x20-\x7e]/.test(p)) return null;
   const parts = p.replace(/\\/g, "/").split("/").filter((x) => x && x !== ".");
-  if (!parts.length || parts.some((x) => x === ".." || x.includes("\0"))) return null;
+  if (!parts.length || parts.some((x) => x === ".." || x.includes("\0") || x !== x.trim())) return null;
   return parts.join("/");
 }
 
@@ -96,6 +102,13 @@ export function normalise(files: SkillFile[]): { files: SkillFile[]; folder: str
       throw new SkillError(400, "A skill needs a SKILL.md at the top of its folder.");
     }
   }
+  // not state: a local used only while checking this one folder, discarded when it returns.
+  const seen = new Set<string>();
+  for (const f of clean) {
+    const key = f.path.toLowerCase();
+    if (seen.has(key)) throw new SkillError(400, `"${f.path}" appears more than once in the skill. Each file may be listed once.`);
+    seen.add(key);
+  }
   const bytes = clean.reduce((n, f) => n + unb64(f.content).length, 0);
   if (bytes > LIMITS.bytes) throw new SkillError(400, `A skill can be at most ${LIMITS.bytes / 1024 / 1024} MB.`);
   clean.sort((a, b) => (a.path === "SKILL.md" ? -1 : b.path === "SKILL.md" ? 1 : a.path.localeCompare(b.path)));
@@ -112,22 +125,75 @@ export function parseGitHub(url: string): { owner: string; repo: string; ref: st
 }
 
 /** The name a fetched skill will have: its frontmatter name, else its folder. */
-const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillName(parseSkillMd(Buffer.from(f.files.find((x) => x.path === "SKILL.md")!.content, "base64").toString("utf8")).name ?? f.folder);
+export const skillNameOf = (f: { folder: string; files: SkillFile[] }) => skillName(parseSkillMd(Buffer.from(f.files.find((x) => x.path === "SKILL.md")!.content, "base64").toString("utf8")).name ?? f.folder);
 
-export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
+/** Loopback, private, link-local, unique-local, carrier-grade NAT, multicast and unspecified addresses (IPv4 and IPv6). */
+export function isPrivateAddress(ip: string): boolean {
+  const v4 = /^(?:::ffff:)?(\d+)\.(\d+)\.(\d+)\.(\d+)$/i.exec(ip);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 192 && b === 0) || (a === 198 && (b === 18 || b === 19));
+  }
+  const x = ip.toLowerCase();
+  return x === "::" || x === "::1" || /^f[cd]/.test(x) || /^fe[89ab]/.test(x) || /^ff/.test(x) || x.startsWith("::ffff:");
+}
+
+const realLookup = async (host: string) => (await dnsLookup(host, { all: true })).map((a) => a.address);
+
+export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (host: string) => Promise<string[]> } = {}) {
   const get = deps.fetch ?? fetch;
+  // A test that injects its own fetch never touches the network, so it needs no real DNS; production resolves every host.
+  const lookup = deps.lookup ?? (deps.fetch ? undefined : realLookup);
 
-  async function fetchOk(url: string, as: "json" | "bytes") {
-    let res: Response;
-    try {
-      res = await get(url, { headers: { "user-agent": "Boss-Man", accept: as === "json" ? "application/vnd.github+json" : "*/*" }, signal: AbortSignal.timeout(20_000) });
-    } catch {
-      throw new SkillError(502, `Couldn't reach ${new URL(url).host}.`);
+  /** True for loopback, private, link-local and other addresses a public skill link has no business on. */
+  async function privateHost(host: string) {
+    const h = host.replace(/^\[|\]$/g, "");
+    const addrs = isIP(h) ? [h] : lookup ? await lookup(h) : [];
+    return addrs.some(isPrivateAddress);
+  }
+
+  /** Fetches an https address: no private hosts (also after each redirect), redirects followed by hand, and the body read with a cap. */
+  async function fetchOk(url: string, as: "json" | "bytes", maxBytes = LIMITS.bytes) {
+    let res: Response | undefined;
+    let at = url;
+    for (let hop = 0; hop <= 5; hop++) {
+      const u = new URL(at);
+      if (u.protocol !== "https:") throw new SkillError(400, "Only https links are supported.");
+      if (await privateHost(u.hostname).catch(() => true)) throw new SkillError(400, `${u.host} isn't a public address; skill links must point to the public internet.`);
+      try {
+        res = await get(at, { headers: { "user-agent": "Boss-Man", accept: as === "json" ? "application/vnd.github+json" : "*/*" }, signal: AbortSignal.timeout(20_000), redirect: "manual" });
+      } catch {
+        throw new SkillError(502, `Couldn't reach ${u.host}.`);
+      }
+      if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+        at = new URL(res.headers.get("location")!, at).toString();
+        await res.body?.cancel().catch(() => {});
+        res = undefined;
+        continue;
+      }
+      break;
     }
+    if (!res) throw new SkillError(502, "Too many redirects.");
+    const host = new URL(at).host;
     if (res.status === 404) throw new SkillError(404, "Nothing found at that link. Private repositories aren't supported yet; check the link is public.");
     if (res.status === 403 || res.status === 429) throw new SkillError(429, "GitHub is rate-limiting requests from this server. Try again in an hour.");
-    if (!res.ok) throw new SkillError(502, `${new URL(url).host} answered ${res.status}.`);
-    return as === "json" ? ((await res.json()) as unknown) : Buffer.from(await res.arrayBuffer());
+    if (!res.ok) throw new SkillError(502, `${host} answered ${res.status}.`);
+    const tooBig = new SkillError(400, `That file is over ${Math.round(maxBytes / 1024 / 1024) || maxBytes / 1024 / 1024} MB.`);
+    if (Number(res.headers.get("content-length") ?? 0) > maxBytes) throw tooBig;
+    const chunks: Buffer[] = [];
+    let n = 0;
+    if (res.body) {
+      for await (const c of res.body as unknown as AsyncIterable<Uint8Array>) {
+        n += c.length;
+        if (n > maxBytes) {
+          await res.body.cancel().catch(() => {});
+          throw tooBig;
+        }
+        chunks.push(Buffer.from(c));
+      }
+    }
+    const body = Buffer.concat(chunks);
+    return as === "json" ? (JSON.parse(body.toString("utf8")) as unknown) : body;
   }
 
   async function save(companyId: string, input: { files: SkillFile[]; source: "written" | "link" | "upload" | "retro"; sourceUrl?: string | null; sourceRef?: string | null; name?: string | null; replaceId?: string | null; pack?: string | null; packUrl?: string | null }) {
@@ -150,12 +216,12 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   }
 
   /** Reads every skill under a GitHub link, pinned to the commit the link points at now. */
-  async function readGitHub(url: string) {
+  async function readGitHub(url: string, at?: string) {
     const gh = parseGitHub(url);
     if (!gh) return null;
     const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
     const ref = gh.ref ?? ((await fetchOk(api, "json")) as { default_branch: string }).default_branch;
-    const commit = ((await fetchOk(`${api}/commits/${encodeURIComponent(ref)}`, "json")) as { sha: string }).sha;
+    const commit = at ?? ((await fetchOk(`${api}/commits/${encodeURIComponent(ref)}`, "json")) as { sha: string }).sha;
     const tree = (await fetchOk(`${api}/git/trees/${commit}?recursive=1`, "json")) as { tree: Array<{ path: string; type: string; size?: number }>; truncated?: boolean };
     const under = (p: string) => !gh.path || p === gh.path || p.startsWith(`${gh.path}/`);
     const all = tree.tree.filter((e) => e.type === "blob" && (e.path === "SKILL.md" || e.path.endsWith("/SKILL.md"))).map((e) => e.path.slice(0, -"SKILL.md".length).replace(/\/$/, ""));
@@ -210,6 +276,12 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
   }
 
   return {
+    /** For the proposals flow: read a link, optionally at an exact commit (never re-resolving a branch). */
+    readGitHub,
+    /** For the proposals flow: the bytes at a non-GitHub link. */
+    fetchBytes: (url: string) => fetchOk(url, "bytes", 1_000_000) as Promise<Buffer>,
+    save,
+
     async list(companyId: string) {
       const rows = await db
         .select({ id: skills.id, name: skills.name, description: skills.description, source: skills.source, sourceUrl: skills.sourceUrl, sourceRef: skills.sourceRef, pack: skills.pack, packUrl: skills.packUrl, sizeBytes: skills.sizeBytes, files: skills.files, requiresAddons: skills.requiresAddons, updatedAt: skills.updatedAt })
@@ -223,7 +295,9 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
             .innerJoin(agents, eq(agents.id, agentSkills.agentId))
             .where(inArray(agentSkills.skillId, rows.map((r) => r.id)))
         : [];
-      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
+      // A skill that came through a proposal was reviewed as the owner's rule requires; any other was added by the owner directly.
+      const viaProposal = rows.length ? new Set((await db.select({ id: skillProposals.installedSkillId }).from(skillProposals).where(inArray(skillProposals.installedSkillId, rows.map((r) => r.id)))).map((r) => r.id)) : new Set<string | null>();
+      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, hasScripts: scriptFilesOf(files).length > 0, addedByOwner: !viaProposal.has(r.id), agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
     },
 
     /** Skills of the owner's other companies, to add here instead of importing again. */
@@ -267,10 +341,11 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
       return {
         ...s,
         agents: held,
+        hasScripts: scriptFilesOf(s.files).length > 0,
         files: s.files.map((f) => {
           const bytes = unb64(f.content);
           const text = bytes.includes(0) ? null : bytes.toString("utf8");
-          return { path: f.path, size: bytes.length, text };
+          return { path: f.path, size: bytes.length, sha256: sha256(bytes), text };
         }),
       };
     },
@@ -315,23 +390,11 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
       }
       // Anything else must be a single SKILL.md file.
       const bytes = (await fetchOk(url, "bytes")) as Buffer;
-      return [await save(companyId, { files: [{ path: "SKILL.md", content: bytes.toString("base64") }], source: "link", sourceUrl: url })];
+      // Nothing versions a plain link, so it is pinned by its content: a later check can tell if it changed.
+      return [await save(companyId, { files: [{ path: "SKILL.md", content: bytes.toString("base64") }], source: "link", sourceUrl: url, sourceRef: `sha256:${sha256(bytes)}` })];
     },
 
-    /** Reads a linked skill again at its link's latest commit. */
-    async refresh(companyId: string, id: string) {
-      const [s] = await db.select().from(skills).where(and(eq(skills.id, id), eq(skills.companyId, companyId)));
-      if (!s?.sourceUrl) throw new SkillError(409, "Only a skill added from a link can be checked for updates.");
-      const gh = await readGitHub(s.sourceUrl);
-      if (!gh) {
-        const bytes = (await fetchOk(s.sourceUrl, "bytes")) as Buffer;
-        return { skill: await save(companyId, { files: [{ path: "SKILL.md", content: bytes.toString("base64") }], source: "link", sourceUrl: s.sourceUrl, name: s.name, replaceId: s.id }), changed: true };
-      }
-      if (gh.commit === s.sourceRef) return { skill: s, changed: false };
-      const f = gh.found.length === 1 ? gh.found[0]! : gh.found.find((x) => x.folder === s.name);
-      if (!f) throw new SkillError(404, "The skill is no longer at its link.");
-      return { skill: await save(companyId, { files: f.files, source: "link", sourceUrl: s.sourceUrl, sourceRef: gh.commit, name: s.name, replaceId: s.id }), changed: true };
-    },
+    // No refresh here: a new version of a skill goes through a proposal (services/skill-proposals.ts), so it is reviewed and the owner decides.
 
     async remove(companyId: string, id: string) {
       const rows = await db.delete(skills).where(and(eq(skills.id, id), eq(skills.companyId, companyId))).returning({ id: skills.id });
@@ -339,29 +402,6 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch } = {}) {
     },
 
     /** Sets exactly which agents of the company have a skill. */
-    /** Reads a pack's link again: changed skills are updated, new ones added; gone ones are listed. */
-    async refreshPack(companyId: string, pack: string) {
-      const rows = await db.select().from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack)));
-      const url = rows.find((r) => r.packUrl)?.packUrl;
-      if (!url) throw new SkillError(404, "No such pack.");
-      const gh = await readGitHub(url);
-      if (!gh) throw new SkillError(409, "That pack's link no longer points at GitHub.");
-      if (rows.every((r) => r.sourceRef === gh.commit)) return { changed: 0, added: [] as string[], gone: [] as string[] };
-      const byName = new Map(rows.map((r) => [r.name, r]));
-      let changed = 0;
-      const added: string[] = [];
-      for (const f of gh.found) {
-        const name = skillNameOf(f);
-        const had = byName.get(name);
-        const before = had ? JSON.stringify(had.files) : null;
-        const saved = await save(companyId, { files: f.files, source: "link", sourceUrl: f.url, sourceRef: gh.commit, name, replaceId: had?.id ?? null, pack, packUrl: url });
-        if (!had) added.push(saved.name);
-        else if (JSON.stringify(saved.files) !== before) changed++;
-      }
-      const found = new Set(gh.found.map(skillNameOf));
-      return { changed, added, gone: rows.filter((r) => !found.has(r.name)).map((r) => r.name) };
-    },
-
     /** Sets exactly which agents have every skill in a pack. */
     async setPackHolders(companyId: string, pack: string, agentIds: string[], by: string | null = null) {
       const rows = await db.select({ id: skills.id }).from(skills).where(and(eq(skills.companyId, companyId), eq(skills.pack, pack)));
