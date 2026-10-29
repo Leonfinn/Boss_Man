@@ -34,6 +34,16 @@ describe("acceptance criteria on the ticket page", () => {
     expect(container.textContent).toContain("Not every criterion has the author's pass or fail");
   });
 
+  it("counts criteria as '1 criterion' or 'N criteria'", async () => {
+    vi.stubGlobal("fetch", stub({ acceptanceCriteria: ["Only one"], stateNote: null }));
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText("1 criterion")).toBeTruthy();
+    cleanup();
+    vi.stubGlobal("fetch", stub({ acceptanceCriteria: ["A", "B"], stateNote: null }));
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText("2 criteria")).toBeTruthy();
+  });
+
   it("saves the owner's edit through the ticket patch, and clearing leaves none", async () => {
     const patches: unknown[] = [];
     vi.stubGlobal("fetch", stub({ acceptanceCriteria: ["Health check returns 200"], stateNote: null }, patches));

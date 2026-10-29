@@ -468,7 +468,7 @@ describe("BOS-149 round 6 regressions (BOS-184)", () => {
     expect((await row(d!.id)).status).toBe("open");
     // The service refuses it too, so the guard does not depend on the tool layer.
     await expect(
-      c.decisions.withdraw({
+      c.decisions.withdrawCard({
         id: d!.id,
         companyId: c.company.id,
         agentId: c.ceo.id,
@@ -527,7 +527,7 @@ describe("BOS-149 round 6 regressions (BOS-184)", () => {
     expect((await row(d!.id)).status).toBe("open");
     // The service refuses it too, so the guard does not depend on the tool layer.
     await expect(
-      c.decisions.withdraw({
+      c.decisions.withdrawCard({
         id: d!.id,
         companyId: c.company.id,
         agentId: c.ceo.id,

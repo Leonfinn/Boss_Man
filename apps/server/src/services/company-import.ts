@@ -7,11 +7,12 @@ import { strFromU8, unzipSync } from "fflate";
 import { z } from "zod";
 import { columnProblems, DEFAULT_REVIEW_POLICY, ReviewPolicySchema, repoUrlAllowed, findCredential, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, type ReviewPolicy } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketDependencies, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
+import { agentAvatars, agentSkills, agents, companies, features, fundingSources, keyResults, mcpServers, milestones, objectives, projects, skills, ticketMessages, tickets, wikiPages, workflowColumns } from "../db/schema.js";
 import { EXPORT_FORMAT } from "./company-export.js";
 import { fromAgentCompanies, isAgentCompanies } from "./import-agent-companies.js";
 import { MAX_BODY, slugify } from "./wiki.js";
 import { cleanPath, LIMITS, normalise, parseSkillMd, skillName, SkillError, type SkillFile } from "./skills.js";
+import { addTicketDependency } from "./ticket-links.js";
 
 export class ImportError extends Error {
   constructor(
@@ -396,7 +397,7 @@ export async function applyPackage(db: Db, pkg: Package, opts: { name?: string; 
       const id = ticketId.get(t.ref)!;
       if (t.parent && ticketId.has(t.parent)) await tx.update(tickets).set({ parentTicketId: ticketId.get(t.parent)! }).where(eq(tickets.id, id));
       const blockers = t.waitsOn.map((r) => ticketId.get(r)).filter((x): x is string => !!x && x !== id);
-      if (blockers.length) await tx.insert(ticketDependencies).values(blockers.map((b) => ({ blockedTicketId: id, blockerTicketId: b })));
+      for (const b of blockers) await addTicketDependency(tx as unknown as Db, { companyId, blockedTicketId: id, blockerTicketId: b, actor: { type: "system" } });
       if (t.conversation.length)
         await tx.insert(ticketMessages).values(
           t.conversation.map((m) => ({ companyId, ticketId: id, author: m.author, agentId: (m.agent && agentId.get(m.agent)) || null, text: m.text, ...(m.author === "system" && m.from ? { delivery: `from:${m.from}` } : {}), ...(m.at && !Number.isNaN(Date.parse(m.at)) ? { createdAt: new Date(m.at) } : {}) })),

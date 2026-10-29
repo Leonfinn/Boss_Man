@@ -439,7 +439,8 @@ export class Workspaces {
         cwd: dir,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1" } as NodeJS.ProcessEnv,
+        // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1" } as NodeJS.ProcessEnv,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {

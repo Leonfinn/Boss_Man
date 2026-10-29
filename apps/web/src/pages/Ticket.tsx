@@ -70,7 +70,7 @@ function DoneWhen({ t, patch, busy }: { t: TicketDetail; patch: (body: Record<st
   const criteria = t.acceptanceCriteria ?? [];
   const rows = readVerdicts(criteria, t.stateNote);
   return (
-    <Fold title="Done when" hint={criteria.length ? `${criteria.length} criterion${criteria.length === 1 ? "" : "a"}` : undefined}>
+    <Fold title="Done when" hint={criteria.length ? `${criteria.length} ${criteria.length === 1 ? "criterion" : "criteria"}` : undefined}>
       {rows.length > 0 && (
         <ul data-testid="criteria" style={{ margin: 0, paddingLeft: 18 }}>
           {rows.map((r) => (
