@@ -277,4 +277,25 @@ describe("raised time", () => {
     expect(times[0]).toBe(when(earlier));
     expect(times[1]).toBe(when(now));
   });
+
+  it("Reassign on a stale-blocker card opens a picker of that company's agents, and won't send without a pick", async () => {
+    const fetch = vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/tickets/") ? { assigneeAgentId: "a1" } : { ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const co: Company = { ...company, agents: [{ id: "a1", name: "Celebrimbor", title: "Dev" }, { id: "a2", name: "Galadriel", title: "QA" }] as Company["agents"] };
+    const other: Company = { id: "c2", name: "Other Co", mission: null, paused: false, agents: [{ id: "x1", name: "Elsewhere" }] as Company["agents"] };
+    const d = decision({ kind: "stale_blocker", question: "A is stuck.", options: ["Chase", "Reassign", "Let the CEO decide", "Drop dependency"], recommendedOption: "Chase", context: { type: "stale_blocker", blockerTicketId: "t9" } });
+    render(<Decisions decisions={[d]} companies={[co, other]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Reassign" }));
+    await waitFor(() => expect(screen.getByText("(has it now)")).toBeTruthy());
+    expect(screen.getByRole("radio", { name: /Galadriel, QA/ })).toBeTruthy();
+    expect(screen.queryByText(/Elsewhere/)).toBeNull();
+    expect(fetch).not.toHaveBeenCalledWith("/api/decisions/d1/answer", expect.anything());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reassign to the one I picked" }));
+    expect(screen.getByRole("alert").textContent).toBe("Pick who should take this ticket.");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Galadriel/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Reassign to the one I picked" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Reassign", assigneeAgentId: "a2" }) })));
+  });
 });
