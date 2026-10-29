@@ -316,6 +316,7 @@ describe("the CEO may answer only system and info cards (BOS-149)", () => {
       { kind: "question" as const, options: ["Deploy", "Not now"], context: { type: "self_deploy", target: "server", commit: "abc", fromCommit: "def" } },
       { kind: "question" as const, options: ["Hire", "Not now"], context: { type: "hire", proposal: { name: "X" }, byAgentId: c.ceo.id } },
       { kind: "question" as const, options: ["Apply the change", "Not now"], context: { type: "instructions", agentId: c.worker.id, instructions: "Be nice", byAgentId: c.ceo.id } },
+      { kind: "approval" as const, options: ["Approve", "Edit", "Reject"], context: { type: "model_change", agentId: c.worker.id, before: { harness: "claude", provider: "anthropic", model: "claude-sonnet", fundingSourceId: randomUUID() }, proposed: { harness: "claude", provider: "anthropic", model: "claude-opus", fundingSourceId: randomUUID() }, byAgentId: c.ceo.id } },
       { kind: "approval" as const, options: ["Approve and merge", "Send it back"], context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" } },
       { kind: "budget" as const, options: ["Raise it by half", "Leave it"], context: { type: "budget_limit", policyId: randomUUID() } },
       { kind: "question" as const, options: ["Hire the ticked ones", "Not now"], context: { type: "team_plan", projectId: null, covered: "", hires: [], byAgentId: c.ceo.id } },
@@ -423,6 +424,7 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 2)", () => 
       { kind: "approval" as const, options: ["Approve and merge", "Send it back"], context: { type: "risk_review", ticketId: t.id, reviewer: "the owner" } },
       { kind: "question" as const, options: ["Hire", "Not now"], context: { type: "hire", proposal: { name: "X" }, byAgentId: c.ceo.id } },
       { kind: "approval" as const, options: ["Approve", "Reject"], context: { type: "deploy", deployId: randomUUID() } },
+      { kind: "approval" as const, options: ["Approve", "Edit", "Reject"], context: { type: "model_change", agentId: c.worker.id, before: { harness: "claude", provider: "anthropic", model: "claude-sonnet", fundingSourceId: randomUUID() }, proposed: { harness: "claude", provider: "anthropic", model: "claude-opus", fundingSourceId: randomUUID() }, byAgentId: c.ceo.id } },
     ];
     const ceo = await c.mcp(c.ceo.id);
     for (const o of cases) {

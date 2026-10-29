@@ -208,6 +208,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "maintenance",
   "hire",
   "instructions",
+  "model_change",
   "team_plan",
   "risk_review",
   "budget_limit",
