@@ -1690,6 +1690,8 @@ export async function buildApp(opts: AppOptions) {
       areaId: Uuid.nullable(),
       parentId: Uuid.nullable(),
       effort: z.number().int().min(1).max(5).nullable(),
+      rank: z.number().int().min(1).max(5).nullable(),
+      horizon: z.enum(HORIZONS).nullable(),
       driverScores: z.record(Uuid, z.number().int().min(0).max(5).nullable()),
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
