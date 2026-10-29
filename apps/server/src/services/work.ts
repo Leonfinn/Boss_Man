@@ -207,15 +207,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // wake's note names it (a review wake can list several tickets in one run). Chat runs don't.
       const everyLive = await liveRuns(db, p.companyId);
       const named = (r: (typeof everyLive)[number]) => [...new Set(`${r.wakeNote ?? ""} ${r.originNote ?? ""}`.match(NOTE_TICKET_IDS) ?? [])];
-      const candidates = [...new Set(everyLive.flatMap((r) => [r.ticketId, r.runTicketId, ...named(r)]).filter((id): id is string => !!id))];
-      const companyTicketIds = new Set(
-        (candidates.length ? await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.companyId, p.companyId), inArray(tickets.id, candidates))) : []).map((t) => t.id),
-      );
-      // Every ticket a run is about, so one run can light two cards and still count once.
+      // Only this board's tickets can be lit; a run about a ticket in another project has no card here.
+      const boardTicketIds = new Set(rows.map((r) => r.t.id));
+      // Every ticket on this board a run is about, so one run can light two cards and still count once.
       const about = (r: (typeof everyLive)[number]) => {
         const found = new Set<string>();
         if (r.purpose === "chat") return found;
-        for (const id of [r.ticketId, r.runTicketId, ...named(r)]) if (id && companyTicketIds.has(id)) found.add(id);
+        for (const id of [r.ticketId, r.runTicketId, ...named(r)]) if (id && boardTicketIds.has(id)) found.add(id);
         return found;
       };
       // What a run is doing, after the agent's name on the card.
