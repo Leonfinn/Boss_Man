@@ -152,11 +152,114 @@ export const TODO_FAILED = "A step failed";
 /** The approval for a change that has to be applied by hand: approving it leaves a to-do rather than deploying. */
 export const APPROVE_HAND_APPLY = "Approve";
 
+/** Who ended a card without answering it, and why (BOS-149): the CEO clears a stale or duplicate card, or the product does. */
+export type Withdrawal = { by: "ceo" | "system"; agentId?: string; name?: string; note: string; at: string };
+
+/**
+ * Cards that answer an action rather than make an owner choice: a merge retry and Boss Man's own
+ * "Got it" notices and alerts. The CEO may answer these even when they sit on the owner's tier.
+ */
+export function isSystemCard(d: { kind: string; tier: string; options: unknown; context: unknown }): boolean {
+  const ctx = d.context as DecisionContext & { ladder?: unknown };
+  if (ctx.type === "check_stuck") return true;
+  // A card with steps asks the owner to do something, so it is never a system card (BOS-149),
+  // even when its only option is "Got it": the ladder keeps the steps of what it escalated.
+  const steps = (ctx as { steps?: unknown }).steps;
+  if (Array.isArray(steps) && steps.length) return false;
+  const options = Array.isArray(d.options) ? (d.options as string[]) : [];
+  // Boss Man's alerts that only need acknowledging.
+  if (ctx.ladder && options.length === 1 && options[0] === "Got it") return true;
+  // Notices such as "your answer couldn't reach the runner".
+  return ctx.type === "question" && options.length === 1 && options[0] === "Got it" && !ctx.steps?.length;
+}
+
+/**
+ * Why the CEO may not answer this card, or null. Enforced in `answer()` itself, so it holds for every
+ * caller, not just the MCP tool: owner sign-offs, deploys, hires, instruction changes, owner-only
+ * permissions and the rest stay the owner's.
+ */
+export function ceoAnswerRefusal(d: { kind: string; tier: string; options: unknown; context: unknown }, answer?: string, opts: { ladder?: boolean } = {}): string | null {
+  const ctx = d.context as DecisionContext & { ladder?: { rung?: string } };
+  // An alert still with the Scrum Master is not the CEO's yet (BOS-64): settling it here would close it
+  // and the owner would never see the escalation (BOS-149). The rung rule is for the CEO only, because
+  // the Scrum Master settles its own alerts through the same path.
+  if (opts.ladder !== false && ctx.ladder?.rung === "scrum_master") return "This alert is still with the Scrum Master, so it isn't yours to settle yet. Leave it for the ladder to hand over.";
+  // An alert that has climbed to the owner has already failed the Scrum Master and the CEO, so it is
+  // the owner's now: closing it here would take it off their queue without their seeing it (BOS-149).
+  if (opts.ladder !== false && ctx.ladder?.rung === "owner") return "This alert is already with the owner, so it isn't yours to settle. Leave it for them.";
+  if (OWNER_ONLY_ANSWER_TYPES.has(ctx.type)) return "Only the owner can answer this kind of decision. Leave it for them; if they asked for your advice, use action advise.";
+  if (ctx.type === "question" && ctx.steps?.length) return "This asks the owner to do something, so only they can answer it. Leave it for them; if they asked for your advice, use action advise.";
+  if (d.tier === "owner" && !isSystemCard(d)) return "This card is the owner's to answer. Leave it for them; if they asked for your advice, use action advise.";
+  if (isSystemCard(d)) {
+    // An allow-list, not a single refusal: anything added to a system card later stays off the CEO's list.
+    // On a merge card only the retry and the send-back are safe; "Merge without the check" is the owner's.
+    const allowed = ctx.type === "check_stuck" ? [CHECK_AGAIN, CHECK_SEND_BACK] : ["Got it"];
+    if (!answer || !allowed.includes(answer)) {
+      return ctx.type === "check_stuck"
+        ? `The CEO may only choose "${CHECK_AGAIN}" or "${CHECK_SEND_BACK}" on this card. Leave "${CHECK_SKIP}" and any other choice to the owner.`
+        : "The CEO may only acknowledge this card with \"Got it\".";
+    }
+  }
+  return null;
+}
+
+/** Context types that are always the owner's call, even if a row was somehow left at the CEO's tier. */
+const OWNER_ONLY_ANSWER_TYPES = new Set([
+  "deploy",
+  "self_deploy",
+  "owner_todo",
+  "maintenance",
+  "hire",
+  "instructions",
+  "model_change",
+  "team_plan",
+  "risk_review",
+  "budget_limit",
+  "engagement",
+  "project_cap",
+  "ticket_cap",
+  "rule_proposal",
+  "goal_check",
+]);
+
+/**
+ * Cards the CEO may withdraw only when their ticket is finished, never as a duplicate (BOS-149).
+ * Two review-loop or merge cards about one ticket can be open at once, and each holds the owner's
+ * choice: dropping one as a "duplicate" would take away that choice.
+ */
+const STALE_ONLY_WITHDRAW_TYPES = new Set(["review_loop", "check_stuck"]);
+
+/**
+ * Withdraws every open merge card for a ticket (BOS-149): one ticket never shows two, and a card for a
+ * finished ticket goes away. The old dedupe key is freed so a fresh card can be raised later.
+ */
+export async function clearMergeCards(db: Db, ticketId: string, withdrawal: Withdrawal) {
+  const rows = await db
+    .select()
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'check_stuck'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`));
+  let cleared = 0;
+  for (const r of rows) {
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
+      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (done) cleared++;
+  }
+  return cleared;
+}
+
 /**
  * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
  * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
  */
 export async function raiseMergeStuck(db: Db, t: { id: string; title: string; companyId: string }, why: string) {
+  // A finished ticket needs no merge card, even if a sweep or a late failure asks for one (BOS-149).
+  const [ticket] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, t.id));
+  if (ticket?.systemState === "done") return [];
+  // A ticket only ever has one open merge card: a new reason replaces the older card (BOS-149).
+  await clearMergeCards(db, t.id, { by: "system", note: `Replaced by a newer merge card: ${why}`, at: new Date().toISOString() });
   // GitHub's own words when the token can't change .github/workflows/.
   const fix = /without [`']?workflows?[`']? (scope|permission)/i.test(why)
     ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
@@ -476,6 +579,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo")));
       if (!ceo) throw new AnswerError("This company has no CEO to hand it to.");
     }
+    if (ctx.type === "check_stuck" && answer !== CHECK_SEND_BACK) {
+      // A retry must not merge past the owner's sign-off. Checked before the card closes, so a refused
+      // retry leaves it open on the queue instead of swapping it for a new one (BOS-149).
+      const [signoff] = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ctx.ticketId}`))
+        .limit(1);
+      if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still waiting, so the check was not run again. Answer that card first.");
+    }
     if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
       const problem = await retroHook?.problemApplying(ctx.changeId);
       if (problem) throw new AnswerError(problem);
@@ -712,6 +825,81 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       });
     else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question, forAgentId ?? undefined);
     return { outcome: tier, rule: "Plans are approved before work starts", decisionId: row?.id ?? null };
+  }
+
+  /** The card's subject, so two cards about the same ticket or deploy can be told apart as duplicates (BOS-149). */
+  async function cardSubject(d: typeof decisions.$inferSelect): Promise<string | null> {
+    const c = d.context as DecisionContext & { ladder?: { ticketId?: string | null } };
+    switch (c.type) {
+      case "permission":
+        // Keyed on the request, not the run: two different requests in one run are not duplicates (BOS-149).
+        return c.requestId ? `request:${c.requestId}` : null;
+      case "question":
+      case "stalled_run": {
+        // Two different questions about one ticket are not duplicates (BOS-149): key on what is asked,
+        // never on the ticket alone, so a live owner question is never cleared as a "duplicate".
+        const own = (c as { ticketId?: unknown }).ticketId;
+        const ticket = typeof own === "string" ? own : c.ladder?.ticketId;
+        // The choices are part of what is asked (BOS-195): a card offering a wider choice is never
+        // a duplicate of a narrower one, or the CEO could withdraw the option the owner never saw.
+        const options = Array.isArray(d.options) ? d.options.filter((o): o is string => typeof o === "string") : [];
+        return `question:${ticket ?? "-"}:${JSON.stringify([d.question, options, d.recommendedOption])}`;
+      }
+      case "check_stuck":
+      case "review_loop":
+      case "ticket_cap":
+      case "risk_review":
+      case "lesson":
+        return `ticket:${c.ticketId}`;
+      case "lesson_replace":
+        return `project:${c.projectId}`;
+      case "deploy":
+        return `deploy:${c.deployId}`;
+      case "engagement":
+        return `engagement:${c.engagementId}`;
+      case "goal_check":
+        return `feature:${c.featureId}`;
+      case "budget_limit":
+        return `budget:${c.policyId}`;
+      case "project_cap":
+        return `project:${c.projectId}`;
+      default:
+        break;
+    }
+    if (c.ladder?.ticketId) return `ticket:${c.ladder.ticketId}`;
+    const own = (c as { ticketId?: unknown }).ticketId;
+    return typeof own === "string" ? `ticket:${own}` : null;
+  }
+
+  /** Its ticket is done or cancelled, so the card no longer asks for anything (BOS-149). */
+  async function isStale(d: typeof decisions.$inferSelect): Promise<boolean> {
+    const c = d.context as DecisionContext & { ladder?: { ticketId?: string | null } };
+    const ids = new Set<string>();
+    const own = (c as { ticketId?: unknown }).ticketId;
+    if (typeof own === "string") ids.add(own);
+    if (c.ladder?.ticketId) ids.add(c.ladder.ticketId);
+    const blocked = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
+    for (const b of blocked) ids.add(b.ticketId);
+    if (!ids.size) return false;
+    const rows = await db.select({ systemState: tickets.systemState }).from(tickets).where(inArray(tickets.id, [...ids]));
+    return rows.length === ids.size && rows.every((r) => r.systemState === "done");
+  }
+
+  /** Another open card of the same kind asks the same thing (BOS-149). */
+  async function openSibling(d: typeof decisions.$inferSelect, subject: string): Promise<typeof decisions.$inferSelect | null> {
+    const c = d.context as DecisionContext;
+    const others = await db.select().from(decisions).where(and(eq(decisions.companyId, d.companyId), eq(decisions.status, "open"), ne(decisions.id, d.id)));
+    for (const o of others) {
+      if ((o.context as DecisionContext).type !== c.type) continue;
+      if ((await cardSubject(o)) === subject) return o;
+    }
+    return null;
+  }
+
+  /** Another open card covers the same thing, so this one is a duplicate (BOS-149). */
+  async function isDuplicate(d: typeof decisions.$inferSelect): Promise<boolean> {
+    const subject = await cardSubject(d);
+    return subject ? (await openSibling(d, subject)) !== null : false;
   }
 
   return {
@@ -1024,9 +1212,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     /**
      * The owner's queue (R20): every open decision with what it holds up, down the chain,
-     * ranked by an explainable score.
+     * ranked by an explainable score. `includeAll` is the CEO's view (BOS-149): every open card
+     * in the company, any tier, including lesson cards and cards still with the CEO or the
+     * Scrum Master. `companyId` narrows that view to one company.
      */
-    async queue() {
+    async queue(opts: { includeAll?: boolean; companyId?: string } = {}) {
       const t = now();
       const open = await db
         .select({ d: decisions, companyName: companies.name, agentName: agents.name })
@@ -1034,7 +1224,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .innerJoin(companies, eq(companies.id, decisions.companyId))
         .leftJoin(agents, eq(agents.id, decisions.raisedByAgentId))
         // Boss Man's alerts still with the Scrum Master or the CEO aren't the owner's yet (BOS-64); withTeam lists them.
-        .where(and(eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`, sql`coalesce(${decisions.context}->>'type', '') not in ('lesson', 'lesson_replace')`));
+        .where(
+          and(
+            eq(decisions.status, "open"),
+            ...(opts.companyId ? [eq(decisions.companyId, opts.companyId)] : []),
+            ...(opts.includeAll
+              ? []
+              : [sql`coalesce(${decisions.context}->'ladder'->>'rung', 'owner') = 'owner'`, sql`coalesce(${decisions.context}->>'type', '') not in ('lesson', 'lesson_replace')`]),
+          ),
+        );
       if (!open.length) return [];
       const forIds = [...new Set(open.map((o) => o.d.forAgentId).filter((x): x is string => !!x))];
       const forNames = new Map(forIds.length ? (await db.select({ id: agents.id, name: agents.name }).from(agents).where(inArray(agents.id, forIds))).map((a) => [a.id, a.name]) : []);
@@ -1299,6 +1497,76 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return expired;
     },
 
+    /**
+     * The CEO clears a card that is stale or a duplicate (BOS-149), with a reason the owner can read.
+     * Owner-only cards may only go when their ticket is finished (never as a duplicate); system and
+     * info cards may be cleared directly, except merge cards, which must be stale or duplicate.
+     * Returns null when it is already settled.
+     */
+    async withdrawCard(input: { id: string; companyId: string; agentId: string; note: string }) {
+      const note = input.note.replace(/\s+/g, " ").trim().slice(0, 500);
+      if (note.length < 10) throw new AnswerError("Give a reason of at least 10 characters: the owner reads it in the audit list.");
+      const [ceo] = await db.select({ name: agents.name }).from(agents).where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId), eq(agents.role, "ceo")));
+      if (!ceo) throw new AnswerError("Only the CEO withdraws a card.");
+      const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId), eq(decisions.status, "open")));
+      if (!d) return null;
+      const ctx = d.context as DecisionContext & { ladder?: { rung?: string } };
+      // An alert still with the Scrum Master is not the CEO's to clear (BOS-149): withdrawing it would
+      // keep it from ever reaching the owner. Leave it for the ladder to hand over.
+      if (ctx.ladder?.rung === "scrum_master") throw new AnswerError("This alert is still with the Scrum Master, so it isn't yours to withdraw yet. Leave it for the ladder to hand over.");
+      // An alert that has climbed to the owner is theirs: withdrawing it would take it off their queue
+      // without their seeing it, exactly what the ladder exists to prevent (BOS-149).
+      if (ctx.ladder?.rung === "owner") throw new AnswerError("This alert is already with the owner, so it isn't yours to withdraw. Leave it for them.");
+      // A permission request holds a live run and is the owner's alone: the CEO never withdraws it,
+      // stale or not. It expires on its own (BOS-149).
+      if (ctx.type === "permission") throw new AnswerError("A permission request holds a live run, so the CEO can't withdraw it. Leave it for the owner; it expires on its own.");
+      // Fail closed: only system and info cards may be cleared outright, and a live merge card never:
+      // it is waiting on the owner and can only be answered, not dropped (BOS-149).
+      const direct = isSystemCard(d) && ctx.type !== "check_stuck";
+      const staleOnly = OWNER_ONLY_ANSWER_TYPES.has(ctx.type) || STALE_ONLY_WITHDRAW_TYPES.has(ctx.type);
+      if (staleOnly) {
+        // Two open sign-offs or loop cards for one ticket are normal (one per round), so a duplicate
+        // is not a reason to clear one of the owner's own cards: only a finished ticket is.
+        if (!(await isStale(d))) {
+          throw new AnswerError("This card is the owner's own choice. Withdraw it only when its ticket is finished (done or cancelled).");
+        }
+      } else if (!direct && !(await isStale(d)) && !(await isDuplicate(d))) {
+        throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
+      }
+      const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
+      const [closed] = await db
+        .update(decisions)
+        .set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, context: { ...(d.context as object), withdrawn: withdrawal } })
+        .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+        .returning({ id: decisions.id });
+      if (!closed) return null;
+      await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
+      // A withdrawn card must never be left holding a ticket (BOS-149): move its hold to an identical
+      // open card when there is one, so the owner's surviving question still holds it, and drop it
+      // otherwise. A ticket is never blocked on a decision nobody can answer.
+      const freed = await db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
+      if (freed.length) {
+        const subject = await cardSubject(d);
+        const sibling = subject ? await openSibling(d, subject) : null;
+        for (const f of freed) {
+          if (sibling) {
+            const [already] = await db.select({ id: ticketDependencies.id }).from(ticketDependencies).where(and(eq(ticketDependencies.blockedTicketId, f.blockedTicketId), eq(ticketDependencies.blockerDecisionId, sibling.id)));
+            if (!already) await db.update(ticketDependencies).set({ blockerDecisionId: sibling.id }).where(eq(ticketDependencies.id, f.id));
+            else await db.delete(ticketDependencies).where(eq(ticketDependencies.id, f.id));
+          } else {
+            await db.delete(ticketDependencies).where(eq(ticketDependencies.id, f.id));
+          }
+          await releaseIfFree(f.blockedTicketId);
+        }
+      }
+      return { id: d.id, name: ceo.name };
+    },
+
+    /** Withdraws a finished ticket's open merge cards (BOS-149), so a merged or closed ticket leaves no card behind. */
+    async withdrawMergeCardsForTicket(ticketId: string) {
+      return clearMergeCards(db, ticketId, { by: "system", note: "The ticket is finished, so its merge card no longer applies.", at: now().toISOString() });
+    },
+
     /** Decisions the CEO settled or replaced in the last day, so the owner can see where they went. */
     async recentlyAdvised() {
       const since = new Date(now().getTime() - 24 * 3_600_000);
@@ -1313,6 +1581,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context, answer: decisions.answer })
         .from(decisions)
         .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
+        .orderBy(desc(decisions.answeredAt))
+        .limit(50);
+      // Cards the CEO cleared as stale or duplicates (BOS-149), with the reason they gave. Kept for
+      // 30 days so the owner can still trace a withdrawal after a day.
+      const withdrawnSince = new Date(now().getTime() - 30 * 24 * 3_600_000);
+      const withdrawn = await db
+        .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context })
+        .from(decisions)
+        .where(and(eq(decisions.status, "withdrawn"), sql`${decisions.context}->'withdrawn'->>'by' = 'ceo'`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
       // Alerts the Scrum Master settled from the watchdog tool: alert_resolved records who and why (BOS-119).
@@ -1353,6 +1630,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           const ctx = r.context as Extract<DecisionContext, { type: "permission" }>;
           return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), about: aboutOf(r), settled: { by: ctx.settled?.name ?? "the team", answer: r.answer ?? "", note: ctx.settled?.note ?? null, command: ctx.explain?.command?.slice(0, 500) ?? null, tempCleanup: ctx.tempCleanup === true, ...(ctx.workingCopy ? { workingCopy: true } : {}) } };
         }),
+        ...withdrawn.map((r) => {
+          const w = (r.context as { withdrawn: Withdrawal }).withdrawn;
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), withdrawn: { by: w.name ?? "the CEO", note: w.note } };
+        }),
         ...fromAlerts,
       ];
     },
@@ -1361,6 +1642,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     async answer(id: string, answer: string, extra: AnswerExtra = {}) {
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, id), eq(decisions.status, "open")));
       if (!d) return null;
+      // The server's own guard (BOS-149): a CEO answer may never settle an owner-only card, whatever the tool text says.
+      if (extra.settledBy) {
+        // The Scrum Master settles its own alerts through `settledBy` too, so the "not yours yet" rung
+        // rule only applies when the settler is the CEO (BOS-64) — the rest of the refusal does not.
+        const [who] = await db.select({ role: agents.role }).from(agents).where(eq(agents.id, extra.settledBy.agentId));
+        const refusal = ceoAnswerRefusal(d, answer, { ladder: who?.role === "ceo" });
+        if (refusal) throw new AnswerError(refusal);
+      }
       const options = d.options as string[];
       // A drop-one decision also takes the short form "Replace #12" for its numbered option.
       const short = /^Replace #(\d+)$/.exec(answer.trim());
@@ -1561,7 +1850,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
         if (answer === CHECK_SEND_BACK) await loopHooks?.sendBack(ctx.ticketId, `The review was approved, but ${ctx.command ? `the check \`${ctx.command}\`` : "the merge"} couldn't finish, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${ctx.output}`, "the owner");
-        else await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
+        else
+          try {
+            await loopHooks?.landAgain(ctx.ticketId, answer === CHECK_SKIP);
+          } catch (err) {
+            // The retry couldn't start: keep the card open so the answer can be given again.
+            await db.update(decisions).set({ status: "open", answer: null, answeredAt: null }).where(eq(decisions.id, id));
+            throw new AnswerError(`The check wasn't run again: ${(err as Error).message}`);
+          }
       } else if (ctx.type === "lesson") {
         await answerLessons(d, ctx, answer, extra);
         await retroHook?.lessonAnswered(id, answer, extra.note);

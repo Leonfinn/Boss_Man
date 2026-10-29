@@ -395,7 +395,7 @@ export async function buildApp(opts: AppOptions) {
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
-    onDone: (t) => scheduler.onTicketDone(t.id),
+    onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
     onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
   });
@@ -446,13 +446,13 @@ export async function buildApp(opts: AppOptions) {
     land: (ticketId, reviewer) =>
       review.land(ticketId, reviewer).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     // An answer that arrives after the ticket moved on is told to the owner, not thrown back at them.
     landAgain: (ticketId, skipChecks) =>
       review.startLanding(ticketId, "the owner", null, { skipChecks }).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message}`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     stopTicket: async (ticketId) => {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
@@ -466,7 +466,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -1869,6 +1869,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
     owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
+    owner.get("/api/tickets/:id/related", async (req) => planning.relatedTickets(IdParam.parse(req.params).id));
     owner.delete("/api/dependencies/:id", async (req, reply) => {
       await planning.removeDependency(IdParam.parse(req.params).id);
       return reply.code(204).send();

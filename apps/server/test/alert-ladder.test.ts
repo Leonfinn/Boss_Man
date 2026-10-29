@@ -175,17 +175,25 @@ describe("the alert ladder (BOS-64)", () => {
     expect(await ownerNotified(d.id)).toHaveLength(1);
   });
 
-  it("the CEO can settle an alert with a plain answer", async () => {
+  it("the CEO can settle an alert with a plain answer, with a reason the owner can read", async () => {
     const d = await wakeChain();
-    const r = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });
+    const bare = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it" } });
+    expect(isError(bare)).toBe(true);
+    const r = await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it", note: "I checked the alert and the team has it." } });
     expect(isError(r)).toBe(false);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.context).toMatchObject({ settled: { note: "I checked the alert and the team has it." } });
     expect(await ownerNotified(d.id)).toHaveLength(0);
   });
 
-  it("the CEO doesn't see alerts still with the Scrum Master", async () => {
+  it("the CEO cannot see or settle alerts still with the Scrum Master (BOS-64), so the ladder still reaches the owner", async () => {
     await ctx.switchOn();
     const d = await wakeChain();
-    expect(textOf(await (await client(ctx.ceo.id)).callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(d.id);
+    // An alert still with the team is not the CEO's to settle: it stays off the CEO's list, as it does off the owner's.
+    const ceo = await client(ctx.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain(d.id);
+    const answered = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: d.id, answer: "Got it", note: "I looked into it and the team has it." } });
+    expect(isError(answered)).toBe(true);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]!.status).toBe("open");
   });
 
   describe("fall-through", () => {
