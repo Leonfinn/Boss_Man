@@ -20,7 +20,7 @@ type Feature = {
 };
 type Finding = { failure: string; failureLabel: string; handoff?: { from: string; to: string }; tickets: string[]; count: number; note: string };
 type RetroInfo = { retro: { id: string; startedAt: string; since: string; until: string; doneCount: number; savedAt: string | null; agentName: string | null; findings: Finding[] } | null; changes: ChangeRow[] };
-type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[] };
+type ChangeRow = { id: string; lever: string; summary: string; approver: "ceo" | "owner"; status: "proposed" | "applied" | "skipped" | "kept" | "reverted"; metricLabel: string; baselineText: string; afterText: string | null; target: string | null; appliedAt: string | null; evidence: string[]; reason: string | null; reasonLink: string | null; decidedBy: "ceo" | "owner" | null };
 type SizeRow = { role: string; size: number; done: number; p50CycleMs: number | null; p85CycleMs: number | null; meanCostMicros: number | null; meanRework: number | null };
 type SizeNote = { role: string; size: number; likeSize: number };
 type Scorecard = { days: number; costBasis: "estimate" | "billed" | "mixed" | null; byRole: Role[]; byAgent: AgentRow[]; handoffs: Handoff[]; features: Feature[]; sizes: SizeRow[]; sizeNotes: SizeNote[] };
@@ -39,6 +39,7 @@ const dollars = (micros: number | null) => (micros === null ? "–" : `$${(micro
 const LEVER: Record<string, string> = { playbook: "Playbook", lesson: "Brief lesson", instructions: "Instructions", review_policy: "Review policy", watchdog: "Watchdog", model: "Model", thinking: "Thinking level" };
 const STATUS: Record<ChangeRow["status"], string> = { proposed: "Waiting for an answer", applied: "Applied", skipped: "Skipped", kept: "Kept", reverted: "Reverted" };
 const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+const decided = (c: ChangeRow) => c.status !== "proposed";
 const label = (s: string) => s.replace(/[-_]/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 function Ticket({ t }: { t: { id: string; ref: string | null; title: string } }) {
@@ -123,7 +124,23 @@ function Retro({ companyId }: { companyId: string }) {
                     <td title={c.evidence.join(", ")}>{c.summary}</td>
                     <td>{LEVER[c.lever] ?? label(c.lever)}</td>
                     <td>{c.approver === "ceo" ? "CEO" : "You"}</td>
-                    <td>{STATUS[c.status]}{c.appliedAt ? ` ${day(c.appliedAt)}` : ""}</td>
+                    <td>
+                      {STATUS[c.status]}{c.appliedAt ? ` ${day(c.appliedAt)}` : ""}
+                      {decided(c) && (
+                        <>
+                          <br />
+                          <small className="muted">
+                            {c.reason ? `${STATUS[c.status]} by ${c.decidedBy === "owner" ? "you" : "CEO"}: ${c.reason}` : "No reason recorded"}
+                          </small>
+                          {c.reasonLink && (
+                            <>
+                              {" "}
+                              <a href={`#/wiki/${companyId}/${c.reasonLink}`}>Why →</a>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </td>
                     <td>
                       {c.metricLabel} <small className="muted">was {c.baselineText}{c.afterText !== null ? `, now ${c.afterText}` : ""}</small>
                     </td>

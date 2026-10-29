@@ -428,7 +428,7 @@ describe("the Scrum Master's actions (BOS-58)", () => {
 });
 
 describe("the hourly cap (BOS-58)", () => {
-  it("switches the watchdog off, tells the owner once, and refuses further actions until the owner switches it back on", async () => {
+  it("pauses the watchdog for the hour, tells the owner once, refuses actions in that hour, and resumes by itself after it", async () => {
     await ctx.switchOn({ maxNudgesPerHour: 2 });
     const ts = [];
     for (const title of ["One", "Two", "Three"]) ts.push(await ctx.ticket({ title, stateChangedAt: ctx.ago(130) }));
@@ -438,23 +438,44 @@ describe("the hourly cap (BOS-58)", () => {
     const over = await call({ action: "nudge", ticketId: ts[2]!.id, reason: "third one trips it" });
     expect(textOf(over)).toContain("hourly limit");
     const st = await ctx.watchdog.status(ctx.companyId);
-    expect(st.settings.enabled).toBe(false);
+    // A breach pauses; it does not leave the watchdog switched off.
+    expect(st.settings.enabled).toBe(true);
+    expect(st.pausedUntil).not.toBeNull();
     expect(st.trippedReason).toContain("more than 2 actions");
-    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
+    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("paused itself"))).toHaveLength(1);
     // The trip is the Page-level problem: the owner is paged straight away, once.
     const pages = (await ctx.db.select().from(notifications)).filter((n) => n.level === "page");
-    expect(pages.map((n) => n.title)).toEqual(["The watchdog switched itself off"]);
-    expect(textOf(await call({ action: "nudge", ticketId: ts[2]!.id, reason: "after the trip" }))).toContain("switched off");
-    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
-    // The sweep stays off too.
-    ctx.advance(130);
-    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+    expect(pages.map((n) => n.title)).toEqual(["The watchdog paused itself for an hour"]);
+    // The cap still holds within the hour: actions and the sweep are refused, and nothing more is sent.
+    expect(textOf(await call({ action: "nudge", ticketId: ts[2]!.id, reason: "after the trip" }))).toContain("paused");
+    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("paused itself"))).toHaveLength(1);
+    const wakesAtTrip = (await ctx.smWakes()).length;
+    const sweptAtTrip = (await ctx.watchdog.status(ctx.companyId)).lastSweepAt ?? new Date(0);
+    ctx.advance(30);
     await ctx.watchdog.run();
-    expect(await ctx.smWakes()).toHaveLength(1);
-    // Switching back on clears the trip.
-    const back = await ctx.switchOn();
-    expect(back.trippedAt).toBeNull();
-    expect(back.settings.enabled).toBe(true);
+    expect(await ctx.smWakes()).toHaveLength(wakesAtTrip);
+    expect((await ctx.watchdog.status(ctx.companyId)).pausedUntil).not.toBeNull();
+    // Once the hour is over the next sweep resumes it with no owner action, and the log is clear again.
+    ctx.advance(31);
+    await ctx.watchdog.run();
+    const after = await ctx.watchdog.status(ctx.companyId);
+    expect(after.trippedAt).toBeNull();
+    expect(after.pausedUntil).toBeNull();
+    expect(after.settings.enabled).toBe(true);
+    expect(after.lastSweepAt!.getTime()).toBeGreaterThan(sweptAtTrip.getTime());
+    expect(textOf(await call({ action: "nudge", ticketId: ts[2]!.id, reason: "next hour works" }))).not.toContain("paused");
+  });
+
+  it("a watchdog the owner switched off during a pause stays off after the hour", async () => {
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    const ts = [await ctx.ticket({ title: "A", stateChangedAt: ctx.ago(130) }), await ctx.ticket({ title: "B", stateChangedAt: ctx.ago(130) })];
+    await ctx.watchdog.run();
+    await call({ action: "nudge", ticketId: ts[0]!.id, reason: "first nudge here" });
+    await call({ action: "nudge", ticketId: ts[1]!.id, reason: "second trips it" });
+    await ctx.watchdog.update(ctx.companyId, { enabled: false });
+    ctx.advance(61);
+    await ctx.watchdog.run();
+    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
   });
 
 
@@ -748,7 +769,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
   });
   const undo = (r: unknown) => ctx.req("POST", `/api/watchdog-actions/${actionId(r)}/undo`, { reason: "Not needed after all." });
 
-  it("a trip on the nudge cap during the sweep ends the sweep: no Scrum Master wake after the watchdog switches itself off", async () => {
+  it("a trip on the nudge cap during the sweep ends the sweep: no Scrum Master wake after the watchdog pauses itself", async () => {
     await ctx.switchOn({ maxNudgesPerHour: 1 });
     const a = await handed({ title: "Twice snoozed" });
     await ctx.switchOn({ maxNudgesPerHour: 1 });
@@ -757,7 +778,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, a.id));
     const before = (await ctx.smWakes()).length;
     await ctx.watchdog.run();
-    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
+    expect((await ctx.watchdog.status(ctx.companyId)).pausedUntil).not.toBeNull();
     expect(await ctx.smWakes()).toHaveLength(before);
   });
 

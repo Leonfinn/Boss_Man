@@ -2,8 +2,8 @@
 // watchdog-rules.ts over the board, with no model and no tokens. It opens and closes flags, and
 // wakes the Scrum Master once with the list of flags that are due. The Scrum Master's few
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
-// called. Hitting the cap switches the watchdog off and tells the owner.
-import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, ne, or, sql } from "drizzle-orm";
+// called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, or, sql } from "drizzle-orm";
 import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, engagements, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
@@ -89,6 +89,13 @@ const SUGGEST: Record<WatchdogRule, string> = {
   review_loop: "escalate to the CEO, or raise_decision if only the owner can settle it",
   owner_decision_waiting: "nothing: Boss Man reminds the owner",
 };
+
+/** When a cap pause ends, or null if the watchdog isn't paused by the cap now. A switched-off watchdog is off, not paused. */
+export function watchdogPausedUntil(c: { watchdog: unknown; watchdogTrippedAt: Date | null }, at: Date): Date | null {
+  if (!c.watchdogTrippedAt || !readWatchdogSettings(c.watchdog).enabled) return null;
+  const until = new Date(c.watchdogTrippedAt.getTime() + H);
+  return until > at ? until : null;
+}
 
 export function watchdogService(db: Db, deps: WatchdogDeps) {
   const now = deps.now ?? (() => new Date());
@@ -176,19 +183,32 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
 
   // ---------- Safety ----------
 
-  /** Switches the watchdog off and tells the owner, once per trip. */
+  /**
+   * Pauses the watchdog for an hour from now and tells the owner, once per pause. It stays switched
+   * on: the sweep clears the pause when the hour is up (resumeExpired), with no one pressing Switch on.
+   */
   async function trip(companyId: string, reason: string) {
     const t = now();
     const done = await db
       .update(companies)
-      .set({ watchdog: sql`jsonb_set(${companies.watchdog}, '{enabled}', 'false'::jsonb)`, watchdogTrippedAt: t, watchdogTrippedReason: reason })
-      .where(and(eq(companies.id, companyId), isNull(companies.watchdogTrippedAt)))
+      .set({ watchdogTrippedAt: t, watchdogTrippedReason: reason })
+      .where(and(eq(companies.id, companyId), or(isNull(companies.watchdogTrippedAt), lte(companies.watchdogTrippedAt, new Date(t.getTime() - H)))))
       .returning({ id: companies.id });
     if (!done.length) return;
-    await log({ companyId, kind: "tripped", reason, summary: `The watchdog switched itself off: ${reason}` });
-    await deps.alert(companyId, `The Scrum Master watchdog switched itself off: ${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog. Look at its recent actions first; this usually means something kept tripping the same rule.`);
-    // The Page-level problem: the "Got it" decision above is only a quiet flag, so the owner is also paged once per trip.
-    await deps.notifyOwner({ companyId, level: "page", title: "The watchdog switched itself off", body: `${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog.`, link: "#/settings" });
+    const back = new Date(t.getTime() + H).toISOString().slice(11, 16);
+    await log({ companyId, kind: "tripped", reason, summary: `The watchdog paused itself for an hour (back at about ${back} UTC): ${reason}` });
+    await deps.alert(companyId, `The Scrum Master watchdog paused itself for an hour: ${reason}. It picks up again by itself at about ${back} UTC, so you don't need to do anything. Look at its recent actions if this keeps happening; it usually means something kept tripping the same rule.`);
+    await deps.notifyOwner({ companyId, level: "page", title: "The watchdog paused itself for an hour", body: `${reason}. It resumes by itself at about ${back} UTC.`, link: "#/settings" });
+  }
+
+  /** Ends cap pauses that have run their hour, for watchdogs still switched on. */
+  async function resumeExpired() {
+    const rows = await db
+      .update(companies)
+      .set({ watchdogTrippedAt: null, watchdogTrippedReason: null })
+      .where(and(sql`(${companies.watchdog}->>'enabled')::boolean`, isNotNull(companies.watchdogTrippedAt), lte(companies.watchdogTrippedAt, new Date(now().getTime() - H))))
+      .returning({ id: companies.id });
+    for (const r of rows) await record(db, { companyId: r.id, agentId: null, ticketId: null, kind: "watchdog", summary: "The watchdog's hourly pause is over, so it is running again.", at: now() });
   }
 
   /**
@@ -214,12 +234,14 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     if (!sm || sm.id !== agentId) throw new WatchdogError(403, "Only the company's Scrum Master can take watchdog actions.");
     const c = await company(companyId);
     const s = readWatchdogSettings(c.watchdog);
-    if (!s.enabled || c.watchdogTrippedAt) throw new WatchdogError(409, "The watchdog is switched off, so its actions are too. Only the owner can switch it back on.");
+    if (!s.enabled) throw new WatchdogError(409, "The watchdog is switched off, so its actions are too. Only the owner can switch it back on.");
+    const until = watchdogPausedUntil(c, now());
+    if (until) throw new WatchdogError(409, `The watchdog is paused after reaching its hourly limit. It resumes by itself at ${until.toISOString().slice(11, 16)} UTC.`);
     return { sm, s };
   }
 
   async function capOrFail(companyId: string, s: WatchdogSettings) {
-    if (!(await withinCap(companyId, "nudges", s))) throw new WatchdogError(429, "The watchdog's hourly limit was reached, so it has switched itself off and told the owner. Stop here.");
+    if (!(await withinCap(companyId, "nudges", s))) throw new WatchdogError(429, "The watchdog's hourly limit was reached, so it has paused itself until the hour is up and told the owner. Stop here.");
   }
 
   // ---------- The sweep ----------
@@ -824,6 +846,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       try {
         const [paused] = await db.select().from(settings).where(eq(settings.key, "paused"));
         if (paused?.value === true || (await getHold(db))) return { skipped: true };
+        await resumeExpired();
         const on = await db.select().from(companies).where(and(sql`(${companies.watchdog}->>'enabled')::boolean`, isNull(companies.watchdogTrippedAt), eq(companies.paused, false)));
         let flagged = 0;
         for (const c of on) {
@@ -1080,6 +1103,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
         scrumMaster: sm ? { id: sm.id, name: sm.name, paused: sm.paused } : null,
         lastSweepAt: c.watchdogLastSweepAt,
         trippedAt: c.watchdogTrippedAt,
+        pausedUntil: watchdogPausedUntil(c, now()),
         trippedReason: c.watchdogTrippedReason,
         openFlags: issues.length,
       };

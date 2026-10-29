@@ -29,9 +29,9 @@ function stub(extra: Record<string, unknown> = {}) {
             {
               id: "col1", name: "Ready", systemState: "ready", wipLimit: null,
               tickets: [
-                card({ id: "t1", title: "Alpha task", featureId: "f1", featureTitle: "Dark mode", working: ["Developer"], workingSince: since, assigneeAgentId: "a1" }),
+                card({ id: "t1", title: "Alpha task", featureId: "f1", featureTitle: "Dark mode", working: ["Developer working"], workingSince: since, assigneeAgentId: "a1" }),
                 card({ id: "t2", title: "Beta task", featureId: "f1", featureTitle: "Dark mode", assigneeAgentId: "a1" }),
-                card({ id: "t3", title: "Gamma task", featureId: "f2", featureTitle: "Export", working: ["Developer"], workingSince: since }),
+                card({ id: "t3", title: "Gamma task", featureId: "f2", featureTitle: "Export", working: ["Developer working"], workingSince: since }),
                 card({ id: "t4", title: "Delta task" }),
               ],
             },
@@ -121,7 +121,7 @@ describe("board filters", () => {
       withoutTicket: [{ id: "r9", agent: "Senior Developer", ticketId: null, ticket: null, purpose: null, origin: "nudge", originFrom: "CEO", originNote: evil, wakeNote: evil, runTicketId: null, startedAt: new Date(Date.now() - 5 * 60_000).toISOString() }],
     });
     open();
-    const strip = await screen.findByLabelText("Working without a ticket");
+    const strip = await screen.findByLabelText("Working on something other than a ticket");
     expect(strip.textContent).toContain("Senior Developer");
     expect(strip.querySelector("img")).toBeNull();
     expect(strip.querySelector("a[href=\"#/runs/r9\"]")).not.toBeNull();
@@ -132,6 +132,6 @@ describe("board filters", () => {
     stub({ workingAgents: 1, withoutTicket: [] });
     open();
     await screen.findByText("Alpha task", { selector: "h3 a" });
-    expect(screen.queryByLabelText("Working without a ticket")).toBeNull();
+    expect(screen.queryByLabelText("Working on something other than a ticket")).toBeNull();
   });
 });

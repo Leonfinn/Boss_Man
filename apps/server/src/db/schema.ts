@@ -818,6 +818,11 @@ export const workflowChanges = pgTable(
     evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
     approver: text("approver").$type<"ceo" | "owner">().notNull(),
     decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    /** Why the decision went the way it did, and the wiki page (optionally a section, slug#Heading) that explains it (BOS-216). */
+    reason: text("reason"),
+    reasonLink: text("reason_link"),
+    /** Who applied or skipped it. Older changes have none. */
+    decidedBy: text("decided_by").$type<"ceo" | "owner">(),
     status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     checkDueAt: timestamp("check_due_at", { withTimezone: true }),
@@ -1096,6 +1101,10 @@ export const features = pgTable(
     status: featureStatus("status").notNull().default("idea"),
     /** 1 (tiny) to 5 (huge); null until someone sizes it. */
     effort: integer("effort"),
+    /** A person's ranking, 1 (most important) to 5; null until ranked. Separate from the computed priority. */
+    rank: integer("rank"),
+    /** Pinned to the Now / Next / Later roadmap column; null places it from its status and work. */
+    horizon: roadmapHorizon("horizon"),
     /** Driver id to score, 0 to 5. */
     driverScores: jsonb("driver_scores").notNull().default({}),
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
@@ -1393,7 +1402,7 @@ export const skillProposals = pgTable(
     id: id(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
-    source: text("source").$type<"draft" | "link">().notNull(),
+    source: text("source").$type<"draft" | "link" | "retro">().notNull(),
     sourceUrl: text("source_url"),
     /** For a link: the commit the files were read at. Install re-reads this exact commit, never a branch. */
     pinnedRef: text("pinned_ref"),
