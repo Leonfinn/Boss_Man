@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { api, today, type Company, type Horizon, type MilestoneStatus, type RoadmapCompany, type RoadmapMilestone, type RoadmapObjective } from "../api";
+import { api, FEATURE_STATUS_LABEL, today, type Company, type FeatureRoadmapCompany, type Horizon, type MilestoneStatus, type RoadmapCompany, type RoadmapFeature, type RoadmapMilestone, type RoadmapObjective } from "../api";
 import { usePoll } from "../hooks";
+import { STATUS_TONE } from "./Features";
 
 export const STATUS: Record<MilestoneStatus, { label: string; tone: string; colour: string }> = {
   done: { label: "Done", tone: "green", colour: "var(--green-ink)" },
@@ -321,47 +322,31 @@ function AddObjective({ companies, onAdded }: { companies: Company[]; onAdded: (
 }
 
 const TABS = [
-  { id: "now", label: "Now", help: "Being worked on, late, or due within 30 days." },
-  { id: "next", label: "Next", help: "Due within the next 90 days." },
-  { id: "later", label: "Later", help: "Further out, or not scheduled yet." },
+  { id: "features", label: "Roadmap", help: "Features in Now, Next and Later, grouped by objective; unfold a feature to see its milestones." },
   { id: "timeline", label: "Timeline", help: "Every milestone by its target date." },
 ] as const;
 type Tab = (typeof TABS)[number]["id"];
-const HORIZON_LABEL: Record<Horizon, string> = { now: "Now", next: "Next", later: "Later" };
+const COLUMNS: Array<{ id: Horizon; label: string; help: string }> = [
+  { id: "now", label: "Now", help: "Being built" },
+  { id: "next", label: "Next", help: "Planned and prioritised" },
+  { id: "later", label: "Later", help: "Accepted, not scheduled" },
+];
 
-/** One milestone on a Now / Next / Later tab. */
-function MilestoneCard({ m, selected, onSelect, onChanged }: { m: RoadmapMilestone; selected: boolean; onSelect: () => void; onChanged: () => void }) {
+/** A milestone inside a feature card, with the control that pins it to a column. */
+function FeatureMilestone({ m, onChanged }: { m: RoadmapFeature["milestones"][number]; onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const pin = (value: string) =>
     void api(`/api/milestones/${m.id}`, { method: "PATCH", body: { horizon: value === "auto" ? null : value } }).then(onChanged, (err: Error) => setError(err.message));
-  const pct = m.total ? m.done / m.total : 0;
   return (
-    <li className="rm-card" style={{ ["--c" as string]: STATUS[m.status].colour }}>
-      <button type="button" className="rm-card-title" aria-expanded={selected} onClick={onSelect}>
-        <span className="rm-dot" aria-hidden="true" />
+    <li>
+      <span>
         <b>{m.title}</b>
-      </button>
-      <div className="rm-card-meta">
-        <span className={`tag ${STATUS[m.status].tone}`}>{STATUS[m.status].label}</span>
-        <span className="muted">{m.targetDate ? short(m.targetDate) : "No date"}</span>
-      </div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <span className="bar" style={{ flex: 1 }} aria-label={`${m.done} of ${m.total} tasks done`}>
-          <span style={{ width: `${pct * 100}%` }} />
-        </span>
-        <span className="mono muted" style={{ fontSize: 12 }}>
-          {m.total ? `${m.done}/${m.total}` : "no tasks"}
-        </span>
-      </div>
-      {(m.active > 0 || m.blocked > 0) && (
-        <p className="muted" style={{ fontSize: 13 }}>
-          {[m.active ? `${m.active} in progress` : "", m.blocked ? `${m.blocked} blocked` : ""].filter(Boolean).join(", ")}
-        </p>
-      )}
+        <span className="muted"> · {m.targetDate ? short(m.targetDate) : "No date"}</span>
+      </span>
       <label className="rm-pin">
         <span className="visually-hidden">Where "{m.title}" sits</span>
         <select value={m.pinned ?? "auto"} onChange={(e) => pin(e.target.value)}>
-          <option value="auto">Auto ({HORIZON_LABEL[m.horizon]})</option>
+          <option value="auto">Automatic</option>
           <option value="now">Pinned to Now</option>
           <option value="next">Pinned to Next</option>
           <option value="later">Pinned to Later</option>
@@ -372,90 +357,169 @@ function MilestoneCard({ m, selected, onSelect, onChanged }: { m: RoadmapMilesto
   );
 }
 
-function HorizonView({ list, tab, showDone, onChanged }: { list: RoadmapCompany[]; tab: Horizon; showDone: boolean; onChanged: () => void }) {
-  const [selected, setSelected] = useState<string | null>(null);
-  const inTab = (m: RoadmapMilestone) => m.horizon === tab && (showDone || m.status !== "done");
-  const companies = list
-    .map((c) => ({ ...c, objectives: c.objectives.map((o) => ({ ...o, shown: o.milestones.filter(inTab) })).filter((o) => o.shown.length || (tab === "later" && o.milestones.length === 0)) }))
-    .filter((c) => c.objectives.length);
-  if (!companies.length) return <p className="muted">Nothing in {HORIZON_LABEL[tab]} right now.</p>;
+/** A feature on the roadmap: opens the feature, and unfolds its milestones. */
+function FeatureCard({ f, companyId, onChanged }: { f: RoadmapFeature; companyId: string; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
   return (
-    <>
-      {companies.map((c) => (
-        <section key={c.id} className="card rm-company" aria-labelledby={`rmh-${c.id}`}>
-          <h2 id={`rmh-${c.id}`}>
-            {c.name}{" "}
-            <a href={`#/plan/${c.id}`} style={{ fontSize: 14, fontWeight: 400 }}>
-              See the plan
-            </a>
-          </h2>
-          {c.objectives.map((o) => {
-            const sel = o.shown.find((m) => m.id === selected);
-            return (
-              <article key={o.id} className="rm-obj" aria-labelledby={`rmh-o-${o.id}`}>
-                <div className="rm-head">
-                  <h3 id={`rmh-o-${o.id}`}>
-                    <span className="tag">P{o.priority}</span> {o.title}
-                  </h3>
-                  <AddMilestone objectiveId={o.id} onAdded={onChanged} horizon={tab} />
+    <li className="rm-card" style={{ ["--c" as string]: "var(--accent)" }}>
+      <div className="rm-card-title">
+        <a href={`#/features/${companyId}/${f.id}`}>
+          <b>{f.title}</b>
+        </a>
+        {f.milestones.length > 0 && (
+          <button type="button" className={`rm-unfold ${open ? "open" : ""}`} aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} milestones for ${f.title}`} onClick={() => setOpen(!open)}>
+            <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+          </button>
+        )}
+      </div>
+      <div className="rm-card-meta">
+        <span className={`tag ${STATUS_TONE[f.status]}`}>{FEATURE_STATUS_LABEL[f.status]}</span>
+        {f.rank !== null && <span className="tag" title="Rank">P{f.rank}</span>}
+        <span className="muted">Priority {f.priority.toFixed(1)}</span>
+      </div>
+      <span className="muted" style={{ fontSize: 13 }}>
+        {f.tickets.done} of {f.tickets.total} tickets done
+      </span>
+      {open && (
+        <ul className="rm-milestones">
+          {f.milestones.map((m) => (
+            <FeatureMilestone key={m.id} m={m} onChanged={onChanged} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
+type FeatureRow = { key: string; objective: RoadmapFeature["objective"]; features: Record<Horizon, RoadmapFeature[]> };
+
+/** One company's feature roadmap: an objective per row and the three columns, then the folded Released list. */
+function FeatureBoard({ c, onChanged }: { c: FeatureRoadmapCompany; onChanged: () => void }) {
+  const live = c.features.filter((f) => f.column !== "released");
+  const released = c.features.filter((f) => f.column === "released").sort((a, b) => (b.releasedAt ?? "").localeCompare(a.releasedAt ?? "") || a.title.localeCompare(b.title));
+  const rows = new Map<string, FeatureRow>();
+  for (const f of live) {
+    const key = f.objective?.id ?? "";
+    const row = rows.get(key) ?? { key, objective: f.objective, features: { now: [], next: [], later: [] } };
+    row.features[f.column as Horizon].push(f);
+    rows.set(key, row);
+  }
+  if (!rows.has("")) rows.set("", { key: "", objective: null, features: { now: [], next: [], later: [] } });
+  const ordered = [...rows.values()].sort((a, b) => (a.objective?.priority ?? 99) - (b.objective?.priority ?? 99) || (a.objective?.title ?? "Unassigned").localeCompare(b.objective?.title ?? "Unassigned"));
+  const order = (a: RoadmapFeature, b: RoadmapFeature) => (a.rank ?? 99) - (b.rank ?? 99) || b.priority - a.priority || a.title.localeCompare(b.title);
+  return (
+    <section className="card rm-company" aria-labelledby={`rmf-${c.id}`}>
+      <h2 id={`rmf-${c.id}`}>
+        {c.name}{" "}
+        <a href={`#/plan/${c.id}`} style={{ fontSize: 14, fontWeight: 400 }}>
+          See the plan
+        </a>
+      </h2>
+      {!c.features.length ? (
+        <p className="muted">
+          No features yet. <a href={`#/features/${c.id}`}>Add one on the Features page</a>.
+        </p>
+      ) : (
+        <>
+          <div className="rm-grid" role="table" aria-label={`Feature roadmap for ${c.name}`}>
+            <div className="rm-grid-head" role="row">
+              <span role="columnheader">Objective</span>
+              {COLUMNS.map((col) => (
+                <span role="columnheader" key={col.id}>
+                  {col.label} <small>{col.help}</small>
+                </span>
+              ))}
+            </div>
+            {ordered.map((row) => (
+              <div className="rm-grid-row" role="row" key={row.key || "unassigned"}>
+                <div className="rm-grid-obj" role="rowheader">
+                  {row.objective ? (
+                    <>
+                      <span className="tag" title="Priority (1 is highest)">
+                        P{row.objective.priority}
+                      </span>{" "}
+                      {row.objective.title}
+                    </>
+                  ) : (
+                    <span className="muted">Unassigned</span>
+                  )}
                 </div>
-                {o.shown.length ? (
-                  <ul className="rm-cards">
-                    {o.shown.map((m) => (
-                      <MilestoneCard key={m.id} m={m} selected={selected === m.id} onSelect={() => setSelected(selected === m.id ? null : m.id)} onChanged={onChanged} />
-                    ))}
-                  </ul>
-                ) : (
-                  <p className="muted" style={{ fontSize: 14 }}>
-                    No milestones yet.
-                  </p>
-                )}
-                {sel && <MilestoneDetail key={sel.id} m={sel} onChanged={onChanged} />}
-              </article>
-            );
-          })}
-        </section>
-      ))}
-    </>
+                {COLUMNS.map((col) => (
+                  <div className="rm-grid-cell" role="cell" key={col.id}>
+                    {row.features[col.id].length ? (
+                      <ul className="rm-cards">
+                        {[...row.features[col.id]].sort(order).map((f) => (
+                          <FeatureCard key={f.id} f={f} companyId={c.id} onChanged={onChanged} />
+                        ))}
+                      </ul>
+                    ) : (
+                      <span className="muted" aria-label={`No ${col.label} features`}>
+                        —
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+          {released.length > 0 && (
+            <details className="rm-released">
+              <summary>Released ({released.length})</summary>
+              <ul className="rm-cards">
+                {released.map((f) => (
+                  <FeatureCard key={f.id} f={f} companyId={c.id} onChanged={onChanged} />
+                ))}
+              </ul>
+            </details>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
 export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]; tab: string | undefined; go: (to: string) => void }) {
-  const tab: Tab = (TABS.find((t) => t.id === tabParam)?.id ?? "now") as Tab;
+  const tab: Tab = (TABS.find((t) => t.id === tabParam)?.id ?? "features") as Tab;
   const [closed, setClosed] = useState(false);
   const now = today();
   const data = usePoll((signal) => api<RoadmapCompany[]>(`/api/roadmap?today=${now}${closed ? "&closed=1" : ""}`, { signal }), 60_000, `roadmap-${closed}`);
+  const board = usePoll((signal) => api<FeatureRoadmapCompany[]>(`/api/roadmap/features`, { signal }), 60_000, "roadmap-features");
   const list = data.data ?? [];
   const win = windowOf(list, now);
-  const count = (h: Horizon) => list.reduce((n, c) => n + c.objectives.reduce((k, o) => k + o.milestones.filter((m) => m.horizon === h && (closed || m.status !== "done")).length, 0), 0);
+  const reload = () => {
+    data.reload();
+    board.reload();
+  };
+  const featureCount = (board.data ?? []).reduce((n, c) => n + c.features.filter((f) => f.column !== "released").length, 0);
   return (
     <>
       <header className="page-head">
         <div>
           <h1>Roadmap</h1>
-          <p className="sub">Each company's objectives and milestones: what's happening now, what's next, and what's later.</p>
+          <p className="sub">Features grouped by objective: what's being built now, what's next, and what's later. Unfold a feature for its milestones.</p>
         </div>
-        <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
-          <input type="checkbox" checked={closed} onChange={(e) => setClosed(e.target.checked)} />
-          Show done work
-        </label>
+        {tab === "timeline" && (
+          <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
+            <input type="checkbox" checked={closed} onChange={(e) => setClosed(e.target.checked)} />
+            Show done work
+          </label>
+        )}
       </header>
       <div className="tabs" role="tablist" aria-label="Roadmap views">
         {TABS.map((t) => (
           <button key={t.id} type="button" role="tab" id={`rm-tab-${t.id}`} aria-selected={tab === t.id} aria-controls="rm-panel" onClick={() => go(`roadmap/${t.id}`)}>
             {t.label}
-            {t.id !== "timeline" && data.data && <span className="tab-count">{count(t.id)}</span>}
+            {t.id === "features" && board.data && <span className="tab-count">{featureCount}</span>}
           </button>
         ))}
       </div>
       <div id="rm-panel" role="tabpanel" aria-labelledby={`rm-tab-${tab}`} style={{ display: "flex", flexDirection: "column", gap: 20 }}>
         <p className="muted" style={{ fontSize: 13 }}>
-          {TABS.find((t) => t.id === tab)!.help}{" "}
-          {tab === "timeline"
-            ? "At risk means due within two weeks with blocked tasks or less than half done. Late means the date has passed with work left."
-            : "Milestones are placed automatically; pin one to move it."}
+          {TABS.find((t) => t.id === tab)!.help}
+          {tab === "timeline" && " At risk means due within two weeks with blocked tasks or less than half done. Late means the date has passed with work left."}
         </p>
         {data.error && <p className="error">{data.error.message}</p>}
+        {tab === "features" && board.error && <p className="error">{board.error.message}</p>}
         {tab === "timeline" ? (
           list.map((c) => (
             <section key={c.id} className="card rm-company" aria-labelledby={`rm-${c.id}`}>
@@ -469,10 +533,10 @@ export function Roadmap({ companies, tab: tabParam, go }: { companies: Company[]
             </section>
           ))
         ) : (
-          data.data && <HorizonView list={list} tab={tab} showDone={closed} onChanged={data.reload} />
+          board.data?.map((c) => <FeatureBoard key={c.id} c={c} onChanged={reload} />)
         )}
       </div>
-      {companies.length > 0 ? <AddObjective companies={companies} onAdded={data.reload} /> : <p>Create a company on the Kanban first.</p>}
+      {companies.length > 0 ? <AddObjective companies={companies} onAdded={reload} /> : <p>Create a company on the Kanban first.</p>}
     </>
   );
 }

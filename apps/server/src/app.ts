@@ -1696,6 +1696,8 @@ export async function buildApp(opts: AppOptions) {
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
+      publicSummary: z.string().trim().max(2000).nullable(),
+      showPublicly: z.boolean(),
     });
     owner.get("/api/companies/:id/feedback-settings", async (req) => {
       const { id } = IdParam.parse(req.params);
@@ -1852,6 +1854,11 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/roadmap", async (req) => {
       const q = z.object({ today: DateStr.optional(), closed: z.enum(["1"]).optional() }).parse(req.query);
       return planning.roadmap(q.today ?? dateIn(opts.now?.() ?? new Date(), "UTC"), { includeClosed: !!q.closed });
+    });
+    /** Features for the roadmap's Now / Next / Later columns, grouped by objective on the client. */
+    owner.get("/api/roadmap/features", async () => {
+      const cos = await db.select({ id: companies.id, name: companies.name }).from(companies).orderBy(asc(companies.name));
+      return Promise.all(cos.map(async (c) => ({ ...c, features: await feedback.roadmapFeatures(c.id) })));
     });
     owner.patch("/api/objectives/:id", async (req) => {
       const { id } = IdParam.parse(req.params);

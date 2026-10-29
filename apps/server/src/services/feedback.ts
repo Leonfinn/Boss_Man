@@ -4,7 +4,7 @@
 // company's own criteria, then divided by effort. Tickets deliver features.
 import { randomBytes } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, lt, or, sql } from "drizzle-orm";
-import { demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
+import { featureHorizon, demandScore, IMPORTANCE_LABEL, IMPORTANCE_POINTS, priorityScore, suggestFeatures, untrusted, type FeatureStatus, type Horizon, type Importance, type NoteSource } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { scheduleGoalCheck } from "./goal-check.js";
 import { agents, companies, deploys, deployTargets, feedbackCustomers, feedbackNotes, feedbackSettings, featureAreas, featureDrivers, features, insights, milestones, objectives, tickets } from "../db/schema.js";
@@ -34,6 +34,8 @@ type FeaturePatch = {
   milestoneId?: string | null;
   objectiveId?: string | null;
   portalVisible?: boolean;
+  publicSummary?: string | null;
+  showPublicly?: boolean;
 };
 
 export type NoteInput = {
@@ -222,6 +224,8 @@ export function feedbackService(
     scored,
     async createFeature(companyId: string, input: FeaturePatch & { title: string; createdByAgentId?: string | null }) {
       await checkLinks(companyId, input);
+      const publicSummary = input.publicSummary?.trim() || null;
+      if (input.showPublicly && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
       const [f] = await db
         .insert(features)
         .values({
@@ -232,10 +236,14 @@ export function feedbackService(
           areaId: input.areaId ?? null,
           parentId: input.parentId ?? null,
           effort: input.effort ?? null,
+          rank: input.rank ?? null,
+          horizon: input.horizon ?? null,
           driverScores: input.driverScores ?? {},
           milestoneId: input.milestoneId ?? null,
           objectiveId: input.objectiveId ?? null,
           portalVisible: input.portalVisible ?? false,
+          publicSummary,
+          showPublicly: input.showPublicly ?? false,
           createdByAgentId: input.createdByAgentId ?? null,
           releasedAt: input.status === "released" ? now() : null,
         })
@@ -246,12 +254,15 @@ export function feedbackService(
     async updateFeature(id: string, patch: FeaturePatch, companyId?: string) {
       const f = await feature(id, companyId);
       await checkLinks(f.companyId, patch, id);
+      const publicSummary = patch.publicSummary !== undefined ? patch.publicSummary?.trim() || null : f.publicSummary;
+      if ((patch.showPublicly ?? f.showPublicly) && !publicSummary) throw new FeedbackError(422, "Write a public summary before showing the feature publicly.");
       const driverScores = patch.driverScores ? { ...(f.driverScores as Record<string, number | null>), ...patch.driverScores } : undefined;
       if (driverScores) for (const [k, v] of Object.entries(driverScores)) if (v === null) delete driverScores[k];
       const [u] = await db
         .update(features)
         .set({
           ...patch,
+          ...(patch.publicSummary !== undefined ? { publicSummary } : {}),
           ...(driverScores ? { driverScores } : {}),
           ...(patch.status === "released" && f.status !== "released" ? { releasedAt: now() } : patch.status && patch.status !== "released" ? { releasedAt: null } : {}),
           updatedAt: now(),
@@ -287,6 +298,53 @@ export function feedbackService(
         insights: evidence.map((e) => ({ ...e.insight, fromSubfeature: e.insight.featureId !== id, note: { ...e.note, text: e.note.text.slice(0, 2000) }, customer: e.customer?.id ? e.customer : null })),
         tickets: me.tickets.items,
       };
+    },
+    /** The roadmap's feature cards: where each sits, its objective, its progress and the milestones it touches. */
+    async roadmapFeatures(companyId: string) {
+      const all = await scored(companyId);
+      const shown = all.features.filter((f) => f.status !== "declined");
+      const ids = shown.map((f) => f.id);
+      const work = ids.length
+        ? await db
+            .select({ featureId: tickets.featureId, milestoneId: tickets.milestoneId })
+            .from(tickets)
+            .where(and(inArray(tickets.featureId, ids), isNull(tickets.parentTicketId)))
+        : [];
+      const milestoneIds = new Set<string>();
+      for (const f of shown) if (f.milestoneId) milestoneIds.add(f.milestoneId);
+      for (const w of work) if (w.milestoneId) milestoneIds.add(w.milestoneId);
+      const ms = milestoneIds.size ? await db.select({ id: milestones.id, title: milestones.title, targetDate: milestones.targetDate, horizon: milestones.horizon, objectiveId: milestones.objectiveId }).from(milestones).where(inArray(milestones.id, [...milestoneIds])) : [];
+      const msById = new Map(ms.map((m) => [m.id, m]));
+      const objectiveOf = (f: (typeof shown)[number]) => f.objectiveId ?? (f.milestoneId ? msById.get(f.milestoneId)?.objectiveId : null) ?? null;
+      const objectiveIds = new Set(shown.map(objectiveOf).filter((id): id is string => !!id));
+      const objs = objectiveIds.size ? await db.select({ id: objectives.id, title: objectives.title, priority: objectives.priority }).from(objectives).where(inArray(objectives.id, [...objectiveIds])) : [];
+      const objById = new Map(objs.map((o) => [o.id, o]));
+      return shown.map((f) => {
+        const linked = new Set<string>();
+        if (f.milestoneId) linked.add(f.milestoneId);
+        for (const w of work) if (w.featureId === f.id && w.milestoneId) linked.add(w.milestoneId);
+        const milestones = [...linked]
+          .map((mid) => msById.get(mid))
+          .filter((m): m is (typeof ms)[number] => !!m)
+          .sort((a, b) => (a.targetDate ?? "9999-12-31").localeCompare(b.targetDate ?? "9999-12-31") || a.title.localeCompare(b.title))
+          .map((m) => ({ id: m.id, title: m.title, targetDate: m.targetDate, pinned: m.horizon }));
+        const objectiveId = objectiveOf(f) ?? milestones.map((m) => msById.get(m.id)?.objectiveId).find((id): id is string => !!id) ?? null;
+        return {
+          id: f.id,
+          title: f.title,
+          status: f.status,
+          rank: f.rank,
+          horizon: f.horizon,
+          column: featureHorizon(f),
+          priority: f.priority,
+          releasedAt: f.releasedAt,
+          objective: objectiveId ? (objById.get(objectiveId) ?? null) : null,
+          publicSummary: f.publicSummary,
+          showPublicly: f.showPublicly,
+          tickets: { total: f.tickets.total, done: f.tickets.done },
+          milestones,
+        };
+      });
     },
 
     // ---- Customers ----
