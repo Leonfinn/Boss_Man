@@ -505,6 +505,10 @@ export function reviewService(
           if (never) {
             // The ticket stays in review; the owner decides, and the loop detector never hears of it.
             const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
+            // A ticket closed while its check was running needs no merge card (BOS-149): read the state
+            // again, because the ticket may have been merged or cancelled since this landing began.
+            const [latest] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+            if (!latest || latest.systemState === "done") return { outcome: "check_stuck", delivered: null, detail: v };
             // One open merge card per ticket: this one replaces any older card (BOS-149).
             await clearMergeCards(db, ticketId, { by: "system", note: `Replaced by a newer merge card: the check \`${command}\` ${reason}.`, at: new Date().toISOString() });
             await db

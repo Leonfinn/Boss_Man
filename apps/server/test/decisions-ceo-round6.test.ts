@@ -267,6 +267,9 @@ describe("BOS-149 round 6 regressions (BOS-184)", () => {
       question: `You approved "Add rate limiting", but it couldn't be merged: the runner is offline. Approve it again from the ticket once that's fixed.`,
       options: ["Got it"],
       recommended: "Got it",
+      // The product raises this notice with the owner's own step (app.ts), which is what makes it the
+      // owner's card rather than a dismissable "Got it" acknowledgement.
+      steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."],
     });
     expect(
       isError(
