@@ -1,11 +1,11 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { checkResults, decisions, runs, tickets, wakes } from "../src/db/schema.js";
-import { checkNeverFinished, landingText } from "../src/services/review.js";
+import { activity, reviewRequests, checkResults, decisions, runs, tickets, wakes } from "../src/db/schema.js";
+import { checkNeverFinished, checkWaitedForLock, LOCK_RETRY_ATTEMPTS, setLockRetryBase, landingText } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -204,6 +204,61 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(checkNeverFinished(v({ output: "Error: Worker exited unexpectedly" }))).toBe("killed");
     expect(checkNeverFinished(v({ output: "FAIL limit.test.ts\n expected 1000 got 100" }))).toBeNull();
     expect(landingText({ outcome: "check_stuck" }, { branch: "main", assignee: null })).toContain("it's in your Decisions");
+  });
+
+  it("starts the merge when every review is already in and a reviewer confirms, instead of refusing with no open review", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    const r = await c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "CEO", reviewerAgentId: c.ceo.id });
+    expect(r).toMatchObject({ outcome: "merged" });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done");
+    // Someone with no slot is still refused.
+    const d = await setup();
+    await d.db.insert(reviewRequests).values({ ticketId: d.ticket.id, kind: "code", reviewerAgentId: d.ceo.id, round: 1, seq: 0, status: "approved" });
+    await expect(d.review.submit(d.ticket.id, { verdict: "approved", reviewer: "Other", reviewerAgentId: randomUUID() })).rejects.toThrow(/no open review/);
+    await d.app.close(); await d.close();
+  });
+
+  describe("a check that only waited too long for the shared lock", () => {
+    const gaveUp = { ok: false, exitCode: 75, timedOut: false, output: "check-all: gave up waiting for the heavy-phase lock /tmp/x.lock", ms: 600_000 };
+    const landed = async (c: Awaited<ReturnType<typeof setup>>) => {
+      await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+    };
+
+    it("is told apart from a real failure", () => {
+      expect(checkWaitedForLock(gaveUp)).toBe(true);
+      expect(checkWaitedForLock({ exitCode: 1, output: gaveUp.output })).toBe(false);
+      expect(checkWaitedForLock({ exitCode: 75, output: "FAIL limit.test.ts" })).toBe(false);
+    });
+
+    it("is retried by Boss Man, stays in review, says so, and merges once the lock frees up", async () => {
+      setLockRetryBase(1);
+      const c = (ctx = await setup({ answers: { verify: gaveUp } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "scripts/check-all.sh" });
+      const first = approveAndWait(c.req, c.ticket.id);
+      await vi.waitFor(() => expect(c.sent.filter((x) => x.type === "workspace.verify").length).toBeGreaterThanOrEqual(2));
+      c.answers.verify = { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 };
+      await first;
+      await landed(c);
+      const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+      expect(t.systemState).toBe("done");
+      const log = (await c.db.select().from(activity)).filter((a) => a.ticketId === c.ticket.id && a.kind === "merge_check_lock_wait");
+      expect(log.length).toBeGreaterThanOrEqual(1);
+      expect(log[0]!.summary).toContain("Merge check waiting for lock, retrying");
+    });
+
+    it("asks the owner, not the agent, after every try ran out", async () => {
+      setLockRetryBase(1);
+      const c = (ctx = await setup({ answers: { verify: gaveUp } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "scripts/check-all.sh" });
+      await approveAndWait(c.req, c.ticket.id);
+      await landed(c);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(LOCK_RETRY_ATTEMPTS);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
+      expect(await c.db.select().from(wakes)).toHaveLength(0);
+      expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("shared lock");
+    }, 30_000);
   });
 
   describe("a check that was killed is the owner's call", () => {
