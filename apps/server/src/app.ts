@@ -55,6 +55,7 @@ import { dashboardService } from "./services/dashboard.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
+import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
@@ -184,6 +185,7 @@ export async function buildApp(opts: AppOptions) {
   const agentsSvc = agentsService(db, {
     now: opts.now,
     notify: (n) => notes.notify(n),
+    catalog: (companyId) => models.forCompany(companyId),
     // Tickets the CEO planned for a hire go to them once hired; one already taken or finished is left alone.
     assignPlanned: async (companyId, hired, ticketIds) => {
       for (const id of ticketIds) {
@@ -313,6 +315,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   decisionsSvc.setSelfDeployHook(selfDeploy);
   decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
+  decisionsSvc.setModelChangeHook((ctx, companyId, config) => agentsSvc.applyModelChange(ctx, companyId, config));
   decisionsSvc.setTeamPlanHook((ctx, companyId, picks) => agentsSvc.hireTeam(companyId, picks.map((i) => ctx.hires[i]!), ctx.byAgentId, (agentId, skill) => skillsSvc.give(companyId, skill, agentId, ctx.byAgentId)));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   async function quotaWatch(fundingSourceId: string) {
@@ -1383,7 +1386,59 @@ export async function buildApp(opts: AppOptions) {
     owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
       const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }).parse(req.body);
-      return skillsSvc.write(id, { ...b, replaceId: skillId }).then((s) => ({ id: s.id, name: s.name }), skillErrors(reply));
+      try {
+        // The edit replaces the skill's files: keep the old text so the log says what actually changed.
+        const old = await skillsSvc.get(id, skillId);
+        const oldSkillMd = old.files.find((f) => f.path === "SKILL.md")?.text ?? "";
+        const s = await skillsSvc.write(id, { ...b, replaceId: skillId });
+        const newSkillMd = Buffer.from(s.files.find((f) => f.path === "SKILL.md")?.content ?? "", "base64").toString("utf8");
+        const newBundle = hashFiles(s.files).bundleHash;
+        // An edited skill is new, unreviewed text: log it so an approved skill can never change without a trace.
+        // The summary shows only the region that differs, so a hidden tail or a description change still shows.
+        const differing = (before: string, after: string) => {
+          const min = Math.min(before.length, after.length);
+          let start = 0;
+          while (start < min && before[start] === after[start]) start++;
+          let endBefore = before.length;
+          let endAfter = after.length;
+          while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) {
+            endBefore--;
+            endAfter--;
+          }
+          return { before: before.slice(start, endBefore), after: after.slice(start, endAfter) };
+        };
+        // Keep both ends when it is long: a payload is often added at the end, after harmless opening text.
+        const flat = (text: string, max: number) => {
+          const one = text.replace(/\s+/g, " ").trim();
+          if (one.length <= max) return one;
+          const half = Math.max(1, Math.floor((max - 1) / 2));
+          return `${one.slice(0, half)}…${one.slice(-half)}`;
+        };
+        const diff = differing(oldSkillMd, newSkillMd);
+        const head = `Owner edited the skill ${s.name}${s.name !== old.name ? ` (was ${flat(old.name, 40)})` : ""} from ${old.bundleHash.slice(0, 12)} to ${newBundle.slice(0, 12)}.`;
+        const tail = " Not security-reviewed; full text in detail.";
+        // Leave room for the head and tail, then share what is left between the two differing sides.
+        const room = Math.max(20, 300 - head.length - tail.length - 30);
+        const shown = !diff.before && !diff.after ? "The visible text is unchanged." : `Old: "${flat(diff.before, Math.floor(room / 2))}" New: "${flat(diff.after, Math.floor(room / 2))}".`;
+        await record(db, {
+          companyId: id,
+          kind: "skill.edited_by_owner",
+          summary: `${head} ${shown}${tail}`,
+          // The activity row's summary is capped, so the full old and new content is kept beside it.
+          detail: {
+            skillId,
+            name: { before: old.name, after: s.name },
+            description: { before: old.description, after: s.description },
+            bundleHash: { before: old.bundleHash, after: newBundle },
+            skillMd: { before: oldSkillMd, after: newSkillMd },
+            changedRegion: diff,
+            removedFiles: old.files.filter((f) => f.path !== "SKILL.md").map((f) => f.path),
+          },
+        });
+        return { id: s.id, name: s.name };
+      } catch (err) {
+        return skillErrors(reply)(err);
+      }
     });
     owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
@@ -2015,11 +2070,20 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, custom, picks } = z
-        .object({ answer: z.string().trim().min(1).max(4000), assigneeAgentId: Uuid.optional(), note: z.string().trim().max(2000).optional(), custom: z.boolean().optional(), picks: z.array(z.number().int().min(0)).max(20).optional() })
+      const { answer, assigneeAgentId, note, custom, picks, modelConfig } = z
+        .object({
+          answer: z.string().trim().min(1).max(4000),
+          assigneeAgentId: Uuid.optional(),
+          note: z.string().trim().max(2000).optional(),
+          custom: z.boolean().optional(),
+          picks: z.array(z.number().int().min(0)).max(20).optional(),
+          modelConfig: z
+            .object({ harness: z.string().trim().min(1).max(40), provider: z.string().trim().min(1).max(40), model: z.string().trim().min(1).max(200), fundingSourceId: Uuid })
+            .optional(),
+        })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, by: await ownerName(req) });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, modelConfig, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });

@@ -2,5 +2,5 @@
 import type { Db } from "../db/client.js";
 import { activity } from "../db/schema.js";
 
-export const record = (db: Db, row: { companyId: string; kind: string; summary: string; agentId?: string | null; ticketId?: string | null; at?: Date }) =>
-  db.insert(activity).values({ ...row, summary: row.summary.replace(/\s+/g, " ").trim().slice(0, 300) });
+export const record = (db: Db, row: { companyId: string; kind: string; summary: string; detail?: Record<string, unknown> | null; agentId?: string | null; ticketId?: string | null; at?: Date }) =>
+  db.insert(activity).values({ ...row, detail: row.detail ?? null, summary: row.summary.replace(/\s+/g, " ").trim().slice(0, 300) });

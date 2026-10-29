@@ -8,7 +8,7 @@ import { isIP } from "node:net";
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { scriptFilesOf, sha256 } from "./skill-files.js";
+import { hashFiles, scriptFilesOf, sha256 } from "./skill-files.js";
 import { agentSkills, agents, companies, skillProposals, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
@@ -302,9 +302,16 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
             .innerJoin(agents, eq(agents.id, agentSkills.agentId))
             .where(inArray(agentSkills.skillId, rows.map((r) => r.id)))
         : [];
-      // A skill that came through a proposal was reviewed as the owner's rule requires; any other was added by the owner directly.
-      const viaProposal = rows.length ? new Set((await db.select({ id: skillProposals.installedSkillId }).from(skillProposals).where(inArray(skillProposals.installedSkillId, rows.map((r) => r.id)))).map((r) => r.id)) : new Set<string | null>();
-      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, hasScripts: scriptFilesOf(files).length > 0, addedByOwner: !viaProposal.has(r.id), agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
+      // A skill that came through a proposal was reviewed as the owner's rule requires, but only while
+      // its bytes are still the exact bytes that review covered: an edit makes the reviewed mark stale.
+      const installed = rows.length
+        ? await db
+            .select({ skillId: skillProposals.installedSkillId, bundleHash: skillProposals.bundleHash })
+            .from(skillProposals)
+            .where(inArray(skillProposals.installedSkillId, rows.map((r) => r.id)))
+        : [];
+      const reviewed = new Set(installed.filter((p) => p.skillId).map((p) => `${p.skillId}\0${p.bundleHash}`));
+      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, hasScripts: scriptFilesOf(files).length > 0, addedByOwner: !reviewed.has(`${r.id}\0${hashFiles(files).bundleHash}`), agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
     },
 
     /** Skills of the owner's other companies, to add here instead of importing again. */
@@ -348,6 +355,8 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
       return {
         ...s,
         agents: held,
+        // The same fingerprint the reviewed mark and the log use, so a reader can pin exact bytes.
+        bundleHash: hashFiles(s.files).bundleHash,
         hasScripts: scriptFilesOf(s.files).length > 0,
         files: s.files.map((f) => {
           const bytes = unb64(f.content);
