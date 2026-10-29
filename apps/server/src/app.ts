@@ -425,7 +425,7 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.error(m),
   });
   // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
-  const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
+  const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
   const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra), watchdog, nudge: (input) => scheduler.nudge(input), now: opts.now });
   const gitHosts = gitHostService({ fetch: opts.fetch });
@@ -1690,6 +1690,8 @@ export async function buildApp(opts: AppOptions) {
       areaId: Uuid.nullable(),
       parentId: Uuid.nullable(),
       effort: z.number().int().min(1).max(5).nullable(),
+      rank: z.number().int().min(1).max(5).nullable(),
+      horizon: z.enum(HORIZONS).nullable(),
       driverScores: z.record(Uuid, z.number().int().min(0).max(5).nullable()),
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
@@ -2183,7 +2185,7 @@ export async function buildApp(opts: AppOptions) {
       if ((r as { outcome?: string } | undefined)?.outcome === "landing") reply.code(202);
       return r;
     });
-    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: review.landing(IdParam.parse(req.params).id) }));
+    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
     // Try the ticket's pull request again now, rather than waiting for the sync (R59).
     owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {

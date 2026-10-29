@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
-import { api, type AdvisedDecision, type Company, type Decision, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, ApiError, type AdvisedDecision, type Company, type Decision, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
@@ -38,6 +38,11 @@ const OPTION_HELP: Record<string, string> = {
   "Cancel run": "Cancel run: stops it; message the agent on the task to start again.",
   "Keep waiting": "Keep waiting: you'll be asked again in 30 minutes if it stays quiet.",
 };
+
+type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean } | { state: "finished"; text?: string };
+const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
+const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 
 const minutesAgo = (iso: string) => {
   const m = Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 60_000));
@@ -283,6 +288,35 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [adviceNote, setAdviceNote] = useState<Record<string, string>>({});
   // "Reassign" on a stale-blocker card: the agent being picked, and who has the ticket now; absent while not picking.
   const [reassign, setReassign] = useState<Record<string, { pick: string; current: string | null }>>({});
+  // A merge started from the ticket page (or a sweep) while its approval card is still open.
+  const [landings, setLandings] = useState<Record<string, TicketLanding | null>>({});
+  const [notices, setNotices] = useState<Record<string, string>>({});
+  const inFlight = useRef(new Set<string>());
+  const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
+  const landingKey = landingIds.sort().join(",");
+  useEffect(() => {
+    if (!landingIds.length) return;
+    let stopped = false;
+    const load = async () => {
+      const entries = await Promise.all(
+        landingIds.map(async (ticketId) => {
+          try {
+            return [ticketId, (await api<{ landing: TicketLanding | null }>(`/api/tickets/${ticketId}/landing`)).landing] as const;
+          } catch {
+            return [ticketId, null] as const;
+          }
+        }),
+      );
+      if (!stopped) setLandings(Object.fromEntries(entries));
+    };
+    void load();
+    const timer = setInterval(() => void load(), 2_500);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [landingKey]);
   const openReassign = async (d: Decision) => {
     const id = d.context?.blockerTicketId;
     let current: string | null = null;
@@ -311,6 +345,9 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
+    // A second click can land before React re-renders the disabled button: refuse it here too.
+    if (inFlight.current.has(d.id)) return;
+    inFlight.current.add(d.id);
     setBusy(d.id);
     try {
       const note = notes[d.id]?.trim();
@@ -319,10 +356,19 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
       setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
+      setNotices(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
     } catch (err) {
-      setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
+      const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
+      if (err instanceof ApiError && err.status === 409 && ALREADY_LANDING.test(err.message)) {
+        const current = ticketId ? await api<{ landing: TicketLanding | null }>(`/api/tickets/${ticketId}/landing`).then((r) => r.landing).catch(() => null) : null;
+        if (ticketId) setLandings((l) => ({ ...l, [ticketId]: current }));
+        const since = current?.state === "running" ? ` since ${atTime(current.startedAt)}` : "";
+        setNotices((n) => ({ ...n, [d.id]: `Already being checked and merged${since}; nothing more to do.` }));
+        setErrors(({ [d.id]: _, ...rest }) => rest);
+      } else setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
     } finally {
+      inFlight.current.delete(d.id);
       setBusy(null);
     }
   };
@@ -449,6 +495,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const rule = d.context?.rule;
               const advice = d.context?.advice;
               const asking = advice?.state === "asking";
+              const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
+              const land = ticketId ? landings[ticketId] : null;
+              const checking = land?.state === "running" && !land.stale;
+              const staleCheck = land?.state === "running" && !!land.stale;
               return (
                 <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
                   <div className="score" title={why(d)}>
@@ -513,10 +563,29 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <span className="tag green">Temporary folder only</span> {x.scratch.note}
                           </p>
                         )}
-                        <p>
-                          <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
-                          {x.effect === "unknown" && " Read the exact command before you allow it."}
-                        </p>
+                        {x.push ? (
+                          <>
+                            <p>
+                              <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.push.headline}
+                              {x.push.kind === "ticket" && x.push.ticketId && (
+                                <>
+                                  {" "}
+                                  (<a href={`#/tickets/${x.push.ticketId}`}>{x.push.ref ?? "its ticket"}</a>)
+                                </>
+                              )}
+                            </p>
+                            {x.push.warnings.map((w) => (
+                              <p key={w} role="alert" style={{ margin: "4px 0" }}>
+                                <span className="tag red">Warning</span> {w}
+                              </p>
+                            ))}
+                          </>
+                        ) : (
+                          <p>
+                            <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
+                            {x.effect === "unknown" && " Read the exact command before you allow it."}
+                          </p>
+                        )}
                         {x.alwaysNote && !done && <p className="muted" style={{ fontSize: 13 }}>{x.alwaysNote}</p>}
                         {x.reason && <p className="muted">What the agent says it's for: {x.reason}</p>}
                         {x.command && (
@@ -619,9 +688,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         busy={busy === d.id}
                       />
                     )}
+                    {checking && land?.state === "running" && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        Checking and merging since {atTime(land.startedAt)}, started by {startedByLabel(land.startedBy)}. This can take several minutes; nothing more to do here.
+                      </p>
+                    )}
+                    {staleCheck && land?.state === "running" && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        The merge check started by {startedByLabel(land.startedBy)} at {atTime(land.startedAt)} looks stuck, so it may have stopped. Nothing is running now: you can answer again below.
+                      </p>
+                    )}
+                    {notices[d.id] && (
+                      <p role="status" className="muted">
+                        {notices[d.id]}
+                      </p>
+                    )}
                     {done ? (
                       <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
-                    ) : (
+                    ) : checking ? null : (
                       <>
                         {d.context?.hires && (
                           <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
@@ -704,7 +788,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               </button>
                             ))}
                             {!modelEdits[d.id] && d.kind === "question" && (
-                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption ?? "" }))}>
+                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => setOwnWords((w) => ({ ...w, [d.id]: "" }))}>
                                 Write my own answer
                               </button>
                             )}
@@ -722,13 +806,26 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               <label htmlFor={`own-${d.id}`}>Your answer, in your own words. It goes to {d.agentName ?? "the agent"} exactly as you write it.</label>
                               <textarea
                                 id={`own-${d.id}`}
+                                className="own-answer"
                                 rows={5}
                                 maxLength={4000}
                                 autoFocus
+                                placeholder={d.recommendedOption ?? undefined}
                                 value={ownWords[d.id]}
                                 onChange={(e) => setOwnWords((w) => ({ ...w, [d.id]: e.target.value }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Tab" && !e.shiftKey && d.recommendedOption && !ownWords[d.id]) {
+                                    e.preventDefault();
+                                    setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }));
+                                  }
+                                }}
                                 style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
                               />
+                              {d.recommendedOption && !ownWords[d.id] && (
+                                <button type="button" className="use-suggestion" onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }))}>
+                                  Use suggestion
+                                </button>
+                              )}
                             </div>
                             <div className="actions">
                               <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim()}>

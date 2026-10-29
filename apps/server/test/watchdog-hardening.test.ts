@@ -158,14 +158,13 @@ describe("QA: nudge storm and active runs (BOS-63)", () => {
     expect(nudges.length).toBeLessThanOrEqual(cap);
     expect(refused).toBeGreaterThanOrEqual(30 - cap - 1);
     const st = await ctx.watchdog.status(ctx.companyId);
-    expect(st.settings.enabled).toBe(false);
-    expect(st.trippedAt).not.toBeNull();
-    expect((await ctx.db.select().from(notifications)).filter((n) => n.title === "The watchdog switched itself off")).toHaveLength(1);
-    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
-    // Hours later the sweep still does nothing and nothing more is sent.
+    expect(st.pausedUntil).not.toBeNull();
+    expect((await ctx.db.select().from(notifications)).filter((n) => n.title === "The watchdog paused itself for an hour")).toHaveLength(1);
+    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("paused itself"))).toHaveLength(1);
+    // For the rest of the hour the sweep does nothing and nothing more is sent.
     const before = (await ctx.db.select().from(notifications)).length;
-    for (let h = 0; h < 5; h++) {
-      ctx.advance(60);
+    for (let h = 0; h < 4; h++) {
+      ctx.advance(10);
       await ctx.watchdog.run();
     }
     expect(await ctx.smWakes()).toHaveLength(1);

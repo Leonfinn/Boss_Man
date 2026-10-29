@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TASK_SIZES } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
@@ -135,8 +135,14 @@ function CriteriaEdit({ initial, save, busy }: { initial: string[]; save: (lines
   );
 }
 
-type Landing = { state: "running"; startedAt: string; command: string | null } | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
+type Landing =
+  | { state: "running"; startedAt: string; command: string | null; startedBy: string; stale?: boolean }
+  | { state: "finished"; outcome: string; text: string; url: string | null; finishedAt: string };
 const elapsed = (ms: number) => `${Math.floor(Math.max(0, ms) / 60_000)}:${String(Math.floor(Math.max(0, ms) / 1000) % 60).padStart(2, "0")}`;
+const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+/** Who started a merge, in the owner's words. */
+const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
+const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 const STATE_LABEL: Record<string, string> = { backlog: "Backlog", ready: "Ready", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done" };
 const STATE_TONE: Record<string, string> = { backlog: "", ready: "amber", in_progress: "blue", blocked: "red", review: "purple", done: "green" };
 
@@ -260,25 +266,52 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       setDiffError(err instanceof ApiError && err.status === 409 ? `${err.message} The diff comes from the runner that holds the task's worktree.` : (err as Error).message);
     }
   };
-  // Approval lands in the background; poll its status quickly while it runs.
+  // Approval lands in the background; poll its status quickly while it runs, and slowly otherwise
+  // so a merge started from another page (Decisions, a sweep) still shows here without a reload.
   const [landing, setLanding] = useState<Landing | null>(null);
   const [now, setNow] = useState(Date.now());
   const running = landing?.state === "running";
+  const checking = running && !landing?.stale;
+  const staleCheck = running && !!landing?.stale;
+  const wasRunning = useRef(false);
+  const sentReview = useRef(false);
   useEffect(() => {
-    api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`).then((r) => setLanding(r.landing), () => undefined);
-  }, [id]);
-  useEffect(() => {
-    if (!running) return;
+    let stopped = false;
+    const load = async () => {
+      try {
+        const r = await api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`);
+        if (stopped) return;
+        if (wasRunning.current && r.landing?.state !== "running") ticket.reload();
+        wasRunning.current = r.landing?.state === "running";
+        setLanding(r.landing);
+      } catch {
+        // A failed poll leaves the last known status in place; the next tick tries again.
+      }
+    };
+    void load();
     const timer = setInterval(() => {
       setNow(Date.now());
-      api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`).then((r) => {
-        if (r.landing && r.landing.state !== "running") ticket.reload();
-        setLanding(r.landing);
-      }, () => undefined);
-    }, 2_000);
-    return () => clearInterval(timer);
+      void load();
+    }, running ? 2_000 : 5_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
   }, [running, id]);
+  const refreshLanding = async () => {
+    try {
+      const r = await api<{ landing: Landing | null }>(`/api/tickets/${id}/landing`);
+      wasRunning.current = r.landing?.state === "running";
+      setLanding(r.landing);
+      return r.landing;
+    } catch {
+      return null;
+    }
+  };
   const review = async (verdict: "approved" | "changes_requested") => {
+    // A second click can land before React re-renders the disabled button: refuse it here too.
+    if (sentReview.current) return;
+    sentReview.current = true;
     setBusy(true);
     try {
       const r = await api<{ outcome?: string; delivered?: string | null; landing?: Landing }>(`/api/tickets/${id}/review`, { method: "POST", body: { verdict, ...(verdict === "changes_requested" ? { summary: summary.trim(), ...(lesson.trim() ? { lesson: lesson.trim() } : {}) } : {}) } });
@@ -292,8 +325,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
       } else setNote({ ok: true, text: `Sent back: ${r.delivered ?? "done"}.` });
       ticket.reload();
     } catch (err) {
-      setNote({ ok: false, text: (err as Error).message });
+      if (err instanceof ApiError && err.status === 409 && ALREADY_LANDING.test(err.message)) {
+        const current = await refreshLanding();
+        const since = current?.state === "running" ? ` since ${atTime(current.startedAt)}` : "";
+        setNote({ ok: true, text: `Already being checked and merged${since}; nothing more to do.` });
+      } else setNote({ ok: false, text: (err as Error).message });
     } finally {
+      sentReview.current = false;
       setBusy(false);
     }
   };
@@ -343,7 +381,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                     <input id="review-lesson" value={lesson} onChange={(e) => setLesson(e.target.value)} maxLength={240} placeholder={'One line, e.g. "Check the migration is expand-only before approving."'} />
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <button type="button" className="btn primary" disabled={busy || running || !summary.trim()} onClick={() => void review("changes_requested")}>
+                    <button type="button" className="btn primary" disabled={busy || checking || !summary.trim()} onClick={() => void review("changes_requested")}>
                       Send it back
                     </button>
                     <button type="button" className="btn" disabled={busy} onClick={() => setSendingBack(false)}>
@@ -353,10 +391,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 </>
               ) : (
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <button type="button" className="btn primary" disabled={busy || running} onClick={() => void review("approved")}>
+                  <button type="button" className="btn primary" disabled={busy || checking} onClick={() => void review("approved")}>
                     {!t.repoUrl || t.noCode ? "Approve" : t.landing === "pull_request" ? "Approve and open a pull request" : "Approve and merge"}
                   </button>
-                  <button type="button" className="btn" disabled={busy || running} onClick={() => setSendingBack(true)}>
+                  <button type="button" className="btn" disabled={busy || checking} onClick={() => setSendingBack(true)}>
                     Request changes
                   </button>
                 </div>
@@ -511,9 +549,15 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           {landing && (
             <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
               {landing.state === "running" ? (
-                <span>
-                  Approved. Running the pre-merge check{landing.command ? ` (${landing.command})` : ""}; this can take several minutes. Elapsed: {elapsed(now - Date.parse(landing.startedAt))}.
-                </span>
+                landing.stale ? (
+                  <span>
+                    The merge check started by {startedByLabel(landing.startedBy)} at {atTime(landing.startedAt)} looks stuck: the task has been quiet since {atTime(t.lastActivityAt)}, so it may have stopped. You can try again below.
+                  </span>
+                ) : (
+                  <span>
+                    Approved. Running the pre-merge check{landing.command ? ` (${landing.command})` : ""}; this can take several minutes. Elapsed: {elapsed(now - Date.parse(landing.startedAt))}.
+                  </span>
+                )
               ) : (
                 <span>
                   {landing.url && landing.text.includes(landing.url) ? (
@@ -533,7 +577,31 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
           )}
           <TicketReviews reviews={reviews} />
           {t.systemState === "review" && (
-            <Fold title="Review" hint={t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" : open.length ? `waiting for ${who}${t.ownerSignoff ? ", then you" : ""}` : "waiting for you"}>
+            <Fold
+              title="Review"
+              hint={
+                checking ? "checking and merging" :
+                staleCheck ? "the merge check looks stuck; you can try again" :
+                t.pullRequestNumber && t.pullRequestNote ? "waiting on the pull request" :
+                open.length ? `waiting for ${who}${t.ownerSignoff ? ", then you" : ""}` :
+                "waiting for you"
+              }
+            >
+              {landing?.state === "running" && !landing.stale && (
+                <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
+                  <span>
+                    <strong>Checking and merging.</strong> Started by {startedByLabel(landing.startedBy)} at {atTime(landing.startedAt)}
+                    {landing.command ? ` (${landing.command})` : ""}; this can take several minutes. Elapsed: {elapsed(now - Date.parse(landing.startedAt))}.
+                  </span>
+                </div>
+              )}
+              {staleCheck && landing?.state === "running" && (
+                <div className="banner" role="status" aria-live="polite" style={{ flexWrap: "wrap" }}>
+                  <span>
+                    <strong>The merge check looks stuck.</strong> It was started by {startedByLabel(landing.startedBy)} at {atTime(landing.startedAt)}, and the task has been quiet since {atTime(t.lastActivityAt)}. It may have stopped, so nothing is running now: you can try again.
+                  </span>
+                </div>
+              )}
               {t.pullRequestNumber && t.pullRequestNote && (
                 <div className="banner" role="status" style={{ flexWrap: "wrap" }}>
                   <span>
@@ -565,7 +633,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                     {decide}
                   </details>
                 </>
-              ) : (
+              ) : checking ? null : (
                 decide
               )}
             </Fold>

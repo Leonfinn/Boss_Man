@@ -19,7 +19,8 @@ describe("watchdog health line (BOS-60)", () => {
   });
   it("is clear when off, tripped, or not checking", () => {
     expect(healthLine({ ...on, settings: { enabled: false } }, now).text).toBe("Watchdog: off");
-    expect(healthLine({ ...on, trippedAt: "2026-10-27T09:00:00Z" }, now)).toMatchObject({ tone: "red", text: expect.stringContaining("stopped itself") });
+    expect(healthLine({ ...on, settings: { enabled: false }, trippedAt: "2026-10-27T09:00:00Z" }, now)).toMatchObject({ tone: "red", text: expect.stringContaining("stopped itself") });
+    expect(healthLine({ ...on, trippedAt: "2026-10-27T09:30:00Z", pausedUntil: "2026-10-27T10:30:00Z" }, now)).toMatchObject({ tone: "amber", text: expect.stringContaining("back in 30 min") });
     expect(healthLine({ ...on, lastSweepAt: "2026-10-27T09:30:00Z" }, now).tone).toBe("amber");
   });
 });

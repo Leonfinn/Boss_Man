@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { cleanupScope, explainCommand, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -178,6 +178,10 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const cmd = commandOf(info.rawInput) ?? info.title ?? "";
   // Temp cleanup is Allow whatever else is in it: cleanupScope already refuses shred, pushes and other destructive words, and a later cd can't move a /tmp/NAME delete.
   if (tempCleanup(cmd)) return "allow";
+  // A push is judged by where it goes (BOS-208): a plain ticket-branch push is Allow; main, force,
+  // deletes, every-branch and anything the parser can't read are Deny.
+  const push = readPush(cmd);
+  if (push) return push.dangerous ? "deny" : "allow";
   // Quoted text is data (a sed script, a commit message) unless a shell runs it.
   const run = /\b(sh|bash|zsh)\s+-c\b|\beval\b/.test(cmd) ? cmd : cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
   const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];

@@ -584,8 +584,8 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
         </a>
       )}
       {!!board.data?.withoutTicket?.length && (
-        <section className="unticketed" aria-label="Working without a ticket">
-          <strong>Working without a ticket</strong>
+        <section className="unticketed" aria-label="Working on something other than a ticket">
+          <strong>Working on something other than a ticket</strong>
           <ul>
             {board.data.withoutTicket.map((r) => (
               <li key={r.id}>
@@ -785,7 +785,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                       {!!t.working?.length && (
                         <span className="working" role="status">
                           <span className="pulse-dot" aria-hidden="true" />
-                          {t.working.join(" and ")} working now
+                          {t.working.join(" and ")}
                         </span>
                       )}
                       <div className="row">
