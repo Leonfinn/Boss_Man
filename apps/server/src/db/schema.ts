@@ -1106,6 +1106,10 @@ export const features = pgTable(
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
+    /** A plain-language summary for readers outside the team; null until written. */
+    publicSummary: text("public_summary"),
+    /** Off by default; nothing is published anywhere until a later public roadmap uses it. */
+    showPublicly: boolean("show_publicly").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
