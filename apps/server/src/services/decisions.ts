@@ -90,12 +90,19 @@ export type DeployUpdate = {
   to: string;
   /** Every commit in the range: tickets plus other commits. */
   total: number;
+  /** How many files the update touches. */
+  files: number;
   changes: DeployChange[];
   /** Tickets beyond the first 20. */
   more: number;
   otherCommits: string[];
   handBecause?: string;
   handFiles?: string[];
+  /** What a hand-applied update changes: the deployer script, the server, or both (BOS-218). */
+  handEffect?: "server" | "deployer" | "both";
+  /** Plain yes/no needs for a hand-applied update (BOS-218). */
+  needsDeployerCopy?: boolean;
+  needsRunnerUpdate?: boolean;
   risks: string[];
 };
 

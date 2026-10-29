@@ -72,7 +72,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
    * `Merge "<title>" (<ticket id>)`, so each one maps back to its ticket and title. Commits that
    * aren't a ticket keep their subject line. Long ranges show the first 20 tickets.
    */
-  async function updateFor(commit: string, fromCommit: string, a: Available | null, extras: { handBecause?: string; handFiles?: string[]; risks: string[] }): Promise<DeployUpdate | undefined> {
+  async function updateFor(commit: string, fromCommit: string, a: Available | null, extras: { handBecause?: string; handFiles?: string[]; handEffect?: DeployUpdate["handEffect"]; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean; risks: string[] }): Promise<DeployUpdate | undefined> {
     const commits = a?.commits ?? [];
     if (!commits.length) return undefined;
     const entries = commits.flatMap((c) => {
@@ -107,11 +107,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       from: fromCommit,
       to: commit,
       total: entries.length,
+      files: a?.paths.length ?? 0,
       changes: all.slice(0, 20),
       more: Math.max(0, all.length - 20),
       otherCommits,
       ...(extras.handBecause ? { handBecause: extras.handBecause } : {}),
       ...(extras.handFiles?.length ? { handFiles: extras.handFiles } : {}),
+      ...(extras.handEffect ? { handEffect: extras.handEffect } : {}),
+      ...(extras.needsDeployerCopy !== undefined ? { needsDeployerCopy: extras.needsDeployerCopy } : {}),
+      ...(extras.needsRunnerUpdate !== undefined ? { needsRunnerUpdate: extras.needsRunnerUpdate } : {}),
       risks: extras.risks,
     };
   }
@@ -163,15 +167,27 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     if (launcherChanged) risks.push("It changes the launcher. The hand steps include rebuilding it.");
     if (a?.runnerChanged) risks.push("It changes the runner, the containers agents work in. You'll be asked separately about building the new runners.");
     const infraCount = a?.infraPaths.length ?? 0;
+    // What a hand-apply touches, in plain words (BOS-218): the deployer script, the server itself, or both.
+    const handPaths = new Set([...(a?.infraPaths ?? []), ...(hostDeployerChanged ? ["scripts/host-deployer.sh"] : [])]);
+    const deployerTouched = handPaths.has("scripts/host-deployer.sh");
+    const serverTouched = [...handPaths].some((p) => p !== "scripts/host-deployer.sh");
+    const handEffect: DeployUpdate["handEffect"] = infra ? (deployerTouched ? (serverTouched ? "both" : "deployer") : "server") : undefined;
     const handBecause = infra
-      ? `Needs applying by hand because this update changes ${a!.infraPaths[0]}${infraCount > 1 ? ` and ${infraCount - 1} other deployment file${infraCount === 2 ? "" : "s"}` : ""} (${infraCount > 1 ? "files that run" : "a file that runs"} on your server).`
+      ? `Needs applying by hand because this update changes ${a!.infraPaths[0]}${infraCount > 1 ? ` and ${infraCount - 1} other deployment file${infraCount === 2 ? "" : "s"}` : ""}.`
       : undefined;
-    const update = target === "server" ? await updateFor(commit, fromCommit, a, { ...(handBecause ? { handBecause } : {}), ...(infra ? { handFiles: a!.infraPaths } : {}), risks }) : undefined;
+    const update = await updateFor(commit, fromCommit, a, {
+      ...(handBecause ? { handBecause } : {}),
+      ...(infra ? { handFiles: a!.infraPaths } : {}),
+      ...(handEffect ? { handEffect } : {}),
+      ...(infra ? { needsDeployerCopy: hostDeployerChanged } : {}),
+      ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
+      risks,
+    });
     const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     const question =
       target === "runner"
-        ? `Update the runners to ${short(commit)}? The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
+        ? `Update the runners to ${short(commit)}?\n\nThis rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
           ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue (scripts/deploy.sh, or the blue/green steps in docs/06-install-truenas.md section 9d) until it's applied or you mark it done.`
           : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`;
@@ -220,7 +236,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });
       // The server is deployed; the runners are a separate question the owner answers on its own.
-      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) await raise("runner", s.to_commit, s.from_commit, null);
+      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) await raise("runner", s.to_commit, s.from_commit, await available());
     }
   }
 
@@ -289,7 +305,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       if (!a?.deployed) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
-      const d = open ?? (await raise("runner", a.deployed, a.deployed, null, true));
+      const d = open ?? (await raise("runner", a.deployed, a.deployed, a, true));
       return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
     },
 

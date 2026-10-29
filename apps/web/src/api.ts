@@ -96,11 +96,15 @@ export type DeployUpdate = {
   from: string;
   to: string;
   total: number;
+  files: number;
   changes: Array<{ ticketId: string; ref: string; title: string }>;
   more: number;
   otherCommits: string[];
   handBecause?: string;
   handFiles?: string[];
+  handEffect?: "server" | "deployer" | "both";
+  needsDeployerCopy?: boolean;
+  needsRunnerUpdate?: boolean;
   risks: string[];
 };
 
