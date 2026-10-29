@@ -5,7 +5,7 @@ export type SkillFindingView = { file: string; lineStart: number; lineEnd: numbe
 export type SkillProposalView = {
   id: string;
   name: string;
-  source: "draft" | "link";
+  source: "draft" | "link" | "retro";
   sourceUrl: string | null;
   pinnedRef: string | null;
   why: string;
@@ -44,7 +44,7 @@ export function SkillProposal({ companyId, proposalId }: { companyId: string; pr
       )}
       <ul style={{ paddingLeft: 18 }}>
         <li>
-          <strong>Where it comes from:</strong> {p.source === "link" ? <>the internet, <code className="mono">{p.sourceUrl}</code>{p.pinnedRef ? <>, version <code className="mono">{p.pinnedRef}</code></> : ""}</> : "a draft written by the CEO"}
+          <strong>Where it comes from:</strong> {p.source === "link" ? <>the internet, <code className="mono">{p.sourceUrl}</code>{p.pinnedRef ? <>, version <code className="mono">{p.pinnedRef}</code></> : ""}</> : p.source === "retro" ? "a playbook written by a workflow retro" : "a draft written by the CEO"}
           {p.replacesSkillId ? ". This is a new version of a skill you already have." : "."}
         </li>
         <li>
