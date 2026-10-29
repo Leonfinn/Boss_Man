@@ -288,6 +288,24 @@ export type RoadmapObjective = {
 };
 export type RoadmapCompany = { id: string; name: string; objectives: RoadmapObjective[] };
 
+export type RoadmapFeature = {
+  id: string;
+  title: string;
+  status: FeatureStatus;
+  rank: number | null;
+  horizon: Horizon | null;
+  /** Where it sits: now, next, later, or released (its own folded list). */
+  column: Horizon | "released";
+  priority: number;
+  releasedAt: string | null;
+  objective: { id: string; title: string; priority: number } | null;
+  publicSummary: string | null;
+  showPublicly: boolean;
+  tickets: { total: number; done: number };
+  milestones: Array<{ id: string; title: string; targetDate: string | null; pinned: Horizon | null }>;
+};
+export type FeatureRoadmapCompany = { id: string; name: string; features: RoadmapFeature[] };
+
 export type PlanNode = {
   id: string;
   kind: "ticket" | "engagement" | "decision";
@@ -333,10 +351,16 @@ export type Feature = {
   description: string | null;
   status: FeatureStatus;
   effort: number | null;
+  /** A person's 1 (most important) to 5 ordering; null until ranked. */
+  rank: number | null;
+  /** Pinned roadmap column; null follows the status. */
+  horizon: Horizon | null;
   driverScores: Record<string, number | null>;
   milestoneId: string | null;
   objectiveId: string | null;
   portalVisible: boolean;
+  publicSummary: string | null;
+  showPublicly: boolean;
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
