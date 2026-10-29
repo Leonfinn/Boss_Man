@@ -31,7 +31,7 @@ import { record } from "./activity.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
-import { APPLY_CHANGE, REVERT_CHANGE } from "./retro.js";
+import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
@@ -362,6 +362,8 @@ export type AnswerExtra = {
   assigneeAgentId?: string;
   /** What to tell the agent, e.g. why a plan or a review went back. */
   note?: string;
+  /** A wiki page that explains a workflow change, optionally with a section: slug#Heading (BOS-216). */
+  reasonLink?: string;
   /** The owner wrote their own answer to an agent's question instead of picking an option. */
   custom?: boolean;
   /** Who answered: "ceo" when the CEO settled it ("handled" advice), else the owner's username (logged with a skill override). */
@@ -458,7 +460,7 @@ type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: s
 /** The workflow retro's side of its decisions (services/retro.ts): a check before Apply, and what to do once answered. */
 export type RetroHook = {
   problemApplying(changeId: string): Promise<string | null>;
-  answered(changeId: string, answer: string): Promise<unknown>;
+  answered(changeId: string, answer: string, info: { reason: string; reasonLink: string | null; decidedBy: "ceo" | "owner" }): Promise<unknown>;
   /** Why Revert can't go ahead now (the value was changed again since), or null. */
   problemReverting(changeId: string): Promise<string | null>;
   checked(changeId: string, answer: string): Promise<unknown>;
@@ -589,9 +591,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .limit(1);
       if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still waiting, so the check was not run again. Answer that card first.");
     }
-    if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
-      const problem = await retroHook?.problemApplying(ctx.changeId);
-      if (problem) throw new AnswerError(problem);
+    if (ctx.type === "workflow_change") {
+      // Every Apply or Skip needs a reason, whether the CEO or the owner decides (BOS-216).
+      try {
+        checkChangeReason(extra.note);
+        checkChangeLink(extra.reasonLink);
+      } catch (err) {
+        throw new AnswerError((err as Error).message);
+      }
+      if (answer === APPLY_CHANGE) {
+        const problem = await retroHook?.problemApplying(ctx.changeId);
+        if (problem) throw new AnswerError(problem);
+      }
     }
     if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
       const problem = await retroHook?.problemReverting(ctx.changeId);
@@ -1877,7 +1888,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await answerLessons(d, ctx, answer, extra);
         await retroHook?.lessonAnswered(id, answer, extra.note);
       } else if (ctx.type === "workflow_change") {
-        await retroHook?.answered(ctx.changeId, answer);
+        await retroHook?.answered(ctx.changeId, answer, { reason: extra.note!, reasonLink: extra.reasonLink?.trim() || null, decidedBy: extra.settledBy ? "ceo" : "owner" });
       } else if (ctx.type === "workflow_check") {
         await retroHook?.checked(ctx.changeId, answer);
       } else if (ctx.type === "lesson_replace") {

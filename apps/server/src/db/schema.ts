@@ -818,6 +818,11 @@ export const workflowChanges = pgTable(
     evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
     approver: text("approver").$type<"ceo" | "owner">().notNull(),
     decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    /** Why the decision went the way it did, and the wiki page (optionally a section, slug#Heading) that explains it (BOS-216). */
+    reason: text("reason"),
+    reasonLink: text("reason_link"),
+    /** Who applied or skipped it. Older changes have none. */
+    decidedBy: text("decided_by").$type<"ceo" | "owner">(),
     status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     checkDueAt: timestamp("check_due_at", { withTimezone: true }),
