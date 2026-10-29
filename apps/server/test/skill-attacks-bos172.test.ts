@@ -103,18 +103,23 @@ describe("BOS-172: retro playbooks through the add-a-skill flow", () => {
     expect(await c.db.select().from(agentSkills)).toHaveLength(0);
   });
 
-  // Still open after BOS-182 (it only links the proposal first, it cannot recover a change that has no proposal id): flip to it() when fixed.
-  it.fails("A4 crash state (proposal exists, change has no proposal id): the change can still undo the skill", async () => {
+  // The crash state cannot be built by clearing an id by hand: BOS-182 records the proposal id on the change BEFORE propose() writes anything.
+  it("A4 the change already holds the proposal id when propose() starts, so a crash in it cannot strand the skill", async () => {
     const { c, propose } = await ready();
     await propose();
-    const ch = await applyIt(c);
-    // Simulate the crash: the proposal and its review exist, the change record never learned the proposal's id.
-    await c.db.update(workflowChanges).set({ after: { name: "null-checks", description: "d", body: "b" } }).where(eq(workflowChanges.id, ch.id));
-    const p = await recommend(c);
-    await ownerAnswer(c, p.id, SKILL_ADD);
-    expect((await c.db.select().from(agentSkills)).length).toBeGreaterThanOrEqual(1);
-    // SAFE: Revert is not refused as "never reached the agents" while the agents hold the skill.
-    expect(await c.retro.problemReverting(ch.id)).not.toMatch(/never reached the agents/);
+    const [ch] = await c.db.select().from(workflowChanges);
+    const real = c.svc.propose.bind(c.svc);
+    let seen: { passed?: string; stored?: unknown } = {};
+    (c.svc as { propose: unknown }).propose = async (input: { id?: string }) => {
+      const [row] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch!.id));
+      seen = { passed: input.id, stored: (row!.after as { proposalId?: string } | null)?.proposalId };
+      return real(input as never);
+    };
+    await applyIt(c);
+    expect(seen.passed).toBeTruthy();
+    expect(seen.stored).toBe(seen.passed);
+    const [p] = await c.db.select().from(skillProposals);
+    expect(p!.id).toBe(seen.passed);
   });
 
   it("A5 an owner's hand edit of a retro-made skill survives a waiting update and the undo", async () => {
