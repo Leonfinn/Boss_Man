@@ -11,7 +11,7 @@ import { decisions, ticketDependencies, tickets } from "../src/db/schema.js";
 import { CHECK_AGAIN, CHECK_SEND_BACK } from "../src/services/decisions.js";
 import { issueRunToken } from "../src/mcp.js";
 
-// Regression tests for the BOS-149 adversarial review, rounds 15/16 (BOS-186). Items 1 and 2 fail on 4859e1d; item 3 waits for the fix (it.fails).
+// Regression tests for the BOS-149 adversarial review, rounds 15/16 (BOS-186). All three pass with the fix.
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -251,10 +251,8 @@ describe("BOS-149 round 15/16 regressions (BOS-186)", () => {
     expect((await openRows(c)).map((d) => d.id).sort()).toEqual(before);
   });
 
-  // Needs the Developer's fix: the CEO's list is the newest 20 cards with no way past them, so the
-  // old stale cards this feature exists to clear are the ones that drop off. Passes once the oldest
-  // card is in the default list, or on a following page (offset: 20).
-  it.fails("3: the CEO can reach the oldest card in a queue of more than 20", async () => {
+  // The CEO pages the queue with offset, so the oldest stale cards stay reachable.
+  it("3: the CEO can reach the oldest card in a queue of more than 20", async () => {
     const c = (ctx = await setup());
     const done = await c.ticket("Finished long ago");
     await c.work.updateTicket(done.id, { state: "done", overLimit: true, outcome: "completed" });
