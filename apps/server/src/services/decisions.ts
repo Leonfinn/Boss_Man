@@ -840,7 +840,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         // never on the ticket alone, so a live owner question is never cleared as a "duplicate".
         const own = (c as { ticketId?: unknown }).ticketId;
         const ticket = typeof own === "string" ? own : c.ladder?.ticketId;
-        return `question:${ticket ?? "-"}:${d.question}`;
+        // The choices are part of what is asked (BOS-195): a card offering a wider choice is never
+        // a duplicate of a narrower one, or the CEO could withdraw the option the owner never saw.
+        const options = Array.isArray(d.options) ? d.options.filter((o): o is string => typeof o === "string") : [];
+        return `question:${ticket ?? "-"}:${JSON.stringify([d.question, options, d.recommendedOption])}`;
       }
       case "check_stuck":
       case "review_loop":

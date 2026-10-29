@@ -226,6 +226,30 @@ describe("the CEO clears stale and duplicate cards (BOS-149)", () => {
     expect(await c.db.select().from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, first.id))).toHaveLength(1);
   });
 
+  it("never treats same-text cards with different options as duplicates (BOS-195)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Pick a provider");
+    const narrower = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which payment provider should we use?", options: ["Stripe", "Mollie"], recommended: "Stripe", blocksTicketId: t.id, triedFirst: "Compared both providers and neither needs a secret." });
+    const wider = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which payment provider should we use?", options: ["Stripe", "Mollie", "Adyen"], recommended: "Stripe", blocksTicketId: t.id, triedFirst: "Compared all three providers and none needs a secret." });
+    const ceo = await c.mcp(c.ceo.id);
+    // The wider card offers a choice the narrower one does not, so it must survive as its own card.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: wider.id, note: "Looks like a duplicate of the other card." } }))).toBe(true);
+    expect((await row(wider.id)).status).toBe("open");
+    // Nor is the narrower one a duplicate of the wider one.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: narrower.id, note: "Looks like a duplicate of the other card." } }))).toBe(true);
+    expect((await row(narrower.id)).status).toBe("open");
+  });
+
+  it("treats cards with a different recommended option as different questions (BOS-195)", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Pick a provider");
+    const first = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which payment provider should we use?", options: ["Stripe", "Mollie"], recommended: "Stripe", blocksTicketId: t.id, triedFirst: "Compared both providers and neither needs a secret." });
+    await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Which payment provider should we use?", options: ["Stripe", "Mollie"], recommended: "Mollie", blocksTicketId: t.id, triedFirst: "Compared both providers and neither needs a secret." });
+    const ceo = await c.mcp(c.ceo.id);
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "withdraw", id: first.id, note: "Looks like a duplicate of the other card." } }))).toBe(true);
+    expect((await row(first.id)).status).toBe("open");
+  });
+
   it("withdraws a true duplicate and drops the hold its withdrawn card had on the ticket", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Held twice");
