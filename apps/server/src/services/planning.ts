@@ -2,9 +2,9 @@
 // on a timeline; the plan is a company's tickets and what they wait on, as a graph with blocked
 // chains and their causes worked out on the server, so the browser only draws.
 import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
-import { layoutPlan, milestoneHorizon, milestoneStatus, type Horizon, type MilestoneStatus } from "@boss-man/shared";
+import { layoutPlan, milestoneHorizon, milestoneStatus, ticketRef, type Horizon, type MilestoneStatus } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagements, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
+import { agents, companies, decisions, engagements, features, keyResults, milestones, objectives, projects, ticketDependencies, tickets } from "../db/schema.js";
 import { WorkError } from "./work.js";
 
 export const OBJECTIVE_STATUSES = ["active", "done", "dropped"] as const;
@@ -195,6 +195,63 @@ export function planningService(db: Db, deps: { release: (ticketId: string) => P
             const b = t(r.blockedTicketId);
             return { dependencyId: r.id, id: r.blockedTicketId, title: b?.title ?? "", state: b?.state ?? "", link: `#/tickets/${r.blockedTicketId}` };
           }),
+      };
+    },
+
+    /**
+     * The tickets around one ticket, for the ticket page's Related section: the feature it delivers, its parent,
+     * its sub-tasks, its peers (same feature or same parent), what it waits on and blocks, and the tickets its
+     * description names by number. Only tickets in its own company.
+     */
+    async relatedTickets(ticketId: string) {
+      const [me] = await db
+        .select({ id: tickets.id, companyId: tickets.companyId, featureId: tickets.featureId, parentId: tickets.parentTicketId, body: tickets.body })
+        .from(tickets)
+        .where(eq(tickets.id, ticketId));
+      if (!me) throw new WorkError(404, "No such ticket.");
+      const cols = { id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, outcome: tickets.outcome, prefix: companies.ticketPrefix };
+      const from = () => db.select(cols).from(tickets).innerJoin(companies, eq(companies.id, tickets.companyId));
+      type Row = Awaited<ReturnType<ReturnType<typeof from>["limit"]>>[number];
+      const view = (r: Row) => ({ id: r.id, ref: ticketRef(r.prefix, r.number), title: r.title, state: r.state, cancelled: r.state === "done" && r.outcome === "cancelled" });
+      const others = (rows: Row[]) => rows.filter((r) => r.id !== ticketId).map(view);
+
+      const [feature] = me.featureId ? await db.select({ id: features.id, title: features.title, status: features.status }).from(features).where(eq(features.id, me.featureId)) : [];
+      const [parent] = me.parentId ? await from().where(eq(tickets.id, me.parentId)) : [];
+      const children = await from().where(eq(tickets.parentTicketId, ticketId)).orderBy(asc(tickets.number)).limit(200);
+      const siblings = [
+        ...(me.featureId ? await from().where(eq(tickets.featureId, me.featureId)).orderBy(asc(tickets.number)).limit(200) : []),
+        ...(me.parentId ? await from().where(eq(tickets.parentTicketId, me.parentId)).orderBy(asc(tickets.number)).limit(200) : []),
+      ];
+      // A sub-task of this ticket under the same feature is listed as a sub-task, not a peer.
+      const childIds = new Set(children.map((c) => c.id));
+      const peers = [...new Map(siblings.map((r) => [r.id, r])).values()].filter((r) => !childIds.has(r.id) && r.id !== me.parentId);
+
+      const edges = await db
+        .select({ blocked: ticketDependencies.blockedTicketId, blocker: ticketDependencies.blockerTicketId })
+        .from(ticketDependencies)
+        .where(or(eq(ticketDependencies.blockedTicketId, ticketId), eq(ticketDependencies.blockerTicketId, ticketId)));
+      const waitIds = edges.filter((e) => e.blocked === ticketId && e.blocker).map((e) => e.blocker!);
+      const blockIds = edges.filter((e) => e.blocker === ticketId).map((e) => e.blocked);
+      const byIds = async (ids: string[]) => (ids.length ? from().where(and(inArray(tickets.id, ids), eq(tickets.companyId, me.companyId))) : []);
+
+      const numbers = [...new Set([...(me.body ?? "").matchAll(/\b([A-Za-z][A-Za-z0-9]{0,9})-(\d{1,9})\b/g)].map((m) => `${m[1]!.toUpperCase()}-${Number(m[2])}`))];
+      const mentioned = numbers.length
+        ? (await from().where(and(eq(tickets.companyId, me.companyId), inArray(tickets.number, numbers.map((r) => Number(r.slice(r.lastIndexOf("-") + 1))))))).filter((r) => {
+            const ref = ticketRef(r.prefix, r.number);
+            return !!ref && numbers.includes(ref.toUpperCase());
+          })
+        : [];
+      // A ticket shown under a more specific heading isn't repeated under Mentioned.
+      const shown = new Set([ticketId, me.parentId, ...children.map((r) => r.id), ...peers.map((r) => r.id), ...waitIds, ...blockIds]);
+
+      return {
+        feature: feature ? { id: feature.id, title: feature.title, status: feature.status } : null,
+        parent: parent ? view(parent) : null,
+        subtasks: others(children),
+        peers: others(peers),
+        waitsOn: others(await byIds(waitIds)),
+        blocks: others(await byIds(blockIds)),
+        mentioned: others(mentioned.filter((r) => !shown.has(r.id))),
       };
     },
 

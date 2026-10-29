@@ -292,6 +292,10 @@ export type TicketLinks = {
   blocks: Array<{ dependencyId: string; id: string; title: string; state: string; link: string }>;
 };
 
+/** One ticket in the ticket page's Related section. */
+export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean };
+export type TicketRelated = { feature: { id: string; title: string; status: string } | null; parent: RelatedTicket | null; subtasks: RelatedTicket[]; peers: RelatedTicket[]; waitsOn: RelatedTicket[]; blocks: RelatedTicket[]; mentioned: RelatedTicket[] };
+
 /** Today's date in the browser's time zone, YYYY-MM-DD. */
 export const today = () => new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 
