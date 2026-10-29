@@ -84,6 +84,40 @@ describe("decision queue", () => {
     expect(onAnswered).toHaveBeenCalled();
   });
 
+  it("a deploy card says what it touches, the file count and what else is needed (BOS-218)", () => {
+    const d = decision({
+      kind: "approval",
+      question: "Main has moved to bbbbbbbb. This update has to be applied by hand on the machine that runs Boss Man.",
+      options: ["Approve", "Not now"],
+      recommendedOption: "Approve",
+      blocks: [],
+      context: {
+        type: "self_deploy",
+        update: {
+          from: "a".repeat(40),
+          to: "b".repeat(40),
+          total: 2,
+          files: 5,
+          changes: [{ ticketId: "t1", ref: "APP-1", title: "Change one" }],
+          more: 0,
+          otherCommits: [],
+          handBecause: "Needs applying by hand because this update changes scripts/host-deployer.sh.",
+          handFiles: ["scripts/host-deployer.sh", "docker-compose.yml"],
+          handEffect: "both",
+          needsDeployerCopy: true,
+          needsRunnerUpdate: false,
+          risks: [],
+        },
+        handSteps: ["First step"],
+      },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("This update brings 2 changes across 5 files since the live version (aaaaaaaa → bbbbbbbb).")).toBeTruthy();
+    expect(screen.getByText(/This changes both the script that runs deploys/)).toBeTruthy();
+    expect(screen.getByText("Deployer copy: needed.")).toBeTruthy();
+    expect(screen.getByText("Runner update afterwards: not needed.")).toBeTruthy();
+  });
+
   it("links the ticket it is about, the tickets it blocks, and known references in the text", () => {
     const d = decision({
       kind: "question",

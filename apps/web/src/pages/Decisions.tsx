@@ -97,6 +97,12 @@ function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string |
 
 const shortSha = (sha: string) => sha.slice(0, 8);
 
+const HAND_EFFECT: Record<NonNullable<DeployUpdate["handEffect"]>, string> = {
+  deployer: "This changes the script that runs deploys on your server (scripts/host-deployer.sh); Boss Man's own server doesn't change.",
+  server: "This changes how Boss Man runs on your server: its compose file, Dockerfiles or other deploy scripts.",
+  both: "This changes both the script that runs deploys on your server (scripts/host-deployer.sh) and how Boss Man runs: its compose file, Dockerfiles or other deploy scripts.",
+};
+
 /**
  * What a Boss Man update contains (BOS-213): the tickets merged since the live version, any commits
  * that aren't a ticket, why it needs a hand-apply, and anything that changes the risk. The same
@@ -106,7 +112,7 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
   return (
     <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
       <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
-        This update brings {u.total} change{u.total === 1 ? "" : "s"} since the live version ({shortSha(u.from)} → {shortSha(u.to)}).
+        This update brings {u.total} change{u.total === 1 ? "" : "s"} across {u.files} file{u.files === 1 ? "" : "s"} since the live version ({shortSha(u.from)} → {shortSha(u.to)}).
       </p>
       {u.changes.length > 0 && (
         <ul aria-label="Tickets in this update" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2 }}>
@@ -137,6 +143,13 @@ function DeployUpdateView({ u }: { u: DeployUpdate }) {
           {u.handBecause}
           {u.handFiles?.length ? <> Files changed: <span className="mono" style={{ overflowWrap: "anywhere" }}>{u.handFiles.join(", ")}</span>.</> : null}
         </p>
+      )}
+      {u.handEffect && <p style={{ margin: "2px 0" }}>{HAND_EFFECT[u.handEffect]}</p>}
+      {u.needsDeployerCopy !== undefined && (
+        <p style={{ margin: "2px 0" }}>Deployer copy: {u.needsDeployerCopy ? "needed" : "not needed"}.</p>
+      )}
+      {u.needsRunnerUpdate !== undefined && (
+        <p style={{ margin: "2px 0" }}>Runner update afterwards: {u.needsRunnerUpdate ? "needed" : "not needed"}.</p>
       )}
       {u.risks.length > 0 && (
         <div>

@@ -104,12 +104,13 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     });
     await c.selfDeploy.sync();
     const [d] = await c.open();
-    type Update = { from: string; to: string; total: number; changes: Array<{ ticketId: string; ref: string; title: string }>; otherCommits: string[]; handBecause?: string; handFiles?: string[]; risks: string[] };
+    type Update = { from: string; to: string; total: number; files: number; changes: Array<{ ticketId: string; ref: string; title: string }>; otherCommits: string[]; handBecause?: string; handFiles?: string[]; handEffect?: "server" | "deployer" | "both"; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean; risks: string[] };
     const update = (d!.context as { update: Update }).update;
     expect(update).toMatchObject({
       from: A,
       to: B,
       total: 3,
+      files: 5,
       changes: [
         { ticketId: t191!.id, ref: "BOS-191", title: "rebuild-live.sh waits on hosts without node" },
         { ticketId: t200!.id, ref: "BOS-200", title: "Plan page titles are cut off" },
@@ -118,6 +119,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     });
     expect(update.handBecause).toContain("scripts/rebuild-live.sh");
     expect(update.handFiles).toEqual(["scripts/rebuild-live.sh", "scripts/host-deployer.sh"]);
+    expect(update.handEffect).toBe("both");
+    expect(update.needsDeployerCopy).toBe(true);
+    expect(update.needsRunnerUpdate).toBe(true);
     expect(update.risks.join(" ")).toContain("database migration");
     expect(update.risks.join(" ")).toContain("host-deployer.sh");
     expect(update.risks.join(" ")).toContain("launcher");
@@ -182,6 +186,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.context).toMatchObject({ result: { result: "deployed" } });
     const [runner] = await c.open();
     expect(runner).toMatchObject({ options: ["Update runners", "Not now"], context: { type: "self_deploy", target: "runner", commit: B } });
+    expect(runner!.question).toContain(`This rebuilds the runner containers from the version Boss Man runs (${B.slice(0, 8)}); the server itself doesn't change.`);
+    // The runner card can list the commits too, when the host has reported them.
+    expect((runner!.context as { update: { total: number; otherCommits: string[] } }).update).toMatchObject({ total: 1, otherCommits: ["Add rate limiting"] });
     expect((await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
     expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: true, pending: true, status: { result: "deployed" } });
@@ -203,6 +210,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const [d] = await c.open();
     expect(d).toMatchObject({ options: ["Approve", "Not now"], context: { infra: true } });
     expect(d!.question).toContain("scripts/deploy.sh");
+    // Only the server's deployment files changed: no deployer copy or runner update is needed (BOS-218).
+    expect((d!.context as { update: { handEffect?: string; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean } }).update).toMatchObject({ handEffect: "server", needsDeployerCopy: false, needsRunnerUpdate: false });
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" })).statusCode).toBe(200);
     // Nothing goes to the host: the change can only be applied by hand.
     expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
@@ -236,6 +245,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.available({ infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"] });
     await c.selfDeploy.sync();
     const [d] = await c.open();
+    // The deployer is the only deployment file touched, so hand-applying only needs the copy (BOS-218).
+    const update = (d!.context as { update: { handEffect?: string; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean } }).update;
+    expect(update).toMatchObject({ handEffect: "deployer", needsDeployerCopy: true, needsRunnerUpdate: false });
     await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
     const [todo] = await c.todos();
     const steps = (todo!.context as { steps: string[] }).steps;
