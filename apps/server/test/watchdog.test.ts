@@ -775,3 +775,75 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
   });
 });
+
+describe("open issues and the timeline (BOS-199)", () => {
+  it("lists the open warnings the badge counts, and settles a finished ticket with a plain note", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Merged one", stateChangedAt: ctx.ago(130) });
+    await ctx.watchdog.run();
+    const res = await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/issues`);
+    expect(res.statusCode).toBe(200);
+    const issues = res.json() as Array<{ ticketId: string; warning: string; holder: string; done: unknown[]; nextText: string }>;
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ ticketId: t.id, holder: "scrum_master" });
+    expect(issues[0]!.warning).toContain("no movement in progress");
+    expect(issues[0]!.nextText).toBe("Checks again");
+    expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(issues.length);
+
+    await ctx.db.update(tickets).set({ systemState: "done", outcome: "completed", mergeCommit: "abc123" }).where(eq(tickets.id, t.id));
+    const after = await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/issues`);
+    expect(after.json()).toEqual([]);
+    expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(0);
+    const [flag] = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id));
+    expect(flag!.status).toBe("closed");
+    const [settled] = await ctx.db.select().from(watchdogActions).where(and(eq(watchdogActions.ticketId, t.id), eq(watchdogActions.kind, "alert_resolved")));
+    expect(settled!.reason).toContain("merged");
+    expect(settled!.reason).toContain("Settled:");
+  });
+
+  it("settles an open alert whose ticket finished, and its warning text has no dangling comma", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Quiet developer", stateChangedAt: ctx.ago(1) });
+    const question = 'Zippy has sent nothing for 5 minutes while working on "Quiet developer". It may be stuck, or busy with a long command.';
+    expect(await ctx.alerts.raise({ companyId: ctx.companyId, question, ticketId: t.id, options: ["Keep waiting", "Cancel run"], recommended: "Keep waiting", from: "scrum_master", duty: true })).not.toBeNull();
+    const before = await ctx.watchdog.issues(ctx.companyId);
+    const issue = before.find((x) => x.ticketId === t.id)!;
+    expect(issue.warning).toBe(question.split(". ")[0] + ".");
+    expect(issue.warning.endsWith(",")).toBe(false);
+    expect(issue.holder).toBe("scrum_master");
+
+    await ctx.db.update(tickets).set({ systemState: "done", outcome: "completed", mergeCommit: "def456" }).where(eq(tickets.id, t.id));
+    const after = await ctx.watchdog.issues(ctx.companyId);
+    expect(after.some((x) => x.ticketId === t.id)).toBe(false);
+    const alert = (await ctx.db.select().from(decisions).where(and(eq(decisions.companyId, ctx.companyId), sql`${decisions.context}->'ladder' is not null`)))[0]!;
+    expect(alert.status).toBe("answered");
+  });
+
+  it("leaves plan and permission hand-overs on the ladder alone", async () => {
+    const t = await ctx.ticket({ title: "Needs approval", stateChangedAt: ctx.ago(1) });
+    const ladder = { rung: "ceo", since: ctx.now().toISOString(), minutes: 5, ticketId: t.id, about: [], hops: [] };
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "permission", question: "Allow this command?", options: ["Allow"], recommendedOption: "Allow", context: { type: "permission", runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID(), ladder } }).returning();
+    expect(await ctx.watchdog.issues(ctx.companyId)).toEqual([]);
+    await ctx.db.update(tickets).set({ systemState: "done", outcome: "completed" }).where(eq(tickets.id, t.id));
+    expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(0);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+  });
+
+  it("labels each timeline entry with its issue, its open or settled state, and a repeat warning on the same ticket", async () => {
+    const t = await ctx.ticket({ title: "Two warnings", stateChangedAt: ctx.ago(1) });
+    const opened = ctx.now();
+    const [first] = await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: t.id, rule: "stale_in_progress", status: "closed", openedAt: new Date(opened.getTime() - 60_000), closedAt: opened, dueAt: opened }).returning();
+    const [second] = await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: t.id, rule: "review_loop", status: "open", openedAt: opened, dueAt: opened }).returning();
+    await ctx.db.insert(watchdogActions).values([
+      { companyId: ctx.companyId, kind: "nudge", ticketId: t.id, flagId: first!.id, reason: "first warning action", createdAt: new Date(opened.getTime() - 30_000) },
+      { companyId: ctx.companyId, kind: "nudge", ticketId: t.id, flagId: second!.id, reason: "second warning action", createdAt: opened },
+    ]);
+    const rows = await ctx.watchdog.actions(ctx.companyId, { ticketId: t.id });
+    const a = rows.find((r) => r.reason === "first warning action")!;
+    const b = rows.find((r) => r.reason === "second warning action")!;
+    expect(a.issueStatus).toBe("settled");
+    expect(b.issueStatus).toBe("open");
+    expect(a.issueLabel).toMatch(/1st warning on .* today/);
+    expect(b.issueLabel).toMatch(/2nd warning on .* today/);
+  });
+});
