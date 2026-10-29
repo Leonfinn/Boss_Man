@@ -1869,6 +1869,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
     owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
+    owner.get("/api/tickets/:id/related", async (req) => planning.relatedTickets(IdParam.parse(req.params).id));
     owner.delete("/api/dependencies/:id", async (req, reply) => {
       await planning.removeDependency(IdParam.parse(req.params).id);
       return reply.code(204).send();
