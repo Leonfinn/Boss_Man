@@ -717,13 +717,18 @@ describe("checking a change's result (part 4)", () => {
       .insert(skills)
       .values({ companyId: c.company.id, name: "null-checks", description: "Old", source: "retro", files: [{ path: "SKILL.md", content: Buffer.from("---\nname: null-checks\ndescription: \"Old\"\n---\n\nOLD\n").toString("base64") }], sizeBytes: 10 })
       .returning();
+    // One engineer already had the old version; the update also reaches the other one.
+    await c.db.insert(agentSkills).values({ agentId: c.eng.id, skillId: existing!.id });
     const id = await apply({ lever: "playbook", target: "engineer", change: { name: "null-checks", description: "New", body: "NEW" } });
     expect(Buffer.from((await c.db.select().from(skills).where(eq(skills.id, existing!.id)))[0]!.files[0]!.content, "base64").toString("utf8")).toContain("NEW");
+    expect((await c.db.select().from(agentSkills).where(eq(agentSkills.skillId, existing!.id))).map((r) => r.agentId).sort()).toEqual([c.eng.id, c.eng2.id].sort());
     const d = await checked(id);
     expect(d.question).toContain("earlier version");
     expect((await answer(c, d.id, "Revert")).statusCode).toBe(200);
     const [back] = await c.db.select().from(skills).where(eq(skills.id, existing!.id));
     expect(Buffer.from(back!.files[0]!.content, "base64").toString("utf8")).toContain("OLD");
+    // The engineer who had it keeps it; the one who only gained it from the update loses it.
+    expect((await c.db.select().from(agentSkills).where(eq(agentSkills.skillId, existing!.id))).map((r) => r.agentId)).toEqual([c.eng.id]);
     expect((await changeRow(c, id)).status).toBe("reverted");
   });
 

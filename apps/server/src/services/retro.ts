@@ -31,7 +31,7 @@ import {
   type WorkflowLever,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skillProposals, skills as skillsTable, ticketReviews, tickets, watchdogFlags, wikiPages, wikiRevisions, workflowChanges } from "../db/schema.js";
+import { activity, agentSkills, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skillProposals, skills as skillsTable, ticketReviews, tickets, watchdogFlags, wikiPages, wikiRevisions, workflowChanges } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkPolicy } from "./review-policy.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
@@ -687,12 +687,17 @@ export function retroService(
         const holders = team.filter((a) => roleOf(a) === c.targetRole && a.duty !== "assistant");
         const holderIds = holders.map((a) => a.id).sort();
         const refs = [...(await refsFor(c.companyId, c.evidence)).values()];
+        // Who already held the playbook before this change: an update installs the new version for
+        // every holder, but Revert only takes it away from agents who did not have it already.
+        const had = before.skillId
+          ? new Set((await db.select({ id: agentSkills.agentId }).from(agentSkills).where(eq(agentSkills.skillId, before.skillId))).map((r) => r.id))
+          : new Set<string>();
         // Record the proposal id on the change first: propose() writes several rows, and a crash
         // between them used to leave the change unable to find (and so unable to undo) its proposal.
         const proposalId = randomUUID();
         await db
           .update(workflowChanges)
-          .set({ after: { ...after, proposalId, assignedAgentIds: before.skillId ? [] : holderIds } })
+          .set({ after: { ...after, proposalId, assignedAgentIds: holderIds.filter((id) => !had.has(id)) } })
           .where(eq(workflowChanges.id, c.id));
         await deps.skillProposals.propose({
           id: proposalId,
