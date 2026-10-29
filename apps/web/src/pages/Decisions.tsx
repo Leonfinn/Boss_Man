@@ -376,6 +376,11 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                     ) : (
                       <h2 style={{ whiteSpace: "pre-wrap" }}>{x ? x.title : <Linked text={rule ? d.question.split("\n\n")[0]! : d.question} refs={d.refs} />}</h2>
                     )}
+                    {d.staleAt && !done && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        May be out of date{d.staleReason ? `: ${d.staleReason}` : ""}. The agent that raised it has been asked to confirm or withdraw it.
+                      </p>
+                    )}
                     {rule && (
                       <>
                         <p style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n").slice(1).join("\n\n")} refs={d.refs} /></p>

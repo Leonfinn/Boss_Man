@@ -17,6 +17,7 @@ import { buildBrief } from "./services/brief.js";
 import { imageMarkdown, TicketImageError, type ticketImagesService } from "./services/ticket-images.js";
 import { policyRulesService, RuleError } from "./services/policy-rules.js";
 import { AnswerError, adviceOf, checkAsk, type decisionsService } from "./services/decisions.js";
+import { recentOwnerAnswer, quotedAnswer } from "./services/stale-requests.js";
 import { EngagementError, type EngagementAction, type engagementsService } from "./services/engagements.js";
 import { DeployError, type deploysService } from "./services/deploys.js";
 import { RunError, type runsService } from "./services/runs.js";
@@ -101,8 +102,8 @@ async function refsOf(db: Db, companyId: string) {
 /** A reference like HOL-12 (any prefix: an old one still finds the number). */
 const REF = /^[A-Za-z0-9]{1,10}-(\d{1,9})$/;
 
-const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date }>({ stateNote, stateNoteAt, ...r }: T) => {
-  const note = stateNoteLine({ stateNote, stateNoteAt, lastActivityAt: r.lastActivityAt }, new Date());
+const withNote = <T extends { stateNote: string | null; stateNoteAt: Date | null; lastActivityAt: Date; stateNoteStaleAt?: Date | null }>({ stateNote, stateNoteAt, stateNoteStaleAt, ...r }: T) => {
+  const note = stateNoteLine({ stateNote, stateNoteAt, stateNoteStaleAt, lastActivityAt: r.lastActivityAt }, new Date());
   return note ? { ...r, stateNote: note } : r;
 };
 
@@ -448,7 +449,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you can write \"the steps are on the ticket\" instead of pasting a URL.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you can write \"the steps are on the ticket\" instead of pasting a URL. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again.",
       inputSchema: {
         question: z.string().min(1).max(1000),
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
@@ -457,9 +458,10 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         triedFirst: z.string().max(1000),
         ownerMustDo: z.boolean().optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
+        stillNeeded: z.string().max(500).optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
       const bad = checkAsk({ triedFirst, ownerMustDo, steps });
       if (bad) return fail(bad);
@@ -478,14 +480,40 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
           .where(and(eq(decisionsTable.raisedByAgentId, scope.agentId), eq(decisionsTable.status, "open"), eq(decisionsTable.question, question)));
         if (same) return text(`Decision ${same.id} is already in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
       }
+      // Don't ask again what the owner has already answered (BOS-123). A fresh reason lets it through.
+      if (blocksTicketId) {
+        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, blocksTicketId));
+        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: scope.agentId, question });
+        if (earlier && !stillNeeded?.trim()) {
+          return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
+        }
+      }
       let d: { id: string };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined });
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;
       }
       return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
+    },
+  );
+
+  server.registerTool(
+    "withdraw_decision",
+    {
+      description: "Take back a decision card you raised, once it no longer needs the owner: they have already acted, or the thing resolved itself. Only a card you raised and only while it is open; any ticket it blocked can move again. Say why in reason.",
+      inputSchema: { decisionId: z.string().uuid(), reason: z.string().max(500).optional() },
+    },
+    async ({ decisionId, reason }) => {
+      if (!scope.agentId) return fail("Only an agent's run can withdraw a decision.");
+      try {
+        const r = await decisions.withdraw(decisionId, { agentId: scope.agentId }, reason);
+        return r ? text(`Withdrew decision ${r.id}. Any ticket it blocked can move again.`) : fail("No open decision with that ID that you raised.");
+      } catch (err) {
+        if (err instanceof AnswerError) return fail(err.message);
+        throw err;
+      }
     },
   );
 
@@ -659,6 +687,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
         title: z.string().min(1).max(200),
         body: z.string().max(4000).optional(),
         ticketId: z.string().uuid().optional(),
+        stillNeeded: z.string().max(500).optional(),
         link: z
           .string()
           .regex(/^#\/(wiki|tickets|runs|features|roadmap|plan)(\/[\w-]+)*$/)
@@ -670,6 +699,13 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       if (input.ticketId) {
         const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, input.ticketId), eq(tickets.companyId, scope.companyId)));
         if (!t) return fail("No ticket with that ID in your company.");
+        // Don't tell the owner they still must act on something they have already answered (BOS-123).
+        const asks = /\b(need(s)? you|your (approval|decision|answer|sign-?off)|waiting (on|for) you|blocked on you|over to you)\b/i.test(`${input.title} ${input.body ?? ""}`);
+        if (asks && !input.stillNeeded?.trim()) {
+          const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
+          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: scope.agentId, question: `${input.title} ${input.body ?? ""}` });
+          if (earlier) return fail(`${quotedAnswer(earlier)}. Check the live state before telling the owner they must act; if it really still needs them, pass stillNeeded saying what changed.`);
+        }
       }
       const link = input.link ?? (input.ticketId ? `#/tickets/${input.ticketId}` : `#/runs/${scope.runId}`);
       const n = await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: input.level, title: input.title, body: input.body ?? null, link });
@@ -806,7 +842,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     "decisions",
     {
       description:
-        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Permission requests and plans addressed to the CEO wait on the alert ladder and stay off the owner's queue until you settle them or the handover runs out (5 minutes for a permission request or a plan); if they run out they reach the owner marked as tried by you first. Stalled-run alerts reach you when the Scrum Master couldn't settle one: answer Keep waiting or Cancel run, nudge the agent with the nudge tool, or escalate. A review that keeps being woken without a verdict comes to you first too: settle it with Got it once you have looked into it, or escalate. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for a decision or alert only the owner can settle (a secret, host access, sign-off, an owner-only choice, a delete you can't vouch for): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests, except a lesson for a project brief that your own review raised. A stale-blocker card the owner handed to you: answer Chase, Drop dependency, or Reassign with assigneeAgentId (the agent who should take the blocking ticket). Permission requests: answer them with a note saying why (the owner reads it). Ones marked TEMP-FILE CLEANUP only delete entries directly in /tmp and came to you instead of the owner: allow them when the rest of the command looks like the agent's own work; deny or escalate (id, triedFirst) anything that reaches outside /tmp, pushes, or that you can't account for. Ones marked WORKING-COPY CLEANUP delete plain relative paths in the asking agent's own checkout (the card names the ticket, branch and files): allow them when the files are its own throwaway work (a probe file, build output) and its ticket explains them; deny or escalate source folders or anything you can't account for. They go to the owner if you don't answer within 5 minutes. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
+        "For CEOs, and for an agent the review settings name as a plan approver: decisions your company's agents need from you, such as permission requests and plans that your company's rules send to you, and Boss Man's own alerts once the Scrum Master couldn't settle them. Permission requests and plans addressed to the CEO wait on the alert ladder and stay off the owner's queue until you settle them or the handover runs out (5 minutes for a permission request or a plan); if they run out they reach the owner marked as tried by you first. Stalled-run alerts reach you when the Scrum Master couldn't settle one: answer Keep waiting or Cancel run, nudge the agent with the nudge tool, or escalate. A review that keeps being woken without a verdict comes to you first too: settle it with Got it once you have looked into it, or escalate. Plan approvers see and answer only the plans put to them. action: list, or answer (id, answer: one of the decision's options, and an optional note, e.g. what to change in a plan you send back). CEO only, for a decision or alert only the owner can settle (a secret, host access, sign-off, an owner-only choice, a delete you can't vouch for): escalate (id, triedFirst: what you and the team tried, ownerMustDo and steps when the owner has to act). The owner sees the same queue and may answer first. You can't answer your own requests, except a lesson for a project brief that your own review raised. A stale-blocker card the owner handed to you: answer Chase, Drop dependency, or Reassign with assigneeAgentId (the agent who should take the blocking ticket). Permission requests: answer them with a note saying why (the owner reads it). Ones marked TEMP-FILE CLEANUP only delete entries directly in /tmp and came to you instead of the owner: allow them when the rest of the command looks like the agent's own work; deny or escalate (id, triedFirst) anything that reaches outside /tmp, pushes, or that you can't account for. Ones marked WORKING-COPY CLEANUP delete plain relative paths in the asking agent's own checkout (the card names the ticket, branch and files): allow them when the files are its own throwaway work (a probe file, build output) and its ticket explains them; deny or escalate source folders or anything you can't account for. They go to the owner if you don't answer within 5 minutes. CEO only, when the owner pressed the Ask the CEO for advice button on a decision (list shows them): advise (id, outcome). outcome reissue: post a clearer version (question, options, recommended, triedFirst, and steps when the owner must act; the same rules as raise_decision). For an agent's plain question this is a replacement: what the original blocked moves to the new one and the original closes without an answer. For any other kind (approval, plan, hire, deploy, budget...) the same decision is rewritten in place: your question, triedFirst and steps replace the old text, its options stay. A skill card is refused both ways: you proposed the skill, so the owner decides it as it is and can ask you in chat instead. outcome handled: only for an agent's plain question that another agent raised, with no steps for the owner (never your own request, an approval, plan, hire, budget, permission request, deploy or sign-off; Boss Man refuses; reissue those instead): do the work, then give summary (what was done, in plain words) and answer (one of its options, or leave it out for a question to record your summary as the answer). The owner is told. If you don't act in time it returns to the owner.",
       inputSchema: {
         action: z.enum(["list", "answer", "escalate", "advise"]),
         outcome: z.enum(["reissue", "handled"]).optional(),
@@ -1059,7 +1095,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
         const byRef = q ? REF.exec(q.trim()) : null;
         const like = q?.trim() && !byRef ? `%${q.trim().replace(/[%_\\]/g, (c) => `\\${c}`)}%` : null;
         const rows = await db
-          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt })
+          .select({ id: tickets.id, number: tickets.number, title: tickets.title, state: tickets.systemState, version: tickets.version, outcome: tickets.outcome, assignee: agents.name, lastActivityAt: tickets.lastActivityAt, stateNote: tickets.stateNote, stateNoteAt: tickets.stateNoteAt, stateNoteStaleAt: tickets.stateNoteStaleAt })
           .from(tickets)
           .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
           .where(and(eq(tickets.companyId, scope.companyId), state ? eq(tickets.systemState, state) : undefined, byRef ? eq(tickets.number, Number(byRef[1])) : undefined, like ? or(ilike(tickets.title, like), ilike(tickets.body, like)) : undefined))
@@ -1582,7 +1618,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
@@ -1997,6 +2033,7 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], ale
         triedFirst: z.string().max(1000).optional(),
         ownerMustDo: z.boolean().optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
+        stillNeeded: z.string().max(500).optional(),
       },
     },
     async (input) => {
@@ -2034,7 +2071,7 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], ale
             return done(await watchdog.escalate(companyId, agentId, runId, { ticketId: input.ticketId!, reason }));
           case "raise_decision":
             need("ticketId", "question", "options", "recommended", "triedFirst");
-            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason }));
+            return done(await watchdog.raiseDecision(companyId, agentId, runId, { ticketId: input.ticketId!, question: input.question!, options: input.options!, recommended: input.recommended!, triedFirst: input.triedFirst!, ownerMustDo: input.ownerMustDo, steps: input.steps, reason, stillNeeded: input.stillNeeded }));
           case "alerts": {
             const mine = await alerts.mine(companyId, agentId);
             return text(mine.length ? JSON.stringify(mine) : "No alerts are waiting for you.");

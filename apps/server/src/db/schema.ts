@@ -328,6 +328,8 @@ export const tickets = pgTable(
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** When an owner action made the state note possibly out of date (BOS-123). */
+    stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
@@ -367,6 +369,9 @@ export const decisions = pgTable("decisions", {
   context: jsonb("context").notNull().default({}),
   createdAt: createdAt(),
   answeredAt: timestamp("answered_at", { withTimezone: true }),
+  /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
+  staleAt: timestamp("stale_at", { withTimezone: true }),
+  staleReason: text("stale_reason"),
 });
 
 export const engagementStatus = pgEnum("engagement_status", [
