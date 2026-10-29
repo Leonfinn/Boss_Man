@@ -1079,6 +1079,7 @@ type WatchdogStatus = {
   scrumMaster: { id: string; name: string; paused: boolean } | null;
   lastSweepAt: string | null;
   trippedAt: string | null;
+  pausedUntil?: string | null;
   trippedReason: string | null;
   openFlags: number;
 };
@@ -1132,7 +1133,9 @@ export function Watchdog({ company }: { company: Company }) {
         Every few minutes Boss Man checks the board with simple rules (no AI, no cost) and wakes the Scrum Master only when something looks stuck. The Scrum Master can only nudge, assign unassigned work, re-wake, chase a review, snooze, escalate to the CEO or ask you; every action is logged and can be undone.
       </p>
       <p role="status" style={{ fontSize: 14 }}>
-        {status.trippedAt
+        {status.pausedUntil
+          ? `Paused after hitting its hourly limit (${status.trippedReason}). It resumes by itself ${when(status.pausedUntil)}; nothing to do.`
+          : status.trippedAt && !on
           ? `Switched itself off ${when(status.trippedAt)}: ${status.trippedReason}. Look at its recent actions, then switch it back on.`
           : on
             ? `On. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
@@ -1162,8 +1165,8 @@ export function Watchdog({ company }: { company: Company }) {
         <button type="button" className="btn" disabled={act.busy} onClick={() => void save({})}>
           Save
         </button>
-        <button type="button" className="btn" disabled={act.busy || (!on && !sm)} onClick={() => void save({ enabled: !on || !!status.trippedAt })}>
-          {on && !status.trippedAt ? "Switch off" : status.trippedAt ? "Switch back on" : "Switch on"}
+        <button type="button" className="btn" disabled={act.busy || (!on && !sm)} onClick={() => void save({ enabled: !on })}>
+          {on ? "Switch off" : status.trippedAt ? "Switch back on" : "Switch on"}
         </button>
         <button
           type="button"

@@ -703,7 +703,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               </button>
                             ))}
                             {!modelEdits[d.id] && d.kind === "question" && (
-                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption ?? "" }))}>
+                              <button type="button" className="btn" disabled={busy === d.id} onClick={() => setOwnWords((w) => ({ ...w, [d.id]: "" }))}>
                                 Write my own answer
                               </button>
                             )}
@@ -721,13 +721,26 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               <label htmlFor={`own-${d.id}`}>Your answer, in your own words. It goes to {d.agentName ?? "the agent"} exactly as you write it.</label>
                               <textarea
                                 id={`own-${d.id}`}
+                                className="own-answer"
                                 rows={5}
                                 maxLength={4000}
                                 autoFocus
+                                placeholder={d.recommendedOption ?? undefined}
                                 value={ownWords[d.id]}
                                 onChange={(e) => setOwnWords((w) => ({ ...w, [d.id]: e.target.value }))}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Tab" && !e.shiftKey && d.recommendedOption && !ownWords[d.id]) {
+                                    e.preventDefault();
+                                    setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }));
+                                  }
+                                }}
                                 style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }}
                               />
+                              {d.recommendedOption && !ownWords[d.id] && (
+                                <button type="button" className="use-suggestion" onClick={() => setOwnWords((w) => ({ ...w, [d.id]: d.recommendedOption! }))}>
+                                  Use suggestion
+                                </button>
+                              )}
                             </div>
                             <div className="actions">
                               <button type="submit" className="btn primary" disabled={busy === d.id || !ownWords[d.id]!.trim()}>

@@ -1393,7 +1393,7 @@ export const skillProposals = pgTable(
     id: id(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
-    source: text("source").$type<"draft" | "link">().notNull(),
+    source: text("source").$type<"draft" | "link" | "retro">().notNull(),
     sourceUrl: text("source_url"),
     /** For a link: the commit the files were read at. Install re-reads this exact commit, never a branch. */
     pinnedRef: text("pinned_ref"),
