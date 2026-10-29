@@ -277,6 +277,43 @@ describe("decision and install", () => {
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
   });
 
+  it("gives the skill before marking it installed, so a database failure leaves it able to be answered again", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c);
+    await review(c, p, "recommend");
+    const give = vi.spyOn(c.skills, "give").mockRejectedValueOnce(new Error("the database went away"));
+    await expect(c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon")).rejects.toThrow(/database went away/);
+    give.mockRestore();
+    // Not installed and no skill.given: the owner's answer can be applied again, and the retry finishes the job.
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("awaiting_owner");
+    expect((await kinds(c)).filter((k) => k === "skill.given")).toHaveLength(0);
+    expect((await c.svc.get(c.company.id, p.id)).status).not.toBe("installed");
+    await c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon");
+    expect((await c.svc.get(c.company.id, p.id)).status).toBe("installed");
+    const log = await kinds(c);
+    expect(log.filter((k) => k === "skill.given")).toHaveLength(1);
+    expect(log.lastIndexOf("skill.given")).toBeLessThan(log.lastIndexOf("skill.installed"));
+  });
+
+  it("takes a second answer's unique-name clash as the same installation, never a database error", async () => {
+    const c = (ctx = await setup());
+    const p = await draft(c);
+    await review(c, p, "recommend");
+    // The other answer wins the race and saves the skill between this call's check and its save.
+    const save = c.skills.save.bind(c.skills);
+    const spy = vi.spyOn(c.skills, "save").mockImplementationOnce(async (...args) => {
+      await save(...args);
+      throw Object.assign(new Error("duplicate key value violates unique constraint \"skills_company_name\""), { code: "23505" });
+    });
+    await expect(c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon")).resolves.toMatchObject({ status: "installed" });
+    spy.mockRestore();
+    expect(await c.db.select().from(skills)).toHaveLength(1);
+    expect(await c.db.select().from(agentSkills)).toHaveLength(1);
+    // The same answer again is a no-op, not a second install.
+    await expect(c.svc.decide(c.company.id, p.id, SKILL_ADD, "leon")).resolves.toMatchObject({ status: "installed" });
+    expect(await c.db.select().from(skills)).toHaveLength(1);
+  });
+
   it("rejecting installs nothing", async () => {
     const c = (ctx = await setup());
     const p = await draft(c);
