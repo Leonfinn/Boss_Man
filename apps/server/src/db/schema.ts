@@ -1101,6 +1101,10 @@ export const features = pgTable(
     status: featureStatus("status").notNull().default("idea"),
     /** 1 (tiny) to 5 (huge); null until someone sizes it. */
     effort: integer("effort"),
+    /** A person's ranking, 1 (most important) to 5; null until ranked. Separate from the computed priority. */
+    rank: integer("rank"),
+    /** Pinned to the Now / Next / Later roadmap column; null places it from its status and work. */
+    horizon: roadmapHorizon("horizon"),
     /** Driver id to score, 0 to 5. */
     driverScores: jsonb("driver_scores").notNull().default({}),
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),

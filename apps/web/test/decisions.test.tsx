@@ -390,3 +390,52 @@ describe("write my own answer", () => {
     expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe("approval card while the merge runs", () => {
+  const approval = (over: Partial<Decision> = {}) =>
+    decision({
+      kind: "approval",
+      question: "Ada approved \"Export CSV\", which is rated medium risk. Merge it, or send it back?",
+      options: ["Approve and merge", "Send it back"],
+      recommendedOption: "Approve and merge",
+      context: { type: "risk_review", ticketId: "t9" },
+      ...over,
+    });
+
+  it("says who is checking and merging, and offers no approve button", async () => {
+    const startedAt = new Date(Date.now() - 4 * 60_000).toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/tickets/t9/landing") return new Response(JSON.stringify({ landing: { state: "running", startedAt, startedBy: "the owner" } }), { status: 200 });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }),
+    );
+    render(<Decisions decisions={[approval()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(await screen.findByText(/Checking and merging since .*started by the owner/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send it back" })).toBeNull();
+  });
+
+  it("turns an 'already being checked' refusal into a neutral notice and refreshes the card", async () => {
+    let started = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/tickets/t9/landing") {
+          return new Response(JSON.stringify({ landing: started ? { state: "running", startedAt: new Date().toISOString(), startedBy: "the owner" } : null }), { status: 200 });
+        }
+        if (url === "/api/decisions/d1/answer") {
+          started = true;
+          return new Response(JSON.stringify({ error: "review", message: "This ticket is already being checked and merged." }), { status: 409 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }),
+    );
+    render(<Decisions decisions={[approval()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve and merge" }));
+    expect(await screen.findByText(/Already being checked and merged since .*nothing more to do\./)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
+  });
+});

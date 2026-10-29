@@ -1,5 +1,5 @@
 {
-  "id": "102b35fb-ac08-41e1-960b-66e6e9fa1783",
+  "id": "909ae335-cd49-411b-b37d-0f40d6c6a613",
   "prevId": "ec74ed94-9011-44b0-b26c-1b8f245f2cbe",
   "version": "7",
   "dialect": "postgresql",
@@ -2448,6 +2448,19 @@
         "effort": {
           "name": "effort",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rank": {
+          "name": "rank",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "horizon": {
+          "name": "horizon",
+          "type": "roadmap_horizon",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -8886,24 +8899,6 @@
         "decision_id": {
           "name": "decision_id",
           "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reason": {
-          "name": "reason",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "reason_link": {
-          "name": "reason_link",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "decided_by": {
-          "name": "decided_by",
-          "type": "text",
           "primaryKey": false,
           "notNull": false
         },

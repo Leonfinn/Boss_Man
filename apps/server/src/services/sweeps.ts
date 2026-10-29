@@ -6,7 +6,7 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
-import { VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
@@ -39,7 +39,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   staleAfterMs: 24 * 3_600_000,
   stallAfterMs: 5 * 60_000,
   missedAfterMs: 30 * 60_000,
-  mergeMissedAfterMs: VERIFY_ASK_TIMEOUT_MS + 5 * 60_000,
+  mergeMissedAfterMs: MERGE_MISSED_AFTER_MS,
   missedEveryMs: 4 * 3_600_000,
   keepWaitingMs: 30 * 60_000,
   lostAfterMs: 30 * 60_000,
