@@ -7,6 +7,7 @@ import type { Db } from "../db/client.js";
 import { agents, runs, skillProposals, ticketMessages, tickets } from "../db/schema.js";
 import { RunError, type runsService } from "./runs.js";
 import { record } from "./activity.js";
+import { ownerActed } from "./stale-requests.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 
 /** How many recent messages a run's prompt carries. */
@@ -88,6 +89,9 @@ export function ticketChatService(db: Db, deps: { runs: ReturnType<typeof runsSe
       // Stored before the wake, so the new run's prompt already carries it.
       const [m] = await db.insert(ticketMessages).values({ companyId: t.companyId, ticketId, author: "owner", agentId, runId, text, delivery }).returning();
       await record(db, { companyId: t.companyId, ticketId, kind: "message", summary: `Owner wrote: ${text}` });
+      // The owner acted: anything else we told them about this ticket may be out of date (BOS-123).
+      // The assignee is woken by the message already, so they get one note, not two.
+      await ownerActed(db, { companyId: t.companyId, ticketIds: [ticketId], reason: "the owner wrote on this ticket", skipAgents: [t.assigneeAgentId], wake: (input) => deps.notify(input.agentId, input as { ticketId: string; reason: string; note: string; priority?: number }) });
       // One waiting run picks up every message sent before it starts: notify joins a waiting wake.
       if (delivery === "woken") {
         await deps.notify(agentId!, {
