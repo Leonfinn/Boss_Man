@@ -63,7 +63,15 @@ export type Risk = "trivial" | "low" | "medium" | "high" | "critical";
 export const RISKS: Risk[] = ["trivial", "low", "medium", "high", "critical"];
 
 /** A permission request in plain words, worked out by the server (shared/explain.ts). */
-export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] } };
+export type PushReading = {
+  kind: "ticket" | "branch" | "many" | "unnamed" | "unreadable";
+  headline: string;
+  ticketId?: string;
+  ref?: string;
+  warnings: string[];
+  dangerous: boolean;
+};
+export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
 
 /** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */

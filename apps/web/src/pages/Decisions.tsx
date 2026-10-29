@@ -513,10 +513,29 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <span className="tag green">Temporary folder only</span> {x.scratch.note}
                           </p>
                         )}
-                        <p>
-                          <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
-                          {x.effect === "unknown" && " Read the exact command before you allow it."}
-                        </p>
+                        {x.push ? (
+                          <>
+                            <p>
+                              <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.push.headline}
+                              {x.push.kind === "ticket" && x.push.ticketId && (
+                                <>
+                                  {" "}
+                                  (<a href={`#/tickets/${x.push.ticketId}`}>{x.push.ref ?? "its ticket"}</a>)
+                                </>
+                              )}
+                            </p>
+                            {x.push.warnings.map((w) => (
+                              <p key={w} role="alert" style={{ margin: "4px 0" }}>
+                                <span className="tag red">Warning</span> {w}
+                              </p>
+                            ))}
+                          </>
+                        ) : (
+                          <p>
+                            <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
+                            {x.effect === "unknown" && " Read the exact command before you allow it."}
+                          </p>
+                        )}
                         {x.alwaysNote && !done && <p className="muted" style={{ fontSize: 13 }}>{x.alwaysNote}</p>}
                         {x.reason && <p className="muted">What the agent says it's for: {x.reason}</p>}
                         {x.command && (

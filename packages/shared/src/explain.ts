@@ -22,6 +22,8 @@ export type PermissionExplanation = {
   alwaysNote?: string;
   /** Every file it changes or deletes is under /tmp: the plain reassurance, and programs Boss Man couldn't check. */
   scratch?: { note: string; unchecked: string[] };
+  /** Where a `git push` goes, and what is dangerous about it (BOS-208). */
+  push?: PushReading;
 };
 
 /** A standing rule the owner can pick instead of "Allow once". */
@@ -448,10 +450,166 @@ export function tempCleanup(command: string): boolean {
   return Boolean(scope && !scope.workingCopy.length);
 }
 
+/** How a `git push` reads on a permission card (BOS-208): where it goes and what would be dangerous. */
+export type PushReading = {
+  /** ticket: its own bossman/<ticket> branch; branch: one other named branch; many; unnamed; unreadable. */
+  kind: "ticket" | "branch" | "many" | "unnamed" | "unreadable";
+  /** One plain line, without the ticket reference (that is resolved from the database). */
+  headline: string;
+  /** The ticket branch this targets, when it is a bossman/<ticket> branch. */
+  ticketId?: string;
+  /** The ticket reference, filled in by the server when the ticket can be found. */
+  ref?: string;
+  /** Red lines: main, force, delete, all/mirror/tags, more than one branch, an unnamed branch. */
+  warnings: string[];
+  /** Any warning, or a command it couldn't read, so it is never treated as safe. */
+  dangerous: boolean;
+};
+
+const PUSH_TICKET = /^bossman\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const PUSH_SAFE_LONG = new Set([
+  "--porcelain", "--no-verify", "--verbose", "--progress", "--quiet", "--atomic", "--no-atomic",
+  "--follow-tags", "--no-follow-tags", "--signed", "--no-signed", "--ipv4", "--ipv6",
+  "--set-upstream", "--dry-run", "--thin", "--no-thin", "--recurse-submodules", "--no-recurse-submodules",
+  "--push-option", "--repo",
+]);
+const PUSH_DANGER_LONG = new Set(["--force", "--force-with-lease", "--force-if-includes", "--delete", "--all", "--mirror", "--tags", "--prune"]);
+const PUSH_SAFE_SHORT = new Set("uvqn");
+const PUSH_DANGER_SHORT = new Set("fd");
+const PUSH_VALUE_OPTS = new Set(["-o", "--push-option", "--repo"]);
+
+/** A bare word scan, ignoring quoted text (a commit message mentioning git push is not a push). */
+function mentionsPush(command: string): boolean {
+  let outside = "";
+  let quote = "";
+  for (const c of command) {
+    if (quote) {
+      if (c === quote) quote = "";
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      continue;
+    }
+    outside += c;
+  }
+  return /\bgit\s+push\b/.test(outside);
+}
+
+/**
+ * Reads one plain `git push` command (BOS-208). Any shell syntax around it, or an option it doesn't
+ * know, reads as "couldn't read" rather than guessing: the card must never call a push it doesn't
+ * understand safe. A refspec is src:dst; dst is where it lands, and a leading + forces, a leading :
+ * deletes.
+ */
+export function readPush(command: string): PushReading | null {
+  if (!mentionsPush(command)) return null;
+  const unreadable = (): PushReading => ({ kind: "unreadable", headline: "Couldn't read this push, check the exact command", warnings: [], dangerous: true });
+  const cmd = command.trim();
+  // Quotes, expansions, redirects and chaining all hide what the shell will run.
+  if (/[;&|`$<>()'"\\\r\n]/.test(cmd)) return unreadable();
+  if (!/^git\s+push(?:\s|$)/.test(cmd)) return unreadable();
+  const tokens = cmd.slice(cmd.indexOf("push") + 4).trim().split(/\s+/).filter(Boolean);
+  const operands: string[] = [];
+  const flags: string[] = [];
+  let repo: string | undefined;
+  let endOptions = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (!endOptions && t === "--") {
+      endOptions = true;
+      continue;
+    }
+    if (!endOptions && t.startsWith("-") && t !== "-") {
+      flags.push(t);
+      if (PUSH_VALUE_OPTS.has(t)) {
+        const value = tokens[++i];
+        if (value === undefined) return unreadable();
+        if (t === "--repo") repo = value;
+      }
+      continue;
+    }
+    operands.push(t);
+  }
+
+  const warnings: string[] = [];
+  const warn = (w: string) => {
+    if (!warnings.includes(w)) warnings.push(w);
+  };
+  const force = "Force push: this can overwrite the remote branch's history.";
+  const deletes = "Deletes a branch on the remote.";
+  let every: "all" | "mirror" | "tags" | null = null;
+  for (const f of flags) {
+    if (f.startsWith("--")) {
+      const [name, value] = f.split("=", 2) as [string, string | undefined];
+      if (name === "--repo" && value) repo = value;
+      if (PUSH_DANGER_LONG.has(name)) {
+        if (name === "--all") {
+          every = every ?? "all";
+          warn("--all pushes every branch.");
+        } else if (name === "--mirror") {
+          every = "mirror";
+          warn("--mirror pushes every branch and tag.");
+        } else if (name === "--tags") {
+          every = every ?? "tags";
+          warn("--tags pushes every tag.");
+        } else if (name === "--delete") warn(deletes);
+        else if (name === "--prune") warn("Deletes remote branches that no longer exist locally (--prune).");
+        else warn(force);
+      } else if (!PUSH_SAFE_LONG.has(name)) return unreadable();
+      continue;
+    }
+    for (const ch of f.slice(1)) {
+      if (PUSH_DANGER_SHORT.has(ch)) warn(ch === "f" ? force : deletes);
+      else if (!PUSH_SAFE_SHORT.has(ch)) return unreadable();
+    }
+  }
+
+  const refspecs = repo ? operands : operands.slice(1);
+  if (refspecs.includes("-")) return unreadable();
+  const branches: string[] = [];
+  let unnamed = refspecs.length === 0;
+  let deleted = false;
+  for (const refspec of refspecs) {
+    if (refspec.startsWith(":")) {
+      deleted = true;
+      warn(deletes);
+      continue;
+    }
+    const forced = refspec.startsWith("+");
+    if (forced) warn(force);
+    const spec = forced ? refspec.slice(1) : refspec;
+    const [src, dst] = spec.includes(":") ? spec.split(":", 2) : [spec, spec];
+    const target = (dst || src || "").replace(/^refs\/heads\//, "").replace(/^refs\/tags\//, "");
+    if (!target || target === "HEAD") {
+      unnamed = true;
+      continue;
+    }
+    branches.push(target);
+  }
+  if (branches.some((b) => b.toLowerCase() === "main")) warn("Pushes to main.");
+  if (branches.length > 1) warn(`Pushes more than one branch: ${branches.join(", ")}.`);
+
+  if (every === "mirror") return { kind: "many", headline: "Pushes every branch and tag (mirror)", warnings, dangerous: true };
+  if (every === "all") return { kind: "many", headline: "Pushes every branch", warnings, dangerous: true };
+  if (every === "tags") return { kind: "many", headline: "Pushes all tags", warnings, dangerous: true };
+  if (branches.length > 1) return { kind: "many", headline: "Pushes to more than one branch", warnings, dangerous: true };
+  if (branches.length === 1 && !unnamed) {
+    const ticket = PUSH_TICKET.exec(branches[0]!);
+    if (ticket) return { kind: "ticket", headline: "Pushes to its ticket branch", ticketId: ticket[1]!.toLowerCase(), warnings, dangerous: warnings.length > 0 };
+    return { kind: "branch", headline: `Pushes to ${branches[0]}`, warnings, dangerous: warnings.length > 0 };
+  }
+  if (deleted && !unnamed && !branches.length) return { kind: "branch", headline: "Deletes a branch on the remote", warnings, dangerous: true };
+  warn("Branch not named: may push to main");
+  return { kind: "unnamed", headline: "Pushes without naming the branch", warnings, dangerous: true };
+}
+
 /** What a shell command would do, in one sentence led by the worst thing in it. */
-export function explainCommand(command: string): { summary: string; effect: Effect; scratch?: PermissionExplanation["scratch"] } {
+export function explainCommand(command: string): { summary: string; effect: Effect; push?: PushReading; scratch?: PermissionExplanation["scratch"] } {
   const segs = segments(command);
   const parts = segs.map(explainSegment);
+  // Read the whole command, not each segment: a push chained with anything else is "couldn't read".
+  const push = readPush(command) ?? undefined;
   const effect = WORST.find((e) => parts.some((p) => p.effect === e)) ?? "reads";
   const sentences: string[] = [];
   for (const e of WORST) {
@@ -461,6 +619,8 @@ export function explainCommand(command: string): { summary: string; effect: Effe
     if (e === "reads") {
       if (group.every((p) => p.env && !p.targets.length)) continue;
       sentences.push(`${effect === "reads" ? "Only reads" : "Reads"} information${targets ? ` (${targets})` : ""}${effect === "reads" ? "; it doesn't change anything" : ""}.`);
+    } else if (e === "pushes" && push) {
+      sentences.push([push.headline, ...push.warnings].join(". ") + ".");
     } else {
       const many = new Set(group.flatMap((p) => p.targets)).size > 1;
       sentences.push([...new Set(group.map((p) => (many ? p.text.replace("a program", "programs") : p.text)))].join("; ") + (targets ? ` (${targets})` : "") + ".");
@@ -475,7 +635,7 @@ export function explainCommand(command: string): { summary: string; effect: Effe
     unchecked: tmp.unchecked,
     note: `Works only in a temporary folder (/tmp): every file it changes or deletes is there, so your project, its branch and the repository aren't touched.${tmp.unchecked.length ? ` It also runs ${tmp.unchecked.join(", ")} in that folder; Boss Man can't see inside ${tmp.unchecked.length === 1 ? "that program" : "those programs"}.` : ""}`,
   };
-  return { summary: sentences.join(" ") || "Does nothing visible.", effect, ...(scratch ? { scratch } : {}) };
+  return { summary: sentences.join(" ") || "Does nothing visible.", effect, ...(push ? { push } : {}), ...(scratch ? { scratch } : {}) };
 }
 
 const TOOL: Record<string, { what: string; effect: Effect; verb: string }> = {
