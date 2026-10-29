@@ -1118,6 +1118,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Pressing twice is harmless.
       if (adviceOf(d.context)?.state === "asking") return { id, advice: adviceOf(d.context)! };
       if (d.kind === "permission") throw new AnswerError("A permission request holds a live run, so it can't be put to the CEO. Answer it, or deny it.");
+      // The CEO proposed the skill on this card, so it must not get to reword the card the owner decides on (BOS-168).
+      if (d.kind === "skill") throw new AnswerError("The CEO proposed this skill, so it can't rewrite this card. If something is unclear, ask the CEO about it in chat.");
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo || !wake) throw new AnswerError("This company has no CEO to ask.");
       const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}), ...(adviceOf(d.context)?.originalQuestion ? { originalQuestion: adviceOf(d.context)!.originalQuestion } : {}) };
@@ -1162,6 +1164,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
       const at = now().toISOString();
       if (input.outcome === "reissue") {
+        // The CEO proposed this skill, so it must not get to reword the card the owner decides on (BOS-168).
+        if (d.kind === "skill") throw new AnswerError("The CEO proposed this skill, so it can't rewrite this card. If something is unclear, the owner can ask the CEO about it in chat.");
         const ctx = d.context as DecisionContext;
         const asking = sql`${decisions.context}->'advice'->>'state' = 'asking'`;
         if (!(d.kind === "question" && ctx.type === "question")) {
