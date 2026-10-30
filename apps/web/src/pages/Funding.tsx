@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { api, usd, type ActiveRun, type BudgetRow, type Company, type FundingSource, type FundingStatus } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
@@ -79,6 +80,79 @@ function ByCompany({ s }: { s: FundingStatus }) {
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** The hold controls for a subscription: threshold, extra usage and which windows count (BOS-227). */
+function QuotaSettings({ s }: { s: FundingStatus }) {
+  const [holdAt, setHoldAt] = useState(Math.round((s.source.quotaHoldAt ?? 0.95) * 100));
+  const [overage, setOverage] = useState<"pause" | "urgent" | "all">(s.source.quotaOverage ?? "pause");
+  const [off, setOff] = useState<string[]>(s.source.quotaDisabledWindows ?? []);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const windows = s.windowsSeen ?? s.quota.map((q) => q.window);
+  const save = async () => {
+    setError(null);
+    try {
+      await api(`/api/funding-sources/${s.source.id}`, { method: "PATCH", body: { quotaHoldAt: holdAt / 100, quotaOverage: overage, quotaDisabledWindows: off } });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  const toggle = (w: string, on: boolean) => setOff((cur) => (on ? cur.filter((x) => x !== w) : [...cur, w]));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+      <span style={{ fontWeight: 600, fontSize: 13 }}>When the subscription is nearly used up</span>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+        <span style={{ flex: 1 }}>Hold routine work at</span>
+        <input aria-label="Hold routine work at this percentage" type="number" min={80} max={100} value={holdAt} onChange={(e) => setHoldAt(Math.max(80, Math.min(100, Number(e.target.value) || 95)))} style={{ width: 70 }} />
+        <span>%</span>
+      </label>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+        <span style={{ flex: 1 }}>I have extra usage</span>
+        <select aria-label="Extra usage" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
+          <option value="pause">Hold everything at the limit (urgent tickets run until then)</option>
+          <option value="urgent">Keep urgent work running past the limit</option>
+          <option value="all">Keep all work running</option>
+        </select>
+      </label>
+      {overage !== "pause" && (
+        <span className="muted" style={{ fontSize: 12 }}>
+          Extra usage is billed by Anthropic. Boss Man can't see the balance, so set a spending limit in your Claude account.
+        </span>
+      )}
+      {windows.length > 0 && (
+        <fieldset style={{ border: 0, margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+          <legend className="muted" style={{ fontSize: 12 }}>
+            Which limits can trigger the hold
+          </legend>
+          {windows.map((w) => {
+            const latest = s.quota.find((q) => q.window === w);
+            return (
+              <label key={w} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                <input type="checkbox" checked={!off.includes(w)} onChange={(e) => toggle(w, e.target.checked)} />
+                <span style={{ flex: 1 }}>
+                  Can trigger the hold: {windowLabel(w).name} <span className="mono">({w})</span>
+                </span>
+                {latest && <span className="mono muted">{pct(latest.utilization)}</span>}
+              </label>
+            );
+          })}
+          <span className="muted" style={{ fontSize: 12 }}>
+            These names come from Claude Code and aren't documented, so Boss Man doesn't guess what each one means.
+          </span>
+        </fieldset>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button type="button" className="btn" onClick={() => void save()}>
+          Save
+        </button>
+        {saved && <span className="muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {error && <span className="error" style={{ fontSize: 12 }}>{error}</span>}
+      </div>
     </div>
   );
 }
@@ -170,6 +244,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
           {usd(s.totalSpentMicros)} <small>spent through Boss Man</small>
         </span>
       )}
+      {s.source.kind === "subscription" && <QuotaSettings s={s} />}
       <Daily s={s} />
       <ByCompany s={s} />
       {s.coverage === "boss_man_runs_only" && s.source.kind !== "subscription" && (

@@ -1,5 +1,5 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
-import { and, asc, eq, inArray, isNull, or, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, ne, sql } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -7,7 +7,7 @@ import { liveRuns } from "./runs.js";
 import { REVIEW_REASON, reviewWaits } from "./review-kinds.js";
 import { reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { addTicketDependency, WorkError } from "./ticket-links.js";
-import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, workflowColumns } from "../db/schema.js";
+import { agents, decisions, engagements, features, keyResults, milestones, objectives, projects, reviewRequests, runs, ticketDependencies, tickets, wakes, workflowColumns } from "../db/schema.js";
 
 export { WorkError };
 
@@ -51,6 +51,8 @@ type TicketPatch = {
   acceptanceCriteria?: string[];
   /** Research, wiki, docs or deploy-only work: an empty diff is fine. */
   noCode?: boolean;
+  /** Owner-marked urgent: always passes the subscription quota hold (BOS-227). */
+  urgent?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
 };
@@ -222,6 +224,13 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
       const withoutCard = everyLive.filter((r) => about(r).size === 0);
       const waits = await reviewWaits(db, inReview);
+      // A held wake whose reason is the subscription quota (BOS-227), so the card can show it and offer Run now.
+      const heldWakes = rows.length
+        ? await db
+            .select({ ticketId: wakes.ticketId, until: wakes.notBefore, reason: wakes.statusReason })
+            .from(wakes)
+            .where(and(inArray(wakes.ticketId, rows.map((r) => r.t.id)), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+        : [];
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
@@ -245,6 +254,8 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
+        quotaHeldUntil: heldWakes.find((h) => h.ticketId === t.id)?.until?.toISOString() ?? null,
+        quotaHeldReason: heldWakes.find((h) => h.ticketId === t.id)?.reason ?? null,
         };
       });
       return {
@@ -293,6 +304,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
           customFields: input.customFields ?? {},
           acceptanceCriteria: input.acceptanceCriteria ?? [],
           noCode: input.noCode ?? false,
+          urgent: input.urgent ?? false,
           lastActivityAt: now(),
           risk: input.risk ?? null,
           size: input.size ?? null,

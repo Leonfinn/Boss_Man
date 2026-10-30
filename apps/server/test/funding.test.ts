@@ -71,6 +71,21 @@ describe("subscription quota from the Claude adapter", () => {
     expect(status.quota).toHaveLength(2);
     expect(week).toMatchObject({ utilization: 1, status: "rejected", overageInUse: true });
   });
+
+  it("keeps the hold threshold, extra-usage choice and window switches per source", async () => {
+    const sub = (await post("/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json();
+    await post("/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.9, resetsAt: 1792245600 }, five_hour: { utilization: 0.2, resetsAt: 1792177800 } } } } });
+    const before = (await get(`/api/funding-sources/${sub.id}/status`)).json();
+    expect(before.source).toMatchObject({ quotaHoldAt: 0.95, quotaOverage: "pause", quotaDisabledWindows: [] });
+    expect(before.windowsSeen).toEqual(["five_hour", "seven_day"]);
+
+    const patch = (payload: unknown) => t.app.inject({ method: "PATCH", url: `/api/funding-sources/${sub.id}`, headers: { cookie }, payload: payload as object });
+    await patch({ quotaHoldAt: 0.85, quotaOverage: "all", quotaDisabledWindows: ["five_hour"] });
+    const after = (await get(`/api/funding-sources/${sub.id}/status`)).json();
+    expect(after.source).toMatchObject({ quotaHoldAt: 0.85, quotaOverage: "all", quotaDisabledWindows: ["five_hour"] });
+    // Out of range is refused.
+    expect((await patch({ quotaHoldAt: 1.2 })).statusCode).toBeGreaterThanOrEqual(400);
+  });
 });
 
 describe("budgets", () => {
