@@ -181,9 +181,6 @@ export function schedulerService(
     return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
   }
 
-  /** Priority an urgent ticket's wake always gets (BOS-253), so it is never treated as routine. */
-  const URGENT_PRIORITY = 4;
-
   /** Whether a ticket the owner marked Urgent: the only tickets whose wakes pass the quota hold (BOS-227). */
   async function isUrgentTicket(ticketId: string | null | undefined) {
     if (!ticketId) return false;
@@ -791,8 +788,9 @@ export function schedulerService(
         depth = (parent?.depth ?? 0) + 1;
         causedByAgentId = run?.agentId ?? null;
       }
-      // An urgent ticket's wake is never routine (BOS-253): it gets the high priority that passes
-      // quiet hours, and a wake that joined a held one can't keep it waiting.
+      // An urgent ticket's wake takes no wait at all (BOS-253) and is never treated as routine: the
+      // flag skips quiet hours and batching, but the priority is kept as given, so tick() still runs
+      // the quota check on it and the default "pause" can hold it (BOS-227).
       const urgent = await isUrgentTicket(input.ticketId);
       const base = {
         companyId: agent.companyId,
@@ -800,7 +798,7 @@ export function schedulerService(
         ticketId: input.ticketId ?? null,
         reason: input.reason,
         note: input.note ?? null,
-        priority: urgent ? Math.max(input.priority ?? 2, URGENT_PRIORITY) : (input.priority ?? 2),
+        priority: input.priority ?? 2,
         causationDepth: depth,
         causedByRunId: input.causedByRunId ?? null,
         causedByAgentId,
@@ -902,7 +900,7 @@ export function schedulerService(
       const ticketId = input.ticketId ?? null;
       const note = input.note ?? null;
       const urgent = await isUrgentTicket(ticketId);
-      const priority = urgent ? Math.max(input.priority ?? 2, URGENT_PRIORITY) : (input.priority ?? 2);
+      const priority = input.priority ?? 2;
       const t = now();
       // Chat runs have their own tools, and a watch report, a tree-stopped brief or a retro (its duty lines go in the prompt) is built from its wake, so none takes a steer.
       if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
@@ -1233,15 +1231,18 @@ export function schedulerService(
           }
         }
 
-        if (agent?.fundingSourceId && w.priority < limits.highPriority) {
+        // Above high priority a wake, or any wake on an urgent ticket, still goes through the quota
+        // check: under the default "pause" it is held at the limit, so nothing spends unapproved
+        // extra usage (BOS-253).
+        const [urgentTicket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+        if (agent?.fundingSourceId && (w.priority < limits.highPriority || !!urgentTicket?.urgent)) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
           if (source?.kind === "subscription") {
-            const [ticket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
             const samples = await latestQuotaWindows(source.id);
             const full = holdingWindows(source, samples, t);
             // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
             // the limit itself, so the default "pause" never spends unapproved extra usage.
-            if (!quotaPasses(source, full, samples, !!ticket?.urgent)) {
+            if (!quotaPasses(source, full, samples, !!urgentTicket?.urgent)) {
               const until = full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null);
               await defer(`subscription ${full.map((s) => s.window).join(", ")} window nearly used up`, until);
               continue;

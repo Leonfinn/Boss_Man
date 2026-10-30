@@ -446,7 +446,7 @@ describe("scheduler", () => {
     await ctx.scheduler.notify(worker.id, { ticketId: urgent.id, reason: "assigned", note: "The owner assigned this to you." });
     const own = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id);
     expect(own).toHaveLength(1);
-    expect(own[0]).toMatchObject({ status: "queued", priority: 4 });
+    expect(own[0]).toMatchObject({ status: "queued" });
 
     // The next pass launches the urgent ticket; the routine wakes stay held.
     expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
@@ -476,7 +476,7 @@ describe("scheduler", () => {
     await ctx.req("POST", `/api/tickets/${urgent.id}/messages`, { text: "pick this up" });
     const own = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id && w.status === "queued");
     expect(own).toHaveLength(1);
-    expect(own[0]).toMatchObject({ priority: 4 });
+    expect(own[0]).toMatchObject({ status: "queued" });
     expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
     await ctx.endRun(ctx.commands[0]!.runId);
     await flush();
@@ -485,7 +485,7 @@ describe("scheduler", () => {
     const [run] = await ctx.db.select().from(runs).limit(1);
     const res = await ctx.scheduler.nudge({ runId: run!.id, fromAgentId: ctx.ceo.id, to: worker.id, ticketId: urgent.id, why: "Handle this one now, please." });
     expect(res).toMatchObject({ ok: true });
-    expect((await ctx.db.select().from(wakes)).find((w) => w.id === (res as { wakeId: string }).wakeId)).toMatchObject({ status: "queued", priority: 4 });
+    expect((await ctx.db.select().from(wakes)).find((w) => w.id === (res as { wakeId: string }).wakeId)).toMatchObject({ status: "queued" });
   });
 
   it("Run now starts a held ticket whose wake was merged into its agent's other held wake (BOS-253)", async () => {
@@ -519,5 +519,24 @@ describe("scheduler", () => {
     await ctx.scheduler.tick();
     const status = await ctx.serverStatus.status(ctx.company.id);
     expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, agent: "Engineer", held: "runner offline" })]);
+  });
+
+  it("holds an urgent ticket assigned after it was marked urgent under the default pause, and shows why (BOS-253)", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("PATCH", `/api/agents/${worker.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    // The ticket is made urgent before any wake exists, then assigned: the wake is queued at the
+    // usual priority and the quota check still reaches it, so "pause" holds it.
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix" })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true, assigneeAgentId: worker.id });
+    await ctx.scheduler.notify(worker.id, { ticketId: urgent.id, reason: "assigned", note: "The owner assigned this to you." });
+    expect((await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id)[0]).toMatchObject({ status: "queued", priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    const [held] = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id);
+    expect(held!.statusReason).toBe("subscription seven_day window nearly used up");
+    const status = await ctx.serverStatus.status(ctx.company.id);
+    expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, held: "subscription seven_day window nearly used up" })]);
   });
 });
