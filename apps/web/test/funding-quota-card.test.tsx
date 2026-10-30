@@ -62,7 +62,9 @@ describe("quota card wording", () => {
 });
 
 describe("Synthetic quota", () => {
-  const synthetic = (providerQuota: Record<string, unknown>) => {
+  const synthetic = (q: Record<string, unknown>) => {
+    // The server always sends the age, history and warnings (BOS-239); older fixtures may not.
+    const providerQuota = { ageSeconds: 0, history: [], warned: [], ...q };
     const status = {
       source: { id: "s2", name: "Synthetic", kind: "subscription", provider: "synthetic" },
       credit: null,
@@ -82,9 +84,28 @@ describe("Synthetic quota", () => {
 
   it("shows requests used of the limit and when it renews", async () => {
     synthetic({ used: 123, limit: 1000, renewsAt: later });
-    expect(await screen.findByText("123 of 1,000")).toBeTruthy();
+    expect(await screen.findByText(/123 of 1,000/)).toBeTruthy();
     const day = new Date(later).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
     expect(screen.getByText(new RegExp(`Renews ${day}`))).toBeTruthy();
+  });
+
+  it("shows the percent, time to renewal, the period's trend and the warnings had (BOS-239)", async () => {
+    const taken = new Date(Date.now() - 10 * 60_000).toISOString();
+    synthetic({
+      used: 850,
+      limit: 1000,
+      renewsAt: later,
+      ageSeconds: 120,
+      history: [
+        { used: 850, limit: 1000, renewsAt: later, takenAt: later },
+        { used: 400, limit: 1000, renewsAt: later, takenAt: taken },
+      ],
+      warned: [80],
+    });
+    expect(await screen.findByText(/850 of 1,000 · 85%/)).toBeTruthy();
+    expect(screen.getByText(/in \d+ days?|in \d+ hours?/)).toBeTruthy();
+    expect(screen.getByText(/This period: 2 readings, 400 → 850 \(\+450/)).toBeTruthy();
+    expect(screen.getByText(/Checked 2m ago · you've been warned at 80%/)).toBeTruthy();
   });
 
   it("says the quota is unknown rather than showing an error", async () => {
