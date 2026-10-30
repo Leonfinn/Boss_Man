@@ -81,6 +81,8 @@ export function fundingService(db: Db) {
           ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, events, now)
           : null;
       const quota = source.kind === "subscription" ? await latestQuota(id) : [];
+      // Every window name the adapter has reported, so the owner can switch each one on or off (BOS-227).
+      const windowsSeen = source.kind === "subscription" ? [...new Set((await db.selectDistinct({ window: quotaSamples.window }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id))).map((r) => r.window))].sort() : [];
       // When each window runs out at the recent rate (R78).
       const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, id), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
       const forecasts = Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)]));
@@ -88,6 +90,7 @@ export function fundingService(db: Db) {
         source,
         credit,
         quota,
+        windowsSeen,
         forecasts,
         daily: await this.daily(id, now, timeZone),
         byCompany: await this.byCompany(id, now),

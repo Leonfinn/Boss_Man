@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
@@ -132,6 +132,8 @@ export function schedulerService(
     now?: () => Date;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
     quietHours?: () => Promise<QuietHours | null>;
+    /** Tells the owner something without needing an answer (quota holds, credits in use). */
+    notifyOwner?: (input: { companyId: string | null; level: "note" | "flag" | "page" | "ask"; title: string; body?: string | null; link: string }) => Promise<unknown>;
     /** Start a pass as soon as a wake is queued (R85); tests that drive ticks themselves turn it off. */
     tickOnWake?: boolean;
     log?: (msg: string) => void;
@@ -161,6 +163,80 @@ export function schedulerService(
   async function globallyPaused() {
     const [row] = await db.select().from(settings).where(eq(settings.key, "paused"));
     return row?.value === true;
+  }
+
+  /** The newest sample per window for a subscription. */
+  async function latestQuotaWindows(fundingSourceId: string) {
+    return db
+      .selectDistinctOn([quotaSamples.window])
+      .from(quotaSamples)
+      .where(eq(quotaSamples.fundingSourceId, fundingSourceId))
+      .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
+  }
+
+  /** Windows that count towards the hold: the owner can switch any adapter-reported name off (BOS-227). */
+  function holdingWindows(source: typeof fundingSources.$inferSelect, samples: (typeof quotaSamples.$inferSelect)[], t: Date) {
+    const off = new Set(source.quotaDisabledWindows ?? []);
+    const threshold = source.quotaHoldAt ?? limits.quotaHoldAt;
+    return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
+  }
+
+  /**
+   * Tells the owner, once, when routine work stops or starts again, and once when extra-usage
+   * credits begin being spent. Safe to run on every pass.
+   */
+  async function quotaNotices(t: Date) {
+    if (!deps.notifyOwner) return;
+    const sources = await db.select().from(fundingSources).where(eq(fundingSources.kind, "subscription"));
+    for (const source of sources) {
+      const samples = await latestQuotaWindows(source.id);
+      if (samples.length === 0) continue;
+      const full = holdingWindows(source, samples, t);
+      // "Keep all work running" means routine work isn't actually paused, so there's nothing to announce.
+      const held = full.length > 0 && source.quotaOverage !== "all";
+      if (held && !source.quotaHeldNotified) {
+        const first = full.reduce((a, b) => (b.utilization > a.utilization ? b : a));
+        const reset = first.resetsAt ? ` until ${first.resetsAt.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+        await deps
+          .notifyOwner({
+            companyId: null,
+            level: "flag",
+            title: `Routine work paused${reset}`,
+            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. Chats, reviews, deploy approvals and urgent tickets still run.`,
+            link: "#/funding",
+          })
+          .catch((err) => deps.log?.(`quota hold notification failed: ${(err as Error).message}`));
+        await db.update(fundingSources).set({ quotaHeldNotified: true }).where(eq(fundingSources.id, source.id));
+      }
+      if (!held && source.quotaHeldNotified) {
+        await deps
+          .notifyOwner({
+            companyId: null,
+            level: "note",
+            title: `Routine work is running again`,
+            body: `${source.name} is back under the hold threshold, so held work will start.`,
+            link: "#/funding",
+          })
+          .catch((err) => deps.log?.(`quota release notification failed: ${(err as Error).message}`));
+        await db.update(fundingSources).set({ quotaHeldNotified: false }).where(eq(fundingSources.id, source.id));
+      }
+      const overage = samples.some((s) => s.overageInUse);
+      if (overage && !source.quotaOverageNotified) {
+        await deps
+          .notifyOwner({
+            companyId: null,
+            level: "flag",
+            title: `Extra-usage credits are now being used`,
+            body: `${source.name} has started using extra-usage credits. Boss Man can't see the balance, so set a spending limit in your Claude account.`,
+            link: "#/funding",
+          })
+          .catch((err) => deps.log?.(`overage notification failed: ${(err as Error).message}`));
+        await db.update(fundingSources).set({ quotaOverageNotified: true }).where(eq(fundingSources.id, source.id));
+      }
+      if (!overage && source.quotaOverageNotified) {
+        await db.update(fundingSources).set({ quotaOverageNotified: false }).where(eq(fundingSources.id, source.id));
+      }
+    }
   }
 
   /** The wiki maintainer's standing job, and the tickets finished since its last run (R73). */
@@ -817,8 +893,9 @@ export function schedulerService(
       // Each note waits the window again, up to answerBatchMaxMs after the first.
       const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + window);
       let notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
-      // A high-priority note ends a quiet-hours wait.
-      const release = waiting.statusReason === "quiet hours" && priority >= limits.highPriority;
+      // A high-priority note ends a quiet-hours or quota-held wait (BOS-227).
+      const holds = waiting.statusReason === "quiet hours" || waiting.statusReason?.startsWith("subscription ");
+      const release = !!holds && priority >= limits.highPriority;
       if (release) notBefore = null;
       // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.
       const listed = !note || !!waiting.note?.includes(input.reason === REVIEW_REASON ? (note.split(" ")[1] ?? "\0") : note);
@@ -970,6 +1047,7 @@ export function schedulerService(
       await watchDue();
 
       const t = now();
+      await quotaNotices(t).catch((err) => deps.log?.(`quota notices failed: ${(err as Error).message}`));
       const queue = await db
         .select()
         .from(wakes)
@@ -1123,13 +1201,11 @@ export function schedulerService(
         if (agent?.fundingSourceId && w.priority < limits.highPriority) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
           if (source?.kind === "subscription") {
-            const samples = await db
-              .selectDistinctOn([quotaSamples.window])
-              .from(quotaSamples)
-              .where(eq(quotaSamples.fundingSourceId, source.id))
-              .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
-            const full = samples.filter((s) => s.utilization >= limits.quotaHoldAt && (!s.resetsAt || s.resetsAt > t));
-            if (full.length) {
+            const [ticket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+            const samples = await latestQuotaWindows(source.id);
+            const full = holdingWindows(source, samples, t);
+            // Urgent tickets always pass; "all" lets every wake through on the owner's extra usage.
+            if (full.length && !ticket?.urgent && source.quotaOverage !== "all") {
               const until = full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null);
               await defer(`subscription ${full.map((s) => s.window).join(", ")} window nearly used up`, until);
               continue;

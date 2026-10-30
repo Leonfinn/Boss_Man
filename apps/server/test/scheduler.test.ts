@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, runTokens, wakes } from "../src/db/schema.js";
+import { decisions, notifications, runners, runTokens, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -185,6 +185,88 @@ describe("scheduler", () => {
     const low = (await ctx.db.select().from(wakes)).find((w) => w.priority === 2)!;
     expect(low.status).toBe("deferred");
     expect(low.notBefore?.getTime()).toBe(resets * 1000);
+  });
+
+  it("always lets an urgent ticket through the quota hold", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { status: "rejected", rateLimitType: "seven_day", unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { urgent: true });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+  });
+
+  it("lets routine work through windows the owner switched off, and past a raised threshold", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.85, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    // 85% is under the default 95%, so it runs.
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+    // Raise nothing: switch the only window off and add a fresh full reading.
+    await ctx.req("PATCH", `/api/funding-sources/${sub.id}`, { quotaDisabledWindows: ["seven_day"] });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+  });
+
+  it("keeps all work running when the owner allows extra usage for it", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic", quotaOverage: "all" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+  });
+
+  it("releases a quota-held wake when a high-priority note joins it", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2, note: "routine" });
+    await ctx.req("POST", "/api/scheduler/tick");
+    const held = (await ctx.db.select().from(wakes))[0]!;
+    expect(held.status).toBe("deferred");
+    await ctx.scheduler.notify(ctx.ceo.id, { reason: held.reason, note: "Important", priority: 3 });
+    const [released] = await ctx.db.select().from(wakes).where(eq(wakes.id, held.id));
+    expect(released).toMatchObject({ status: "queued", statusReason: null });
+  });
+
+  it("tells the owner once when the hold starts and once when it lifts", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    const meta = (w: number) => ({ "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: w, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.99) });
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(notifications)).filter((n) => /Routine work paused/.test(n.title))).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 5));
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.2) });
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(notifications)).filter((n) => /running again/.test(n.title))).toHaveLength(1);
+  });
+
+  it("runs a held ticket now when the owner asks", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Held work", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("backlog");
+    expect((await ctx.req("POST", `/api/tickets/${t.id}/run-now`)).json()).toEqual({ released: 1 });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+  });
+
+  it("marks a ticket urgent only through the owner path and the managers' tool", async () => {
+    ctx = await setup();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent later" })).json();
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { urgent: true });
+    const [row] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.urgent).toBe(true);
   });
 
   it("tells an agent on a ticket to save its state note before ending, but not one with no ticket", async () => {

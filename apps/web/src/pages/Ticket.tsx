@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { TASK_SIZES } from "@boss-man/shared";
+import { TASK_SIZES, windowLabel } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
@@ -336,6 +336,19 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
     }
   };
 
+  const runNow = async () => {
+    setBusy(true);
+    try {
+      const r = await api<{ released: number }>(`/api/tickets/${id}/run-now`, { method: "POST" });
+      setNote({ ok: true, text: r.released ? "Started now, past the quota hold." : "Nothing was held." });
+      ticket.reload();
+    } catch (err) {
+      setNote({ ok: false, text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const mergeNow = async () => {
     setBusy(true);
     try {
@@ -412,6 +425,18 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         </div>
       </header>
 
+      {t.quotaHeldUntil && (
+        <div className="card" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ flex: "1 1 320px" }}>
+            <strong>Routine work is held until {when(t.quotaHeldUntil)}.</strong>{" "}
+            <span className="muted">{t.quotaHeldReason ? `${windowLabel(t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")).name} is nearly used up. ` : ""}You can run this one now, or mark it urgent so it always runs through the hold.</span>
+          </span>
+          <button type="button" className="btn primary" disabled={busy} onClick={() => void runNow()}>
+            Run now
+          </button>
+        </div>
+      )}
+
       <div className={`ticket-layout${propsCollapsed ? " props-collapsed" : ""}`}>
         <div className="ticket-main">
           <section className="card" aria-labelledby="desc-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -482,6 +507,13 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
               </span>
             </label>
           )}
+
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+            <input type="checkbox" checked={!!t.urgent} disabled={busy} onChange={(e) => patch({ urgent: e.target.checked })} />
+            <span>
+              Urgent <span className="muted">(always runs through the subscription quota hold)</span>
+            </span>
+          </label>
 
           <DoneWhen t={t} patch={patch} busy={busy} />
 

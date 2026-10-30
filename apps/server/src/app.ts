@@ -259,6 +259,7 @@ export async function buildApp(opts: AppOptions) {
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
     quietHours: async () => (await notes.getSettings()).quietHours,
+    notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
     log: (m) => app.log.error(m),
     // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
@@ -944,6 +945,12 @@ export async function buildApp(opts: AppOptions) {
       monthlyGrantUsd: z.number().nonnegative().optional(),
       cycleAnchor: z.coerce.date().optional(),
       secretId: Uuid.optional(),
+      /** Hold routine work at this share of a subscription window (BOS-227). */
+      quotaHoldAt: z.number().min(0.8).max(1).optional(),
+      /** Whether extra usage may be spent: pause (default), urgent only, or all work. */
+      quotaOverage: z.enum(["pause", "urgent", "all"]).optional(),
+      /** Adapter window names that never trigger the hold. */
+      quotaDisabledWindows: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
     });
     const FundingInput = FundingFields.superRefine((v, ctx) => {
       const problem = fundingComboError(v.kind, v.provider);
@@ -959,6 +966,9 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : null,
         cycleAnchor: b.cycleAnchor ?? null,
         secretId: b.secretId ?? null,
+        quotaHoldAt: b.quotaHoldAt ?? 0.95,
+        quotaOverage: b.quotaOverage ?? "pause",
+        quotaDisabledWindows: b.quotaDisabledWindows ?? [],
       });
       return reply.code(201).send(row);
     });
@@ -982,6 +992,9 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : undefined,
         cycleAnchor: b.cycleAnchor,
         secretId: b.secretId,
+        quotaHoldAt: b.quotaHoldAt,
+        quotaOverage: b.quotaOverage,
+        quotaDisabledWindows: b.quotaDisabledWindows,
       });
       models.forget(id);
       return row;
@@ -1072,6 +1085,7 @@ export async function buildApp(opts: AppOptions) {
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
       noCode: z.boolean(),
+      urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
       size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).nullable(),
       planFirst: z.boolean(),
@@ -1281,7 +1295,12 @@ export async function buildApp(opts: AppOptions) {
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee };
+      const [held] = await db
+        .select({ until: wakes.notBefore, reason: wakes.statusReason })
+        .from(wakes)
+        .where(and(eq(wakes.ticketId, id), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+        .limit(1);
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1606,6 +1625,21 @@ export async function buildApp(opts: AppOptions) {
     owner.post("/api/companies/:id/wiki-semantic/reindex", async (req, reply) => reply.code(202).send({ pages: await semantic.reindexAll(IdParam.parse(req.params).id) }));
     owner.get("/api/tickets/:id/artifacts", async (req) => wiki.artifacts(IdParam.parse(req.params).id, { family: true }));
     owner.delete("/api/artifacts/:id", async (req, reply) => wiki.removeArtifact(IdParam.parse(req.params).id).then(() => reply.code(204).send(), wikiErrors(reply)));
+
+    // A held wake can be run now: it gets high priority, which passes the quota hold, and starts on the next pass.
+    owner.post("/api/tickets/:id/run-now", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, id));
+      if (!t) return reply.code(404).send({ error: "not_found" });
+      const released = await db
+        .update(wakes)
+        .set({ status: "queued", statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` })
+        .where(and(eq(wakes.ticketId, id), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+        .returning({ id: wakes.id });
+      if (released.length) await scheduler.tick();
+      await record(db, { companyId: t.companyId, ticketId: id, kind: "quota", summary: `Owner ran it now past the quota hold (${released.length} wake${released.length === 1 ? "" : "s"})`, at: new Date() });
+      return { released: released.length };
+    });
 
     owner.patch("/api/tickets/:id", async (req) => {
       const { id } = IdParam.parse(req.params);
