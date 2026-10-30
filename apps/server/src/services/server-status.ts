@@ -98,7 +98,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const deploy = await deps.deploy().catch(() => null);
       const status = (deploy?.status as DeployStatus) ?? null;
       const available = (deploy?.available as Available) ?? null;
-      const recentErrors = deps.errors.recent(20);
+      const recentErrors = deps.errors.recent(20, companyId);
 
       return {
         server: {
@@ -130,9 +130,10 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           recent: recentRuns.map((r) => ({ id: r.id, agent: r.agent, startedAt: r.startedAt.toISOString(), endedAt: r.endedAt?.toISOString() ?? null, outcome: r.outcome, purpose: r.purpose })),
           failures: failedRuns.map((r) => ({ id: r.id, agent: r.agent, startedAt: r.startedAt.toISOString(), endedAt: r.endedAt?.toISOString() ?? null, reason: r.outcome })),
         },
-        // Only the message each error was logged with, never a query, its parameters or a stack:
-        // the buffer is server-wide, and any company's agents can read this tool.
-        errors: { count: deps.errors.count(), recent: recentErrors },
+        // Only this company's lines, and only the message each was logged with: never a query, its
+        // parameters or a stack. The buffer is server-wide, so lines with no company are counted,
+        // not shown (security review round 2).
+        errors: { count: deps.errors.count(companyId), recent: recentErrors, untagged: deps.errors.untagged() },
       };
     },
   };

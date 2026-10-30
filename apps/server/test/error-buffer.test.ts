@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createErrorBuffer, logMessage, redact } from "../src/services/error-buffer.js";
+import { createErrorBuffer, logCompany, logMessage, redact } from "../src/services/error-buffer.js";
 
 describe("error buffer", () => {
   it("redacts the secrets an error line can carry", () => {
@@ -26,10 +26,28 @@ describe("error buffer", () => {
 
   it("keeps only the most recent lines, oldest dropped", () => {
     const buf = createErrorBuffer(3, () => new Date("2026-01-01T00:00:00Z"));
-    for (const line of ["one", "two", "three", "four"]) buf.push(line);
-    expect(buf.recent().map((e) => e.message)).toEqual(["two", "three", "four"]);
-    expect(buf.recent(1)).toEqual([{ at: "2026-01-01T00:00:00.000Z", message: "four" }]);
-    expect(buf.count()).toBe(3);
+    for (const line of ["one", "two", "three", "four"]) buf.push(line, "co-a");
+    expect(buf.recent(10, "co-a").map((e) => e.message)).toEqual(["two", "three", "four"]);
+    expect(buf.recent(1, "co-a")).toEqual([{ at: "2026-01-01T00:00:00.000Z", message: "four", companyId: "co-a" }]);
+    expect(buf.count("co-a")).toBe(3);
+  });
+
+  it("shows a company only its own lines, and counts the rest", () => {
+    const buf = createErrorBuffer(100, () => new Date("2026-01-01T00:00:00Z"));
+    buf.push("A's own error", "co-a");
+    buf.push("B's error", "co-b");
+    buf.push("no company here");
+    expect(buf.recent(10, "co-a").map((e) => e.message)).toEqual(["A's own error"]);
+    expect(buf.recent(10, "co-b").map((e) => e.message)).toEqual(["B's error"]);
+    expect(buf.count("co-a")).toBe(1);
+    expect(buf.untagged()).toBe(1);
+  });
+
+  it("finds the company a log call was tagged with", () => {
+    expect(logCompany([{ err: new Error("x"), companyId: "co-a" }, "failed"])).toBe("co-a");
+    expect(logCompany([{ err: new Error("x") }, "failed"])).toBeNull();
+    expect(logCompany([new Error("x")])).toBeNull();
+    expect(logCompany([{ companyId: "" }, "failed"])).toBeNull();
   });
 
   it("keeps the logged message, never an Error's message, stack, query or params", () => {

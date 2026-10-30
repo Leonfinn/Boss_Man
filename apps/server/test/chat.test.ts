@@ -165,7 +165,15 @@ describe("owner chat", () => {
       new Error('Failed query: select * from tickets where id = $1 params: ["B Co private plan: acquire Acme"]'),
       { query: "select * from tickets", params: ["B Co private plan: acquire Acme"] },
     );
-    c.app.log.error({ err: leak }, "run-ended handling failed");
+    // This company's own error keeps only the message it was logged with, never the query or params.
+    c.app.log.error({ err: leak, companyId: c.company.id }, "run-ended handling failed");
+    // Another company's error is tagged to it, so this company never reads even its safe message.
+    const otherLeak = Object.assign(
+      new Error('Failed query: select * from tickets where id = $1 params: ["Other Co private plan"]'),
+      { query: "select * from tickets", params: ["Other Co private plan"] },
+    );
+    c.app.log.error({ err: otherLeak, companyId: other.company.id }, "runner event failed");
+    // An error with no company attached is counted for everyone, shown to no one.
     c.app.log.error(leak);
     const port = (c.app.server.address() as { port: number }).port;
     const connect = async (companyId: string, agentId: string) => {
@@ -182,8 +190,11 @@ describe("owner chat", () => {
     expect(seen).not.toContain(wake2);
     expect(seen).not.toContain("B Co private plan");
     expect(seen).not.toContain("acquire Acme");
+    expect(seen).not.toContain("Other Co private plan");
     expect(seen).not.toContain("select * from tickets");
+    expect(seen).not.toContain("runner event failed");
     expect(view.errors.recent.map((e: { message: string }) => e.message)).toContain("run-ended handling failed");
+    expect(view.errors.untagged).toBeGreaterThan(0);
     expect(textOf(await mine.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain("Other Co secret question");
     await mine.close();
     // The other company's CEO does see them.
@@ -191,8 +202,55 @@ describe("owner chat", () => {
     const theirView = JSON.parse(textOf(await theirs.callTool({ name: "server_status", arguments: {} })));
     expect(JSON.stringify(theirView.runs.recent)).toContain(run2);
     expect(JSON.stringify(theirView.wakes.waiting)).toContain(wake2);
+    // Each company reads only its own error lines, and only their safe messages.
+    expect(theirView.errors.recent.map((e: { message: string }) => e.message)).toContain("runner event failed");
+    expect(theirView.errors.recent.map((e: { message: string }) => e.message)).not.toContain("run-ended handling failed");
+    expect(JSON.stringify(theirView.errors.recent)).not.toContain("Other Co private plan");
     expect(textOf(await theirs.callTool({ name: "decisions", arguments: { action: "list" } }))).toContain("Other Co secret question");
     await theirs.close();
+  });
+
+  it("keeps another agent's chat to the board tools, so it can't outgrow its restricted runs (BOS-58)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("PATCH", `/api/companies/${c.company.id}/watchdog`, { scrumMasterAgentId: c.worker.id });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What is stuck?", agentId: c.worker.id });
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.worker.id)!;
+    expect(start).toBeTruthy();
+    // Its chat doesn't claim the CEO's run tools.
+    expect(start.prompt).not.toContain("same tools here as in your ticket runs");
+    const client = await c.mcp(start.runId, c.worker.id);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual([
+      "agent_instructions",
+      "board",
+      "create_feature",
+      "create_ticket",
+      "features",
+      "link_tickets",
+      "list_my_work",
+      "log_feedback",
+      "model_options",
+      "notes",
+      "nudge",
+      "open_attachment",
+      "propose_hire",
+      "propose_model_change",
+      "propose_rule",
+      "propose_team",
+      "request_note",
+      "roadmap",
+      "set_milestone",
+      "set_ticket_state",
+      "skills",
+      "tickets",
+      "update_instructions",
+      "update_ticket",
+      "whats_new",
+      "wiki",
+    ]);
+    await client.close();
   });
 
   it("sends the owner's draft to the CEO with how to question them, before anything is created", async () => {

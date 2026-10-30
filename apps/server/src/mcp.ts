@@ -148,7 +148,7 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   }) as never;
 }
 
-function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false) {
+function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false, withServerStatus = true) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
@@ -156,7 +156,7 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
     registerWatchdog(server, services.watchdog, services.alerts, scope);
   }
   if (retroAgent) registerRetro(server, services.retro, scope);
-  registerRunTools(server, db, services, scope, hooks);
+  registerRunTools(server, db, services, scope, hooks, undefined, withServerStatus);
   registerRoadmap(server, db, services.work, scope);
   registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals }, scope, hooks, false);
   registerSharedTools(server, db, { notes: services.notes, wiki: services.wiki, skills: services.skills, skillProposals: services.skillProposals, review: services.review, agents: services.agents }, scope);
@@ -172,9 +172,9 @@ function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, 
  * owner chat register): handing out and moving tickets, decisions, engagements, deploys, runs,
  * notifications, review and the rest. Both buildServer and buildChatServer call it, so the CEO
  * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
- * which it has its own version of.
+ * which it has its own version of, and only the CEO's chat registers these tools at all.
  */
-function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>) {
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
   const originalRegister = server.registerTool.bind(server);
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
@@ -1160,15 +1160,19 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     },
   );
 
-  server.registerTool(
-    "server_status",
-    {
-      description:
-        "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, and recent server errors with secrets redacted. It changes nothing and shows no other company's tickets or runs.",
-      inputSchema: {},
-    },
-    async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
-  );
+  // The server view is the CEO's (BOS-224), in its chat and its runs: it names the server's work,
+  // so it is not registered for a worker's run, however safe its contents are filtered.
+  if (withServerStatus) {
+    server.registerTool(
+      "server_status",
+      {
+        description:
+          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, and recent server errors with secrets redacted. It changes nothing and shows no other company's tickets, runs or errors.",
+        inputSchema: {},
+      },
+      async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
+    );
+  }
 
   if (skip?.size) (server.registerTool as unknown) = originalRegister;
 }
@@ -2292,15 +2296,17 @@ const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().opti
 const CHAT_SKIP: ReadonlySet<string> = new Set(["create_ticket", "nudge"]);
 
 /**
- * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
- * not an agent's, and go through the same checks as the board's own forms.
+ * The owner chat's tools (v1.1): the board, plus the CEO's own run tools (BOS-224). Tickets it
+ * makes are the owner's, not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks) {
+function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean) {
   const { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
-  // The same tools its ticket runs have (BOS-224), except create_ticket and nudge, which have
-  // chat versions below. No tool here edits code or runs a command.
-  registerRunTools(server, db, services, scope, hooks, CHAT_SKIP);
+  // The CEO gets the same tools in its chat as in its runs, except create_ticket and nudge, which
+  // have chat versions below (BOS-224). Another agent's chat keeps the board tools only: its runs
+  // may be deliberately restricted (BOS-58), and a chat must not widen them. No tool here edits
+  // code or runs a command.
+  if (withRunTools) registerRunTools(server, db, services, scope, hooks, CHAT_SKIP);
   registerListMyWork(server, db, scope);
   registerRequestNote(server, db, scope, hooks);
   registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
@@ -2447,20 +2453,23 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       : [];
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 
-    // Stateless: a fresh server and transport per request. Owner chat runs get board tools only.
+    // Stateless: a fresh server and transport per request.
     const [run] = await db.select({ purpose: runsTable.purpose }).from(runsTable).where(eq(runsTable.id, scope.runId));
     // A PA gets its read-only server whatever woke it (R87).
-    const [me] = scope.agentId ? await db.select({ duty: agents.duty }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+    const [me] = scope.agentId ? await db.select({ duty: agents.duty, role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
     // The Scrum Master gets its restricted server for its own runs (BOS-58); the owner's chat with it keeps the chat tools.
     const retroAgent = !!scope.agentId && run?.purpose !== "chat" && me?.duty !== "assistant" && (await services.retro.isRetroAgent(scope.companyId, scope.agentId));
+    // The server view is the CEO's alone (BOS-224). In chat, only the CEO also gets its run tools:
+    // another agent's chat stays board-only, so it can't outgrow its run's restrictions (BOS-58).
+    const ceo = me?.role === "ceo";
     const server =
       me?.duty === "assistant"
         ? buildPaServer(db, services, scope)
         : run?.purpose === "chat"
-          ? buildChatServer(db, services, scope, hooks)
+          ? buildChatServer(db, services, scope, hooks, ceo)
           : me?.duty === SCRUM_MASTER_DUTY
-            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent)
-            : buildServer(db, services, scope, hooks, undefined, retroAgent);
+            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent, false)
+            : buildServer(db, services, scope, hooks, undefined, retroAgent, ceo);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {
