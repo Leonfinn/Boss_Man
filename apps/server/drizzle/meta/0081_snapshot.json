@@ -1,6 +1,6 @@
 {
-  "id": "bb82ff12-69ab-43ce-8384-e799f943f309",
-  "prevId": "6956bf69-af18-414d-ade3-d0336665d591",
+  "id": "823230d5-1dc0-4c93-bd34-fd3f964e772a",
+  "prevId": "bb82ff12-69ab-43ce-8384-e799f943f309",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3050,6 +3050,42 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "quota_hold_at": {
+          "name": "quota_hold_at",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0.95
+        },
+        "quota_overage": {
+          "name": "quota_overage",
+          "type": "quota_overage_mode",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pause'"
+        },
+        "quota_disabled_windows": {
+          "name": "quota_disabled_windows",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
+        },
+        "quota_held_notified": {
+          "name": "quota_held_notified",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "quota_overage_notified": {
+          "name": "quota_overage_notified",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         },
         "created_at": {
           "name": "created_at",
@@ -7459,6 +7495,13 @@
           "notNull": true,
           "default": false
         },
+        "urgent": {
+          "name": "urgent",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "version": {
           "name": "version",
           "type": "integer",
@@ -9386,6 +9429,15 @@
         "openrouter",
         "ollama",
         "synthetic"
+      ]
+    },
+    "public.quota_overage_mode": {
+      "name": "quota_overage_mode",
+      "schema": "public",
+      "values": [
+        "pause",
+        "urgent",
+        "all"
       ]
     },
     "public.risk_tier": {

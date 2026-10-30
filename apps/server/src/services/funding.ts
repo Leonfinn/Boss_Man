@@ -163,10 +163,16 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       const told = await db.insert(providerQuotaWarnings).values({ fundingSourceId: source.id, period, threshold, warnedAt: now() }).onConflictDoNothing().returning();
       if (!told.length) continue;
       const who = paid.length ? paid.map((a) => `${a.name} (${a.company})`).join(", ") : "no agents right now";
-      await notify({
-        title: threshold >= 100 ? `${source.name}: the Synthetic allowance is used up` : `${source.name}: ${threshold}% of the Synthetic allowance is used`,
-        body: `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for the renewal.`,
-      });
+      try {
+        await notify({
+          title: threshold >= 100 ? `${source.name}: the Synthetic allowance is used up` : `${source.name}: ${threshold}% of the Synthetic allowance is used`,
+          body: `${view.used.toLocaleString()} of ${view.limit.toLocaleString()} requests used (${Math.round(percent)}%). It renews ${when(view.renewsAt)}. Paid from it: ${who}. Boss Man won't pause any runs; move less urgent work or wait for the renewal.`,
+        });
+      } catch {
+        // The warning never reached the owner: drop the row so the next reading tries again.
+        await db.delete(providerQuotaWarnings).where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, period), eq(providerQuotaWarnings.threshold, threshold)));
+        continue;
+      }
       sent.push(threshold);
     }
     return sent;
@@ -223,6 +229,8 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
           ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, events, now)
           : null;
       const quota = source.kind === "subscription" ? await latestQuota(id) : [];
+      // Every window name the adapter has reported, so the owner can switch each one on or off (BOS-227).
+      const windowsSeen = source.kind === "subscription" ? [...new Set((await db.selectDistinct({ window: quotaSamples.window }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id))).map((r) => r.window))].sort() : [];
       // When each window runs out at the recent rate (R78).
       const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, id), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
       const forecasts = Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)]));
@@ -230,6 +238,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         source,
         credit,
         quota,
+        windowsSeen,
         forecasts,
         /** Synthetic's own used/limit reading, its age and its history; null for other providers. */
         providerQuota: await providerQuota(source),
@@ -351,27 +360,34 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
       return out;
     },
 
-    /** What the CEO sees: every Synthetic source's reading, its age, history and warnings had (BOS-239). */
-    async syntheticUsage() {
+    /**
+     * What the CEO sees: every Synthetic source's reading, its age, history and warnings had (BOS-239).
+     * The reading is the owner's own plan, so every company's CEO may see it; but agent names are
+     * company-scoped (BOS-224): only the calling company's agents are named, and agents another
+     * company runs on the same plan are counted, not named.
+     */
+    async syntheticUsage(companyId: string) {
       const sources = await db.select().from(fundingSources).where(eq(fundingSources.provider, "synthetic")).orderBy(fundingSources.name);
       const out = [];
       for (const source of sources) {
         const reading = await providerQuota(source);
-        const agentsPaid = await db
-          .select({ name: agents.name, company: companies.name, model: agents.model })
+        const paid = await db
+          .select({ name: agents.name, company: companies.name, companyId: agents.companyId, model: agents.model })
           .from(agents)
           .innerJoin(companies, eq(companies.id, agents.companyId))
           .where(and(eq(agents.fundingSourceId, source.id), sql`${agents.retiredAt} is null`))
           .orderBy(agents.name);
-        out.push({ fundingSourceId: source.id, name: source.name, reading, agents: agentsPaid });
+        const mine = paid.filter((a) => a.companyId === companyId);
+        out.push({
+          fundingSourceId: source.id,
+          name: source.name,
+          reading,
+          agents: mine.map((a) => ({ name: a.name, model: a.model })),
+          // Agents outside this company on the same plan: counted, never named.
+          otherCompaniesAgents: paid.length - mine.length,
+        });
       }
       return out;
-    },
-
-    /** Monthly quota readings per source, oldest first, for the trend; other providers have none. */
-    async readingTrend(fundingSourceId: string, days = 30) {
-      const since = new Date(now().getTime() - days * 86_400_000);
-      return db.select().from(providerQuotaReadings).where(and(eq(providerQuotaReadings.fundingSourceId, fundingSourceId), gte(providerQuotaReadings.takenAt, since))).orderBy(providerQuotaReadings.takenAt);
     },
 
     async createPolicy(input: typeof budgetPolicies.$inferInsert) {

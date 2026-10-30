@@ -192,6 +192,28 @@ describe("Synthetic usage for the CEO (BOS-239)", () => {
     expect(JSON.stringify(view)).not.toContain("sk-syn-secret");
     await client.close();
   });
+
+  it("names only the calling company's agents, and counts the other company's without naming them", async () => {
+    const c = (ctx = await setup().build());
+    await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Engineer", fundingSourceId: c.source.id });
+    // A second company on the same Synthetic plan, with an agent of its own.
+    const b = (await c.req("POST", "/api/companies", { name: "Other Co" })).json() as { company: { id: string }; ceo: { id: string } };
+    await c.req("POST", `/api/companies/${b.company.id}/agents`, { name: "Secret Agent", fundingSourceId: c.source.id });
+
+    const aView = await c.funding.syntheticUsage(c.company.id);
+    expect(aView[0]!.agents.map((a) => a.name)).toEqual(["Engineer"]);
+    expect(aView[0]!.otherCompaniesAgents).toBe(1);
+
+    const otherView = await c.funding.syntheticUsage(b.company.id);
+    expect(otherView[0]!.agents.map((a) => a.name)).toEqual(["Secret Agent"]);
+    expect(otherView[0]!.otherCompaniesAgents).toBe(1);
+    // The CEO of App Co never sees the other company's agent name in its own server_status.
+    const client = await c.mcp();
+    const view = JSON.parse(textOf(await client.callTool({ name: "server_status", arguments: {} })));
+    expect(JSON.stringify(view)).not.toContain("Secret Agent");
+    expect(JSON.stringify(view)).not.toContain("Other Co");
+    await client.close();
+  });
 });
 
 describe("other providers (BOS-239)", () => {
@@ -201,7 +223,7 @@ describe("other providers (BOS-239)", () => {
     expect((await status(c, ollama.id)).providerQuota).toBeNull();
     await c.refreshSyntheticQuota();
     expect(quotaCalls(c.calls)).toBe(1);
-    const usage = await c.funding.syntheticUsage();
+    const usage = await c.funding.syntheticUsage(c.company.id);
     expect(usage.map((u) => u.name)).toEqual(["Synthetic"]);
   });
 });
