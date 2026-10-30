@@ -259,6 +259,26 @@ describe("skills library (R71)", () => {
     expect(((await c.req("GET", base)).json() as Array<{ name: string; instructionsUnreadable: boolean }>).find((x) => x.name === "binary")).toMatchObject({ instructionsUnreadable: true });
   });
 
+  it("shows the body when the description is quoted with escapes, or a folded block", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    // The shape of content-strategy's description: a quoted value with escaped quotes inside.
+    const quotedMd = '---\nname: quoted\ndescription: "When the user mentions \\"content strategy,\\" and \\"topic clusters.\\""\n---\n\n# Steps\n\nThe body after an escaped description.';
+    // The shape of british-plain-english's description: a block scalar with several lines.
+    const foldedMd = "---\nname: folded\ndescription: |\n  Write plain British English.\n  Explain every term.\n---\n\n# Rules\n\nKeep sentences short.";
+    await c.db.insert(skills).values([
+      { companyId: c.company.id, name: "quoted", description: "Quoted", source: "upload", files: [{ path: "SKILL.md", content: b64(quotedMd) }], sizeBytes: Buffer.byteLength(quotedMd) },
+      { companyId: c.company.id, name: "folded", description: "Folded", source: "upload", files: [{ path: "SKILL.md", content: b64(foldedMd) }], sizeBytes: Buffer.byteLength(foldedMd) },
+    ]);
+    const list = (await c.req("GET", base)).json() as Array<{ id: string; name: string; hasInstructions: boolean }>;
+    const quoted = list.find((x) => x.name === "quoted")!;
+    const folded = list.find((x) => x.name === "folded")!;
+    expect(quoted.hasInstructions).toBe(true);
+    expect(folded.hasInstructions).toBe(true);
+    expect(((await c.req("GET", `${base}/${quoted.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Steps\n\nThe body after an escaped description.");
+    expect(((await c.req("GET", `${base}/${folded.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Rules\n\nKeep sentences short.");
+  });
+
   it("lets the CEO give and take skills, and tells the owner", async () => {
     const c = (ctx = await setup());
     await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "triage", description: "Sorts bug reports.", body: "Steps." });
