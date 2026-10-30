@@ -27,7 +27,9 @@ import { secretGrants, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
-import { maintenanceService } from "./services/maintenance.js";
+import { getHold, maintenanceService } from "./services/maintenance.js";
+import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
+import { serverStatusService } from "./services/server-status.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
@@ -175,6 +177,14 @@ async function serveWeb(app: FastifyInstance, root: string) {
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
   const app = Fastify({ logger: opts.logger ?? false });
+  // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
+  const errorBuffer = createErrorBuffer();
+  const logError = app.log.error.bind(app.log);
+  app.log.error = ((...args: unknown[]) => {
+    const message = logMessage(args);
+    if (message) errorBuffer.push(message, logCompany(args));
+    return logError(...(args as Parameters<typeof logError>));
+  }) as typeof app.log.error;
   await app.register(cookie);
   await app.register(websocket);
 
@@ -289,6 +299,19 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  const serverStatus = serverStatusService(db, {
+    role: () => leader.role(),
+    isConnected: (id) => runners.isConnected(id),
+    deploy: () => selfDeploy.overview(),
+    hold: async () => {
+      const h = await getHold(db);
+      return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
+    },
+    errors: errorBuffer,
+    commit: process.env.BOSSMAN_COMMIT || "dev",
+    startedAt: new Date(STARTED_AT),
+    now: opts.now,
+  });
   const engagementsSvc = engagementsService(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now });
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
@@ -342,24 +365,24 @@ export async function buildApp(opts: AppOptions) {
   }
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
-    if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err }, "chapter update failed"));
-    if (event.type === "run.context") void chapters.onContext(event.runId, event.used, event.size).catch((err) => app.log.error({ err }, "chapter update failed"));
-    if (event.type === "run.ended") void chapters.onRunEnded(event.runId).catch((err) => app.log.error({ err }, "chapter close failed"));
+    if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
+    if (event.type === "run.context") void chapters.onContext(event.runId, event.used, event.size).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
+    if (event.type === "run.ended") void chapters.onRunEnded(event.runId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter close failed"));
     // The owner chat's answers.
     if (event.type === "run.update" && (event.update as { kind?: string } | null)?.kind === "agent_message") {
-      void chat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "chat reply failed"));
-      void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "PA relay failed"));
-      void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "ticket reply failed"));
+      void chat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat reply failed"));
+      void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
+      void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
-    if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err }, "chat end failed"));
-    if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "PA fail-open failed"));
+    if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat end failed"));
+    if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA fail-open failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
     if (event.type === "run.quota") void quotaWatch(event.fundingSourceId).catch((err) => app.log.error({ err }, "quota forecast failed"));
     // What each agent kind offers, for the model picker (R60).
-    if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err }, "model list failed"));
+    if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err, companyId: runner.companyId }, "model list failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
-      void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
+      void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "disk report handling failed"));
     }
     if (event.type === "run.ended") {
       // A deploy whose run ended without a report is failed, which also ends its secrets.
@@ -375,7 +398,7 @@ export async function buildApp(opts: AppOptions) {
         })
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
         .then(() => scheduler.tick())
-        .catch((err) => app.log.error({ err }, "run-ended handling failed"));
+        .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
     }
   });
   const sweeps = sweepService(db, {
@@ -468,7 +491,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 

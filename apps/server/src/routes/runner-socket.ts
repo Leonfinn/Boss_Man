@@ -87,7 +87,7 @@ export async function runnerSocketRoutes(
               send({ type: "welcome", lastSeq: await runners.lastSeq(runner.id) });
               void runners.checkAddons(runner.id).catch((err) => app.log.warn({ err, runnerId: runner.id }, "add-on check failed"));
               // Verdicts that may have been lost in a dropped connection are sent again.
-              if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id }, "re-sending verdicts failed"));
+              if (msg.pending?.length) await runners.resumed(runner, msg.pending).catch((err) => app.log.error({ err, runnerId: runner.id, companyId: runner.companyId }, "re-sending verdicts failed"));
             });
             return;
           case "event":
@@ -97,7 +97,7 @@ export async function runnerSocketRoutes(
                 send({ type: "ack", upTo: msg.entry.seq });
               })
               .catch((err) => {
-                app.log.error({ err, runnerId: runner.id, seq: msg.entry.seq }, "runner event failed");
+                app.log.error({ err, runnerId: runner.id, seq: msg.entry.seq, companyId: runner.companyId }, "runner event failed");
                 // No ack: the runner keeps the entry and resends it after reconnecting.
                 socket.close(1011, "ingest failed");
               });

@@ -43,6 +43,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import type { serverStatusService } from "./services/server-status.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -127,6 +128,7 @@ type Services = {
   watchdog: ReturnType<typeof watchdogService>;
   alerts: ReturnType<typeof alertLadder>;
   retro: ReturnType<typeof retroService>;
+  serverStatus: ReturnType<typeof serverStatusService>;
 };
 
 /**
@@ -146,15 +148,35 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   }) as never;
 }
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false) {
+function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false, withServerStatus = true) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
-    registerWatchdog(server, watchdog, alerts, scope);
+    registerWatchdog(server, services.watchdog, services.alerts, scope);
   }
-  if (retroAgent) registerRetro(server, retro, scope);
+  if (retroAgent) registerRetro(server, services.retro, scope);
+  registerRunTools(server, db, services, scope, hooks, undefined, withServerStatus);
+  registerRoadmap(server, db, services.work, scope);
+  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals }, scope, hooks, false);
+  registerSharedTools(server, db, { notes: services.notes, wiki: services.wiki, skills: services.skills, skillProposals: services.skillProposals, review: services.review, agents: services.agents }, scope);
+  registerViewImage(server, services.images, scope);
+  registerNotes(server, db, scope, false, { ticketChat: services.ticketChat });
+  registerRequestNote(server, db, scope, hooks);
+  registerListMyWork(server, db, scope);
+  return server;
+}
 
+/**
+ * The tools a ticket run has beyond the shared reads and the board (which both a run and the
+ * owner chat register): handing out and moving tickets, decisions, engagements, deploys, runs,
+ * notifications, review and the rest. Both buildServer and buildChatServer call it, so the CEO
+ * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
+ * which it has its own version of, and only the CEO's chat registers these tools at all.
+ */
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>, withServerStatus = true) {
+  const originalRegister = server.registerTool.bind(server);
+  if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
 
@@ -230,9 +252,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerRoadmap(server, db, work, scope);
 
-  registerTicketMoves(server, db, { review, work, feedback, skillProposals }, scope, hooks, false);
 
   server.registerTool(
     "create_ticket",
@@ -404,8 +424,6 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
-  registerViewImage(server, images, scope);
 
   server.registerTool(
     "ticket_reply",
@@ -862,8 +880,6 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       return text(`Handoff saved for chapter ${c.number + 1}.`);
     },
   );
-  registerNotes(server, db, scope, false, { ticketChat });
-  registerRequestNote(server, db, scope, hooks);
 
   server.registerTool(
     "decisions",
@@ -1130,7 +1146,6 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerListMyWork(server, db, scope);
 
   server.registerTool(
     "pa_verdict",
@@ -1145,8 +1160,23 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  return server;
+  // The server view is the CEO's (BOS-224), in its chat and its runs: it names the server's work,
+  // so it is not registered for a worker's run, however safe its contents are filtered.
+  if (withServerStatus) {
+    server.registerTool(
+      "server_status",
+      {
+        description:
+          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, and recent server errors with secrets redacted. It changes nothing and shows no other company's tickets, runs or errors.",
+        inputSchema: {},
+      },
+      async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
+    );
+  }
+
+  if (skip?.size) (server.registerTool as unknown) = originalRegister;
 }
+
 
 /** What a verdict (or an overrule) did, in a sentence for the reviewer. */
 function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?: string }): string {
@@ -2262,13 +2292,23 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], ale
 const NUDGE_DESCRIPTION =
   "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
+/** Run tools the owner chat replaces with its own version (BOS-224). */
+const CHAT_SKIP: ReadonlySet<string> = new Set(["create_ticket", "nudge"]);
 
 /**
- * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
- * not an agent's, and go through the same checks as the board's own forms.
+ * The owner chat's tools (v1.1): the board, plus the CEO's own run tools (BOS-224). Tickets it
+ * makes are the owner's, not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat }: Services, scope: Scope, hooks: McpHooks) {
+function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, withRunTools: boolean) {
+  const { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  // The CEO gets the same tools in its chat as in its runs, except create_ticket and nudge, which
+  // have chat versions below (BOS-224). Another agent's chat keeps the board tools only: its runs
+  // may be deliberately restricted (BOS-58), and a chat must not widen them. No tool here edits
+  // code or runs a command.
+  if (withRunTools) registerRunTools(server, db, services, scope, hooks, CHAT_SKIP);
+  registerListMyWork(server, db, scope);
+  registerRequestNote(server, db, scope, hooks);
   registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;
@@ -2413,20 +2453,23 @@ export async function mcpRoutes(app: FastifyInstance, db: Db, services: Services
       : [];
     if (!scope) return reply.code(401).send({ error: "unknown_or_expired_run_token" });
 
-    // Stateless: a fresh server and transport per request. Owner chat runs get board tools only.
+    // Stateless: a fresh server and transport per request.
     const [run] = await db.select({ purpose: runsTable.purpose }).from(runsTable).where(eq(runsTable.id, scope.runId));
     // A PA gets its read-only server whatever woke it (R87).
-    const [me] = scope.agentId ? await db.select({ duty: agents.duty }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+    const [me] = scope.agentId ? await db.select({ duty: agents.duty, role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
     // The Scrum Master gets its restricted server for its own runs (BOS-58); the owner's chat with it keeps the chat tools.
     const retroAgent = !!scope.agentId && run?.purpose !== "chat" && me?.duty !== "assistant" && (await services.retro.isRetroAgent(scope.companyId, scope.agentId));
+    // The server view is the CEO's alone (BOS-224). In chat, only the CEO also gets its run tools:
+    // another agent's chat stays board-only, so it can't outgrow its run's restrictions (BOS-58).
+    const ceo = me?.role === "ceo";
     const server =
       me?.duty === "assistant"
         ? buildPaServer(db, services, scope)
         : run?.purpose === "chat"
-          ? buildChatServer(db, services, scope, hooks)
+          ? buildChatServer(db, services, scope, hooks, ceo)
           : me?.duty === SCRUM_MASTER_DUTY
-            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent)
-            : buildServer(db, services, scope, hooks, undefined, retroAgent);
+            ? buildServer(db, services, scope, hooks, SCRUM_MASTER_TOOLS, retroAgent, false)
+            : buildServer(db, services, scope, hooks, undefined, retroAgent, ceo);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     reply.hijack();
     reply.raw.on("close", () => {
