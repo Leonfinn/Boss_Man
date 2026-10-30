@@ -85,8 +85,9 @@ describe("opencode agent kind", () => {
 describe.skipIf(!process.env.OPENCODE_BIN || !existsSync(process.env.OPENCODE_BIN))("real opencode acp", () => {
   it("handshakes and lists provider/model ids", async () => {
     const home = mkdtempSync(path.join(tmpdir(), "bm-oc-home-"));
-    const models = await probeModels("opencode", { OPENROUTER_API_KEY: "sk-or-dummy" }, { adapterBin: process.env.OPENCODE_BIN, baseEnv: { PATH: process.env.PATH, HOME: home }, timeoutMs: 60_000 });
+    const models = await probeModels("opencode", { OPENROUTER_API_KEY: "sk-or-dummy", SYNTHETIC_API_KEY: "sk-syn-dummy" }, { adapterBin: process.env.OPENCODE_BIN, baseEnv: { PATH: process.env.PATH, HOME: home }, timeoutMs: 60_000 });
     expect(models.some((m) => m.value.startsWith("openrouter/"))).toBe(true);
+    expect(models.some((m) => m.value === "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017")).toBe(true);
   }, 90_000);
 });
 

@@ -1,6 +1,6 @@
 {
   "id": "823230d5-1dc0-4c93-bd34-fd3f964e772a",
-  "prevId": "6956bf69-af18-414d-ade3-d0336665d591",
+  "prevId": "bb82ff12-69ab-43ce-8384-e799f943f309",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -9427,7 +9427,8 @@
         "foundry",
         "gateway",
         "openrouter",
-        "ollama"
+        "ollama",
+        "synthetic"
       ]
     },
     "public.quota_overage_mode": {

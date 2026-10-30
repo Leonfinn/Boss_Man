@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normaliseUtilization, parseAcpUsageCost, parseClaudeRateLimit, parseCodexRateLimits } from "../src/quota.js";
+import { normaliseUtilization, parseAcpUsageCost, parseClaudeRateLimit, parseCodexRateLimits, parseSyntheticQuota } from "../src/quota.js";
 import { checkSecretFormat, findCredential, normaliseSecret, secretHint } from "../src/secrets.js";
 
 describe("parseClaudeRateLimit", () => {
@@ -61,6 +61,29 @@ describe("parseCodexRateLimits", () => {
       ["five_hour", 0.125],
       ["seven_day", 0.6],
     ]);
+  });
+});
+
+describe("parseSyntheticQuota", () => {
+  it("reads used, limit and renewal whether they sit beside or inside subscription", () => {
+    const renewsAt = "2026-11-30T00:00:00.000Z";
+    expect(parseSyntheticQuota({ subscription: { limit: 1000 }, requests: 123, renewsAt })).toEqual({
+      used: 123,
+      limit: 1000,
+      renewsAt: new Date(renewsAt),
+    });
+    expect(parseSyntheticQuota({ subscription: { limit: 50, requests: 7, renewsAt } })).toEqual({
+      used: 7,
+      limit: 50,
+      renewsAt: new Date(renewsAt),
+    });
+  });
+
+  it("treats a response without a usable used/limit pair as unknown", () => {
+    expect(parseSyntheticQuota(null)).toBeNull();
+    expect(parseSyntheticQuota({})).toBeNull();
+    expect(parseSyntheticQuota({ subscription: { limit: 0 }, requests: 1 })).toBeNull();
+    expect(parseSyntheticQuota({ subscription: { limit: 10 }, requests: "3" })).toBeNull();
   });
 });
 

@@ -70,3 +70,36 @@ describe("quota card wording", () => {
     expect(windowLabel("90_min").name).toBe("90-minute window");
   });
 });
+
+describe("Synthetic quota", () => {
+  const synthetic = (providerQuota: Record<string, unknown>) => {
+    const status = {
+      source: { id: "s2", name: "Synthetic", kind: "subscription", provider: "synthetic" },
+      credit: null,
+      quota: [],
+      forecasts: {},
+      providerQuota,
+      daily: [],
+      totalSpentMicros: 0,
+      coverage: "boss_man_runs_only",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const body = url.includes("/status") ? status : url.includes("funding-sources") ? [status.source] : [];
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    render(<Funding companies={[]} />);
+  };
+
+  it("shows requests used of the limit and when it renews", async () => {
+    synthetic({ used: 123, limit: 1000, renewsAt: later });
+    expect(await screen.findByText("123 of 1,000")).toBeTruthy();
+    const day = new Date(later).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    expect(screen.getByText(new RegExp(`Renews ${day}`))).toBeTruthy();
+  });
+
+  it("says the quota is unknown rather than showing an error", async () => {
+    synthetic({ used: null, limit: null, renewsAt: null });
+    expect(await screen.findByText(/Quota unknown/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});

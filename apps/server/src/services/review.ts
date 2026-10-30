@@ -389,7 +389,7 @@ export function reviewService(
         return { verdict: "approved" as const, outcome: "owner_review" as const, delivered: `the owner reviews ${riskOf(t.risk)}-risk work; decision ${d!.id}` };
       }
       if (o.background) return { verdict: "approved" as const, outcome: "landing" as const, delivered: null, landing: await this.startLanding(ticketId, o.reviewer, o.causedByRunId) };
-      return { verdict: "approved" as const, ...(await this.land(ticketId, o.reviewer, o.causedByRunId)) };
+      return { verdict: "approved" as const, ...(await this.landVisible(ticketId, o.reviewer, o.causedByRunId)) };
     },
 
     /** Changes requested: a review that keeps coming back goes to the owner instead of another round (R49). */
@@ -438,8 +438,8 @@ export function reviewService(
       return { ...status, stale: await landingStale(ticketId) };
     },
 
-    /** Runs land() without holding the request (the check can take minutes); the outcome is kept for the page to poll. */
-    async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<LandingStatus> {
+    /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */
+    async claimLanding(ticketId: string, reviewer: string): Promise<string> {
       const existing = landings.get(ticketId);
       if (existing?.state === "running") {
         if (!(await landingStale(ticketId))) throw new ReviewError(409, "This ticket is already being checked and merged.");
@@ -450,6 +450,29 @@ export function reviewService(
       // Claimed before the first await, so two approvals at the same moment cannot both start a landing.
       const startedAt = new Date().toISOString();
       landings.set(ticketId, { state: "running", startedAt, command: null, startedBy: reviewer });
+      // A ticket can sit in review for hours before its last reviewer approves. Count the merge itself as
+      // activity now, so the very first poll of a fresh merge is never judged stale from that quiet spell.
+      await db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+      return startedAt;
+    },
+
+    /**
+     * Lands and waits, as land() does (a sign-off card's answer still finishes the merge before it returns),
+     * but keeps the running marker for as long as it takes so every page shows the merge in flight.
+     */
+    async landVisible(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions) {
+      await this.claimLanding(ticketId, reviewer);
+      try {
+        return await this.land(ticketId, reviewer, causedByRunId, opts);
+      } finally {
+        // The ticket page reloads when a running marker goes away; a finished banner comes from startLanding.
+        if (landings.get(ticketId)?.state === "running") landings.delete(ticketId);
+      }
+    },
+
+    /** Runs land() without holding the request (the check can take minutes); the outcome is kept for the page to poll. */
+    async startLanding(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<LandingStatus> {
+      const startedAt = await this.claimLanding(ticketId, reviewer);
       let ctx: Awaited<ReturnType<typeof ticketWithRepo>>;
       try {
         ctx = await ticketWithRepo(ticketId);

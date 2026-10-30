@@ -527,7 +527,7 @@ export const runs = pgTable("runs", {
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
-export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama"]);
+export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
 /** What routine work does when a subscription window passes its hold threshold (BOS-227). */
 export const quotaOverageMode = pgEnum("quota_overage_mode", ["pause", "urgent", "all"]);
 

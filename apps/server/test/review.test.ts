@@ -164,6 +164,50 @@ describe("approval lands in the background (B)", () => {
     await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
   });
 
+  it("is not called stale on its first poll because the ticket was quiet before the last review", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    // The ticket sat in review for hours before anyone finished reviewing it.
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 2 * 3_600_000) }).where(eq(tickets.id, c.ticket.id));
+    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(202);
+    const landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    expect(landing).toMatchObject({ state: "running", startedBy: "the owner", stale: false });
+    c.held.forEach((release) => release());
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+  });
+
+  it("shows a merge started by the last reviewer's approval while it runs", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "pending" });
+    expect(await c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "CEO", reviewerAgentId: c.ceo.id, background: true })).toMatchObject({ outcome: "landing" });
+    const landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    expect(landing).toMatchObject({ state: "running", startedBy: "CEO", stale: false });
+    c.held.forEach((release) => release());
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+  });
+
+  it("shows a merge the owner starts from the sign-off card while it runs", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: c.ticket.id, reviewer: "Senior Developer" } })
+      .returning();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerDecisionId: d!.id });
+    const answering = c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve and merge" });
+    try {
+      await vi.waitFor(async () => {
+        const landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+        expect(landing).toMatchObject({ state: "running", startedBy: "the owner", stale: false });
+      });
+    } finally {
+      c.held.forEach((release) => release());
+      await answering;
+    }
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toBeNull());
+  });
+
   it("says each outcome in plain words", () => {
     const ctx = { branch: "main", assignee: "Engineer" };
     expect(landingText({ outcome: "merged" }, ctx)).toBe("Merged into main.");

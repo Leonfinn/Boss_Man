@@ -125,6 +125,10 @@ describe("funding source provider and kind", () => {
     expect((await post("/api/funding-sources", { name: "Ollama Cloud", kind: "subscription", provider: "ollama" })).statusCode).toBe(201);
     expect((await post("/api/funding-sources", { name: "Sub on OpenRouter", kind: "subscription", provider: "openrouter" })).statusCode).toBeGreaterThanOrEqual(400);
   });
+
+  it("accepts the Synthetic standard plan as a subscription", async () => {
+    expect((await post("/api/funding-sources", { name: "Synthetic", kind: "subscription", provider: "synthetic" })).statusCode).toBe(201);
+  });
 });
 
 describe("editing and deleting funding sources", () => {
