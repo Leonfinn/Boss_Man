@@ -83,6 +83,30 @@ function ByCompany({ s }: { s: FundingStatus }) {
   );
 }
 
+/** Synthetic's own used/limit reading; an unreadable one is unknown, never an error. */
+function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
+  if (q.used === null || q.limit === null) return <span className="muted">Quota unknown: Synthetic's quota service couldn't be reached just now.</span>;
+  const fraction = q.limit > 0 ? q.used / q.limit : 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+        <span>Requests this period</span>
+        <span className="mono" style={{ color: fraction >= 0.9 ? "var(--amber-ink)" : undefined }}>
+          {q.used.toLocaleString()} of {q.limit.toLocaleString()}
+        </span>
+      </div>
+      <div className={`bar${fraction >= 0.9 ? " warn" : ""}`} aria-hidden="true">
+        <span style={{ width: pct(Math.min(1, fraction)) }} />
+      </div>
+      {q.renewsAt && (
+        <span className="muted" style={{ fontSize: 12 }}>
+          Renews {when(q.renewsAt)}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function SourceCard({ s }: { s: FundingStatus }) {
   const kind = s.source.kind === "api_credit" ? "API credit" : s.source.kind === "subscription" ? "Subscription" : s.source.kind === "api_payg" ? "API, pay as you go" : s.source.kind;
   return (
@@ -107,6 +131,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
             Resets {when(s.credit.cycleEnd)} · {usd(s.credit.spentMicros)} spent this cycle
           </span>
         </>
+      ) : s.providerQuota ? (
+        <ProviderQuotaBlock q={s.providerQuota} />
       ) : s.quota.length ? (
         s.quota.map((q) => {
           const label = windowLabel(q.window);

@@ -25,6 +25,7 @@ const CREDENTIALS = [
   { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },
   { kind: "generic", label: "OpenRouter API key", env: "OPENROUTER_API_KEY", help: "For OpenCode agents. Models are named openrouter/<model>." },
   { kind: "generic", label: "Ollama Cloud API key", env: "OLLAMA_API_KEY", help: "For OpenCode agents. Models are named ollama-cloud/<model>." },
+  { kind: "generic", label: "Synthetic API key", env: "SYNTHETIC_API_KEY", help: "For OpenCode agents. Models are named synthetic/<model>, e.g. synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" },
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
 ] as const;
 
@@ -600,9 +601,10 @@ const PROVIDERS: Array<[string, string]> = [
   ["gateway", "LLM gateway"],
   ["openrouter", "OpenRouter"],
   ["ollama", "Ollama"],
+  ["synthetic", "Synthetic"],
 ];
-/** Mirrors the server's rule: a subscription is only a Claude or ChatGPT plan. */
-const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai";
+/** Mirrors the server's rule: a subscription is only a Claude, ChatGPT, Ollama Cloud or Synthetic plan. */
+const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai" || provider === "ollama" || provider === "synthetic";
 
 export function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 30_000, "sources");
@@ -696,6 +698,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
             <ul style={{ margin: 0, paddingLeft: 18 }}>
               <li>Subscription + Anthropic: a Claude Pro or Max plan, run with a setup-token (<code>CLAUDE_CODE_OAUTH_TOKEN</code>).</li>
               <li>Subscription + OpenAI: a ChatGPT plan, used by Codex agents.</li>
+              <li>Subscription + Ollama or Synthetic: an Ollama Cloud or Synthetic plan, used by OpenCode agents.</li>
               <li>API kinds: a key from that provider (Anthropic, OpenAI).</li>
               <li>
                 Amazon Bedrock (API kinds only): add three credentials with "Other": <code>CLAUDE_CODE_USE_BEDROCK</code> = 1, <code>AWS_REGION</code> and <code>AWS_BEARER_TOKEN_BEDROCK</code> (a Bedrock API key). Name models as Bedrock IDs, e.g. <code>us.anthropic.claude-sonnet-4-6</code>.
@@ -709,7 +712,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
             </ul>
             <p>Claude agents only: Codex runs on OpenAI.</p>
             <p>
-              OpenCode agents (pick "OpenCode" when hiring) read <code>OPENROUTER_API_KEY</code>, <code>OLLAMA_API_KEY</code> (Ollama Cloud), <code>OPENAI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> by themselves; models are named <code>provider/model</code>. A local Ollama has no key: add a credential with "Other" named <code>OPENCODE_CONFIG_CONTENT</code>, whose value is JSON such as{" "}
+              OpenCode agents (pick "OpenCode" when hiring) read <code>OPENROUTER_API_KEY</code>, <code>OLLAMA_API_KEY</code> (Ollama Cloud), <code>SYNTHETIC_API_KEY</code> (Synthetic), <code>OPENAI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> by themselves; models are named <code>provider/model</code>. A local Ollama has no key: add a credential with "Other" named <code>OPENCODE_CONFIG_CONTENT</code>, whose value is JSON such as{" "}
               <code>{`{"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","name":"Ollama","options":{"baseURL":"http://host.docker.internal:11434/v1"},"models":{"qwen3:8b":{"name":"Qwen3 8B"}}}}}`}</code>.
             </p>
           </div>

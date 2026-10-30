@@ -13,7 +13,7 @@ export const KIND_CREDENTIALS: Record<"claude" | "codex" | "opencode", string[]>
   claude: ["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
   codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
   // Keys only OpenCode uses; it also reads OPENAI_API_KEY and ANTHROPIC_API_KEY, but those start Codex and Claude probes already. A local Ollama needs OPENCODE_CONFIG_CONTENT.
-  opencode: ["OPENROUTER_API_KEY", "OLLAMA_API_KEY", "OPENCODE_CONFIG_CONTENT"],
+  opencode: ["OPENROUTER_API_KEY", "OLLAMA_API_KEY", "SYNTHETIC_API_KEY", "OPENCODE_CONFIG_CONTENT"],
 };
 const STALE_MS = 24 * 3_600_000;
 
