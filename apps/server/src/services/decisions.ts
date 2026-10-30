@@ -31,7 +31,7 @@ import { record } from "./activity.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
-import { APPLY_CHANGE, REVERT_CHANGE } from "./retro.js";
+import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from "./retro.js";
 import { ADD_RULE, policyRulesService } from "./policy-rules.js";
 import { effectivePolicy, resolveActor } from "./review-policy.js";
 import { LESSONS_CAP, LESSON_DONT_ADD, LESSON_EDIT, LESSON_DROP, LESSON_MAX, lessonsFrom, lessonsPageRow, normalizeLesson, writeLesson } from "./project-brief.js";
@@ -78,6 +78,34 @@ async function resolveRefs(db: Db, cards: Array<{ id: string; companyId: string;
   );
 }
 
+/** One ticket a Boss Man update brings, as the owner sees it on a deploy card (BOS-213). */
+export type DeployChange = { ticketId: string; ref: string; title: string };
+/**
+ * What a Boss Man update contains, in the owner's words (BOS-213): the tickets merged in the range,
+ * the commits that aren't a ticket, why it needs a hand-apply, and what in it changes the risk.
+ * Kept on both the approval card and the to-do it leaves behind, so both say the same thing.
+ */
+export type DeployUpdate = {
+  from: string;
+  to: string;
+  /** Every commit in the range: tickets plus other commits. */
+  total: number;
+  /** How many files the update touches. */
+  files: number;
+  changes: DeployChange[];
+  /** Tickets beyond the first 20. */
+  more: number;
+  otherCommits: string[];
+  handBecause?: string;
+  handFiles?: string[];
+  /** What a hand-applied update changes: the deployer script, the server, or both (BOS-218). */
+  handEffect?: "server" | "deployer" | "both";
+  /** Plain yes/no needs for a hand-applied update (BOS-218). */
+  needsDeployerCopy?: boolean;
+  needsRunnerUpdate?: boolean;
+  risks: string[];
+};
+
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
@@ -95,9 +123,9 @@ export type DecisionContext =
    * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
    * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string } }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
-  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; result?: { result: string; message: string; at: string } }
+  | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
   | { type: "maintenance"; since: string }
   | { type: "review_loop"; ticketId: string; message: string; reviewer: string }
@@ -287,7 +315,7 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
  */
 export async function raiseOwnerTodo(
   db: Db,
-  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string },
+  t: { companyId: string; question: string; key: string; steps: string[]; check?: string; rollback?: string; ofDecisionId: string; raisedByAgentId?: string | null; target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; update?: DeployUpdate },
 ) {
   const [row] = await db
     .insert(decisions)
@@ -300,7 +328,7 @@ export async function raiseOwnerTodo(
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -362,6 +390,8 @@ export type AnswerExtra = {
   assigneeAgentId?: string;
   /** What to tell the agent, e.g. why a plan or a review went back. */
   note?: string;
+  /** A wiki page that explains a workflow change, optionally with a section: slug#Heading (BOS-216). */
+  reasonLink?: string;
   /** The owner wrote their own answer to an agent's question instead of picking an option. */
   custom?: boolean;
   /** Who answered: "ceo" when the CEO settled it ("handled" advice), else the owner's username (logged with a skill override). */
@@ -458,7 +488,7 @@ type SkillHook = (ctx: Extract<DecisionContext, { type: "skill" }>, companyId: s
 /** The workflow retro's side of its decisions (services/retro.ts): a check before Apply, and what to do once answered. */
 export type RetroHook = {
   problemApplying(changeId: string): Promise<string | null>;
-  answered(changeId: string, answer: string): Promise<unknown>;
+  answered(changeId: string, answer: string, info: { reason: string; reasonLink: string | null; decidedBy: "ceo" | "owner" }): Promise<unknown>;
   /** Why Revert can't go ahead now (the value was changed again since), or null. */
   problemReverting(changeId: string): Promise<string | null>;
   checked(changeId: string, answer: string): Promise<unknown>;
@@ -589,9 +619,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .limit(1);
       if (signoff) throw new AnswerError("The owner's sign-off for this ticket is still waiting, so the check was not run again. Answer that card first.");
     }
-    if (ctx.type === "workflow_change" && answer === APPLY_CHANGE) {
-      const problem = await retroHook?.problemApplying(ctx.changeId);
-      if (problem) throw new AnswerError(problem);
+    if (ctx.type === "workflow_change") {
+      // Every Apply or Skip needs a reason, whether the CEO or the owner decides (BOS-216).
+      try {
+        checkChangeReason(extra.note);
+        checkChangeLink(extra.reasonLink);
+      } catch (err) {
+        throw new AnswerError((err as Error).message);
+      }
+      if (answer === APPLY_CHANGE) {
+        const problem = await retroHook?.problemApplying(ctx.changeId);
+        if (problem) throw new AnswerError(problem);
+      }
     }
     if (ctx.type === "workflow_check" && answer === REVERT_CHANGE) {
       const problem = await retroHook?.problemReverting(ctx.changeId);
@@ -1314,7 +1353,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         const hireFor = c.type === "hire" ? (c.proposal.forTickets ?? []).filter((id) => UUID.test(id)) : [];
         return [...new Set([...direct(d), ...(typeof own === "string" ? [own] : []), ...hireFor])];
       };
-      const wantedAbout = [...new Set(open.flatMap(({ d }) => aboutIds(d)))];
+      // A push card names the branch it goes to, which can be a ticket other than the run's own.
+      const pushTicketIds = open.flatMap(({ d }) => {
+        const explain = (d.context as DecisionContext).type === "permission" ? (d.context as { explain?: PermissionExplanation }).explain : undefined;
+        return explain?.push?.ticketId ? [explain.push.ticketId] : [];
+      });
+      const wantedAbout = [...new Set([...open.flatMap(({ d }) => aboutIds(d)), ...pushTicketIds])];
       const aboutRows = wantedAbout.length
         ? await db
             .select({ id: tickets.id, title: tickets.title, number: tickets.number, companyId: tickets.companyId, prefix: companies.ticketPrefix })
@@ -1343,7 +1387,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
         const rank = rankDecision({ createdAt: d.createdAt, blocked: chain, holdsLiveRun: d.kind === "permission" }, t);
         const about = aboutIds(d).flatMap((id) => { const r = aboutInfo.get(id); return r && r.companyId === d.companyId ? [{ ticketId: id, title: r.title, ref: ticketRef(r.prefix, r.number) }] : []; });
-        return { ...d, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
+        const c = d.context as DecisionContext;
+        const push = c.type === "permission" ? c.explain?.push : undefined;
+        const pushTicket = push?.ticketId ? aboutInfo.get(push.ticketId) : undefined;
+        const context = pushTicket && c.type === "permission" && c.explain
+          ? { ...c, explain: { ...c.explain, push: { ...push!, ref: ticketRef(pushTicket.prefix, pushTicket.number) ?? undefined } } }
+          : d.context;
+        return { ...d, context, companyName, agentName, forAgentName: d.forAgentId ? (forNames.get(d.forAgentId) ?? null) : null, blocks: chain, about, ...rank };
       });
       const refs = await resolveRefs(db, open.map(({ d }) => ({ id: d.id, companyId: d.companyId, text: cardText(d) })));
       // Newest first, by when the card was raised; the score is shown but never reorders (BOS-164).
@@ -1760,6 +1810,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             target: ctx.target,
             commit: ctx.commit,
             fromCommit: ctx.fromCommit,
+            update: ctx.update,
           });
         } else if (answer === DEPLOY || answer === UPDATE_RUNNERS) {
           try {
@@ -1866,7 +1917,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         await answerLessons(d, ctx, answer, extra);
         await retroHook?.lessonAnswered(id, answer, extra.note);
       } else if (ctx.type === "workflow_change") {
-        await retroHook?.answered(ctx.changeId, answer);
+        await retroHook?.answered(ctx.changeId, answer, { reason: extra.note!, reasonLink: extra.reasonLink?.trim() || null, decidedBy: extra.settledBy ? "ceo" : "owner" });
       } else if (ctx.type === "workflow_check") {
         await retroHook?.checked(ctx.changeId, answer);
       } else if (ctx.type === "lesson_replace") {

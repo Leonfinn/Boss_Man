@@ -146,6 +146,24 @@ describe("approval lands in the background (B)", () => {
     expect(await c.db.select().from(checkResults)).toEqual([expect.objectContaining({ ticketId: c.ticket.id, kind: "verify", passed: false, detail: "boom" })]);
   });
 
+  it("treats a running marker as stale once the ticket has gone quiet, so the owner can try again", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(202);
+    const running = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    expect(running).toMatchObject({ state: "running", startedBy: "the owner" });
+    expect(running.stale).toBe(false);
+    // The check stopped saying it is alive: the marker is a leftover, so approving again starts a fresh landing.
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 2 * 3_600_000) }).where(eq(tickets.id, c.ticket.id));
+    expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running", stale: true });
+    const again = await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+    expect(again.statusCode).toBe(202);
+    expect(again.json().landing).toMatchObject({ state: "running", startedBy: "the owner" });
+    await vi.waitFor(() => expect(c.held.length).toBeGreaterThanOrEqual(2));
+    c.held.forEach((release) => release());
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+  });
+
   it("says each outcome in plain words", () => {
     const ctx = { branch: "main", assignee: "Engineer" };
     expect(landingText({ outcome: "merged" }, ctx)).toBe("Merged into main.");

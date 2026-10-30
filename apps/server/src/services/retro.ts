@@ -45,6 +45,26 @@ import { metricSample, metricValue, workflowService } from "./workflow.js";
 
 /** Why the retro agent is woken. */
 export const RETRO_REASON = "retro";
+
+/** A reason is a short sentence; a link is a wiki slug, optionally with a section: slug#Heading (BOS-216). */
+export const CHANGE_REASON_MAX = 500;
+const CHANGE_LINK_MAX = 400;
+const CHANGE_LINK_RE = /^[a-z0-9~][a-z0-9~._/-]*(#[^\n\r]{1,200})?$/i;
+
+export function checkChangeReason(reason: string | undefined): string {
+  const text = (reason ?? "").trim().replace(/\s+/g, " ");
+  if (!text) throw new RetroError(422, "Say why, in a short sentence: the reason can't be empty.");
+  if (text.length > CHANGE_REASON_MAX) throw new RetroError(422, `Keep the reason to ${CHANGE_REASON_MAX} characters or fewer.`);
+  return text;
+}
+
+/** A wiki page slug, optionally a section: "product/decisions/why#Skipped: playbooks". */
+export function checkChangeLink(link: string | undefined): string | null {
+  const text = (link ?? "").trim();
+  if (!text) return null;
+  if (text.length > CHANGE_LINK_MAX || !CHANGE_LINK_RE.test(text)) throw new RetroError(422, "The link is a wiki page address, optionally with a section: slug#Heading.");
+  return text;
+}
 export const APPLY_CHANGE = "Apply";
 export const SKIP_CHANGE = "Skip";
 export const KEEP_CHANGE = "Keep";
@@ -415,7 +435,7 @@ export function retroService(
       const [by] = retro?.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, retro.agentId)) : [];
       return {
         retro: retro ? { id: retro.id, startedAt: retro.startedAt, since: retro.since, until: retro.until, doneCount: retro.doneCount, savedAt: retro.savedAt, agentName: by?.name ?? null, findings: (retro.findings ?? []).map((f) => ({ ...f, failureLabel: RETRO_FAILURE_LABEL[f.failure], tickets: f.tickets.map((t) => refs.get(t) ?? t) })) } : null,
-        changes: changes.map(({ c, agent }) => ({ id: c.id, retroId: c.retroId, lever: c.lever, summary: c.summary, approver: c.approver, status: c.status, metric: c.metric, metricLabel: METRIC_LABEL[c.metric] ?? c.metric, baseline: c.baseline, baselineText: showMetric(c.metric, c.baseline), target: agent ?? c.targetRole, appliedAt: c.appliedAt, checkDueAt: c.checkDueAt, afterText: c.result ? showMetric(c.metric, c.result.value) : null, createdAt: c.createdAt, evidence: c.evidence.map((t) => refs.get(t) ?? t), decisionId: c.decisionId })),
+        changes: changes.map(({ c, agent }) => ({ id: c.id, retroId: c.retroId, lever: c.lever, summary: c.summary, approver: c.approver, status: c.status, metric: c.metric, metricLabel: METRIC_LABEL[c.metric] ?? c.metric, baseline: c.baseline, baselineText: showMetric(c.metric, c.baseline), target: agent ?? c.targetRole, appliedAt: c.appliedAt, checkDueAt: c.checkDueAt, afterText: c.result ? showMetric(c.metric, c.result.value) : null, createdAt: c.createdAt, evidence: c.evidence.map((t) => refs.get(t) ?? t), decisionId: c.decisionId, reason: c.reason, reasonLink: c.reasonLink, decidedBy: c.decidedBy })),
       };
     },
 
@@ -646,26 +666,44 @@ export function retroService(
       return null;
     },
 
+    /** Adds or corrects the reason and link on a change already decided, including one from before reasons were recorded. */
+    async recordReason(companyId: string, changeId: string, input: { reason?: string; reasonLink?: string }) {
+      const reason = checkChangeReason(input.reason);
+      const reasonLink = checkChangeLink(input.reasonLink);
+      const [row] = await db
+        .update(workflowChanges)
+        .set({ reason, reasonLink, decidedBy: "ceo" })
+        .where(and(eq(workflowChanges.id, changeId), eq(workflowChanges.companyId, companyId)))
+        .returning({ id: workflowChanges.id });
+      if (!row) throw new RetroError(404, "No such change in this company.");
+      return row;
+    },
+
     /** The decision was answered: Apply carries the change out (once), anything else skips it. */
-    async answered(changeId: string, answer: string) {
+    async answered(changeId: string, answer: string, info: { reason: string; reasonLink: string | null; decidedBy: "ceo" | "owner" }) {
       const [c] = await db.select().from(workflowChanges).where(eq(workflowChanges.id, changeId));
       if (!c) return;
+      const reason = checkChangeReason(info.reason);
+      const reasonLink = checkChangeLink(info.reasonLink ?? undefined);
       if (answer !== APPLY_CHANGE) {
-        await db.update(workflowChanges).set({ status: "skipped" }).where(and(eq(workflowChanges.id, changeId), eq(workflowChanges.status, "proposed")));
+        await db
+          .update(workflowChanges)
+          .set({ status: "skipped", reason, reasonLink, decidedBy: info.decidedBy })
+          .where(and(eq(workflowChanges.id, changeId), eq(workflowChanges.status, "proposed")));
         return;
       }
       // Whoever flips proposed to applied first carries it out; an answer repeated does nothing.
       const t = now();
       const [claimed] = await db
         .update(workflowChanges)
-        .set({ status: "applied", appliedAt: t, checkDueAt: new Date(t.getTime() + CHECK_AFTER_DAYS * DAY) })
+        .set({ status: "applied", appliedAt: t, checkDueAt: new Date(t.getTime() + CHECK_AFTER_DAYS * DAY), reason, reasonLink, decidedBy: info.decidedBy })
         .where(and(eq(workflowChanges.id, changeId), eq(workflowChanges.status, "proposed")))
         .returning();
       if (!claimed) return;
       try {
         await self.carryOut(claimed);
       } catch (err) {
-        await db.update(workflowChanges).set({ status: "skipped", appliedAt: null, checkDueAt: null }).where(eq(workflowChanges.id, changeId));
+        await db.update(workflowChanges).set({ status: "skipped", appliedAt: null, checkDueAt: null, reason, reasonLink, decidedBy: info.decidedBy }).where(eq(workflowChanges.id, changeId));
         await record(db, { companyId: c.companyId, kind: "workflow_change", summary: `Workflow change not applied (${c.lever}): ${(err as Error).message}`, at: now() });
       }
     },
@@ -869,8 +907,9 @@ export function retroService(
     async lessonAnswered(decisionId: string, answer: string, note?: string) {
       const [c] = await db.select().from(workflowChanges).where(and(eq(workflowChanges.decisionId, decisionId), eq(workflowChanges.status, "proposed")));
       if (!c) return;
+      const reason = note?.trim() ? checkChangeReason(note) : null;
       if (answer === LESSON_DROP) {
-        await db.update(workflowChanges).set({ status: "skipped" }).where(eq(workflowChanges.id, c.id));
+        await db.update(workflowChanges).set({ status: "skipped", ...(reason ? { reason, decidedBy: "ceo" as const } : {}) }).where(eq(workflowChanges.id, c.id));
         return;
       }
       const projectId = c.targetRole!.slice("project:".length);
@@ -880,7 +919,7 @@ export function retroService(
       if (!page || !lessonsFrom(page.body).includes(written)) return;
       const t = now();
       // The CEO may have edited the wording: Revert has to find the line that is in the brief.
-      await db.update(workflowChanges).set({ status: "applied", after: { lesson: written }, appliedAt: t, checkDueAt: new Date(t.getTime() + CHECK_AFTER_DAYS * DAY) }).where(eq(workflowChanges.id, c.id));
+      await db.update(workflowChanges).set({ status: "applied", after: { lesson: written }, appliedAt: t, checkDueAt: new Date(t.getTime() + CHECK_AFTER_DAYS * DAY), ...(reason ? { reason, decidedBy: "ceo" as const } : {}) }).where(eq(workflowChanges.id, c.id));
     },
   };
   return self;

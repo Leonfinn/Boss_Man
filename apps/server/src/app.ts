@@ -1690,10 +1690,14 @@ export async function buildApp(opts: AppOptions) {
       areaId: Uuid.nullable(),
       parentId: Uuid.nullable(),
       effort: z.number().int().min(1).max(5).nullable(),
+      rank: z.number().int().min(1).max(5).nullable(),
+      horizon: z.enum(HORIZONS).nullable(),
       driverScores: z.record(Uuid, z.number().int().min(0).max(5).nullable()),
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
+      publicSummary: z.string().trim().max(2000).nullable(),
+      showPublicly: z.boolean(),
     });
     owner.get("/api/companies/:id/feedback-settings", async (req) => {
       const { id } = IdParam.parse(req.params);
@@ -1851,6 +1855,11 @@ export async function buildApp(opts: AppOptions) {
       const q = z.object({ today: DateStr.optional(), closed: z.enum(["1"]).optional() }).parse(req.query);
       return planning.roadmap(q.today ?? dateIn(opts.now?.() ?? new Date(), "UTC"), { includeClosed: !!q.closed });
     });
+    /** Features for the roadmap's Now / Next / Later columns, grouped by objective on the client. */
+    owner.get("/api/roadmap/features", async () => {
+      const cos = await db.select({ id: companies.id, name: companies.name }).from(companies).orderBy(asc(companies.name));
+      return Promise.all(cos.map(async (c) => ({ ...c, features: await feedback.roadmapFeatures(c.id) })));
+    });
     owner.patch("/api/objectives/:id", async (req) => {
       const { id } = IdParam.parse(req.params);
       const b = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5), status: z.enum(OBJECTIVE_STATUSES) }).partial().parse(req.body);
@@ -1985,6 +1994,10 @@ export async function buildApp(opts: AppOptions) {
       const b = WatchdogSettings.partial().extend({ scrumMasterAgentId: Uuid.nullable().optional() }).strict().parse(req.body ?? {});
       return watchdog.update(id, b).catch(watchdogErrors(reply));
     });
+    owner.get("/api/companies/:id/watchdog/issues", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return watchdog.issues(id).catch(watchdogErrors(reply));
+    });
     owner.get("/api/companies/:id/watchdog/flags", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const q = z.object({ status: z.enum(["open", "closed"]).optional(), ticketId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
@@ -2071,11 +2084,12 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, custom, picks, modelConfig } = z
+      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig } = z
         .object({
           answer: z.string().trim().min(1).max(4000),
           assigneeAgentId: Uuid.optional(),
           note: z.string().trim().max(2000).optional(),
+          reasonLink: z.string().trim().max(400).optional(),
           custom: z.boolean().optional(),
           picks: z.array(z.number().int().min(0)).max(20).optional(),
           modelConfig: z
@@ -2084,7 +2098,7 @@ export async function buildApp(opts: AppOptions) {
         })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, modelConfig, by: await ownerName(req) });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
@@ -2186,7 +2200,7 @@ export async function buildApp(opts: AppOptions) {
       if ((r as { outcome?: string } | undefined)?.outcome === "landing") reply.code(202);
       return r;
     });
-    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: review.landing(IdParam.parse(req.params).id) }));
+    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
     // Try the ticket's pull request again now, rather than waiting for the sync (R59).
     owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {

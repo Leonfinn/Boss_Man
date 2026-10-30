@@ -1,5 +1,5 @@
 {
-  "id": "5db321a3-83fa-47a3-a6a4-78e233be08a6",
+  "id": "909ae335-cd49-411b-b37d-0f40d6c6a613",
   "prevId": "ec74ed94-9011-44b0-b26c-1b8f245f2cbe",
   "version": "7",
   "dialect": "postgresql",
@@ -2448,6 +2448,19 @@
         "effort": {
           "name": "effort",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rank": {
+          "name": "rank",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "horizon": {
+          "name": "horizon",
+          "type": "roadmap_horizon",
+          "typeSchema": "public",
           "primaryKey": false,
           "notNull": false
         },
@@ -6136,12 +6149,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "replaces_bundle_hash": {
-          "name": "replaces_bundle_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {

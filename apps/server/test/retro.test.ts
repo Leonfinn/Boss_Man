@@ -321,7 +321,7 @@ describe("proposing a change", () => {
 
   /** What the agent's history holds besides being hired. */
   const changes = (c: NonNullable<typeof ctx>, agentId: string) => c.db.select().from(agentChanges).where(and(eq(agentChanges.agentId, agentId), ne(agentChanges.field, "hired")));
-  const answer = (c: NonNullable<typeof ctx>, decisionId: string, a: string) => c.req("POST", `/api/decisions/${decisionId}/answer`, { answer: a });
+  const answer = (c: NonNullable<typeof ctx>, decisionId: string, a: string, note = "Because it should help the team.", reasonLink?: string) => c.req("POST", `/api/decisions/${decisionId}/answer`, { answer: a, note, ...(reasonLink ? { reasonLink } : {}) });
   const decisionOf = async (c: NonNullable<typeof ctx>, lever: string) => {
     const [ch] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.lever, lever));
     return { ch: ch!, id: ch!.decisionId! };
@@ -361,6 +361,45 @@ describe("proposing a change", () => {
     expect((await decisionOf(c, "instructions")).ch.status).toBe("skipped");
     expect((await c.db.select().from(agents).where(eq(agents.id, c.eng.id)))[0]!.instructions).not.toBe("Always test the null case.");
     expect(await changes(c, c.eng.id)).toHaveLength(0);
+  });
+
+  it("requires a reason on Apply and Skip, and shows who decided, why and the wiki section", async () => {
+    const { c, p } = await ready();
+    await p();
+    const { id, ch } = await decisionOf(c, "instructions");
+    const blank = await c.req("POST", `/api/decisions/${id}/answer`, { answer: "Skip", note: "   " });
+    expect(blank.statusCode).toBe(422);
+    expect(blank.json().message).toMatch(/reason can't be empty/);
+    // A link that isn't a wiki slug is refused before anything closes.
+    const badLink = await c.req("POST", `/api/decisions/${id}/answer`, { answer: "Skip", note: "Not now.", reasonLink: "https://example.com/why" });
+    expect(badLink.statusCode).toBe(422);
+    expect(badLink.json().message).toMatch(/wiki page address/);
+    const link = "product/decisions/workflow-retro-changes-why-each-was-applied-or-skipped#Skipped: class-level-regression-tests (QA agents)";
+    expect((await answer(c, id, "Skip", "Adds a skill; waits for BOS-172.", link)).statusCode).toBe(200);
+    const [row] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id));
+    expect(row).toMatchObject({ status: "skipped", reason: "Adds a skill; waits for BOS-172.", reasonLink: link, decidedBy: "owner" });
+    const latest = (await c.req("GET", `/api/companies/${c.company.id}/retros/latest`)).json();
+    expect(latest.changes[0]).toMatchObject({ id: ch.id, status: "skipped", reason: "Adds a skill; waits for BOS-172.", reasonLink: link, decidedBy: "owner" });
+  });
+
+  it("leaves an old change without a reason, and lets the CEO add one and a link afterwards", async () => {
+    const { c, p } = await ready();
+    await p();
+    const { id, ch } = await decisionOf(c, "instructions");
+    await answer(c, id, "Skip");
+    // An old row from before reasons were stored.
+    await c.db.update(workflowChanges).set({ reason: null, reasonLink: null, decidedBy: null }).where(eq(workflowChanges.id, ch.id));
+    const before = (await c.req("GET", `/api/companies/${c.company.id}/retros/latest`)).json().changes.find((x: { id: string }) => x.id === ch.id);
+    expect(before).toMatchObject({ reason: null, reasonLink: null, decidedBy: null });
+
+    const ceo = await c.mcp(c.ceo.id);
+    const list = await tool(ceo, "decisions", { action: "changes" });
+    expect(textOf(list)).toContain(ch.id);
+    expect(textOf(list)).toContain("No reason recorded");
+    const link = "product/decisions/workflow-retro-changes-why-each-was-applied-or-skipped#Skipped: prove-in-environment (senior-infra agents)";
+    expect(isError(await tool(ceo, "decisions", { action: "explain", changeId: ch.id, reason: "The CEO's hold on new skills until BOS-172.", reasonLink: link }))).toBe(false);
+    const [row] = await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, ch.id));
+    expect(row).toMatchObject({ reason: "The CEO's hold on new skills until BOS-172.", reasonLink: link, decidedBy: "ceo" });
   });
 
   it("refuses to Apply when the agent is retired or the value moved on, and says why", async () => {
@@ -534,7 +573,7 @@ describe("proposing a change", () => {
 describe("checking a change's result (part 4)", () => {
   const propose = (pm: Client, over: Record<string, unknown>) =>
     tool(pm, "propose_workflow_change", { lever: "instructions", target: "Eve", change: { instructions: "Always test the null case." }, metric: "firstPassRate", scope: { role: "engineer" }, expected: "Fewer send-backs.", ...over });
-  const answer = (c: NonNullable<typeof ctx>, decisionId: string, a: string) => c.req("POST", `/api/decisions/${decisionId}/answer`, { answer: a });
+  const answer = (c: NonNullable<typeof ctx>, decisionId: string, a: string, note = "Because it should help the team.", reasonLink?: string) => c.req("POST", `/api/decisions/${decisionId}/answer`, { answer: a, note, ...(reasonLink ? { reasonLink } : {}) });
   const decisionRow = async (c: NonNullable<typeof ctx>, id: string) => (await c.db.select().from(decisions).where(eq(decisions.id, id)))[0]!;
   const changeRow = async (c: NonNullable<typeof ctx>, id: string) => (await c.db.select().from(workflowChanges).where(eq(workflowChanges.id, id)))[0]!;
   /** n tickets finished a day ago, each with one review. */

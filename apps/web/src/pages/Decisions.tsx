@@ -1,6 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
-import { api, type AdvisedDecision, type Company, type Decision, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
+import { api, ApiError, type AdvisedDecision, type Company, type Decision, type DeployUpdate, type FundingSource, type ModelConfigView, type StallEvidence, type TeamAlert } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
 import { usePoll } from "../hooks";
@@ -38,6 +38,11 @@ const OPTION_HELP: Record<string, string> = {
   "Cancel run": "Cancel run: stops it; message the agent on the task to start again.",
   "Keep waiting": "Keep waiting: you'll be asked again in 30 minutes if it stays quiet.",
 };
+
+type TicketLanding = { state: "running"; startedAt: string; startedBy: string; stale?: boolean } | { state: "finished"; text?: string };
+const atTime = (iso: string) => new Date(iso).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+const startedByLabel = (who: string) => (/interrupted merge/i.test(who) ? "the automatic retry" : who);
+const ALREADY_LANDING = /already being checked and merged|merge is running now/i;
 
 const minutesAgo = (iso: string) => {
   const m = Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 60_000));
@@ -87,6 +92,74 @@ function TicketRefs({ about }: { about?: Array<{ ticketId: string; ref: string |
         </li>
       ))}
     </ul>
+  );
+}
+
+const shortSha = (sha: string) => sha.slice(0, 8);
+
+const HAND_EFFECT: Record<NonNullable<DeployUpdate["handEffect"]>, string> = {
+  deployer: "This changes the script that runs deploys on your server (scripts/host-deployer.sh); Boss Man's own server doesn't change.",
+  server: "This changes how Boss Man runs on your server: its compose file, Dockerfiles or other deploy scripts.",
+  both: "This changes both the script that runs deploys on your server (scripts/host-deployer.sh) and how Boss Man runs: its compose file, Dockerfiles or other deploy scripts.",
+};
+
+/**
+ * What a Boss Man update contains (BOS-213): the tickets merged since the live version, any commits
+ * that aren't a ticket, why it needs a hand-apply, and anything that changes the risk. The same
+ * block is shown on the approval card and on the to-do it leaves behind.
+ */
+function DeployUpdateView({ u }: { u: DeployUpdate }) {
+  return (
+    <div className="deploy-update" style={{ margin: "8px 0", fontSize: 14 }}>
+      <p style={{ fontWeight: 600, margin: "0 0 4px" }}>
+        This update brings {u.total} change{u.total === 1 ? "" : "s"} across {u.files} file{u.files === 1 ? "" : "s"} since the live version ({shortSha(u.from)} → {shortSha(u.to)}).
+      </p>
+      {u.changes.length > 0 && (
+        <ul aria-label="Tickets in this update" style={{ listStyle: "none", padding: 0, margin: "4px 0", display: "flex", flexDirection: "column", gap: 2 }}>
+          {u.changes.map((c) => (
+            <li key={c.ticketId} style={{ overflowWrap: "anywhere" }}>
+              <a href={`#/tickets/${c.ticketId}`}><strong>{c.ref}</strong> {c.title}</a>
+            </li>
+          ))}
+          {u.more > 0 && (
+            <li className="muted">
+              and {u.more} more. <a href="#/board">See all the tickets</a>.
+            </li>
+          )}
+        </ul>
+      )}
+      {u.otherCommits.length > 0 && (
+        <details>
+          <summary>Other commits: {u.otherCommits.length}</summary>
+          <ul style={{ paddingLeft: 20, margin: "4px 0" }}>
+            {u.otherCommits.map((s, i) => (
+              <li key={i} style={{ overflowWrap: "anywhere" }}><span className="mono muted">{s}</span></li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {u.handBecause && (
+        <p style={{ margin: "6px 0 2px" }}>
+          {u.handBecause}
+          {u.handFiles?.length ? <> Files changed: <span className="mono" style={{ overflowWrap: "anywhere" }}>{u.handFiles.join(", ")}</span>.</> : null}
+        </p>
+      )}
+      {u.handEffect && <p style={{ margin: "2px 0" }}>{HAND_EFFECT[u.handEffect]}</p>}
+      {u.needsDeployerCopy !== undefined && (
+        <p style={{ margin: "2px 0" }}>Deployer copy: {u.needsDeployerCopy ? "needed" : "not needed"}.</p>
+      )}
+      {u.needsRunnerUpdate !== undefined && (
+        <p style={{ margin: "2px 0" }}>Runner update afterwards: {u.needsRunnerUpdate ? "needed" : "not needed"}.</p>
+      )}
+      {u.risks.length > 0 && (
+        <div>
+          <p style={{ fontWeight: 600, margin: "8px 0 2px" }}>Worth knowing</p>
+          <ul style={{ paddingLeft: 20, margin: "2px 0" }}>
+            {u.risks.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -273,6 +346,8 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [busy, setBusy] = useState<string | null>(null);
   const [endedHere, setEndedHere] = useState<Record<string, boolean>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // A workflow-retro change's optional wiki link, e.g. a page slug with a section after it.
+  const [reasonLinks, setReasonLinks] = useState<Record<string, string>>({});
   // The owner's own answer to an agent's question, being written; absent while not.
   const [ownWords, setOwnWords] = useState<Record<string, string>>({});
   // A team plan's ticked hires, by position; all of them until the owner unticks one.
@@ -283,6 +358,35 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const [adviceNote, setAdviceNote] = useState<Record<string, string>>({});
   // "Reassign" on a stale-blocker card: the agent being picked, and who has the ticket now; absent while not picking.
   const [reassign, setReassign] = useState<Record<string, { pick: string; current: string | null }>>({});
+  // A merge started from the ticket page (or a sweep) while its approval card is still open.
+  const [landings, setLandings] = useState<Record<string, TicketLanding | null>>({});
+  const [notices, setNotices] = useState<Record<string, string>>({});
+  const inFlight = useRef(new Set<string>());
+  const landingIds = [...new Set(decisions.filter((d) => !answered[d.id] && d.context?.type === "risk_review" && d.context.ticketId).map((d) => d.context!.ticketId!))];
+  const landingKey = landingIds.sort().join(",");
+  useEffect(() => {
+    if (!landingIds.length) return;
+    let stopped = false;
+    const load = async () => {
+      const entries = await Promise.all(
+        landingIds.map(async (ticketId) => {
+          try {
+            return [ticketId, (await api<{ landing: TicketLanding | null }>(`/api/tickets/${ticketId}/landing`)).landing] as const;
+          } catch {
+            return [ticketId, null] as const;
+          }
+        }),
+      );
+      if (!stopped) setLandings(Object.fromEntries(entries));
+    };
+    void load();
+    const timer = setInterval(() => void load(), 2_500);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [landingKey]);
   const openReassign = async (d: Decision) => {
     const id = d.context?.blockerTicketId;
     let current: string | null = null;
@@ -311,18 +415,31 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
   const shown = decisions.filter((d) => !filter || d.companyId === filter);
   const open = shown.filter((d) => !answered[d.id]);
   const answer = async (d: Decision, option: string, extra: { custom?: boolean; modelConfig?: ModelConfigView; assigneeAgentId?: string } = {}) => {
+    // A second click can land before React re-renders the disabled button: refuse it here too.
+    if (inFlight.current.has(d.id)) return;
+    inFlight.current.add(d.id);
     setBusy(d.id);
     try {
       const note = notes[d.id]?.trim();
-      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(extra.custom ? { custom: true } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
+      const reasonLink = reasonLinks[d.id]?.trim();
+      const r = await api<{ endedHere?: boolean }>(`/api/decisions/${d.id}/answer`, { method: "POST", body: { answer: option, ...(note ? { note } : {}), ...(reasonLink ? { reasonLink } : {}), ...(extra.custom ? { custom: true } : {}), ...(extra.modelConfig ? { modelConfig: extra.modelConfig } : {}), ...(extra.assigneeAgentId ? { assigneeAgentId: extra.assigneeAgentId } : {}), ...(d.context?.hires && option === "Hire the ticked ones" ? { picks: picks[d.id] ?? d.context.hires.map((_, i) => i) } : {}) } });
       setAnswered((a) => ({ ...a, [d.id]: option }));
       setModelEdits(({ [d.id]: _, ...rest }) => rest);
       if (r?.endedHere) setEndedHere((x) => ({ ...x, [d.id]: true }));
       setErrors(({ [d.id]: _, ...rest }) => rest);
+      setNotices(({ [d.id]: _, ...rest }) => rest);
       onAnswered();
     } catch (err) {
-      setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
+      const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
+      if (err instanceof ApiError && err.status === 409 && ALREADY_LANDING.test(err.message)) {
+        const current = ticketId ? await api<{ landing: TicketLanding | null }>(`/api/tickets/${ticketId}/landing`).then((r) => r.landing).catch(() => null) : null;
+        if (ticketId) setLandings((l) => ({ ...l, [ticketId]: current }));
+        const since = current?.state === "running" ? ` since ${atTime(current.startedAt)}` : "";
+        setNotices((n) => ({ ...n, [d.id]: `Already being checked and merged${since}; nothing more to do.` }));
+        setErrors(({ [d.id]: _, ...rest }) => rest);
+      } else setErrors((e) => ({ ...e, [d.id]: (err as Error).message }));
     } finally {
+      inFlight.current.delete(d.id);
       setBusy(null);
     }
   };
@@ -449,6 +566,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const rule = d.context?.rule;
               const advice = d.context?.advice;
               const asking = advice?.state === "asking";
+              const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
+              const land = ticketId ? landings[ticketId] : null;
+              const checking = land?.state === "running" && !land.stale;
+              const staleCheck = land?.state === "running" && !!land.stale;
               return (
                 <li className="decision" key={d.id} style={asking ? { opacity: 0.7 } : undefined} aria-busy={asking || undefined}>
                   <div className="score" title={why(d)}>
@@ -471,6 +592,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </span>
                     </div>
                     <TicketRefs about={d.about} />
+                    {d.context?.update && <DeployUpdateView u={d.context.update} />}
                     {d.context?.type === "instructions" && d.context.instructions ? (
                       <>
                         {/* The question holds only the start of the new text; the decision keeps all of it, and that is what's applied. */}
@@ -513,10 +635,29 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <span className="tag green">Temporary folder only</span> {x.scratch.note}
                           </p>
                         )}
-                        <p>
-                          <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
-                          {x.effect === "unknown" && " Read the exact command before you allow it."}
-                        </p>
+                        {x.push ? (
+                          <>
+                            <p>
+                              <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.push.headline}
+                              {x.push.kind === "ticket" && x.push.ticketId && (
+                                <>
+                                  {" "}
+                                  (<a href={`#/tickets/${x.push.ticketId}`}>{x.push.ref ?? "its ticket"}</a>)
+                                </>
+                              )}
+                            </p>
+                            {x.push.warnings.map((w) => (
+                              <p key={w} role="alert" style={{ margin: "4px 0" }}>
+                                <span className="tag red">Warning</span> {w}
+                              </p>
+                            ))}
+                          </>
+                        ) : (
+                          <p>
+                            <span className={`tag ${EFFECT[x.effect].tone}`}>{EFFECT[x.effect].label}</span> {x.summary}
+                            {x.effect === "unknown" && " Read the exact command before you allow it."}
+                          </p>
+                        )}
                         {x.alwaysNote && !done && <p className="muted" style={{ fontSize: 13 }}>{x.alwaysNote}</p>}
                         {x.reason && <p className="muted">What the agent says it's for: {x.reason}</p>}
                         {x.command && (
@@ -562,6 +703,16 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       ))}
                     </div>
                     {d.evidence && !done && <StallEvidenceView e={d.evidence} />}
+                    {d.context?.type === "self_deploy" && d.context.handSteps && d.context.handSteps.length > 0 && (
+                      <details className="plan">
+                        <summary>What you'll need to do</summary>
+                        <ol data-steps style={{ paddingLeft: 20, fontSize: 14 }}>
+                          {d.context.handSteps.map((s, i) => (
+                            <li key={i}><Linked text={s} refs={d.refs} /></li>
+                          ))}
+                        </ol>
+                      </details>
+                    )}
                     {d.context?.steps && d.context.steps.length > 0 && (
                       <div>
                         <p style={{ fontWeight: 600, marginBottom: 4 }}>What to do</p>
@@ -619,9 +770,24 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         busy={busy === d.id}
                       />
                     )}
+                    {checking && land?.state === "running" && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        Checking and merging since {atTime(land.startedAt)}, started by {startedByLabel(land.startedBy)}. This can take several minutes; nothing more to do here.
+                      </p>
+                    )}
+                    {staleCheck && land?.state === "running" && (
+                      <p role="status" style={{ fontWeight: 600 }}>
+                        The merge check started by {startedByLabel(land.startedBy)} at {atTime(land.startedAt)} looks stuck, so it may have stopped. Nothing is running now: you can answer again below.
+                      </p>
+                    )}
+                    {notices[d.id] && (
+                      <p role="status" className="muted">
+                        {notices[d.id]}
+                      </p>
+                    )}
                     {done ? (
                       <p style={{ color: "var(--green-ink)", fontWeight: 500, fontSize: 14 }}>Answered: {done}.{done === "Let the CEO decide" ? " The CEO has it now and was woken; it comes back to you if they do not settle it in time." : ""}{d.context?.always?.some((a) => a.label === done) ? " Saved as a rule in Settings → Rules." : ""}{endedHere[d.id] ? " The runner is offline, so Boss Man marked the run as stopped." : ""}</p>
-                    ) : (
+                    ) : checking ? null : (
                       <>
                         {d.context?.hires && (
                           <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
@@ -653,6 +819,18 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <label htmlFor={`note-${d.id}`}>{d.context?.type === "owner_todo" ? "What went wrong (if a step failed)" : "Note for the agent (if you send it back)"}</label>
                             <textarea id={`note-${d.id}`} rows={2} value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} />
                           </div>
+                        )}
+                        {d.context?.type === "workflow_change" && (
+                          <>
+                            <div className="field">
+                              <label htmlFor={`reason-${d.id}`}>Why (shown on the Changes table, required)</label>
+                              <textarea id={`reason-${d.id}`} rows={2} maxLength={500} required value={notes[d.id] ?? ""} onChange={(e) => setNotes((n) => ({ ...n, [d.id]: e.target.value }))} placeholder="e.g. adds a skill; waits for BOS-172" />
+                            </div>
+                            <div className="field">
+                              <label htmlFor={`reason-link-${d.id}`}>Wiki page that explains it (optional)</label>
+                              <input id={`reason-link-${d.id}`} maxLength={400} value={reasonLinks[d.id] ?? ""} onChange={(e) => setReasonLinks((l) => ({ ...l, [d.id]: e.target.value }))} placeholder="slug or slug#Heading" />
+                            </div>
+                          </>
                         )}
                         {d.evidence && (
                           <ul className="muted" style={{ fontSize: 13, paddingLeft: 18 }}>
@@ -698,7 +876,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         ) : ownWords[d.id] === undefined || modelEdits[d.id] ? (
                           <div className="actions">
                             {!modelEdits[d.id] && d.options.map((o) => (
-                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
+                              <button type="button" key={o} className={`btn${o === d.recommendedOption ? " primary" : ""}`} disabled={busy === d.id || (d.context?.type === "workflow_change" && !notes[d.id]?.trim())} onClick={() => (d.context?.type === "model_change" && o === "Edit" ? setModelEdits((m) => ({ ...m, [d.id]: true })) : o === "Reassign" && d.context?.type === "stale_blocker" && d.context.blockerTicketId ? void openReassign(d) : void answer(d, o))}>
                                 {o}
                               </button>
                             ))}
