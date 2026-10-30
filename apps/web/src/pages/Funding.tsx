@@ -114,7 +114,7 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
       <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
         <span style={{ flex: 1 }}>I have extra usage</span>
         <select aria-label="Extra usage" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
-          <option value="pause">Hold routine work (urgent tickets still run)</option>
+          <option value="pause">Hold everything at the limit (urgent tickets run until then)</option>
           <option value="urgent">Keep urgent work running past the limit</option>
           <option value="all">Keep all work running</option>
         </select>

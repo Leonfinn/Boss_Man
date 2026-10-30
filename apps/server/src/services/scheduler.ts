@@ -182,6 +182,20 @@ export function schedulerService(
   }
 
   /**
+   * Whether a wake may run while the hold is on (BOS-227). Routine work is held unless the owner
+   * allows all work on extra usage. Urgent tickets pass the threshold in every mode, but under the
+   * default "pause" they are still held once a window is at its limit or credits are already in
+   * use, so nothing spends extra-usage credits the owner did not allow.
+   */
+  function quotaPasses(source: typeof fundingSources.$inferSelect, full: (typeof quotaSamples.$inferSelect)[], samples: (typeof quotaSamples.$inferSelect)[], urgent: boolean) {
+    if (full.length === 0) return true;
+    if (source.quotaOverage === "all") return true;
+    if (!urgent) return false;
+    if (source.quotaOverage === "urgent") return true;
+    return !full.some((s) => s.utilization >= 1) && !samples.some((s) => s.overageInUse);
+  }
+
+  /**
    * Tells the owner, once, when routine work stops or starts again, and once when extra-usage
    * credits begin being spent. Safe to run on every pass.
    */
@@ -192,17 +206,21 @@ export function schedulerService(
       const samples = await latestQuotaWindows(source.id);
       if (samples.length === 0) continue;
       const full = holdingWindows(source, samples, t);
+      const overage = samples.some((s) => s.overageInUse);
       // "Keep all work running" means routine work isn't actually paused, so there's nothing to announce.
       const held = full.length > 0 && source.quotaOverage !== "all";
+      // Under "pause" urgent work stops too once a window is at its limit or credits are being spent.
+      const urgentStillRuns = source.quotaOverage !== "pause" || !(overage || full.some((s) => s.utilization >= 1));
       if (held && !source.quotaHeldNotified) {
         const first = full.reduce((a, b) => (b.utilization > a.utilization ? b : a));
         const reset = first.resetsAt ? ` until ${first.resetsAt.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+        const stillRuns = urgentStillRuns ? "Chats, reviews, deploy approvals and urgent tickets still run." : "Chats, reviews and deploy approvals still run; urgent tickets wait too, because the limit is reached.";
         await deps
           .notifyOwner({
             companyId: null,
             level: "flag",
             title: `Routine work paused${reset}`,
-            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. Chats, reviews, deploy approvals and urgent tickets still run.`,
+            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. ${stillRuns}`,
             link: "#/funding",
           })
           .catch((err) => deps.log?.(`quota hold notification failed: ${(err as Error).message}`));
@@ -220,7 +238,6 @@ export function schedulerService(
           .catch((err) => deps.log?.(`quota release notification failed: ${(err as Error).message}`));
         await db.update(fundingSources).set({ quotaHeldNotified: false }).where(eq(fundingSources.id, source.id));
       }
-      const overage = samples.some((s) => s.overageInUse);
       if (overage && !source.quotaOverageNotified) {
         await deps
           .notifyOwner({
@@ -1204,8 +1221,9 @@ export function schedulerService(
             const [ticket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
             const samples = await latestQuotaWindows(source.id);
             const full = holdingWindows(source, samples, t);
-            // Urgent tickets always pass; "all" lets every wake through on the owner's extra usage.
-            if (full.length && !ticket?.urgent && source.quotaOverage !== "all") {
+            // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
+            // the limit itself, so the default "pause" never spends unapproved extra usage.
+            if (!quotaPasses(source, full, samples, !!ticket?.urgent)) {
               const until = full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null);
               await defer(`subscription ${full.map((s) => s.window).join(", ")} window nearly used up`, until);
               continue;

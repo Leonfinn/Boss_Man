@@ -200,6 +200,17 @@ describe("scheduler", () => {
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, routine.id)))[0]!.systemState).toBe("backlog");
   });
 
+  it("holds even an urgent ticket under the default pause once the window is at its limit", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, urgent.id)))[0]!.systemState).toBe("backlog");
+  });
+
   it("lets routine work through windows the owner switched off, and past a raised threshold", async () => {
     ctx = await setup({ agent: 5 });
     const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
