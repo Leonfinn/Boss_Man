@@ -181,6 +181,16 @@ export function schedulerService(
     return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
   }
 
+  /** Priority an urgent ticket's wake always gets (BOS-253), so it is never treated as routine. */
+  const URGENT_PRIORITY = 4;
+
+  /** Whether a ticket the owner marked Urgent: the only tickets whose wakes pass the quota hold (BOS-227). */
+  async function isUrgentTicket(ticketId: string | null | undefined) {
+    if (!ticketId) return false;
+    const [t] = await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, ticketId));
+    return !!t?.urgent;
+  }
+
   /**
    * Whether a wake may run while the hold is on (BOS-227). Routine work is held unless the owner
    * allows all work on extra usage. Urgent tickets pass the threshold in every mode, but under the
@@ -781,13 +791,16 @@ export function schedulerService(
         depth = (parent?.depth ?? 0) + 1;
         causedByAgentId = run?.agentId ?? null;
       }
+      // An urgent ticket's wake is never routine (BOS-253): it gets the high priority that passes
+      // quiet hours, and a wake that joined a held one can't keep it waiting.
+      const urgent = await isUrgentTicket(input.ticketId);
       const base = {
         companyId: agent.companyId,
         agentId: agent.id,
         ticketId: input.ticketId ?? null,
         reason: input.reason,
         note: input.note ?? null,
-        priority: input.priority ?? 2,
+        priority: urgent ? Math.max(input.priority ?? 2, URGENT_PRIORITY) : (input.priority ?? 2),
         causationDepth: depth,
         causedByRunId: input.causedByRunId ?? null,
         causedByAgentId,
@@ -870,7 +883,9 @@ export function schedulerService(
       }
       // Agent wakes below high priority wait out the owner's quiet hours; one morning run covers them (R86).
       const quietEnd = !fromOwner(input) && base.priority < limits.highPriority && deps.quietHours ? quietHoursEnd(now(), await deps.quietHours()) : null;
-      const hold = quietEnd && (!input.defer || quietEnd > input.defer.until) ? { until: quietEnd, why: "quiet hours" } : input.defer;
+      // An urgent ticket's wake takes no wait at all (BOS-253): its window is minutes at most, and
+      // a held wake of the same agent must not keep it out of the queue.
+      const hold = urgent ? undefined : quietEnd && (!input.defer || quietEnd > input.defer.until) ? { until: quietEnd, why: "quiet hours" } : input.defer;
       const [row] = await db.insert(wakes).values(hold ? { ...base, status: "deferred", statusReason: hold.why, notBefore: hold.until } : base).returning();
       // Start it now rather than at the next timer pass (R85).
       if (!hold && deps.tickOnWake !== false) void this.tick().catch((err) => deps.log?.(`scheduler pass after a wake failed: ${(err as Error).message}`));
@@ -886,7 +901,8 @@ export function schedulerService(
     async notify(agentId: string, input: Omit<WakeInput, "agentId" | "defer" | "steerRunId">) {
       const ticketId = input.ticketId ?? null;
       const note = input.note ?? null;
-      const priority = input.priority ?? 2;
+      const urgent = await isUrgentTicket(ticketId);
+      const priority = urgent ? Math.max(input.priority ?? 2, URGENT_PRIORITY) : (input.priority ?? 2);
       const t = now();
       // Chat runs have their own tools, and a watch report, a tree-stopped brief or a retro (its duty lines go in the prompt) is built from its wake, so none takes a steer.
       if (note && input.reason !== CHAT_REASON && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== RETRO_REASON) {
@@ -899,6 +915,7 @@ export function schedulerService(
         if (live) return this.wake({ ...input, agentId, steerRunId: live.id });
       }
       // How long a reason waits for more of itself; 0 still joins a wake that is already waiting.
+      // An urgent ticket's note takes no wait at all (BOS-253): no batch window and no quiet hours.
       const window = ({ [ANSWER_REASON]: limits.answerBatchMs, [REVIEW_REASON]: limits.reviewBatchMs, unblocked: limits.quickBatchMs, assigned: limits.quickBatchMs, [WIKI_REASON]: limits.wikiBatchMs } as Record<string, number>)[input.reason] ?? 0;
       const [waiting] = await db
         .select()
@@ -906,13 +923,14 @@ export function schedulerService(
         .where(and(eq(wakes.agentId, agentId), eq(wakes.reason, input.reason), ticketId ? eq(wakes.ticketId, ticketId) : isNull(wakes.ticketId), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
         .orderBy(asc(wakes.createdAt))
         .limit(1);
-      if (!waiting) return this.wake({ ...input, agentId, ...(window > 0 ? { defer: { until: new Date(t.getTime() + window), why: `waiting briefly for more "${input.reason}"` } } : {}) });
+      if (!waiting) return this.wake({ ...input, agentId, ...(window > 0 && !urgent ? { defer: { until: new Date(t.getTime() + window), why: `waiting briefly for more "${input.reason}"` } } : {}) });
       // Each note waits the window again, up to answerBatchMaxMs after the first.
       const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + window);
       let notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
-      // A high-priority note ends a quiet-hours or quota-held wait (BOS-227).
+      // A high-priority note ends a quiet-hours or quota-held wait (BOS-227), and so does any note
+      // on an urgent ticket (BOS-253): the wait may have been set by the routine work it joined.
       const holds = waiting.statusReason === "quiet hours" || waiting.statusReason?.startsWith("subscription ");
-      const release = !!holds && priority >= limits.highPriority;
+      const release = !!holds && (priority >= limits.highPriority || urgent);
       if (release) notBefore = null;
       // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.
       const listed = !note || !!waiting.note?.includes(input.reason === REVIEW_REASON ? (note.split(" ")[1] ?? "\0") : note);
