@@ -77,6 +77,13 @@ describe("helpers", () => {
   it("recommends refusing destructive commands", () => {
     expect(recommendedVerdict(exec("rm -rf /"))).toBe("deny");
     expect(recommendedVerdict(exec("git push origin x"))).toBe("allow");
+    // A push is judged by where it goes (BOS-208): its own ticket branch is Allow, anything else is Deny.
+    const ticket = "11111111-2222-4333-8444-555555555555";
+    expect(recommendedVerdict(exec(`git push origin bossman/${ticket}`))).toBe("allow");
+    for (const c of ["git push origin main", "git push", "git push origin HEAD", "git push -f origin x", "git push origin :x", `git push origin +bossman/${ticket}`, "git push --mirror origin"]) {
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+    expect(recommendedVerdict(exec(`git status && git push origin bossman/${ticket}`))).toBe("deny");
     // rm -rf inside a sed script may run (sed '1e rm -rf x'), so only a data-only program's quotes are skipped (BOS-116 review).
     expect(recommendedVerdict(exec(`sed "s|trap 'rm -rf \\"\\$t\\"' EXIT|:|" a.sh > /tmp/x.sh && bash /tmp/x.sh`))).toBe("deny");
     expect(recommendedVerdict(exec("git commit -m 'stop rm -rf in scripts'"))).toBe("allow");

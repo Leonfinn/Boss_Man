@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Secrets } from "../src/pages/Secrets";
+import { Credentials } from "../src/pages/Settings";
 
 afterEach(() => {
   cleanup();
@@ -71,8 +72,20 @@ describe("agents per key", () => {
   });
 });
 
-describe("adding a credential", () => {
-  it("starts with no kind chosen and points a pasted JSON key at Other", async () => {
+describe("Synthetic credential", () => {
+  it("offers the Synthetic API key under the synthetic/<model> help text", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json([])));
+    render(<Credentials company={company} />);
+    const kind = (await screen.findByLabelText("Add")) as HTMLSelectElement;
+    const synthetic = Array.from(kind.options).find((o) => o.text === "Synthetic API key");
+    expect(synthetic?.value).toBeTruthy();
+    fireEvent.change(kind, { target: { value: synthetic!.value } });
+    await vi.waitFor(() => expect((screen.getByLabelText("Variable name") as HTMLInputElement).value).toBe("SYNTHETIC_API_KEY"));
+    expect(screen.getByText(/Models are named synthetic\/<model>/)).toBeTruthy();
+  });
+});
+
+describe("adding a credential", () => {  it("starts with no kind chosen and points a pasted JSON key at Other", async () => {
     const posts: Array<{ url: string; body: { name?: string } }> = [];
     vi.stubGlobal(
       "fetch",

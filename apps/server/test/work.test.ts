@@ -184,7 +184,7 @@ describe("dependencies (R25)", () => {
     await t.db.insert(runs).values({ companyId: c.id, agentId: agent.id, ticketId: t1.id, purpose: "chat", startedAt: new Date("2026-10-19T09:00:00Z") });
     const after = (await req("GET", `/api/projects/${p.id}/board`)).json().columns.flatMap((x: { tickets: Array<{ title: string }> }) => x.tickets).find((x: { title: string }) => x.title === "Ship");
     expect(after.blockedBy).toEqual([]);
-    expect(after.working).toEqual([agent.name]);
+    expect(after.working).toEqual([`${agent.name} working`]);
     // The card's time comes from the live run, not the older chat run.
     expect(after.workingSince).toBe("2026-10-20T09:00:00.000Z");
   });

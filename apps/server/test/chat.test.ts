@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { ceoChapters, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -79,6 +79,9 @@ describe("owner chat", () => {
     expect(start.prompt).toContain("also save it as a wiki page (Product/Analysis");
     // Work it can't do here is offered as a ticket, not left at "I can't".
     expect(start.prompt).toContain("don't stop at saying you can't. Offer to create the ticket that does it");
+    // The chat's tool description names the tools it now shares with its runs (BOS-224).
+    expect(start.prompt).toContain("server_status");
+    expect(start.prompt).toContain("decisions (");
     expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ purpose: "chat", chapterId: null });
     // Only the CEO's own run made a chapter.
     expect((await c.db.select().from(ceoChapters)).length).toBe(1);
@@ -88,14 +91,16 @@ describe("owner chat", () => {
     c.sent.length = 0;
     await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p1", title: "Bash", kind: "execute", rawInput: { command: "ls" }, optionKinds: ["allow_once", "reject_once"] });
     await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p2", title: "mcp__bossman__create_ticket", kind: "other", rawInput: {}, optionKinds: ["allow_once", "reject_once"] });
+    await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p3", title: "Edit", kind: "edit", rawInput: { file_path: "src/x.ts" }, optionKinds: ["allow_once", "reject_once"] });
     expect(c.sent).toEqual([
       expect.objectContaining({ type: "permission.decide", requestId: "p1", verdict: "deny" }),
       expect.objectContaining({ type: "permission.decide", requestId: "p2", verdict: "allow" }),
+      expect.objectContaining({ type: "permission.decide", requestId: "p3", verdict: "deny" }),
     ]);
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_feature", "create_ticket", "features", "link_tickets", "log_feedback", "notes", "nudge", "open_attachment", "propose_hire", "propose_rule", "propose_team", "roadmap", "set_milestone", "set_ticket_state", "skills", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "board", "clear_check", "create_feature", "create_ticket", "decisions", "deploy", "engagement", "features", "feedback", "handoff", "link_tickets", "list_my_work", "log_feedback", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "raise_decision", "report_key_result", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "server_status", "set_milestone", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision"]);
     // The CEO can build the roadmap from chat too.
     expect(textOf(await client.callTool({ name: "roadmap", arguments: { action: "add_objective", title: "Grow search traffic", reason: "Owner asked in chat." } }))).toMatch(/^Added the objective "Grow search traffic"/);
     // It asks a colleague itself, rather than asking the owner to pass a message on.
@@ -105,6 +110,15 @@ describe("owner chat", () => {
     expect((await c.feedback.notes(c.company.id))[0]).toMatchObject({ source: "chat", customer: "Acme", text: "Acme wants SSO." });
     const board = JSON.parse(textOf(await client.callTool({ name: "board", arguments: {} })));
     expect(board.objectives[0].milestones[0]).toMatchObject({ id: c.ms.id, title: "Beta" });
+    // It can also see the server from chat now (BOS-224), read-only, and settle decisions.
+    const serverView = JSON.parse(textOf(await client.callTool({ name: "server_status", arguments: {} })));
+    expect(serverView.server).toMatchObject({ role: "single" });
+    expect(serverView).toHaveProperty("deploy");
+    expect(serverView).toHaveProperty("migration");
+    expect(Array.isArray(serverView.wakes.waiting)).toBe(true);
+    expect(Array.isArray(serverView.runs.recent)).toBe(true);
+    expect(serverView.errors).toMatchObject({ count: expect.any(Number), recent: expect.any(Array) });
+    expect(textOf(await client.callTool({ name: "decisions", arguments: { action: "list" } }))).toMatch(/No decisions|^\[/);
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "SSO", description: "For Acme.", milestoneId: c.ms.id } }))).toMatch(/^Created feature [0-9a-f-]{36} "SSO"/);
     expect((await c.feedback.scored(c.company.id)).features[0]).toMatchObject({ title: "SSO", description: "For Acme.", milestoneId: c.ms.id });
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "sso" } }))).toMatch(/already exists/);
@@ -133,6 +147,110 @@ describe("owner chat", () => {
     expect(chat.state).toBe("idle");
     expect(chat.items.map((m: { role: string }) => m.role)).toEqual(["owner", "owner", "assistant"]);
     expect(chat.items[2].text).toContain(`#/tickets/${rateId}`);
+  });
+
+  it("keeps server_status and decisions to the calling company", async () => {
+    const c = await setup();
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json();
+    const [ceo2] = await c.db.select().from(agents).where(eq(agents.companyId, other.company.id));
+    if (!ceo2) throw new Error("no second CEO");
+    const run2 = randomUUID();
+    const wake2 = randomUUID();
+    const decision2 = randomUUID();
+    await c.db.insert(runs).values({ id: run2, companyId: other.company.id, agentId: ceo2.id, purpose: "chat", origin: "owner_chat" });
+    await c.db.insert(wakes).values({ id: wake2, companyId: other.company.id, agentId: ceo2.id, reason: "owner_chat" });
+    await c.db.insert(decisions).values({ id: decision2, companyId: other.company.id, kind: "question", question: "Other Co secret question", options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: ceo2.id, tier: "ceo" });
+    // A server error carrying another company's text must not reach this company's agents.
+    const leak = Object.assign(
+      new Error('Failed query: select * from tickets where id = $1 params: ["B Co private plan: acquire Acme"]'),
+      { query: "select * from tickets", params: ["B Co private plan: acquire Acme"] },
+    );
+    // This company's own error keeps only the message it was logged with, never the query or params.
+    c.app.log.error({ err: leak, companyId: c.company.id }, "run-ended handling failed");
+    // Another company's error is tagged to it, so this company never reads even its safe message.
+    const otherLeak = Object.assign(
+      new Error('Failed query: select * from tickets where id = $1 params: ["Other Co private plan"]'),
+      { query: "select * from tickets", params: ["Other Co private plan"] },
+    );
+    c.app.log.error({ err: otherLeak, companyId: other.company.id }, "runner event failed");
+    // An error with no company attached is counted for everyone, shown to no one.
+    c.app.log.error(leak);
+    const port = (c.app.server.address() as { port: number }).port;
+    const connect = async (companyId: string, agentId: string) => {
+      const token = await issueRunToken(c.db, { companyId, agentId, runId: randomUUID() });
+      const client = new Client({ name: "test", version: "0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1:" + port + "/mcp"), { requestInit: { headers: { authorization: "Bearer " + token } } }));
+      return client;
+    };
+    // This company's CEO sees its own server facts but not the other company's work.
+    const mine = await connect(c.company.id, c.ceo.id);
+    const view = JSON.parse(textOf(await mine.callTool({ name: "server_status", arguments: {} })));
+    const seen = JSON.stringify(view);
+    expect(seen).not.toContain(run2);
+    expect(seen).not.toContain(wake2);
+    expect(seen).not.toContain("B Co private plan");
+    expect(seen).not.toContain("acquire Acme");
+    expect(seen).not.toContain("Other Co private plan");
+    expect(seen).not.toContain("select * from tickets");
+    expect(seen).not.toContain("runner event failed");
+    expect(view.errors.recent.map((e: { message: string }) => e.message)).toContain("run-ended handling failed");
+    expect(view.errors.untagged).toBeGreaterThan(0);
+    expect(textOf(await mine.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain("Other Co secret question");
+    await mine.close();
+    // The other company's CEO does see them.
+    const theirs = await connect(other.company.id, ceo2.id);
+    const theirView = JSON.parse(textOf(await theirs.callTool({ name: "server_status", arguments: {} })));
+    expect(JSON.stringify(theirView.runs.recent)).toContain(run2);
+    expect(JSON.stringify(theirView.wakes.waiting)).toContain(wake2);
+    // Each company reads only its own error lines, and only their safe messages.
+    expect(theirView.errors.recent.map((e: { message: string }) => e.message)).toContain("runner event failed");
+    expect(theirView.errors.recent.map((e: { message: string }) => e.message)).not.toContain("run-ended handling failed");
+    expect(JSON.stringify(theirView.errors.recent)).not.toContain("Other Co private plan");
+    expect(textOf(await theirs.callTool({ name: "decisions", arguments: { action: "list" } }))).toContain("Other Co secret question");
+    await theirs.close();
+  });
+
+  it("keeps another agent's chat to the board tools, so it can't outgrow its restricted runs (BOS-58)", async () => {
+    const c = await setup();
+    await c.db.delete(wakes);
+    await c.req("PATCH", `/api/companies/${c.company.id}/watchdog`, { scrumMasterAgentId: c.worker.id });
+    await c.req("POST", `/api/companies/${c.company.id}/chat`, { text: "What is stuck?", agentId: c.worker.id });
+    c.sent.length = 0;
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Start => x.type === "run.start" && x.agentId === c.worker.id)!;
+    expect(start).toBeTruthy();
+    // Its chat doesn't claim the CEO's run tools.
+    expect(start.prompt).not.toContain("same tools here as in your ticket runs");
+    const client = await c.mcp(start.runId, c.worker.id);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual([
+      "agent_instructions",
+      "board",
+      "create_feature",
+      "create_ticket",
+      "features",
+      "link_tickets",
+      "list_my_work",
+      "log_feedback",
+      "model_options",
+      "notes",
+      "nudge",
+      "open_attachment",
+      "propose_hire",
+      "propose_model_change",
+      "propose_rule",
+      "propose_team",
+      "request_note",
+      "roadmap",
+      "set_milestone",
+      "set_ticket_state",
+      "skills",
+      "tickets",
+      "update_instructions",
+      "update_ticket",
+      "whats_new",
+      "wiki",
+    ]);
+    await client.close();
   });
 
   it("sends the owner's draft to the CEO with how to question them, before anything is created", async () => {

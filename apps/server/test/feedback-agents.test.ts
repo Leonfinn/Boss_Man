@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { feedbackNotes, features, notifications, tickets, wakes } from "../src/db/schema.js";
+import { activity, agents, feedbackNotes, features, notifications, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -144,5 +144,55 @@ describe("agents and feedback", () => {
     expect((await ceo2.callTool({ name: "create_ticket", arguments: { size: 3, title: "Bad", featureId: randomUUID() } })).isError).toBe(true);
     await ceo2.close();
     expect((await c.db.select().from(tickets).where(eq(tickets.featureId, f.id))).length).toBe(1);
+  });
+});
+
+describe("placing features on the roadmap", () => {
+  it("lets the CEO, managers and product managers set a feature's objective, rank, column and status, and refuses workers", async () => {
+    const c = await setup();
+    const f = (await c.req("POST", `/api/companies/${c.company.id}/features`, { title: "Roadmap feature" })).json();
+    const goal = (await c.req("POST", `/api/companies/${c.company.id}/objectives`, { title: "Complete alpha build" })).json();
+    const row = async () => (await c.db.select().from(features).where(eq(features.id, f.id)))[0]!;
+
+    const worker = await c.mcp(c.worker.id);
+    expect(textOf(await worker.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, rank: 2, reason: "x" } }))).toMatch(/Only the CEO, a manager or a product manager/);
+    await worker.close();
+
+    const ceo = await c.mcp(c.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id } }))).toMatch(/Nothing to change/);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, rank: 2 } }))).toMatch(/Say why/);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, objectiveId: randomUUID(), reason: "x" } }))).toMatch(/No such objective/);
+    expect(textOf(await ceo.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, objectiveId: goal.id, rank: 2, horizon: "next", status: "planned", reason: "The approved roadmap list." } }))).toBe('Updated "Roadmap feature": linked it to an objective, rank 2, column next, status planned.');
+    expect(await row()).toMatchObject({ objectiveId: goal.id, rank: 2, horizon: "next", status: "planned" });
+    const logged = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "feature_updated")));
+    expect(logged).toHaveLength(1);
+    expect(logged[0]!.summary).toContain("rank 2, column next, status planned");
+    expect(logged[0]!.summary).toContain("The approved roadmap list.");
+    await ceo.close();
+
+    // A manager can do it too.
+    await c.db.update(agents).set({ role: "manager" }).where(eq(agents.id, c.worker.id));
+    const manager = await c.mcp(c.worker.id);
+    expect(textOf(await manager.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, rank: 4, reason: "Manager's call." } }))).toContain("rank 4");
+    await manager.close();
+
+    // So can a product manager.
+    const pmAgent = (await c.req("POST", `/api/companies/${c.company.id}/agents`, { name: "Faramir", template: "product-manager" })).json() as { id: string };
+    const pm = await c.mcp(pmAgent.id);
+    expect(textOf(await pm.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, horizon: "later", status: "released", reason: "Shipped long ago." } }))).toContain("column later, status released");
+    await pm.close();
+    expect((await row()).releasedAt).not.toBeNull();
+
+    // Null clears a column or link; the feature goes back to automatic placement.
+    const ceo2 = await c.mcp(c.ceo.id);
+    expect(textOf(await ceo2.callTool({ name: "feedback", arguments: { action: "update_feature", featureId: f.id, objectiveId: null, horizon: null, rank: null, reason: "Unplanned for now." } }))).toContain("unlinked its objective, rank none, column automatic");
+    await ceo2.close();
+    expect(await row()).toMatchObject({ objectiveId: null, horizon: null, rank: null });
+
+    // The list shows what was set.
+    const ceo3 = await c.mcp(c.ceo.id);
+    const listed = JSON.parse(textOf(await ceo3.callTool({ name: "feedback", arguments: { action: "features" } })));
+    expect(listed.features.find((x: { id: string }) => x.id === f.id)).toMatchObject({ rank: null, horizon: null, status: "released" });
+    await ceo3.close();
   });
 });

@@ -1,4 +1,5 @@
 import type { Company } from "../api";
+import { OpenIssues } from "../components/OpenIssues";
 import { ScrumMasterLog } from "../components/ScrumMasterLog";
 import { WatchdogHealth } from "../components/WatchdogHealth";
 
@@ -15,6 +16,7 @@ export function ScrumMaster({ company }: { company: Company | undefined }) {
         </div>
         <WatchdogHealth companyId={company.id} />
       </header>
+      <OpenIssues companyId={company.id} />
       <ScrumMasterLog companyId={company.id} />
     </>
   );

@@ -5,12 +5,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
-import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, type QuietHours } from "@boss-man/shared";
+import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
-import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
+import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
 import { record } from "./activity.js";
@@ -22,11 +22,13 @@ import { getHold, HOLD_REASON } from "./maintenance.js";
 import { RETRO_DUTY, RETRO_REASON } from "./retro.js";
 import { SCRUM_MASTER_DUTY, WATCHDOG_REASON } from "./watchdog.js";
 import { HARD_STOP, LEAVE_BUDGET, RAISE_BUDGET, unblockedNote } from "./decisions.js";
+import { ownerActed } from "./stale-requests.js";
 import type { fundingService } from "./funding.js";
 import type { runnersService } from "./runners.js";
 import { ceoNotesLines } from "./agent-notes.js";
 import { skillsForRun } from "./skills.js";
 import { conversationLines } from "./ticket-chat.js";
+import { openReviewProposal, reviewTicketWriteRefusal } from "./skill-proposals.js";
 import { briefSlug, findBrief, findWikiKeeper } from "./project-brief.js";
 import type { AlertInput } from "./alert-ladder.js";
 
@@ -130,6 +132,8 @@ export function schedulerService(
     now?: () => Date;
     /** The owner's quiet hours; agent wakes below high priority wait for them to end (R86). */
     quietHours?: () => Promise<QuietHours | null>;
+    /** Tells the owner something without needing an answer (quota holds, credits in use). */
+    notifyOwner?: (input: { companyId: string | null; level: "note" | "flag" | "page" | "ask"; title: string; body?: string | null; link: string }) => Promise<unknown>;
     /** Start a pass as soon as a wake is queued (R85); tests that drive ticks themselves turn it off. */
     tickOnWake?: boolean;
     log?: (msg: string) => void;
@@ -159,6 +163,97 @@ export function schedulerService(
   async function globallyPaused() {
     const [row] = await db.select().from(settings).where(eq(settings.key, "paused"));
     return row?.value === true;
+  }
+
+  /** The newest sample per window for a subscription. */
+  async function latestQuotaWindows(fundingSourceId: string) {
+    return db
+      .selectDistinctOn([quotaSamples.window])
+      .from(quotaSamples)
+      .where(eq(quotaSamples.fundingSourceId, fundingSourceId))
+      .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
+  }
+
+  /** Windows that count towards the hold: the owner can switch any adapter-reported name off (BOS-227). */
+  function holdingWindows(source: typeof fundingSources.$inferSelect, samples: (typeof quotaSamples.$inferSelect)[], t: Date) {
+    const off = new Set(source.quotaDisabledWindows ?? []);
+    const threshold = source.quotaHoldAt ?? limits.quotaHoldAt;
+    return samples.filter((s) => !off.has(s.window) && s.utilization >= threshold && (!s.resetsAt || s.resetsAt > t));
+  }
+
+  /**
+   * Whether a wake may run while the hold is on (BOS-227). Routine work is held unless the owner
+   * allows all work on extra usage. Urgent tickets pass the threshold in every mode, but under the
+   * default "pause" they are still held once a window is at its limit or credits are already in
+   * use, so nothing spends extra-usage credits the owner did not allow.
+   */
+  function quotaPasses(source: typeof fundingSources.$inferSelect, full: (typeof quotaSamples.$inferSelect)[], samples: (typeof quotaSamples.$inferSelect)[], urgent: boolean) {
+    if (full.length === 0) return true;
+    if (source.quotaOverage === "all") return true;
+    if (!urgent) return false;
+    if (source.quotaOverage === "urgent") return true;
+    return !full.some((s) => s.utilization >= 1) && !samples.some((s) => s.overageInUse);
+  }
+
+  /**
+   * Tells the owner, once, when routine work stops or starts again, and once when extra-usage
+   * credits begin being spent. Safe to run on every pass.
+   */
+  async function quotaNotices(t: Date) {
+    if (!deps.notifyOwner) return;
+    const sources = await db.select().from(fundingSources).where(eq(fundingSources.kind, "subscription"));
+    for (const source of sources) {
+      const samples = await latestQuotaWindows(source.id);
+      if (samples.length === 0) continue;
+      const full = holdingWindows(source, samples, t);
+      const overage = samples.some((s) => s.overageInUse);
+      // "Keep all work running" means routine work isn't actually paused, so there's nothing to announce.
+      const held = full.length > 0 && source.quotaOverage !== "all";
+      // Under "pause" urgent work stops too once a window is at its limit or credits are being spent.
+      const urgentStillRuns = source.quotaOverage !== "pause" || !(overage || full.some((s) => s.utilization >= 1));
+      if (held && !source.quotaHeldNotified) {
+        const first = full.reduce((a, b) => (b.utilization > a.utilization ? b : a));
+        const reset = first.resetsAt ? ` until ${first.resetsAt.toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+        const stillRuns = urgentStillRuns ? "Chats, reviews, deploy approvals and urgent tickets still run." : "Chats, reviews and deploy approvals still run; urgent tickets wait too, because the limit is reached.";
+        await deps
+          .notifyOwner({
+            companyId: null,
+            level: "flag",
+            title: `Routine work paused${reset}`,
+            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. ${stillRuns}`,
+            link: "#/funding",
+          })
+          .catch((err) => deps.log?.(`quota hold notification failed: ${(err as Error).message}`));
+        await db.update(fundingSources).set({ quotaHeldNotified: true }).where(eq(fundingSources.id, source.id));
+      }
+      if (!held && source.quotaHeldNotified) {
+        await deps
+          .notifyOwner({
+            companyId: null,
+            level: "note",
+            title: `Routine work is running again`,
+            body: `${source.name} is back under the hold threshold, so held work will start.`,
+            link: "#/funding",
+          })
+          .catch((err) => deps.log?.(`quota release notification failed: ${(err as Error).message}`));
+        await db.update(fundingSources).set({ quotaHeldNotified: false }).where(eq(fundingSources.id, source.id));
+      }
+      if (overage && !source.quotaOverageNotified) {
+        await deps
+          .notifyOwner({
+            companyId: null,
+            level: "flag",
+            title: `Extra-usage credits are now being used`,
+            body: `${source.name} has started using extra-usage credits. Boss Man can't see the balance, so set a spending limit in your Claude account.`,
+            link: "#/funding",
+          })
+          .catch((err) => deps.log?.(`overage notification failed: ${(err as Error).message}`));
+        await db.update(fundingSources).set({ quotaOverageNotified: true }).where(eq(fundingSources.id, source.id));
+      }
+      if (!overage && source.quotaOverageNotified) {
+        await db.update(fundingSources).set({ quotaOverageNotified: false }).where(eq(fundingSources.id, source.id));
+      }
+    }
   }
 
   /** The wiki maintainer's standing job, and the tickets finished since its last run (R73). */
@@ -457,7 +552,9 @@ export function schedulerService(
         lines.push("", `Ticket ${ref ? `${ref} (id ${t.t.id})` : t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
         const note = stateNoteLine(t.t, now());
-        if (note) lines.push("", note);
+        // On an open skill-review ticket the note is a way to talk to the reviewer, so it is
+        // untrusted like the ticket body, whoever wrote it (BOS-86, round 9).
+        if (note) lines.push("", (await openReviewProposal(db, t.t.companyId, t.t.id)) ? untrusted("state note on a skill review ticket", note) : note);
         if (t.t.engagementId) lines.push("", `This ticket does work for engagement ${t.t.engagementId}. Use the engagement tool to view it, message the requester, or deliver.`);
         if (t.t.risk) {
           const serious = t.t.risk === "high" || t.t.risk === "critical";
@@ -510,6 +607,7 @@ export function schedulerService(
       "Use the bossman tools to report back: ticket_reply to answer the owner on the ticket; wiki write (with the ticket's id) for any document you produce, such as research, a spec or a report, so the owner can read it from the ticket; set_ticket_state with \"review\" when the work is ready to check or \"done\" when it's finished (pass expected_version, the ticket's version above, so a move is refused if the ticket changed since you last saw it; a move to review, done or blocked needs a summary of up to 240 characters, which stays on the ticket for whoever reads it next); raise_decision (with your recommended answer) when you need the owner; create_ticket for follow-up work; request_engagement to ask another company for help; nudge (a colleague by name, why, and the ticket if it's about one) to hand something to a colleague or ask them a question. Routine updates are not nudges: put them in ticket_reply or the ticket's state note.",
       "Changes to the runner image (new tools in apps/runner/Dockerfile) go live when the owner clicks Settings → Server and runner → Updates → Build and update runners; ask them for that, not for commands on the host.",
       "Ending your turn does not move the ticket.",
+      "Before you tell the owner they must do something, check the live state (their recent answers, what's deployed, and whether the linked tickets are done), not just your own earlier note. Don't repeat an old \"waiting on you\" note as fact. When it's done, withdraw the card with withdraw_decision and update the ticket's state note in the same run.",
       UNTRUSTED_NOTE,
     );
     return lines.join("\n");
@@ -812,8 +910,9 @@ export function schedulerService(
       // Each note waits the window again, up to answerBatchMaxMs after the first.
       const latest = Math.min(waiting.createdAt.getTime() + limits.answerBatchMaxMs, t.getTime() + window);
       let notBefore = waiting.status === "deferred" && waiting.notBefore ? new Date(Math.max(waiting.notBefore.getTime(), latest)) : waiting.notBefore;
-      // A high-priority note ends a quiet-hours wait.
-      const release = waiting.statusReason === "quiet hours" && priority >= limits.highPriority;
+      // A high-priority note ends a quiet-hours or quota-held wait (BOS-227).
+      const holds = waiting.statusReason === "quiet hours" || waiting.statusReason?.startsWith("subscription ");
+      const release = !!holds && priority >= limits.highPriority;
       if (release) notBefore = null;
       // A review line starts "- <ticket id>"; a ticket already listed isn't listed twice.
       const listed = !note || !!waiting.note?.includes(input.reason === REVIEW_REASON ? (note.split(" ")[1] ?? "\0") : note);
@@ -873,8 +972,11 @@ export function schedulerService(
       if (to.id === from.id) return { ok: false, error: "That's you." };
       const ticketId = input.ticketId ?? null;
       if (ticketId) {
-        const [tk] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
+        const [tk] = await db.select({ id: tickets.id, companyId: tickets.companyId, assigneeAgentId: tickets.assigneeAgentId }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, from.companyId)));
         if (!tk) return { ok: false, error: "No ticket with that ID in your company." };
+        // An open skill-review ticket is a gate: the proposal's author must not nudge the reviewer into a verdict.
+        const refusal = await reviewTicketWriteRefusal(db, tk.companyId, ticketId, from.id);
+        if (refusal) return { ok: false, error: `${refusal} Don't nudge the reviewer about the verdict.` };
       }
       // A company-wide hourly cap (BOS-73), counted from the table so it holds across restarts. The Scrum
       // Master's nudges come only from the watchdog, which has its own hourly cap, so they neither count nor are refused:
@@ -962,6 +1064,7 @@ export function schedulerService(
       await watchDue();
 
       const t = now();
+      await quotaNotices(t).catch((err) => deps.log?.(`quota notices failed: ${(err as Error).message}`));
       const queue = await db
         .select()
         .from(wakes)
@@ -1115,13 +1218,12 @@ export function schedulerService(
         if (agent?.fundingSourceId && w.priority < limits.highPriority) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
           if (source?.kind === "subscription") {
-            const samples = await db
-              .selectDistinctOn([quotaSamples.window])
-              .from(quotaSamples)
-              .where(eq(quotaSamples.fundingSourceId, source.id))
-              .orderBy(quotaSamples.window, desc(quotaSamples.observedAt));
-            const full = samples.filter((s) => s.utilization >= limits.quotaHoldAt && (!s.resetsAt || s.resetsAt > t));
-            if (full.length) {
+            const [ticket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+            const samples = await latestQuotaWindows(source.id);
+            const full = holdingWindows(source, samples, t);
+            // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
+            // the limit itself, so the default "pause" never spends unapproved extra usage.
+            if (!quotaPasses(source, full, samples, !!ticket?.urgent)) {
               const until = full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null);
               await defer(`subscription ${full.map((s) => s.window).join(", ")} window nearly used up`, until);
               continue;
@@ -1183,6 +1285,9 @@ export function schedulerService(
      */
     async onTicketDone(ticketId: string, causedByRunId?: string | null) {
       await this.releaseWorkspace(ticketId);
+      // A ticket finishing may make "waiting on it" notes and cards out of date (BOS-123).
+      const [finished] = await db.select({ companyId: tickets.companyId }).from(tickets).where(eq(tickets.id, ticketId));
+      if (finished) await ownerActed(db, { companyId: finished.companyId, ticketIds: [ticketId], reason: "a ticket it waited on finished", now: now(), wake: (input) => this.notify(input.agentId, input) });
       const dependents = await db.select({ id: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerTicketId, ticketId));
       for (const { id } of dependents) {
         const blockers = await db

@@ -24,6 +24,20 @@ export function runOriginQuery(alias: string) {
   };
 }
 
+/**
+ * Every run going now in a company: the one source for "who is working", read by the Dashboard's
+ * count and the board's cards, strip and count so the two cannot drift (BOS-155).
+ */
+export async function liveRuns(db: Db, companyId: string) {
+  return db
+    .select({ id: runs.id, agentId: runs.agentId, agent: agents.name, ticketId: runs.ticketId, ticket: tickets.title, purpose: runs.purpose, startedAt: runs.startedAt, ...runOriginQuery("runs") })
+    .from(runs)
+    .leftJoin(agents, eq(agents.id, runs.agentId))
+    .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+    .where(and(eq(runs.companyId, companyId), isNull(runs.endedAt)))
+    .orderBy(asc(runs.startedAt));
+}
+
 export class RunError extends Error {
   constructor(
     readonly status: number,

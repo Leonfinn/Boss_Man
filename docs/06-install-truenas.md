@@ -746,6 +746,7 @@ curl -s http://192.168.68.67:3101/api/health; echo     # "role":"leader"; the co
   - **A `Dockerfile` or other server-image change:** rebuild the live colour in place, as in "Rebuild the live colour in place" below.
   - **The Caddyfile:** `docker compose exec proxy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`.
   - **The proxy's compose settings:** `docker compose up -d --no-deps proxy`, which leaves the UI down for a few seconds.
+  - **The launcher** (`apps/launcher/` or its compose settings): it runs its own image built from this checkout, so rebuild it first, or the old code keeps running: `docker compose build launcher && docker compose up -d --no-deps launcher`. The UI stays up. Runners keep their old limits until they are recreated: at the next runner update, or now with `docker compose exec launcher node dist/main.js recreate-all`, which cuts off runs in progress (crash recovery restarts them).
   - **`scripts/host-deployer.sh`:** copy it to `$D` as in 9a step 3.
 - After a hand-applied change, the deployer may still show the alert about deployment files for a few minutes: press **Got it**.
 - Runner updates are unchanged (the drain); they never touch the proxy.

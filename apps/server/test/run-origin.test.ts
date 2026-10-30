@@ -96,13 +96,81 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect((await card(c, c.worker.id)).run).toMatchObject({ origin: "nudge", originFrom: "CEO", runTicketId: t.id });
   });
 
-  it("does not pick one ticket out of a review wake that lists several", async () => {
+  it("shows ticketless runs on the board and counts them like the dashboard (BOS-155)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Add a skill" })).json() as { id: string };
+    // The Engineer is nudged about the ticket without being on it; the CEO runs with no ticket at all.
+    const ceo = await agent(c, c.ceo.id);
+    await ceo.callTool({ name: "nudge", arguments: { agent: "Engineer", why: `The ticket ${t.id} needs a look` } });
+    await ceo.close();
+    await c.scheduler.notify(c.ceo.id, { reason: "feedback", note: "New notes." });
+    await c.scheduler.tick();
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string; origin: string }>; columns: Array<{ tickets: Array<{ id: string; working: string[] }> }> };
+    const dash = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json() as { stats: { running: number } };
+    const card = board.columns.flatMap((x) => x.tickets).find((x) => x.id === t.id)!;
+    expect(card.working).toEqual(["Engineer picking this up"]);
+    expect(board.withoutTicket.map((r) => r.agent)).toEqual(["CEO"]);
+    expect(board.workingAgents).toBe(2);
+    expect(board.workingAgents).toBe(dash.stats.running);
+  });
+
+  it("lights the ticket a review wake names, and keeps the run out of the ticketless strip", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First" })).json() as { id: string };
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${t.id} "First": ready` });
+    await c.scheduler.tick();
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string }>; columns: Array<{ tickets: Array<{ id: string; working: string[] }> }> };
+    const card = board.columns.flatMap((x) => x.tickets).find((x) => x.id === t.id)!;
+    expect(card.working).toEqual(["Engineer reviewing"]);
+    expect(board.withoutTicket).toEqual([]);
+    expect(board.workingAgents).toBe(1);
+  });
+
+  it("keeps a run reviewing another project's ticket in the strip, so the board never under-reports", async () => {
+    const c = (ctx = await setup());
+    const other = (await c.req("POST", `/api/companies/${c.company.id}/projects`, { name: "Other site" })).json() as { id: string };
+    const t = (await c.req("POST", `/api/projects/${other.id}/tickets`, { title: "Elsewhere" })).json() as { id: string };
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${t.id} "Elsewhere": ready` });
+    await c.scheduler.tick();
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string }> };
+    const dash = (await c.req("GET", `/api/companies/${c.company.id}/dashboard`)).json() as { stats: { running: number } };
+    expect(board.withoutTicket.map((r) => r.agent)).toEqual(["Engineer"]);
+    expect(board.workingAgents).toBe(1);
+    expect(board.workingAgents).toBe(dash.stats.running);
+  });
+
+  it("lights every ticket a review run covers, counts the run once, and shows a finished ticket as done", async () => {
     const c = (ctx = await setup());
     const a = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First" })).json() as { id: string };
     const b = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second" })).json() as { id: string };
     await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${a.id} "First": ready\n- ${b.id} "Second": ready` });
     await c.scheduler.tick();
+    // The run does not pick one ticket at wake time; the board shows it on both.
     expect(await c.latestRun(c.worker.id)).toMatchObject({ ticketId: null, origin: "review requested", runTicketId: null });
+    // One of the tickets merges while the reviewer is still running.
+    await c.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string }>; columns: Array<{ systemState: string; tickets: Array<{ id: string; working: string[] }> }> };
+    const cards = board.columns.flatMap((x) => x.tickets);
+    expect(cards.find((x) => x.id === a.id)!.working).toEqual(["Engineer reviewing"]);
+    expect(cards.find((x) => x.id === b.id)!.working).toEqual(["Engineer reviewing"]);
+    expect(board.columns.find((x) => x.systemState === "done")!.tickets.map((x) => x.id)).toContain(a.id);
+    expect(board.withoutTicket).toEqual([]);
+    expect(board.workingAgents).toBe(1);
+  });
+
+  it("lists only the runs with no ticket when reviews and ticketless runs are mixed", async () => {
+    const c = (ctx = await setup());
+    const a = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First" })).json() as { id: string };
+    const b = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second" })).json() as { id: string };
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${a.id} "First": ready\n- ${b.id} "Second": ready` });
+    await c.scheduler.notify(c.ceo.id, { reason: "feedback", note: "New notes." });
+    await c.scheduler.tick();
+    const board = (await c.req("GET", `/api/projects/${c.project.id}/board`)).json() as { workingAgents: number; withoutTicket: Array<{ agent: string }>; columns: Array<{ tickets: Array<{ id: string; working: string[] }> }> };
+    const cards = board.columns.flatMap((x) => x.tickets);
+    expect(cards.find((x) => x.id === a.id)!.working).toEqual(["Engineer reviewing"]);
+    expect(cards.find((x) => x.id === b.id)!.working).toEqual(["Engineer reviewing"]);
+    expect(board.withoutTicket.map((r) => r.agent)).toEqual(["CEO"]);
+    expect(board.workingAgents).toBe(2);
   });
 
   it("says a scheduled wiki sweep was a sweep", async () => {

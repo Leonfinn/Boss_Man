@@ -5,12 +5,13 @@
 import { randomBytes } from "node:crypto";
 import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
+import { ticketRef } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { companies, decisions, owners, settings } from "../db/schema.js";
+import { companies, decisions, owners, settings, tickets } from "../db/schema.js";
 import { record } from "./activity.js";
-import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext } from "./decisions.js";
+import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
@@ -40,6 +41,9 @@ const Status = z.object({
 export type DeployStatus = z.infer<typeof Status>;
 
 const short = (sha: string) => sha.slice(0, 8);
+// The install's folders, as docs/06-install-truenas.md names them: every hand-apply command is written in full.
+const SRC = "/mnt/NVME_Apps/Container_files/boss-man/src";
+const DEPLOYER = "/mnt/NVME_Apps/Container_files/boss-man/deployer";
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 
@@ -63,6 +67,59 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     return c?.id ?? null;
   }
 
+  /**
+   * What the owner is approving (BOS-213): Boss Man's merges record the ticket as
+   * `Merge "<title>" (<ticket id>)`, so each one maps back to its ticket and title. Commits that
+   * aren't a ticket keep their subject line. Long ranges show the first 20 tickets.
+   */
+  async function updateFor(commit: string, fromCommit: string, a: Available | null, extras: { handBecause?: string; handFiles?: string[]; handEffect?: DeployUpdate["handEffect"]; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean; risks: string[] }): Promise<DeployUpdate | undefined> {
+    const commits = a?.commits ?? [];
+    if (!commits.length) return undefined;
+    const entries = commits.flatMap((c) => {
+      if (!c.subject) return [];
+      const m = c.subject.match(/^Merge ".*" \(([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\)$/i);
+      return [{ subject: c.subject, ticketId: m ? m[1]!.toLowerCase() : null }];
+    });
+    const wanted = [...new Set(entries.flatMap((e) => (e.ticketId ? [e.ticketId] : [])))];
+    const rows = wanted.length
+      ? await db
+          .select({ id: tickets.id, title: tickets.title, number: tickets.number, prefix: companies.ticketPrefix })
+          .from(tickets)
+          .innerJoin(companies, eq(companies.id, tickets.companyId))
+          .where(inArray(tickets.id, wanted))
+      : [];
+    const found = new Map(rows.flatMap((r) => {
+      const ref = ticketRef(r.prefix, r.number);
+      return ref ? [[r.id, { ticketId: r.id, ref, title: r.title }] as const] : [];
+    }));
+    const all: DeployUpdate["changes"] = [];
+    const otherCommits: string[] = [];
+    const seen = new Set<string>();
+    for (const e of entries) {
+      const t = e.ticketId ? found.get(e.ticketId) : undefined;
+      // A merge whose ticket can't be found (removed, or another install) is still shown as a commit.
+      if (t && !seen.has(t.ticketId)) {
+        seen.add(t.ticketId);
+        all.push(t);
+      } else if (!t) otherCommits.push(e.subject);
+    }
+    return {
+      from: fromCommit,
+      to: commit,
+      total: entries.length,
+      files: a?.paths.length ?? 0,
+      changes: all.slice(0, 20),
+      more: Math.max(0, all.length - 20),
+      otherCommits,
+      ...(extras.handBecause ? { handBecause: extras.handBecause } : {}),
+      ...(extras.handFiles?.length ? { handFiles: extras.handFiles } : {}),
+      ...(extras.handEffect ? { handEffect: extras.handEffect } : {}),
+      ...(extras.needsDeployerCopy !== undefined ? { needsDeployerCopy: extras.needsDeployerCopy } : {}),
+      ...(extras.needsRunnerUpdate !== undefined ? { needsRunnerUpdate: extras.needsRunnerUpdate } : {}),
+      risks: extras.risks,
+    };
+  }
+
   async function openFor(target: string) {
     return db
       .select()
@@ -81,27 +138,59 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     // are kept structured so the approval card and the to-do it leaves behind both show them (BOS-122).
     // The approved commit is pinned in every step (BOS-124): `main` may have moved on by the time the
     // owner applies it, and an unpinned step would bring in changes they never approved.
+    const changed = new Set([...(a?.infraPaths ?? []), ...(a?.paths ?? [])]);
+    const hostDeployerChanged = changed.has("scripts/host-deployer.sh");
+    const launcherChanged = [...changed].some((p) => p.startsWith("apps/launcher/"));
     const handSteps = infra
       ? [
           "Check your setup first: Settings → Server and runner → Server. \"Blue/green: On\" or Live/Standby means blue/green; anything else is a single server.",
-          `On the server that runs Boss Man, in the folder it deploys from, pin the approved commit: git checkout main; git fetch origin; git merge --ff-only ${commit}; git rev-parse HEAD. The last command must print ${commit}; if it prints anything else, stop and tell us.`,
-          `Apply it: on blue/green run scripts/rebuild-live.sh; on a single server run scripts/deploy.sh --commit ${commit}. Copy the deployer's host-deployer.sh to its folder if the change touches it.`,
+          `On the server that runs Boss Man, in the folder it deploys from, pin the approved commit: cd ${SRC} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD. The last command must print ${commit}; if it prints anything else, stop and tell us.`,
+          `Apply it: on blue/green run cd ${SRC} && scripts/rebuild-live.sh; on a single server run cd ${SRC} && scripts/deploy.sh --commit ${commit}.`,
+          hostDeployerChanged
+            ? `Copy the changed host-deployer script to the deployer folder: cp ${SRC}/scripts/host-deployer.sh ${DEPLOYER}/host-deployer.sh && chown root:root ${DEPLOYER}/host-deployer.sh && chmod 750 ${DEPLOYER}/host-deployer.sh`
+            : "host-deployer.sh didn't change; no copy needed.",
+          ...(launcherChanged
+            ? [`Rebuild the launcher: cd ${SRC} && docker compose build launcher && docker compose up -d --no-deps launcher. Runners keep their old limits until the next runner update.`]
+            : []),
+          `Blue/green only: check the new server has taken charge. Find the live colour: grep reverse_proxy ${DEPLOYER}/proxy/active.caddy. Then run cd ${SRC} && docker compose exec -T server-<colour> node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))", with <colour> blue or green. If it says standby, run cd ${SRC} && docker compose kill -s SIGUSR2 server-<colour>.`,
           "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners.",
         ]
       : [];
-    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
-    const rollback = infra ? `Blue/green: git checkout ${fromCommit} and run scripts/rebuild-live.sh. Single server: scripts/deploy.sh --rollback. Database restore isn't a fallback yet.` : undefined;
-    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}) };
-    const subjects = changes.slice(0, 5).map((c) => `- ${c}`).join("\n");
+    const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
+    const rollback = infra ? `Blue/green: cd ${SRC} && git checkout ${fromCommit} && scripts/rebuild-live.sh. Single server: cd ${SRC} && scripts/deploy.sh --rollback. Database restore isn't a fallback yet.` : undefined;
     const n = a?.paths.length ?? 0;
     const migrations = (a?.paths ?? []).filter((p) => /^apps\/server\/drizzle\/[^/]+\.sql$/.test(p)).length;
+    // What changes the risk of the update, in plain words (BOS-213). The deploy itself is unchanged.
+    const risks: string[] = [];
+    if (migrations) risks.push(`${migrations} database migration${migrations === 1 ? "" : "s"} ${migrations === 1 ? "is" : "are"} included. Boss Man backs the database up first.`);
+    if (hostDeployerChanged) risks.push("It changes host-deployer.sh, the script that runs deploys on your server. The hand steps include copying it into place.");
+    if (launcherChanged) risks.push("It changes the launcher. The hand steps include rebuilding it.");
+    if (a?.runnerChanged) risks.push("It changes the runner, the containers agents work in. You'll be asked separately about building the new runners.");
+    const infraCount = a?.infraPaths.length ?? 0;
+    // What a hand-apply touches, in plain words (BOS-218): the deployer script, the server itself, or both.
+    const handPaths = new Set([...(a?.infraPaths ?? []), ...(hostDeployerChanged ? ["scripts/host-deployer.sh"] : [])]);
+    const deployerTouched = handPaths.has("scripts/host-deployer.sh");
+    const serverTouched = [...handPaths].some((p) => p !== "scripts/host-deployer.sh");
+    const handEffect: DeployUpdate["handEffect"] = infra ? (deployerTouched ? (serverTouched ? "both" : "deployer") : "server") : undefined;
+    const handBecause = infra
+      ? `Needs applying by hand because this update changes ${a!.infraPaths[0]}${infraCount > 1 ? ` and ${infraCount - 1} other deployment file${infraCount === 2 ? "" : "s"}` : ""}.`
+      : undefined;
+    const update = await updateFor(commit, fromCommit, a, {
+      ...(handBecause ? { handBecause } : {}),
+      ...(infra ? { handFiles: a!.infraPaths } : {}),
+      ...(handEffect ? { handEffect } : {}),
+      ...(infra ? { needsDeployerCopy: hostDeployerChanged } : {}),
+      ...(target === "server" ? { needsRunnerUpdate: !!a?.runnerChanged } : {}),
+      risks,
+    });
+    const ctx: SelfDeployContext = { type: "self_deploy", target, commit, fromCommit, ...(infra ? { infra: true, handSteps, ...(check ? { check } : {}), ...(rollback ? { rollback } : {}) } : {}), ...(a?.runnerChanged && target === "server" ? { runnerChanged: true } : {}), ...(changes.length ? { changes } : {}), ...(update ? { update } : {}) };
     const areas = `${n} file${n === 1 ? "" : "s"} changed${migrations ? `, ${migrations} database migration${migrations === 1 ? "" : "s"}` : ""}${a?.runnerChanged ? ", runner code changed (separate approval after this)" : ""}`;
     const question =
       target === "runner"
-        ? `Update the runners to ${short(commit)}? The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
+        ? `Update the runners to ${short(commit)}?\n\nThis rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
-          ? `Main has moved to ${short(commit)}, but the change touches deployment files (${a!.infraPaths.slice(0, 5).join(", ")}), so Boss Man cannot deploy it. Approve this and a to-do stays on your queue with the steps to apply it by hand on the machine that runs Boss Man (scripts/deploy.sh, or the blue/green steps in docs/06-install-truenas.md section 9d), how to check it worked and how to roll back. It clears when you mark it done or the live commit changes.`
-          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}.${subjects ? `\n${subjects}` : ""}\nThe database is backed up first, then Boss Man restarts (a minute or two).`;
+          ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue (scripts/deploy.sh, or the blue/green steps in docs/06-install-truenas.md section 9d) until it's applied or you mark it done.`
+          : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`;
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).
     const options = infra ? [APPROVE_HAND_APPLY, NOT_NOW] : target === "runner" ? [UPDATE_RUNNERS, NOT_NOW] : [DEPLOY, NOT_NOW];
@@ -147,7 +236,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });
       // The server is deployed; the runners are a separate question the owner answers on its own.
-      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) await raise("runner", s.to_commit, s.from_commit, null);
+      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) await raise("runner", s.to_commit, s.from_commit, await available());
     }
   }
 
@@ -216,7 +305,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       if (!a?.deployed) return { error: "The host deployer has not reported yet. Check that its cron job is running." } as const;
       const open = (await openFor("runner")).find((d) => (d.context as SelfDeployContext).commit === a.deployed);
-      const d = open ?? (await raise("runner", a.deployed, a.deployed, null, true));
+      const d = open ?? (await raise("runner", a.deployed, a.deployed, a, true));
       return d ? ({ decisionId: d.id } as const) : ({ error: "Create a company first: decisions belong to one." } as const);
     },
 

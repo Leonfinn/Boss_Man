@@ -121,6 +121,7 @@ describe("temp-file cleanup goes to the CEO first (BOS-111)", () => {
 
   it("moves to the owner after 5 minutes, or when the CEO escalates it", async () => {
     const { d } = await ctx.ask(CLEANUP);
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.ceo.id, startedAt: ctx.advance(0) });
     ctx.advance(4);
     await ctx.alerts.sweep();
     expect((await reload(d!.id)).tier).toBe("ceo");
@@ -179,6 +180,7 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
 
   it("moves to the owner after 5 minutes, still naming the checkout", async () => {
     const { d } = await ctx.ask(PROBE, ctx.dev.id, { ticketId: ctx.ticket.id });
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.ceo.id, startedAt: ctx.advance(0) });
     ctx.advance(6);
     await ctx.alerts.sweep();
     const moved = await reload(d!.id);

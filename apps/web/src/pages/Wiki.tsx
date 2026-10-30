@@ -2,7 +2,7 @@
 // ticket link back to it, and every save is kept, so an older version can be put back.
 import { useEffect, useState, type FormEvent } from "react";
 import { api, type Company } from "../api";
-import { Markdown } from "../components/Markdown";
+import { Markdown, headingId } from "../components/Markdown";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { SaveButton, useSaveState } from "../components/SaveButton";
@@ -75,7 +75,7 @@ function Editor({ initial, folders, onSave, onCancel, saveLabel }: { initial: Dr
   );
 }
 
-function PageView({ companyId, slug, folders, go, onChanged, onNewHere }: { companyId: string; slug: string; folders: string[]; go: (to: string) => void; onChanged: () => void; onNewHere: (folder: string) => void }) {
+function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere }: { companyId: string; slug: string; section?: string; folders: string[]; go: (to: string) => void; onChanged: () => void; onNewHere: (folder: string) => void }) {
   const page = usePoll((signal) => api<PageDetail>(`/api/companies/${companyId}/wiki/${slug}`, { signal }), 30_000, `${companyId}/${slug}`);
   const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState(false);
@@ -83,6 +83,13 @@ function PageView({ companyId, slug, folders, go, onChanged, onNewHere }: { comp
   const [error, setError] = useState<string | null>(null);
   useEffect(() => (setEditing(false), setHistory(false), setOld(null)), [slug]);
   const p = page.data;
+  // A link can name a section (slug#Heading); land on that heading once the page has rendered.
+  useEffect(() => {
+    if (!p || !section) return;
+    const wanted = headingId(section);
+    const heading = [...document.querySelectorAll("h1, h2, h3, h4, h5, h6")].find((h) => h.id === wanted || h.textContent?.trim().toLowerCase() === section.trim().toLowerCase());
+    heading?.scrollIntoView({ block: "start" });
+  }, [p?.id, section]);
 
   const save = async (v: Draft) => {
     const saved = await api<{ slug: string }>(`/api/companies/${companyId}/wiki/${slug}`, { method: "PUT", body: v });
@@ -350,6 +357,19 @@ function TreeList({ folder, companyId, current, currentFolder, open, onPick }: {
 }
 
 export function Wiki({ companies, companyId, slug, go }: { companies: Company[]; companyId: string | undefined; slug: string | undefined; go: (to: string) => void }) {
+  // A link can arrive as slug#Heading; the page is the slug, and the rest is the section to land on.
+  const hashAt = slug?.indexOf("#") ?? -1;
+  const pageSlug = hashAt >= 0 ? slug!.slice(0, hashAt) : slug;
+  const rawSection = hashAt >= 0 ? slug!.slice(hashAt + 1) : undefined;
+  const section = rawSection
+    ? (() => {
+        try {
+          return decodeURIComponent(rawSection);
+        } catch {
+          return rawSection;
+        }
+      })()
+    : undefined;
   const company = companies.find((c) => c.id === companyId) ?? companies[0];
   const [q, setQ] = useState("");
   // The folder a new page starts in, or null when no page is being created.
@@ -398,7 +418,7 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
             {!q.trim() && (
               <ul>
                 <li>
-                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={slug === BRIEF && creating === null ? "page" : undefined} onClick={() => setCreating(null)}>
+                  <a href={`#/wiki/${company.id}/${BRIEF}`} aria-current={pageSlug === BRIEF && creating === null ? "page" : undefined} onClick={() => setCreating(null)}>
                     Company brief
                     <small>read-only, as of now</small>
                   </a>
@@ -410,8 +430,8 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
             <TreeList
               folder={tree(pages)}
               companyId={company.id}
-              current={creating === null ? slug : undefined}
-              currentFolder={(creating ?? pages.find((p) => p.slug === slug)?.folder ?? "").toLowerCase()}
+              current={creating === null ? pageSlug : undefined}
+              currentFolder={(creating ?? pages.find((p) => p.slug === pageSlug)?.folder ?? "").toLowerCase()}
               open={!!q.trim()}
               onPick={() => setCreating(null)}
             />
@@ -419,10 +439,10 @@ export function Wiki({ companies, companyId, slug, go }: { companies: Company[];
           <div>
             {creating !== null ? (
               <Editor key={creating} initial={{ title: "", body: "", folder: creating }} folders={folders} onSave={create} onCancel={() => setCreating(null)} saveLabel="Create page" />
-            ) : slug === BRIEF ? (
+            ) : pageSlug === BRIEF ? (
               <BriefView companyId={company.id} />
-            ) : slug ? (
-              <PageView companyId={company.id} slug={slug} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
+            ) : pageSlug ? (
+              <PageView companyId={company.id} slug={pageSlug} section={section} folders={folders} go={go} onChanged={list.reload} onNewHere={setCreating} />
             ) : (
               <p className="muted card">{pages.length ? "Pick a page on the left." : "Start a page with New page, or ask an agent to write one."}</p>
             )}

@@ -38,14 +38,26 @@ if command -v flock >/dev/null; then
   out=$(lock env) || fail "free lock: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free lock: not acquired"
 
-  # A second caller waits, then gives up with exit 1 after CHECK_ALL_LOCK_WAIT (no retry: not a process-limit error).
+  # A second caller waits, then gives up with exit 75 after CHECK_ALL_LOCK_WAIT (no retry: not a process-limit error).
   ( exec 8>"$t/lock"; flock 8; sleep 5 ) & holder=$!
   sleep 0.5
   rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=1) || rc=$?
-  [ "$rc" = 1 ] || fail "busy lock: expected exit 1, got $rc"
+  [ "$rc" = 75 ] || fail "busy lock: expected exit 75, got $rc"
   grep -q "waiting for it" <<<"$out" || fail "busy lock: no waiting message: $out"
   grep -q "gave up" <<<"$out" || fail "busy lock: messages missing: $out"
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+
+  # A merge check waiting for the lock holds back a hand-run check that arrives later: when the holder lets go, the merge check gets it.
+  ( exec 8>"$t/lock"; flock 8; sleep 3 ) & holder=$!
+  sleep 0.3
+  ( lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=10 >"$t/merge.out"; date +%s%N >"$t/merge.at" ) & merge=$!
+  sleep 0.5
+  ( lock env CHECK_ALL_LOCK_WAIT=10 >"$t/hand.out"; date +%s%N >"$t/hand.at" ) & hand=$!
+  wait "$holder" "$merge" "$hand"
+  grep -q "lock held" "$t/merge.out" || fail "merge check: lock not acquired: $(cat "$t/merge.out")"
+  grep -q "lock held" "$t/hand.out" || fail "hand-run check: lock not acquired: $(cat "$t/hand.out")"
+  [ "$(cat "$t/merge.at")" -le "$(cat "$t/hand.at")" ] || fail "hand-run check got in ahead of the merge check"
+  [ -z "$(ls "$t/lock.merge-waiting" 2>/dev/null)" ] || fail "merge check left its waiting marker behind"
 
   # Once the holder lets go, the waiter gets in.
   ( exec 8>"$t/lock"; flock 8; sleep 1 ) & holder=$!

@@ -4,7 +4,7 @@ import { AGENT_TEMPLATES, CEO_TEMPLATE } from "../src/agent-templates.js";
 // Tool names templates may mention: the registerTool names in apps/server/src/mcp.ts.
 const TOOLS = new Set([
   "assign_ticket", "board", "clear_check", "create_ticket", "decisions", "deploy", "engagement", "feedback", "features", "handoff", "link_tickets", "list_my_work", "log_feedback",
-  "notify_owner", "nudge", "pa_escalate", "pa_reply", "pa_verdict", "propose_hire", "propose_team", "raise_decision", "report_key_result", "request_engagement", "review", "runs", "schedule_check",
+  "model_options", "notify_owner", "nudge", "pa_escalate", "pa_reply", "pa_verdict", "propose_hire", "propose_model_change", "propose_team", "raise_decision", "report_key_result", "request_engagement", "review", "runs", "schedule_check",
   "set_milestone", "set_ticket_risk", "set_ticket_state", "skills", "ticket_reply", "tickets", "update_instructions", "whats_new", "wiki",
 ]);
 const ALL = [...AGENT_TEMPLATES, { ...CEO_TEMPLATE, role: "manager" as const }];

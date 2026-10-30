@@ -31,7 +31,11 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const m = Math.max(0, Math.round((now.getTime() - d.getTime()) / 60_000));
     return m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
   };
-  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null }) => (t.stateNote && t.stateNoteAt ? ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}` : "");
+  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null; stateNoteStaleAt?: Date | null }) => {
+    if (!t.stateNote || !t.stateNoteAt) return "";
+    const stale = t.stateNoteStaleAt != null && (!t.stateNoteAt || t.stateNoteStaleAt > t.stateNoteAt);
+    return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? " (may be out of date: the owner acted after it, so check before repeating it)" : ""}`;
+  };
   const from = since ?? new Date(now.getTime() - 24 * 3_600_000);
   const notMe = agentId ? sql`${activity.agentId} is distinct from ${agentId}` : undefined;
 

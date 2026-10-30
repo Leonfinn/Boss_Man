@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, notifications, runners, settings } from "../src/db/schema.js";
+import { agents, decisions, notifications, runners, settings, skills } from "../src/db/schema.js";
 import { cleanPath, normalise, parseGitHub, parseSkillMd, skillName } from "../src/services/skills.js";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -85,7 +85,8 @@ async function setup() {
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
     return c;
   };
-  return { ...built, db, close, req, company, worker, project, sent, emit, starts, mcp, ceo };
+  const funding = (await req("POST", "/api/funding-sources", { name: "Claude Max", kind: "subscription", provider: "anthropic" })).json() as { id: string };
+  return { ...built, db, close, req, company, worker, project, sent, emit, starts, mcp, ceo, funding };
 }
 
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
@@ -130,11 +131,14 @@ describe("skills library (R71)", () => {
     ]);
     // The same link again clashes; a check with no new commit changes nothing.
     expect((await c.req("POST", base, { from: "link", url: "https://github.com/acme/kit/tree/main/skills/triage" })).statusCode).toBe(409);
-    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toEqual({ changed: false, sourceRef: commit });
+    await c.db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, c.worker.id));
+    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toEqual({ changed: false, proposalId: null, status: null });
     const before = commit;
     commit = "2222222222222222222222222222222222222222";
     files["skills/release-notes/templates/entry.md"] = "* {change}";
-    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toEqual({ changed: true, sourceRef: commit });
+    // A newer version never replaces the library's copy: it becomes a proposal that is reviewed and decided.
+    expect((await c.req("POST", `${base}/${notes.id}/refresh`)).json()).toMatchObject({ changed: true, status: "in_review" });
+    expect((await c.req("GET", `${base}/${notes.id}`)).json()).toMatchObject({ sourceRef: before, files: [expect.anything(), { path: "templates/entry.md", text: "- {change}" }] });
     commit = before;
     expect((await c.req("POST", base, { from: "link", url: "https://github.com/acme/nothing" })).statusCode).toBe(404);
   });
@@ -224,6 +228,57 @@ describe("skills library (R71)", () => {
     expect(await md()).toContain("Two pages at most.");
   });
 
+  it("marks skills with no instructions and refuses to empty a body without confirmation", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const [empty] = (await c.req("POST", base, { from: "written", name: "empty-body", description: "Says what it does, but has no steps.", body: "" })).json();
+    const [full] = (await c.req("POST", base, { from: "written", name: "full-body", description: "Has real steps.", body: "# Rules\n\nDo the thing." })).json();
+    const list = (await c.req("GET", base)).json() as Array<{ name: string; hasInstructions: boolean; instructionsUnreadable: boolean }>;
+    expect(list.find((x) => x.name === "empty-body")).toMatchObject({ hasInstructions: false, instructionsUnreadable: false });
+    expect(list.find((x) => x.name === "full-body")).toMatchObject({ hasInstructions: true, instructionsUnreadable: false });
+    expect(((await c.req("GET", `${base}/${empty.id}`)).json() as { instructions: unknown }).instructions).toEqual({ path: "SKILL.md", body: "", empty: true, unreadable: false });
+    // An empty editor must not silently replace real instructions.
+    const refused = await c.req("PUT", `${base}/${full.id}`, { name: "full-body", description: "Has real steps.", body: "" });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().message).toMatch(/instructions/i);
+    expect(((await c.req("GET", `${base}/${full.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Rules\n\nDo the thing.");
+    expect((await c.req("PUT", `${base}/${full.id}`, { name: "full-body", description: "Has real steps.", body: "", confirmEmptyBody: true })).statusCode).toBe(200);
+    expect(((await c.req("GET", `${base}/${full.id}`)).json() as { instructions: { empty: boolean } }).instructions.empty).toBe(true);
+  });
+
+  it("shows the body when a legacy skill's SKILL.md has different casing, and flags one that isn't text", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const legacyMd = "---\nname: legacy\ndescription: Legacy casing.\n---\n\n# Steps\n\nUse it.";
+    await c.db.insert(skills).values({ companyId: c.company.id, name: "legacy", description: "Legacy casing.", source: "upload", files: [{ path: "skill.md", content: b64(legacyMd) }], sizeBytes: Buffer.byteLength(legacyMd) });
+    const legacy = ((await c.req("GET", base)).json() as Array<{ id: string; name: string }>).find((x) => x.name === "legacy")!;
+    expect(((await c.req("GET", `${base}/${legacy.id}`)).json() as { instructions: unknown }).instructions).toEqual({ path: "skill.md", body: "# Steps\n\nUse it.", empty: false, unreadable: false });
+    const binary = Buffer.concat([Buffer.from("---\nname: binary\ndescription: Has a binary body.\n---\n\n"), Buffer.from([0, 1, 2])]);
+    const [odd] = (await c.req("POST", base, { from: "upload", files: [{ path: "SKILL.md", content: binary.toString("base64") }] })).json();
+    expect(((await c.req("GET", `${base}/${odd.id}`)).json() as { instructions: unknown }).instructions).toEqual({ path: "SKILL.md", body: null, empty: true, unreadable: true });
+    expect(((await c.req("GET", base)).json() as Array<{ name: string; instructionsUnreadable: boolean }>).find((x) => x.name === "binary")).toMatchObject({ instructionsUnreadable: true });
+  });
+
+  it("shows the body when the description is quoted with escapes, or a folded block", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    // The shape of content-strategy's description: a quoted value with escaped quotes inside.
+    const quotedMd = '---\nname: quoted\ndescription: "When the user mentions \\"content strategy,\\" and \\"topic clusters.\\""\n---\n\n# Steps\n\nThe body after an escaped description.';
+    // The shape of british-plain-english's description: a block scalar with several lines.
+    const foldedMd = "---\nname: folded\ndescription: |\n  Write plain British English.\n  Explain every term.\n---\n\n# Rules\n\nKeep sentences short.";
+    await c.db.insert(skills).values([
+      { companyId: c.company.id, name: "quoted", description: "Quoted", source: "upload", files: [{ path: "SKILL.md", content: b64(quotedMd) }], sizeBytes: Buffer.byteLength(quotedMd) },
+      { companyId: c.company.id, name: "folded", description: "Folded", source: "upload", files: [{ path: "SKILL.md", content: b64(foldedMd) }], sizeBytes: Buffer.byteLength(foldedMd) },
+    ]);
+    const list = (await c.req("GET", base)).json() as Array<{ id: string; name: string; hasInstructions: boolean }>;
+    const quoted = list.find((x) => x.name === "quoted")!;
+    const folded = list.find((x) => x.name === "folded")!;
+    expect(quoted.hasInstructions).toBe(true);
+    expect(folded.hasInstructions).toBe(true);
+    expect(((await c.req("GET", `${base}/${quoted.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Steps\n\nThe body after an escaped description.");
+    expect(((await c.req("GET", `${base}/${folded.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Rules\n\nKeep sentences short.");
+  });
+
   it("lets the CEO give and take skills, and tells the owner", async () => {
     const c = (ctx = await setup());
     await c.req("POST", `/api/companies/${c.company.id}/skills`, { from: "written", name: "triage", description: "Sorts bug reports.", body: "Steps." });
@@ -253,15 +308,16 @@ describe("skills library (R71)", () => {
       await m.close();
       return r;
     };
-    const plan = { projectId: c.project.id, covered: "Engineer builds the site.", hires: [{ name: "Quinn", template: "qa", reason: "Checks each release in a browser.", skills: ["triage"] }, { name: "Rae", reason: "Writes the copy." }] };
+    const model = { harness: "claude", provider: "anthropic", model: "claude-opus-4-5", fundingSourceId: c.funding.id };
+    const plan = { projectId: c.project.id, covered: "Engineer builds the site.", hires: [{ ...model, name: "Quinn", template: "qa", reason: "Checks each release in a browser.", skills: ["triage"] }, { ...model, name: "Rae", reason: "Writes the copy." }] };
     expect(textOf(await propose(c.worker.id, plan))).toBe("Only your company's CEO can propose a team.");
-    expect(textOf(await propose(c.ceo.id, { ...plan, hires: [{ name: "X", reason: "y", skills: ["nope"] }] }))).toBe("There's no skill or pack called nope in the library.");
+    expect(textOf(await propose(c.ceo.id, { ...plan, hires: [{ ...model, name: "X", reason: "y", skills: ["nope"] }] }))).toBe("There's no skill or pack called nope in the library.");
     expect(textOf(await propose(c.ceo.id, plan))).toMatch(/^The team plan is waiting for the owner/);
     expect(textOf(await propose(c.ceo.id, plan))).toBe("A team plan for this is already waiting for the owner.");
     const [d] = (await c.db.select().from(decisions)).filter((x) => (x.context as { type?: string }).type === "team_plan");
     expect(d).toMatchObject({ tier: "owner", options: ["Hire the ticked ones", "Not now"] });
     expect(d!.question).toContain("Team plan for Site: the CEO proposes 2 hires.");
-    expect(d!.question).toContain("1. Quinn (qa): Checks each release in a browser. Skills: triage.");
+    expect(d!.question).toContain("1. Quinn (qa) Harness: Claude Code · Provider: Anthropic · Model: claude-opus-4-5 · Paid from: Claude Max: Checks each release in a browser. Skills: triage.");
     // A pick outside the plan is refused and the decision stays open; then the owner ticks only Quinn.
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [5] })).statusCode).toBe(422);
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Hire the ticked ones", picks: [0] })).statusCode).toBe(200);
@@ -336,10 +392,10 @@ describe("skills library (R71)", () => {
     commit = "4444444444444444444444444444444444444444";
     files["skills/triage/SKILL.md"] = "---\nname: triage\ndescription: \"Sorts bug reports by severity.\"\n---\nNew steps.\n";
     files["skills/deploy/SKILL.md"] = "---\nname: deploy\ndescription: Deploys.\n---\n";
-    const apiCalls = fetched.filter((u) => u.startsWith("https://api.github.com")).length;
-    expect((await c.req("POST", `${packs}/refresh`, { pack: "acme/kit" })).json()).toEqual({ changed: 1, added: ["deploy"], gone: [] });
-    // One read of the link for the whole pack: the branch's commit and the tree.
-    expect(fetched.filter((u) => u.startsWith("https://api.github.com")).length - apiCalls).toBe(2);
+    await c.db.update(agents).set({ reviewKind: "security" }).where(eq(agents.id, c.worker.id));
+    // The changed skill becomes a proposal; nothing in the library moves.
+    expect((await c.req("POST", `${packs}/refresh`, { pack: "acme/kit" })).json()).toEqual({ proposed: ["triage"], unchanged: 1, problems: [] });
+    expect((await c.req("GET", base)).json().map((s: { name: string; sourceRef: string }) => [s.name, s.sourceRef])).toEqual([["release-notes", before], ["triage", before]]);
     commit = before;
     delete files["skills/deploy/SKILL.md"];
 

@@ -323,11 +323,15 @@ export const tickets = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
+    urgent: boolean("urgent").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** When an owner action made the state note possibly out of date (BOS-123). */
+    stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
@@ -343,7 +347,7 @@ export const tickets = pgTable(
 
 // ---------- Decisions and engagements ----------
 
-export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget"]);
+export const decisionKind = pgEnum("decision_kind", ["question", "approval", "permission", "stale_blocker", "stalled_run", "engagement", "budget", "skill"]);
 export const decisionTier = pgEnum("decision_tier", ["ceo", "owner"]);
 export const decisionStatus = pgEnum("decision_status", ["open", "answered", "withdrawn"]);
 
@@ -367,6 +371,9 @@ export const decisions = pgTable("decisions", {
   context: jsonb("context").notNull().default({}),
   createdAt: createdAt(),
   answeredAt: timestamp("answered_at", { withTimezone: true }),
+  /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
+  staleAt: timestamp("stale_at", { withTimezone: true }),
+  staleReason: text("stale_reason"),
 });
 
 export const engagementStatus = pgEnum("engagement_status", [
@@ -520,7 +527,9 @@ export const runs = pgTable("runs", {
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
-export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama"]);
+export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
+/** What routine work does when a subscription window passes its hold threshold (BOS-227). */
+export const quotaOverageMode = pgEnum("quota_overage_mode", ["pause", "urgent", "all"]);
 
 export const fundingSources = pgTable("funding_sources", {
   id: id(),
@@ -533,6 +542,16 @@ export const fundingSources = pgTable("funding_sources", {
   cycleAnchor: timestamp("cycle_anchor", { withTimezone: true }),
   /** The credential agents on this source use. */
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Subscription utilisation at which routine work is held (0.8–1, default 0.95). */
+  quotaHoldAt: real("quota_hold_at").notNull().default(0.95),
+  /** Whether extra usage may be spent, and for which work: pause (default), urgent, or all. */
+  quotaOverage: quotaOverageMode("quota_overage").notNull().default("pause"),
+  /** Window names (as the adapter reports them) that never trigger the hold. Empty means all of them can. */
+  quotaDisabledWindows: jsonb("quota_disabled_windows").$type<string[]>().notNull().default([]),
+  /** The owner was told the current hold started; cleared when it lifts. */
+  quotaHeldNotified: boolean("quota_held_notified").notNull().default(false),
+  /** The owner was told credits are in use; cleared when overage stops. */
+  quotaOverageNotified: boolean("quota_overage_notified").notNull().default(false),
   createdAt: createdAt(),
 });
 
@@ -813,6 +832,11 @@ export const workflowChanges = pgTable(
     evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
     approver: text("approver").$type<"ceo" | "owner">().notNull(),
     decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    /** Why the decision went the way it did, and the wiki page (optionally a section, slug#Heading) that explains it (BOS-216). */
+    reason: text("reason"),
+    reasonLink: text("reason_link"),
+    /** Who applied or skipped it. Older changes have none. */
+    decidedBy: text("decided_by").$type<"ceo" | "owner">(),
     status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     checkDueAt: timestamp("check_due_at", { withTimezone: true }),
@@ -1091,12 +1115,20 @@ export const features = pgTable(
     status: featureStatus("status").notNull().default("idea"),
     /** 1 (tiny) to 5 (huge); null until someone sizes it. */
     effort: integer("effort"),
+    /** A person's ranking, 1 (most important) to 5; null until ranked. Separate from the computed priority. */
+    rank: integer("rank"),
+    /** Pinned to the Now / Next / Later roadmap column; null places it from its status and work. */
+    horizon: roadmapHorizon("horizon"),
     /** Driver id to score, 0 to 5. */
     driverScores: jsonb("driver_scores").notNull().default({}),
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
+    /** A plain-language summary for readers outside the team; null until written. */
+    publicSummary: text("public_summary"),
+    /** Off by default; nothing is published anywhere until a later public roadmap uses it. */
+    showPublicly: boolean("show_publicly").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1270,6 +1302,11 @@ export const activity = pgTable(
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     kind: text("kind").notNull(),
     summary: text("summary").notNull(),
+    /**
+     * The full record behind a summary that has to be shortened, such as both sides of a skill edit
+     * (BOS-178). Null when the summary says all there is.
+     */
+    detail: jsonb("detail").$type<Record<string, unknown> | null>(),
   },
   (t) => [index("activity_company_at").on(t.companyId, t.at)],
 );
@@ -1372,6 +1409,59 @@ export const skills = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("skills_company_name").on(t.companyId, t.name)],
+);
+
+export type SkillFinding = { file: string; lineStart: number; lineEnd: number; title: string; severity: "critical" | "high" | "medium" | "low"; confidence: "confirmed" | "likely"; behaviour: string; harm: string; fix: string; blocks: boolean };
+
+/** A skill the CEO proposes (own draft or internet link). Nothing here is in the library until the owner decides; the install step is the only writer to skills. */
+export const skillProposals = pgTable(
+  "skill_proposals",
+  {
+    id: id(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    source: text("source").$type<"draft" | "link" | "retro">().notNull(),
+    sourceUrl: text("source_url"),
+    /** For a link: the commit the files were read at. Install re-reads this exact commit, never a branch. */
+    pinnedRef: text("pinned_ref"),
+    /** The reviewed bytes (base64), kept so install writes exactly what the reviewer saw. */
+    files: jsonb("files").$type<Array<{ path: string; content: string }>>().notNull(),
+    /** sha256 hex per file path, and over the whole sorted set. */
+    fileHashes: jsonb("file_hashes").$type<Record<string, string>>().notNull(),
+    bundleHash: text("bundle_hash").notNull(),
+    why: text("why").notNull(),
+    proposedAgentIds: jsonb("proposed_agent_ids").$type<string[]>().notNull().default([]),
+    proposedByAgentId: uuid("proposed_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
+    /** Set: this proposal is a new version of that installed skill. */
+    replacesSkillId: uuid("replaces_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    /** Fingerprint of the skill this replaces when the proposal was made: install refuses if it was edited since. */
+    replacesBundleHash: text("replaces_bundle_hash"),
+    /** Worked out by the system from the files, never taken from the CEO. */
+    hasScripts: boolean("has_scripts").notNull(),
+    scriptFiles: jsonb("script_files").$type<string[]>().notNull().default([]),
+    reviewRequired: boolean("review_required").notNull(),
+    status: text("status").$type<"proposed" | "in_review" | "awaiting_owner" | "installed" | "rejected" | "stale" | "expired">().notNull().default("proposed"),
+    reviewTicketId: uuid("review_ticket_id").references(() => tickets.id, { onDelete: "set null" }),
+    verdict: text("verdict").$type<"recommend" | "conditions" | "advise_against">(),
+    verdictSummary: text("verdict_summary"),
+    findings: jsonb("findings").$type<SkillFinding[]>(),
+    conditions: jsonb("conditions").$type<string[]>(),
+    /** Bundle hash the verdict was given for; must equal bundleHash to count. */
+    reviewedBundleHash: text("reviewed_bundle_hash"),
+    decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    decidedBy: text("decided_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    overridden: boolean("overridden").notNull().default(false),
+    overriddenBy: text("overridden_by"),
+    overriddenAt: timestamp("overridden_at", { withTimezone: true }),
+    installedSkillId: uuid("installed_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // One open proposal per name.
+    uniqueIndex("skill_proposals_open_name").on(t.companyId, t.name).where(sql`status in ('proposed','in_review','awaiting_owner')`),
+  ],
 );
 
 /** Which agents have which skills, and who gave them. */

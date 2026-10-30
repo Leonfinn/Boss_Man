@@ -12,6 +12,8 @@ import { ProjectBudget } from "./ProjectBudget";
 import { WatchdogHealth } from "../components/WatchdogHealth";
 import { ArchiveProject, ProjectBrief, ProjectRow } from "./Settings";
 import { Avatar } from "../components/Avatar";
+import { RunLabelLink } from "./Runs";
+import { ago } from "./Dashboard";
 
 const DONE_SHOWN = 8;
 const PROJECT_TABS = [
@@ -431,6 +433,10 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
     await api(`/api/projects/${current!.id}/columns`, { method: "PUT", body: board.data!.columns.map((c) => ({ name: c.id === columnId ? name : c.name, systemState: c.systemState, wipLimit: c.wipLimit })) });
     board.reload();
   };
+  const runNow = async (id: string) => {
+    await api(`/api/tickets/${id}/run-now`, { method: "POST" });
+    board.reload();
+  };
   const openForm = (a: Adding) => setAdding({ ...a, n: (adding?.n ?? 0) + 1 });
   const agents = new Map(companies.flatMap((c) => c.agents.map((a) => [a.id, a] as const)));
   const tiers = useRiskTiers(current?.companyId);
@@ -581,6 +587,18 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           <strong style={{ whiteSpace: "nowrap" }}>Review it <span aria-hidden="true">→</span></strong>
         </a>
       )}
+      {!!board.data?.withoutTicket?.length && (
+        <section className="unticketed" aria-label="Working on something other than a ticket">
+          <strong>Working on something other than a ticket</strong>
+          <ul>
+            {board.data.withoutTicket.map((r) => (
+              <li key={r.id}>
+                <strong>{r.agent ?? "An agent"}</strong> <RunLabelLink run={{ ...r, note: r.wakeNote }} /> <span className="muted">· started {ago(r.startedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <div className="board-bar">
         <div>
           {current && !adding && (
@@ -628,7 +646,7 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
           )}
           {view !== "features" && (
             <button type="button" className="chip" aria-pressed={filters.working} onClick={() => setFilter({ working: !filters.working })}>
-              Working now
+              Working now{board.data ? ` (${board.data.workingAgents})` : ""}
             </button>
           )}
         </div>
@@ -767,11 +785,19 @@ export function Board({ companies, projectId, subpage, go, onCompaniesChanged }:
                         </span>
                       )}
                       {t.outcome === "cancelled" && <span className="tag" style={{ alignSelf: "flex-start" }}>Cancelled</span>}
+                      {t.quotaHeldUntil && !t.working?.length && (
+                        <span className="note" role="status">
+                          Held by the quota hold{t.quotaHeldReason ? ` (${t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")})` : ""}.{" "}
+                          <button type="button" className="linkish" onClick={() => void runNow(t.id)}>
+                            Run now
+                          </button>
+                        </span>
+                      )}
                       {t.reviewWait && !t.working?.length && <span className="muted" style={{ fontSize: 12 }}>Waiting: {t.reviewWait}</span>}
                       {!!t.working?.length && (
                         <span className="working" role="status">
                           <span className="pulse-dot" aria-hidden="true" />
-                          {t.working.join(" and ")} working now
+                          {t.working.join(" and ")}
                         </span>
                       )}
                       <div className="row">

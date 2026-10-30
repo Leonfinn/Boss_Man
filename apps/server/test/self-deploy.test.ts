@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, wakes } from "../src/db/schema.js";
+import { companies, decisions, notifications, projects, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -69,7 +69,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(d!.question).toContain("4 files changed, 1 database migration.");
     expect(await c.open()).toHaveLength(1);
     expect(d).toMatchObject({ tier: "owner", options: ["Deploy", "Not now"], recommendedOption: "Deploy", context: { type: "self_deploy", target: "server", commit: B, fromCommit: A } });
-    expect(d!.question).toContain("Add rate limiting");
+    expect((d!.context as { update: { total: number; otherCommits: string[] } }).update).toMatchObject({ total: 1, otherCommits: ["Add rate limiting"] });
     expect(await c.notes.syncDecisions()).toBe(1);
     expect((await c.db.select().from(notifications))[0]).toMatchObject({ level: "ask", decisionId: d!.id });
 
@@ -83,6 +83,73 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     await c.available({ tip: C });
     await c.selfDeploy.sync();
     expect(await c.open()).toHaveLength(0);
+  });
+
+  it("names the merged tickets and what changes the risk, on the card and the to-do (BOS-213)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const [t191] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "rebuild-live.sh waits on hosts without node", number: 191 }).returning();
+    const [t200] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: "Plan page titles are cut off", number: 200 }).returning();
+    await c.available({
+      commits: [
+        { sha: C, subject: `Merge "rebuild-live.sh waits on hosts without node" (${t191!.id})` },
+        { sha: B, subject: `Merge "Plan page titles are cut off" (${t200!.id})` },
+        { sha: A, subject: "Bump a dependency" },
+      ],
+      paths: ["scripts/rebuild-live.sh", "apps/server/drizzle/0050_x.sql", "apps/launcher/src/main.ts", "scripts/host-deployer.sh", "apps/runner/Dockerfile"],
+      infraPaths: ["scripts/rebuild-live.sh", "scripts/host-deployer.sh"],
+      runnerChanged: true,
+    });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    type Update = { from: string; to: string; total: number; files: number; changes: Array<{ ticketId: string; ref: string; title: string }>; otherCommits: string[]; handBecause?: string; handFiles?: string[]; handEffect?: "server" | "deployer" | "both"; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean; risks: string[] };
+    const update = (d!.context as { update: Update }).update;
+    expect(update).toMatchObject({
+      from: A,
+      to: B,
+      total: 3,
+      files: 5,
+      changes: [
+        { ticketId: t191!.id, ref: "BOS-191", title: "rebuild-live.sh waits on hosts without node" },
+        { ticketId: t200!.id, ref: "BOS-200", title: "Plan page titles are cut off" },
+      ],
+      otherCommits: ["Bump a dependency"],
+    });
+    expect(update.handBecause).toContain("scripts/rebuild-live.sh");
+    expect(update.handFiles).toEqual(["scripts/rebuild-live.sh", "scripts/host-deployer.sh"]);
+    expect(update.handEffect).toBe("both");
+    expect(update.needsDeployerCopy).toBe(true);
+    expect(update.needsRunnerUpdate).toBe(true);
+    expect(update.risks.join(" ")).toContain("database migration");
+    expect(update.risks.join(" ")).toContain("host-deployer.sh");
+    expect(update.risks.join(" ")).toContain("launcher");
+    expect(update.risks.join(" ")).toContain("runner");
+    // The steps are on the approval card before it is approved (BOS-213).
+    expect((d!.context as { handSteps: string[] }).handSteps.length).toBeGreaterThan(0);
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    expect((todo!.context as { update: Update }).update).toEqual(update);
+  });
+
+  it("shows the first 20 tickets and says how many more there are (BOS-213)", async () => {
+    const c = (ctx = await setup());
+    const [co] = await c.db.select().from(companies).limit(1);
+    await c.db.update(companies).set({ ticketPrefix: "BOS" }).where(eq(companies.id, co!.id));
+    const [p] = await c.db.insert(projects).values({ companyId: co!.id, name: "Development" }).returning();
+    const commits: Array<{ sha: string; subject: string }> = [];
+    for (let i = 1; i <= 21; i++) {
+      const [t] = await c.db.insert(tickets).values({ companyId: co!.id, projectId: p!.id, title: `Change ${i}`, number: 300 + i }).returning();
+      commits.push({ sha: `${i}`.padStart(40, "0"), subject: `Merge "Change ${i}" (${t!.id})` });
+    }
+    await c.available({ commits, paths: ["apps/server/src/x.ts"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    const update = (d!.context as { update: { total: number; changes: unknown[]; more: number } }).update;
+    expect(update.total).toBe(21);
+    expect(update.changes).toHaveLength(20);
+    expect(update.more).toBe(1);
   });
 
   it("will not take a second approval while a deploy is running, and withdraws a question main has outrun", async () => {
@@ -119,6 +186,9 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.context).toMatchObject({ result: { result: "deployed" } });
     const [runner] = await c.open();
     expect(runner).toMatchObject({ options: ["Update runners", "Not now"], context: { type: "self_deploy", target: "runner", commit: B } });
+    expect(runner!.question).toContain(`This rebuilds the runner containers from the version Boss Man runs (${B.slice(0, 8)}); the server itself doesn't change.`);
+    // The runner card can list the commits too, when the host has reported them.
+    expect((runner!.context as { update: { total: number; otherCommits: string[] } }).update).toMatchObject({ total: 1, otherCommits: ["Add rate limiting"] });
     expect((await c.req("POST", `/api/decisions/${runner!.id}/answer`, { answer: "Update runners" })).statusCode).toBe(200);
     expect(JSON.parse(await readFile(path.join(c.dir, "inbox", "request.json"), "utf8"))).toMatchObject({ target: "runner", commit: B });
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: true, pending: true, status: { result: "deployed" } });
@@ -140,6 +210,8 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const [d] = await c.open();
     expect(d).toMatchObject({ options: ["Approve", "Not now"], context: { infra: true } });
     expect(d!.question).toContain("scripts/deploy.sh");
+    // Only the server's deployment files changed: no deployer copy or runner update is needed (BOS-218).
+    expect((d!.context as { update: { handEffect?: string; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean } }).update).toMatchObject({ handEffect: "server", needsDeployerCopy: false, needsRunnerUpdate: false });
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" })).statusCode).toBe(200);
     // Nothing goes to the host: the change can only be applied by hand.
     expect(await readdir(path.join(c.dir, "inbox"))).toEqual([]);
@@ -155,6 +227,37 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).not.toContain("origin/main");
     expect(todo!.context).toMatchObject({ check: expect.stringContaining(B.slice(0, 8)), rollback: expect.stringContaining(A) });
     expect(todo!.question).toContain("waiting for you to apply it by hand");
+    // Every command is written in full, with the install's absolute folders.
+    expect(steps.join("\n")).toContain("/mnt/NVME_Apps/Container_files/boss-man/src");
+    // This change touches neither the deployer nor the launcher.
+    expect(steps.join("\n")).toContain("host-deployer.sh didn't change; no copy needed.");
+    expect(steps.join("\n")).not.toContain("chown root:root");
+    expect(steps.join("\n")).not.toContain("docker compose build launcher");
+    // The card still checks that the new server took charge, and how to recover it.
+    expect(steps.join("\n")).toContain("grep reverse_proxy /mnt/NVME_Apps/Container_files/boss-man/deployer/proxy/active.caddy");
+    expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-<colour>");
+    expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
+    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("/mnt/NVME_Apps/Container_files/boss-man/src") });
+  });
+
+  it("copies host-deployer.sh and rebuilds the launcher only when the change touches them", async () => {
+    const c = (ctx = await setup());
+    await c.available({ infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"] });
+    await c.selfDeploy.sync();
+    const [d] = await c.open();
+    // The deployer is the only deployment file touched, so hand-applying only needs the copy (BOS-218).
+    const update = (d!.context as { update: { handEffect?: string; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean } }).update;
+    expect(update).toMatchObject({ handEffect: "deployer", needsDeployerCopy: true, needsRunnerUpdate: false });
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" });
+    const [todo] = await c.todos();
+    const steps = (todo!.context as { steps: string[] }).steps;
+    const text = steps.join("\n");
+    expect(text).toContain(
+      "cp /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh && chown root:root /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh && chmod 750 /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh",
+    );
+    expect(text).not.toContain("host-deployer.sh didn't change");
+    expect(text).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");
+    expect(text).toContain("Runners keep their old limits until the next runner update.");
   });
 
   it("clears the owner to-do when the owner marks it done", async () => {

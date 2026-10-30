@@ -6,11 +6,11 @@
 // - stalled reviews: a review whose reviewer was woken but never gave a verdict.
 // Rows that no longer apply are withdrawn, so the queue only shows live problems.
 import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql } from "drizzle-orm";
-import { VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
-import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
+import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
@@ -39,7 +39,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   staleAfterMs: 24 * 3_600_000,
   stallAfterMs: 5 * 60_000,
   missedAfterMs: 30 * 60_000,
-  mergeMissedAfterMs: VERIFY_ASK_TIMEOUT_MS + 5 * 60_000,
+  mergeMissedAfterMs: MERGE_MISSED_AFTER_MS,
   missedEveryMs: 4 * 3_600_000,
   keepWaitingMs: 30 * 60_000,
   lostAfterMs: 30 * 60_000,
@@ -50,7 +50,7 @@ const MISSED_NUDGES_PER_DAY = 2;
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -88,7 +88,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         const who = b.assignee ? `assigned to ${b.assignee}` : b.t.assignedToOwner ? "assigned to you" : "unassigned";
         stale.set(dep.id, {
           question: `"${b.t.title}" (${who}) has blocked "${blocked.title}" with no activity for ${ago(idle)}.`,
-          options: [CHASE, REASSIGN, DROP],
+          options: [CHASE, REASSIGN, LET_CEO_DECIDE, DROP],
           // Nobody to chase means it needs an owner.
           recommended: b.t.assigneeAgentId || b.t.assignedToOwner ? CHASE : REASSIGN,
           companyId: blocked.companyId,
@@ -101,7 +101,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
         if (idle < limits.staleAfterMs) continue;
         stale.set(dep.id, {
           question: `The engagement "${e.title}" (${e.status.replace("_", " ")}) has blocked "${blocked.title}" with no activity for ${ago(idle)}.`,
-          options: [CHASE, DROP],
+          options: [CHASE, LET_CEO_DECIDE, DROP],
           recommended: e.status === "rejected" ? DROP : CHASE,
           companyId: blocked.companyId,
           ctx,
@@ -429,6 +429,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     async run() {
       const t = now();
       const goalChecks = await raiseDueGoalChecks(db, t);
+      await opts.expireSkills?.();
       await opts.endUnconfirmedCancels(t);
       await opts.expireAdvice?.();
       const lost = await lostRuns(t);

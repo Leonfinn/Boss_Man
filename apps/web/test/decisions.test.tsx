@@ -84,6 +84,40 @@ describe("decision queue", () => {
     expect(onAnswered).toHaveBeenCalled();
   });
 
+  it("a deploy card says what it touches, the file count and what else is needed (BOS-218)", () => {
+    const d = decision({
+      kind: "approval",
+      question: "Main has moved to bbbbbbbb. This update has to be applied by hand on the machine that runs Boss Man.",
+      options: ["Approve", "Not now"],
+      recommendedOption: "Approve",
+      blocks: [],
+      context: {
+        type: "self_deploy",
+        update: {
+          from: "a".repeat(40),
+          to: "b".repeat(40),
+          total: 2,
+          files: 5,
+          changes: [{ ticketId: "t1", ref: "APP-1", title: "Change one" }],
+          more: 0,
+          otherCommits: [],
+          handBecause: "Needs applying by hand because this update changes scripts/host-deployer.sh.",
+          handFiles: ["scripts/host-deployer.sh", "docker-compose.yml"],
+          handEffect: "both",
+          needsDeployerCopy: true,
+          needsRunnerUpdate: false,
+          risks: [],
+        },
+        handSteps: ["First step"],
+      },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByText("This update brings 2 changes across 5 files since the live version (aaaaaaaa → bbbbbbbb).")).toBeTruthy();
+    expect(screen.getByText(/This changes both the script that runs deploys/)).toBeTruthy();
+    expect(screen.getByText("Deployer copy: needed.")).toBeTruthy();
+    expect(screen.getByText("Runner update afterwards: not needed.")).toBeTruthy();
+  });
+
   it("links the ticket it is about, the tickets it blocks, and known references in the text", () => {
     const d = decision({
       kind: "question",
@@ -176,6 +210,16 @@ describe("permission cards", () => {
     render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Allow once", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
     expect(screen.getByText("Temporary folder only")).toBeTruthy();
     expect(screen.getByText(/Works only in a temporary folder/)).toBeTruthy();
+  });
+
+  it("says where a push goes, links its ticket branch and shows danger in red", () => {
+    const ticketId = "11111111-2222-4333-8444-555555555555";
+    const explain = { title: "Dev wants to run a command", summary: "Pushes to its ticket branch. Pushes to main.", effect: "pushes" as const, command: "git push origin HEAD:main", push: { kind: "ticket" as const, headline: "Pushes to its ticket branch", ticketId, ref: "BOS-208", warnings: ["Pushes to main."], dangerous: true } };
+    render(<Decisions decisions={[decision({ kind: "permission", question: "ignored", options: ["Allow once", "Deny"], recommendedOption: "Deny", context: { type: "permission", explain } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(screen.getByRole("link", { name: "BOS-208" }).getAttribute("href")).toBe(`#/tickets/${ticketId}`);
+    expect(screen.getByText("Pushes to main.")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Pushes to main.");
+    expect(screen.getByRole("button", { name: "Deny" }).className).toContain("primary");
   });
 
   it("lead with plain words and keep the command behind a fold", () => {
@@ -276,5 +320,156 @@ describe("raised time", () => {
     expect(times).toHaveLength(4);
     expect(times[0]).toBe(when(earlier));
     expect(times[1]).toBe(when(now));
+  });
+
+  it("Reassign on a stale-blocker card opens a picker of that company's agents, and won't send without a pick", async () => {
+    const fetch = vi.fn(async (url: string) => new Response(JSON.stringify(url.startsWith("/api/tickets/") ? { assigneeAgentId: "a1" } : { ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const co: Company = { ...company, agents: [{ id: "a1", name: "Celebrimbor", title: "Dev" }, { id: "a2", name: "Galadriel", title: "QA" }] as Company["agents"] };
+    const other: Company = { id: "c2", name: "Other Co", mission: null, paused: false, agents: [{ id: "x1", name: "Elsewhere" }] as Company["agents"] };
+    const d = decision({ kind: "stale_blocker", question: "A is stuck.", options: ["Chase", "Reassign", "Let the CEO decide", "Drop dependency"], recommendedOption: "Chase", context: { type: "stale_blocker", blockerTicketId: "t9" } });
+    render(<Decisions decisions={[d]} companies={[co, other]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Reassign" }));
+    await waitFor(() => expect(screen.getByText("(has it now)")).toBeTruthy());
+    expect(screen.getByRole("radio", { name: /Galadriel, QA/ })).toBeTruthy();
+    expect(screen.queryByText(/Elsewhere/)).toBeNull();
+    expect(fetch).not.toHaveBeenCalledWith("/api/decisions/d1/answer", expect.anything());
+
+    fireEvent.click(screen.getByRole("button", { name: "Reassign to the one I picked" }));
+    expect(screen.getByRole("alert").textContent).toBe("Pick who should take this ticket.");
+
+    fireEvent.click(screen.getByRole("radio", { name: /Galadriel/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Reassign to the one I picked" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/decisions/d1/answer", expect.objectContaining({ body: JSON.stringify({ answer: "Reassign", assigneeAgentId: "a2" }) })));
+  });
+});
+
+describe("model change cards (BOS-128)", () => {
+  const modelChange = (over: Partial<Decision> = {}): Decision =>
+    decision({
+      kind: "approval",
+      question: "The CEO wants to change Engineer's model setup.\n\nCurrent: Harness: Claude Code · Provider: Anthropic · Model: claude-opus-4-5 · Paid from: Claude Max\n\nProposed: Harness: OpenCode · Provider: Ollama · Model: qwen3:8b · Paid from: Ollama Cloud\n\nIt takes effect before their next run.",
+      options: ["Approve", "Edit", "Reject"],
+      recommendedOption: "Approve",
+      context: {
+        type: "model_change",
+        before: { harness: "claude", provider: "anthropic", model: "claude-opus-4-5", fundingSourceId: "f1", fundingSourceName: "Claude Max" },
+        proposed: { harness: "opencode", provider: "ollama", model: "qwen3:8b", fundingSourceId: "f2", fundingSourceName: "Ollama Cloud" },
+      },
+      ...over,
+    });
+
+  it("shows current vs proposed for all four fields and sends an edited setup through the same answer", async () => {
+    const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (String(url) === "/api/funding-sources") return new Response(JSON.stringify([
+        { id: "f1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
+        { id: "f2", name: "Ollama Cloud", kind: "subscription", provider: "ollama" },
+      ]), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<Decisions decisions={[modelChange()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    for (const text of ["Harness", "Provider", "Paid from"]) expect(screen.getAllByText(text).length).toBeGreaterThan(0);
+    expect(screen.getByText("Claude Code")).toBeTruthy();
+    expect(screen.getByText("OpenCode")).toBeTruthy();
+    expect(screen.getByText("Claude Max")).toBeTruthy();
+    expect(screen.getByText("Ollama Cloud")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await waitFor(() => expect(screen.getByLabelText("Harness")).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "qwen3:14b" } });
+    fireEvent.change(screen.getByLabelText("Paid from"), { target: { value: "f2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save and approve" }));
+    await waitFor(() => expect(fetch.mock.calls.some((c) => c[0] === "/api/decisions/d1/answer")).toBe(true));
+    const call = fetch.mock.calls.find((c) => c[0] === "/api/decisions/d1/answer")!;
+    expect(JSON.parse(String((call[1] as { body: string }).body))).toEqual({ answer: "Edit", modelConfig: { harness: "opencode", provider: "ollama", model: "qwen3:14b", fundingSourceId: "f2" } });
+  });
+});
+
+describe("write my own answer", () => {
+  const open = (over: Partial<Decision> = {}) => {
+    const d = decision({ kind: "question", question: "Merge check failed.", options: ["Run the check again", "Skip"], recommendedOption: "Run the check again", ...over });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Write my own answer" }));
+    return screen.getByRole("textbox") as HTMLTextAreaElement;
+  };
+
+  it("opens empty with the suggestion as placeholder and Send disabled", () => {
+    const box = open();
+    expect(box.value).toBe("");
+    expect(box.placeholder).toBe("Run the check again");
+    expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("Tab on the empty box accepts the suggestion", () => {
+    const box = open();
+    fireEvent.keyDown(box, { key: "Tab" });
+    expect(box.value).toBe("Run the check again");
+    expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("the Use suggestion link does the same and Tab does nothing once there is text", () => {
+    const box = open();
+    fireEvent.click(screen.getByRole("button", { name: "Use suggestion" }));
+    expect(box.value).toBe("Run the check again");
+    expect(screen.queryByRole("button", { name: "Use suggestion" })).toBeNull();
+    fireEvent.change(box, { target: { value: "mine" } });
+    expect(fireEvent.keyDown(box, { key: "Tab" })).toBe(true);
+    expect(box.value).toBe("mine");
+  });
+
+  it("whitespace alone does not enable Send", () => {
+    const box = open();
+    fireEvent.change(box, { target: { value: "   " } });
+    expect((screen.getByRole("button", { name: "Send my answer" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("approval card while the merge runs", () => {
+  const approval = (over: Partial<Decision> = {}) =>
+    decision({
+      kind: "approval",
+      question: "Ada approved \"Export CSV\", which is rated medium risk. Merge it, or send it back?",
+      options: ["Approve and merge", "Send it back"],
+      recommendedOption: "Approve and merge",
+      context: { type: "risk_review", ticketId: "t9" },
+      ...over,
+    });
+
+  it("says who is checking and merging, and offers no approve button", async () => {
+    const startedAt = new Date(Date.now() - 4 * 60_000).toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/tickets/t9/landing") return new Response(JSON.stringify({ landing: { state: "running", startedAt, startedBy: "the owner" } }), { status: 200 });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }),
+    );
+    render(<Decisions decisions={[approval()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    expect(await screen.findByText(/Checking and merging since .*started by the owner/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send it back" })).toBeNull();
+  });
+
+  it("turns an 'already being checked' refusal into a neutral notice and refreshes the card", async () => {
+    let started = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/tickets/t9/landing") {
+          return new Response(JSON.stringify({ landing: started ? { state: "running", startedAt: new Date().toISOString(), startedBy: "the owner" } : null }), { status: 200 });
+        }
+        if (url === "/api/decisions/d1/answer") {
+          started = true;
+          return new Response(JSON.stringify({ error: "review", message: "This ticket is already being checked and merged." }), { status: 409 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }),
+    );
+    render(<Decisions decisions={[approval()]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve and merge" }));
+    expect(await screen.findByText(/Already being checked and merged since .*nothing more to do\./)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
   });
 });

@@ -3,15 +3,16 @@
 import { RUNNER_ADDONS } from "@boss-man/shared";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
-import { api, type Company } from "../api";
+import { api, ApiError, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
 import { Section, useAction } from "./Settings";
 
-type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; updatedAt: string; agents: Array<{ id: string; name: string }> };
-type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; text: string | null }>; requiresAddons: string[] | null };
+type SkillInstructions = { path: string | null; body: string | null; empty: boolean; unreadable: boolean };
+type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; hasInstructions?: boolean; instructionsPath?: string | null; instructionsUnreadable?: boolean; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
+type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; sha256?: string; text: string | null }>; requiresAddons: string[] | null; instructions?: SkillInstructions };
 type Upload = { path: string; content: string };
 type Elsewhere = { id: string; name: string; description: string; companyName: string; requiresAddons: string[] | null; fileCount: number; hasScripts: boolean };
 
@@ -223,12 +224,30 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
       setNote({ ok: false, text: (err as Error).message });
     }
   };
-  const md = s.files.find((f) => f.path === "SKILL.md")?.text ?? "";
+  const instructions = s.instructions;
+  const mainPath = instructions?.path ?? (s.files.some((f) => f.path === "SKILL.md") ? "SKILL.md" : null);
+  const md = s.files.find((f) => f.path === mainPath)?.text ?? "";
+  const body = instructions ? instructions.body ?? "" : stripFrontmatter(md).trim();
+  const unreadable = instructions?.unreadable ?? false;
+  const noInstructions = instructions ? instructions.empty && !instructions.unreadable : !body;
   // Only a skill that is just its SKILL.md can be edited here; a linked one follows its source.
-  const editable = s.source !== "link" && s.files.length === 1;
-  const save = () =>
+  // A SKILL.md that isn't text is never opened as an empty editor, so a save can't wipe it.
+  const editable = s.source !== "link" && s.files.length === 1 && !!mainPath && !unreadable;
+  const save = (confirmed = false) =>
     void run(async () => {
-      await api(`/api/companies/${company.id}/skills/${id}`, { method: "PUT", body: editing });
+      if (!editing) return "Nothing to save.";
+      const put = (confirmEmptyBody: boolean) =>
+        api(`/api/companies/${company.id}/skills/${id}`, { method: "PUT", body: { ...editing, ...(confirmEmptyBody ? { confirmEmptyBody: true } : {}) } });
+      try {
+        await put(confirmed);
+      } catch (err) {
+        if (!confirmed && err instanceof ApiError && err.status === 409 && /instructions/i.test(err.message)) {
+          if (window.confirm("This skill has instructions. Saving an empty Instructions box will delete them. Delete them anyway?")) await put(true);
+          else return "Nothing saved. The skill's instructions are still there.";
+        } else {
+          throw err;
+        }
+      }
       setEditing(null);
       return "Saved. Agents get the new version from their next run.";
     });
@@ -240,6 +259,16 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
             {s.name}
           </h2>
           <p>{s.description}</p>
+          {noInstructions && (
+            <p className="banner" role="status">
+              <span>{mainPath ? "No instructions: this skill does nothing when loaded." : "This skill has no SKILL.md, so it does nothing when loaded."}</span>
+            </p>
+          )}
+          {unreadable && (
+            <p className="banner" role="status">
+              <span>Instructions unreadable: the SKILL.md isn't text, so it can't be shown safely here.</span>
+            </p>
+          )}
           <p className="muted" style={{ fontSize: 13 }}>
             {SOURCE[s.source]}
             {s.sourceUrl && (
@@ -256,12 +285,12 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {editable && !editing && (
-            <button type="button" className="btn" onClick={() => setEditing({ name: s.name, description: s.description, body: stripFrontmatter(md).trim() })}>
+            <button type="button" className="btn" onClick={() => setEditing({ name: s.name, description: s.description, body })}>
               Edit
             </button>
           )}
           {s.source === "link" && (
-            <button type="button" className="btn" onClick={() => void run(async () => ((await api<{ changed: boolean }>(`/api/companies/${company.id}/skills/${id}/refresh`, { method: "POST" })).changed ? "Updated to the latest commit." : "Already up to date."))}>
+            <button type="button" className="btn" onClick={() => void run(async () => ((await api<{ changed: boolean }>(`/api/companies/${company.id}/skills/${id}/refresh`, { method: "POST" })).changed ? "A newer version was found. It is not installed: it goes to the Security Reviewer, then to Decisions for you." : "Already up to date."))}>
               Check for updates
             </button>
           )}
@@ -346,7 +375,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
             <textarea id="edit-skill-body" rows={18} value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" className="btn primary" disabled={!editing.name.trim() || !editing.description.trim()} onClick={save}>
+            <button type="button" className="btn primary" disabled={!editing.name.trim() || !editing.description.trim()} onClick={() => save()}>
               Save
             </button>
             <button type="button" className="btn" onClick={() => setEditing(null)}>
@@ -356,7 +385,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         </section>
       ) : (
         <section aria-label="SKILL.md">
-          <Markdown text={stripFrontmatter(md)} />
+          <Markdown text={body} />
         </section>
       )}
       {s.files.length > 1 && (
@@ -375,7 +404,10 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
                   ) : (
                     <span className="mono">{f.path}</span>
                   )}
-                  <small className="muted">{f.text === null ? `binary, ${kb(f.size)}` : kb(f.size)}</small>
+                  <small className="muted">
+                    {f.text === null ? `binary, ${kb(f.size)}` : kb(f.size)}
+                    {f.sha256 ? <span title={f.sha256}> · sha256 <span className="mono">{f.sha256.slice(0, 16)}</span></span> : null}
+                  </small>
                 </span>
                 {open === f.path && f.text !== null && <pre className="skill-file">{f.text}</pre>}
               </li>
@@ -430,8 +462,8 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
             className="btn"
             onClick={() =>
               void run(async () => {
-                const r = await api<{ changed: number; added: string[]; gone: string[] }>(`/api/companies/${company.id}/skill-packs/refresh`, { method: "POST", body: { pack } });
-                const parts = [r.changed ? `${r.changed} updated` : null, r.added.length ? `added ${r.added.join(", ")}` : null, r.gone.length ? `no longer in the link: ${r.gone.join(", ")}` : null].filter(Boolean);
+                const r = await api<{ proposed: string[]; unchanged: number; problems: string[] }>(`/api/companies/${company.id}/skill-packs/refresh`, { method: "POST", body: { pack } });
+                const parts = [r.proposed.length ? `newer versions of ${r.proposed.join(", ")} are waiting for review and your decision (nothing is installed yet)` : null, r.problems.length ? r.problems.join("; ") : null].filter(Boolean);
                 return parts.length ? `${parts.join("; ")}.` : "Already up to date.";
               })
             }
@@ -497,6 +529,39 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
+type ProposalRow = { id: string; name: string; source: "draft" | "link" | "retro"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
+const PROPOSAL_STATUS: Record<string, string> = {
+  proposed: "Waiting",
+  in_review: "With the Security Reviewer",
+  awaiting_owner: "Waiting for your decision",
+  installed: "Added",
+  rejected: "Not added",
+  stale: "Not added: the source changed",
+  expired: "Expired after 14 days",
+};
+
+/** Skills the CEO proposed, and where each one stands. The decision itself is answered in Decisions. */
+function Proposals({ companyId }: { companyId: string }) {
+  const list = usePoll((signal) => api<ProposalRow[]>(`/api/companies/${companyId}/skill-proposals`, { signal }), 30_000, companyId);
+  const rows = (list.data ?? []).slice(0, 10);
+  if (!rows.length) return null;
+  return (
+    <section className="card" aria-label="Skill proposals" style={{ marginBottom: 16 }}>
+      <h2>Skill proposals</h2>
+      <ul>
+        {rows.map((p) => (
+          <li key={p.id}>
+            <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : p.source === "retro" ? "from a workflow retro" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
+            {` · security review: ${p.verdict ? p.verdict.replace("_", " ") : "pending"}`}
+            {p.overridden ? " · added against the reviewer's advice" : ""}
+            {p.status === "awaiting_owner" ? <> · <a href="#/decisions">Decide</a></> : null}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function Skills({ company }: { company: Company | undefined }) {
   const list = usePoll((signal) => (company ? api<SkillRow[]>(`/api/companies/${company.id}/skills`, { signal }) : Promise.resolve([])), 30_000, company?.id ?? "none");
   const [picked, setPicked] = useState<string | null>(null);
@@ -512,8 +577,13 @@ export function Skills({ company }: { company: Company | undefined }) {
     <li key={s.id}>
       <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), pick(s.id))}>
         <span className="mono">{s.name}</span>
+        {s.instructionsUnreadable ? (
+          <span className="tag red" title="The SKILL.md isn't text, so its instructions can't be shown.">Instructions unreadable</span>
+        ) : s.hasInstructions === false ? (
+          <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>
+        ) : null}
         <small>
-          {SOURCE[s.source]} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
+          {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
         </small>
       </a>
     </li>
@@ -535,6 +605,7 @@ export function Skills({ company }: { company: Company | undefined }) {
           <span>Added {added}. Choose who has it below.</span>
         </p>
       )}
+      <Proposals companyId={company.id} />
       <div className="wiki">
         <nav className="card wiki-list" aria-label="Skills">
           {list.data && rows.length === 0 && <p className="muted">No skills yet.</p>}

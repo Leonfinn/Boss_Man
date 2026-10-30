@@ -3,7 +3,7 @@
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
 import { commandRisks, type Risk } from "./destructive.js";
-import { cleanupScope, explainCommand, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -240,6 +240,10 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   // Temp cleanup is Allow whatever else is in it: cleanupScope already refuses shred, pushes and other destructive words,
   // and a later cd can't move a /tmp/NAME delete. The reader must agree that nothing but deletes destroys (BOS-116).
   if (tempCleanup(cmd) && found.every((r) => /^(rm|find)\b/i.test(r.text))) return "allow";
+  // A push is judged by where it goes (BOS-208): a plain ticket-branch push is Allow; main, force,
+  // deletes, every-branch and anything the parser can't read are Deny.
+  const push = readPush(cmd);
+  if (push) return push.dangerous ? "deny" : "allow";
   const run = dataText(cmd);
   const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
   // Destructive commands that aren't file deletes are Deny even in /tmp (shred /tmp/a); find -delete counts as a delete.
