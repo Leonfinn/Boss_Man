@@ -1994,6 +1994,10 @@ export async function buildApp(opts: AppOptions) {
       const b = WatchdogSettings.partial().extend({ scrumMasterAgentId: Uuid.nullable().optional() }).strict().parse(req.body ?? {});
       return watchdog.update(id, b).catch(watchdogErrors(reply));
     });
+    owner.get("/api/companies/:id/watchdog/issues", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return watchdog.issues(id).catch(watchdogErrors(reply));
+    });
     owner.get("/api/companies/:id/watchdog/flags", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const q = z.object({ status: z.enum(["open", "closed"]).optional(), ticketId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
