@@ -117,7 +117,7 @@ describe("owner chat", () => {
     expect(serverView).toHaveProperty("migration");
     expect(Array.isArray(serverView.wakes.waiting)).toBe(true);
     expect(Array.isArray(serverView.runs.recent)).toBe(true);
-    expect(Array.isArray(serverView.errors)).toBe(true);
+    expect(serverView.errors).toMatchObject({ count: expect.any(Number), recent: expect.any(Array) });
     expect(textOf(await client.callTool({ name: "decisions", arguments: { action: "list" } }))).toMatch(/No decisions|^\[/);
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "SSO", description: "For Acme.", milestoneId: c.ms.id } }))).toMatch(/^Created feature [0-9a-f-]{36} "SSO"/);
     expect((await c.feedback.scored(c.company.id)).features[0]).toMatchObject({ title: "SSO", description: "For Acme.", milestoneId: c.ms.id });
@@ -160,6 +160,13 @@ describe("owner chat", () => {
     await c.db.insert(runs).values({ id: run2, companyId: other.company.id, agentId: ceo2.id, purpose: "chat", origin: "owner_chat" });
     await c.db.insert(wakes).values({ id: wake2, companyId: other.company.id, agentId: ceo2.id, reason: "owner_chat" });
     await c.db.insert(decisions).values({ id: decision2, companyId: other.company.id, kind: "question", question: "Other Co secret question", options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: ceo2.id, tier: "ceo" });
+    // A server error carrying another company's text must not reach this company's agents.
+    const leak = Object.assign(
+      new Error('Failed query: select * from tickets where id = $1 params: ["B Co private plan: acquire Acme"]'),
+      { query: "select * from tickets", params: ["B Co private plan: acquire Acme"] },
+    );
+    c.app.log.error({ err: leak }, "run-ended handling failed");
+    c.app.log.error(leak);
     const port = (c.app.server.address() as { port: number }).port;
     const connect = async (companyId: string, agentId: string) => {
       const token = await issueRunToken(c.db, { companyId, agentId, runId: randomUUID() });
@@ -173,6 +180,10 @@ describe("owner chat", () => {
     const seen = JSON.stringify(view);
     expect(seen).not.toContain(run2);
     expect(seen).not.toContain(wake2);
+    expect(seen).not.toContain("B Co private plan");
+    expect(seen).not.toContain("acquire Acme");
+    expect(seen).not.toContain("select * from tickets");
+    expect(view.errors.recent.map((e: { message: string }) => e.message)).toContain("run-ended handling failed");
     expect(textOf(await mine.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain("Other Co secret question");
     await mine.close();
     // The other company's CEO does see them.

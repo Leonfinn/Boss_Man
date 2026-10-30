@@ -98,6 +98,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const deploy = await deps.deploy().catch(() => null);
       const status = (deploy?.status as DeployStatus) ?? null;
       const available = (deploy?.available as Available) ?? null;
+      const recentErrors = deps.errors.recent(20);
 
       return {
         server: {
@@ -129,7 +130,9 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           recent: recentRuns.map((r) => ({ id: r.id, agent: r.agent, startedAt: r.startedAt.toISOString(), endedAt: r.endedAt?.toISOString() ?? null, outcome: r.outcome, purpose: r.purpose })),
           failures: failedRuns.map((r) => ({ id: r.id, agent: r.agent, startedAt: r.startedAt.toISOString(), endedAt: r.endedAt?.toISOString() ?? null, reason: r.outcome })),
         },
-        errors: deps.errors.recent(20),
+        // Only the message each error was logged with, never a query, its parameters or a stack:
+        // the buffer is server-wide, and any company's agents can read this tool.
+        errors: { count: deps.errors.count(), recent: recentErrors },
       };
     },
   };

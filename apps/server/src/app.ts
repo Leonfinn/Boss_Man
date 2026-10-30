@@ -28,7 +28,7 @@ import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
-import { createErrorBuffer, formatLogArg } from "./services/error-buffer.js";
+import { createErrorBuffer, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -181,7 +181,8 @@ export async function buildApp(opts: AppOptions) {
   const errorBuffer = createErrorBuffer();
   const logError = app.log.error.bind(app.log);
   app.log.error = ((...args: unknown[]) => {
-    errorBuffer.push(args.map(formatLogArg).join(" "));
+    const message = logMessage(args);
+    if (message) errorBuffer.push(message);
     return logError(...(args as Parameters<typeof logError>));
   }) as typeof app.log.error;
   await app.register(cookie);
