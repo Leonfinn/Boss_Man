@@ -35,7 +35,7 @@ import type { SkillFinding } from "./db/schema.js";
 import { numbered, reviewTicketWriteRefusal, type skillProposalsService } from "./services/skill-proposals.js";
 import { AgentError, type agentsService } from "./services/agents.js";
 import { describeNote, MIN_QUOTE, NOTE_LIMITS, NoteError, notesService, originOf, REQUEST_LIMITS, requestLines } from "./services/agent-notes.js";
-import { resolveReviewer } from "./services/review-policy.js";
+import { resolveReviewer, securityReviewers } from "./services/review-policy.js";
 import { latestRows } from "./services/review-kinds.js";
 import { markSearched, remember, type paService } from "./services/pa.js";
 import { SCRUM_MASTER_DUTY, WatchdogError, type watchdogService } from "./services/watchdog.js";
@@ -1317,9 +1317,9 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     async (input) => {
       const { action, skill, agent } = input;
       if (action === "list") return text(JSON.stringify((await skills.list(scope.companyId)).map((s) => ({ name: s.name, ...(s.pack ? { pack: s.pack } : {}), description: s.description, agents: s.agents.map((a) => a.name) }))));
-      const [me] = scope.agentId ? await db.select({ role: agents.role, kind: agents.reviewKind }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+      const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
       const isCeo = me?.role === "ceo";
-      const isReviewer = me?.kind === "security";
+      const isReviewer = !!scope.agentId && (await securityReviewers(db, scope.companyId)).some((a) => a.id === scope.agentId);
       if (action === "propose" || action === "proposals" || action === "proposal" || action === "proposal_file" || action === "review_verdict") {
         if (action === "propose" && !isCeo) return fail("Only your company's CEO can propose a skill.");
         if (action === "review_verdict" && !isReviewer) return fail("Only the Security Reviewer can give a verdict on a skill.");
