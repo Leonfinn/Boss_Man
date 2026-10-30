@@ -102,9 +102,9 @@ describe("migration 0080 (synthetic provider)", () => {
     cpSync(migrationsFolder, old, { recursive: true });
     const jp = path.join(old, "meta/_journal.json");
     const journal = JSON.parse(readFileSync(jp, "utf8")) as { entries: Array<{ tag: string }> };
-    // Roll back to the state just before the Synthetic provider migration, whatever came after it.
+    // Roll back to just before 0080, dropping it and any migration that landed after it.
     const at = journal.entries.findIndex((e) => e.tag === "0080_synthetic_provider");
-    expect(at).toBeGreaterThanOrEqual(0);
+    expect(at).toBeGreaterThan(0);
     journal.entries.splice(at);
     writeFileSync(jp, JSON.stringify(journal));
     const client = new PGlite({ extensions: { vector } });
