@@ -84,7 +84,6 @@ function ByCompany({ s }: { s: FundingStatus }) {
   );
 }
 
-
 /** "3m ago", "2h ago", "4d ago": how old a cached reading is, in plain words. */
 const ago = (seconds: number | null) => {
   if (seconds === null) return "";
@@ -193,7 +192,6 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
 }
 
 /** Synthetic's own used/limit reading; an unreadable one is unknown, never an error. */
-
 function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
   if (q.used === null || q.limit === null)
     return <span className="muted">Quota unknown: Synthetic's quota service couldn't be reached and there's no earlier reading yet.</span>;

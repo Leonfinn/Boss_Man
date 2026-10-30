@@ -62,6 +62,13 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
   /** A refresh already under way per source, so two loads at once ask Synthetic once.
    * shortcut: lost on restart, harmless because the stored reading survives and is read again after 5 minutes. */
   const refreshing = new Map<string, Promise<ProviderQuota | null>>();
+  /** When a refresh last failed per source, so an outage isn't retried on every Funding load or
+   * server_status: a failed call stores nothing, so without this each load would wait 10s again.
+   * shortcut: lost on restart, harmless because a restart is a fresh reason to try once. */
+  const lastFailed = new Map<string, number>();
+
+  /** Don't re-ask Synthetic within this window after a failed call (BOS-239, review round 2). */
+  const PROVIDER_QUOTA_FAIL_BACKOFF_MS = 60_000;
 
   /** One call to Synthetic; never throws and never logs the request or the key. */
   async function callProviderQuota(source: FundingRow): Promise<ProviderQuota> {
@@ -103,6 +110,11 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
         await db.insert(providerQuotaReadings).values({ fundingSourceId: source.id, used: q.used, limit: q.limit, renewsAt: q.renewsAt ? new Date(q.renewsAt) : null, takenAt });
         // Prune the history to the last 30 days (BOS-239).
         await db.delete(providerQuotaReadings).where(and(eq(providerQuotaReadings.fundingSourceId, source.id), lt(providerQuotaReadings.takenAt, new Date(takenAt.getTime() - PROVIDER_QUOTA_HISTORY_MS))));
+        lastFailed.delete(source.id);
+      } else {
+        // Store nothing on failure, so remember the attempt: the next few loads reuse the old reading
+        // instead of each waiting on Synthetic again (BOS-239, review round 2).
+        lastFailed.set(source.id, takenAt.getTime());
       }
       return q;
     })().finally(() => refreshing.delete(source.id));
@@ -118,7 +130,12 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     if (source.provider !== "synthetic") return null;
     const latest = await newestReading(source.id);
     const stale = !latest || now().getTime() - latest.takenAt.getTime() >= PROVIDER_QUOTA_REFRESH_MS;
-    if (stale) await refreshProviderQuota(source);
+    // During an outage, don't make every load wait on Synthetic again: reuse the old reading until
+    // the backoff passes. With no reading to fall back on, still try, so the card turns known
+    // again as soon as Synthetic answers (BOS-239, review round 2).
+    const failedAt = lastFailed.get(source.id);
+    const backingOff = !!latest && failedAt !== undefined && now().getTime() - failedAt < PROVIDER_QUOTA_FAIL_BACKOFF_MS;
+    if (stale && !backingOff) await refreshProviderQuota(source);
     const at = await newestReading(source.id);
     if (!at) return { ...unknown, ageSeconds: null, history: [], warned: [] };
     const history = await db

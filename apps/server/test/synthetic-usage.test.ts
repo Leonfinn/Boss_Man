@@ -99,6 +99,27 @@ describe("Synthetic quota caching (BOS-239)", () => {
     expect(kept.providerQuota).toMatchObject({ used: 123, limit: 1000, ageSeconds: 600 });
   });
 
+  it("doesn't re-ask Synthetic on every load during an outage: a failed call backs off for a minute", async () => {
+    const c = (ctx = await setup().build());
+    await status(c);
+    const afterGood = quotaCalls(c.calls);
+    // Synthetic goes down; past the 5-minute cache each load would otherwise retry the 10s call.
+    c.answer.status = 500;
+    c.clock.at = new Date(c.clock.at.getTime() + 6 * 60_000);
+    await status(c);
+    const afterFirstFailure = quotaCalls(c.calls);
+    expect(afterFirstFailure).toBe(afterGood + 1);
+    // The next loads inside the backoff reuse the stored reading without calling Synthetic.
+    c.clock.at = new Date(c.clock.at.getTime() + 20_000);
+    await status(c);
+    await status(c);
+    expect(quotaCalls(c.calls)).toBe(afterFirstFailure);
+    // Once the backoff passes, it tries again.
+    c.clock.at = new Date(c.clock.at.getTime() + 60_000);
+    await status(c);
+    expect(quotaCalls(c.calls)).toBe(afterFirstFailure + 1);
+  });
+
   it("reads again when a run on a Synthetic agent ends, and prunes readings older than 30 days", async () => {
     const c = (ctx = await setup().build());
     await status(c);
