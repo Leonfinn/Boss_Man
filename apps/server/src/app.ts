@@ -1387,7 +1387,7 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }).parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000), confirmEmptyBody: z.boolean().optional() }).parse(req.body);
       try {
         // The edit replaces the skill's files: keep the old text so the log says what actually changed.
         const old = await skillsSvc.get(id, skillId);
