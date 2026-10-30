@@ -27,7 +27,9 @@ import { secretGrants, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
-import { maintenanceService } from "./services/maintenance.js";
+import { getHold, maintenanceService } from "./services/maintenance.js";
+import { createErrorBuffer, formatLogArg } from "./services/error-buffer.js";
+import { serverStatusService } from "./services/server-status.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
@@ -175,6 +177,13 @@ async function serveWeb(app: FastifyInstance, root: string) {
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
   const app = Fastify({ logger: opts.logger ?? false });
+  // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
+  const errorBuffer = createErrorBuffer();
+  const logError = app.log.error.bind(app.log);
+  app.log.error = ((...args: unknown[]) => {
+    errorBuffer.push(args.map(formatLogArg).join(" "));
+    return logError(...(args as Parameters<typeof logError>));
+  }) as typeof app.log.error;
   await app.register(cookie);
   await app.register(websocket);
 
@@ -289,6 +298,19 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  const serverStatus = serverStatusService(db, {
+    role: () => leader.role(),
+    isConnected: (id) => runners.isConnected(id),
+    deploy: () => selfDeploy.overview(),
+    hold: async () => {
+      const h = await getHold(db);
+      return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
+    },
+    errors: errorBuffer,
+    commit: process.env.BOSSMAN_COMMIT || "dev",
+    startedAt: new Date(STARTED_AT),
+    now: opts.now,
+  });
   const engagementsSvc = engagementsService(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now });
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
@@ -466,7 +488,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 

@@ -43,6 +43,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import type { serverStatusService } from "./services/server-status.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
 export const TREE_REASON = "tree stopped";
@@ -127,6 +128,7 @@ type Services = {
   watchdog: ReturnType<typeof watchdogService>;
   alerts: ReturnType<typeof alertLadder>;
   retro: ReturnType<typeof retroService>;
+  serverStatus: ReturnType<typeof serverStatusService>;
 };
 
 /**
@@ -146,15 +148,35 @@ function restrictTo(server: McpServer, only: ReadonlySet<string>) {
   }) as never;
 }
 
-function buildServer(db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro }: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false) {
+function buildServer(db: Db, services: Services, scope: Scope, hooks: McpHooks, only?: ReadonlySet<string>, retroAgent = false) {
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
   if (only) restrictTo(server, only);
   if (only === SCRUM_MASTER_TOOLS) {
     registerBoard(server, db, scope);
-    registerWatchdog(server, watchdog, alerts, scope);
+    registerWatchdog(server, services.watchdog, services.alerts, scope);
   }
-  if (retroAgent) registerRetro(server, retro, scope);
+  if (retroAgent) registerRetro(server, services.retro, scope);
+  registerRunTools(server, db, services, scope, hooks);
+  registerRoadmap(server, db, services.work, scope);
+  registerTicketMoves(server, db, { review: services.review, work: services.work, feedback: services.feedback, skillProposals: services.skillProposals }, scope, hooks, false);
+  registerSharedTools(server, db, { notes: services.notes, wiki: services.wiki, skills: services.skills, skillProposals: services.skillProposals, review: services.review, agents: services.agents }, scope);
+  registerViewImage(server, services.images, scope);
+  registerNotes(server, db, scope, false, { ticketChat: services.ticketChat });
+  registerRequestNote(server, db, scope, hooks);
+  registerListMyWork(server, db, scope);
+  return server;
+}
 
+/**
+ * The tools a ticket run has beyond the shared reads and the board (which both a run and the
+ * owner chat register): handing out and moving tickets, decisions, engagements, deploys, runs,
+ * notifications, review and the rest. Both buildServer and buildChatServer call it, so the CEO
+ * has the same set in its chat as in its runs (BOS-224). Chat skips create_ticket and nudge,
+ * which it has its own version of.
+ */
+function registerRunTools(server: McpServer, db: Db, { decisions, engagements, deploys, runs, review, notes, chapters, work, feedback, ticketChat, wiki, skills, skillProposals, agents: team, pa, images, watchdog, alerts, retro, serverStatus }: Services, scope: Scope, hooks: McpHooks, skip?: ReadonlySet<string>) {
+  const originalRegister = server.registerTool.bind(server);
+  if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
 
@@ -230,9 +252,7 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerRoadmap(server, db, work, scope);
 
-  registerTicketMoves(server, db, { review, work, feedback, skillProposals }, scope, hooks, false);
 
   server.registerTool(
     "create_ticket",
@@ -404,8 +424,6 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
-  registerViewImage(server, images, scope);
 
   server.registerTool(
     "ticket_reply",
@@ -862,8 +880,6 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
       return text(`Handoff saved for chapter ${c.number + 1}.`);
     },
   );
-  registerNotes(server, db, scope, false, { ticketChat });
-  registerRequestNote(server, db, scope, hooks);
 
   server.registerTool(
     "decisions",
@@ -1130,7 +1146,6 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  registerListMyWork(server, db, scope);
 
   server.registerTool(
     "pa_verdict",
@@ -1145,8 +1160,19 @@ function buildServer(db: Db, { decisions, engagements, deploys, runs, review, no
     },
   );
 
-  return server;
+  server.registerTool(
+    "server_status",
+    {
+      description:
+        "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, and recent server errors with secrets redacted. It changes nothing and shows no other company's tickets or runs.",
+      inputSchema: {},
+    },
+    async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
+  );
+
+  if (skip?.size) (server.registerTool as unknown) = originalRegister;
 }
+
 
 /** What a verdict (or an overrule) did, in a sentence for the reviewer. */
 function reviewOutcome(r: { verdict: string; delivered?: string | null; outcome?: string }): string {
@@ -2262,13 +2288,21 @@ function registerWatchdog(server: McpServer, watchdog: Services["watchdog"], ale
 const NUDGE_DESCRIPTION =
   "Call a colleague over: hand something to them or ask them a question, by name (or id), in your own company. Pass the ticket it's about, if any, and say why in a sentence or two. If they're working on that ticket now it reaches them straight away; otherwise they're woken with it. Not for routine updates: those go in ticket_reply or the ticket's state note. A few nudges per colleague every ten minutes at most, none back and forth about the same ticket, and a company-wide limit each hour.";
 const NUDGE_INPUT = { agent: z.string().min(1), ticketId: z.string().uuid().optional(), why: z.string().min(1).max(500) };
+/** Run tools the owner chat replaces with its own version (BOS-224). */
+const CHAT_SKIP: ReadonlySet<string> = new Set(["create_ticket", "nudge"]);
 
 /**
  * The owner chat's tools (v1.1): the board and nothing else. Tickets it makes are the owner's,
  * not an agent's, and go through the same checks as the board's own forms.
  */
-function buildChatServer(db: Db, { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat }: Services, scope: Scope, hooks: McpHooks) {
+function buildChatServer(db: Db, services: Services, scope: Scope, hooks: McpHooks) {
+  const { work, feedback, notes, wiki, skills, skillProposals, review, agents: team, images, ticketChat } = services;
   const server = new McpServer({ name: "bossman", version: "0.1.0" });
+  // The same tools its ticket runs have (BOS-224), except create_ticket and nudge, which have
+  // chat versions below. No tool here edits code or runs a command.
+  registerRunTools(server, db, services, scope, hooks, CHAT_SKIP);
+  registerListMyWork(server, db, scope);
+  registerRequestNote(server, db, scope, hooks);
   registerSharedTools(server, db, { notes, wiki, skills, skillProposals, review, agents: team }, scope);
   registerViewImage(server, images, scope);
   const ownTicket = async (id: string) => (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, id), eq(tickets.companyId, scope.companyId))))[0] ?? null;

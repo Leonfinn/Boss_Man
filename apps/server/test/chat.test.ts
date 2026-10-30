@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { ceoChapters, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
+import { agents, ceoChapters, decisions, runners, runs, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: { close: () => Promise<void> } | undefined;
@@ -79,6 +79,9 @@ describe("owner chat", () => {
     expect(start.prompt).toContain("also save it as a wiki page (Product/Analysis");
     // Work it can't do here is offered as a ticket, not left at "I can't".
     expect(start.prompt).toContain("don't stop at saying you can't. Offer to create the ticket that does it");
+    // The chat's tool description names the tools it now shares with its runs (BOS-224).
+    expect(start.prompt).toContain("server_status");
+    expect(start.prompt).toContain("decisions (");
     expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ purpose: "chat", chapterId: null });
     // Only the CEO's own run made a chapter.
     expect((await c.db.select().from(ceoChapters)).length).toBe(1);
@@ -95,7 +98,7 @@ describe("owner chat", () => {
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
     const client = await c.mcp(start.runId);
-    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "board", "create_feature", "create_ticket", "features", "link_tickets", "log_feedback", "model_options", "notes", "nudge", "open_attachment", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "roadmap", "set_milestone", "set_ticket_state", "skills", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki"]);
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(["agent_instructions", "assign_ticket", "attach_image", "board", "clear_check", "create_feature", "create_ticket", "decisions", "deploy", "engagement", "features", "feedback", "handoff", "link_tickets", "list_my_work", "log_feedback", "model_options", "notes", "notify_owner", "nudge", "open_attachment", "pa_verdict", "propose_hire", "propose_model_change", "propose_rule", "propose_team", "raise_decision", "report_key_result", "request_engagement", "request_note", "review", "roadmap", "runs", "schedule_check", "server_status", "set_milestone", "set_ticket_risk", "set_ticket_state", "sizing_guide", "skills", "ticket_reply", "tickets", "update_instructions", "update_ticket", "whats_new", "wiki", "withdraw_decision"]);
     // The CEO can build the roadmap from chat too.
     expect(textOf(await client.callTool({ name: "roadmap", arguments: { action: "add_objective", title: "Grow search traffic", reason: "Owner asked in chat." } }))).toMatch(/^Added the objective "Grow search traffic"/);
     // It asks a colleague itself, rather than asking the owner to pass a message on.
@@ -105,6 +108,15 @@ describe("owner chat", () => {
     expect((await c.feedback.notes(c.company.id))[0]).toMatchObject({ source: "chat", customer: "Acme", text: "Acme wants SSO." });
     const board = JSON.parse(textOf(await client.callTool({ name: "board", arguments: {} })));
     expect(board.objectives[0].milestones[0]).toMatchObject({ id: c.ms.id, title: "Beta" });
+    // It can also see the server from chat now (BOS-224), read-only, and settle decisions.
+    const serverView = JSON.parse(textOf(await client.callTool({ name: "server_status", arguments: {} })));
+    expect(serverView.server).toMatchObject({ role: "single" });
+    expect(serverView).toHaveProperty("deploy");
+    expect(serverView).toHaveProperty("migration");
+    expect(Array.isArray(serverView.wakes.waiting)).toBe(true);
+    expect(Array.isArray(serverView.runs.recent)).toBe(true);
+    expect(Array.isArray(serverView.errors)).toBe(true);
+    expect(textOf(await client.callTool({ name: "decisions", arguments: { action: "list" } }))).toMatch(/No decisions|^\[/);
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "SSO", description: "For Acme.", milestoneId: c.ms.id } }))).toMatch(/^Created feature [0-9a-f-]{36} "SSO"/);
     expect((await c.feedback.scored(c.company.id)).features[0]).toMatchObject({ title: "SSO", description: "For Acme.", milestoneId: c.ms.id });
     expect(textOf(await client.callTool({ name: "create_feature", arguments: { title: "sso" } }))).toMatch(/already exists/);
@@ -133,6 +145,41 @@ describe("owner chat", () => {
     expect(chat.state).toBe("idle");
     expect(chat.items.map((m: { role: string }) => m.role)).toEqual(["owner", "owner", "assistant"]);
     expect(chat.items[2].text).toContain(`#/tickets/${rateId}`);
+  });
+
+  it("keeps server_status and decisions to the calling company", async () => {
+    const c = await setup();
+    const other = (await c.req("POST", "/api/companies", { name: "Other Co" })).json();
+    const [ceo2] = await c.db.select().from(agents).where(eq(agents.companyId, other.company.id));
+    if (!ceo2) throw new Error("no second CEO");
+    const run2 = randomUUID();
+    const wake2 = randomUUID();
+    const decision2 = randomUUID();
+    await c.db.insert(runs).values({ id: run2, companyId: other.company.id, agentId: ceo2.id, purpose: "chat", origin: "owner_chat" });
+    await c.db.insert(wakes).values({ id: wake2, companyId: other.company.id, agentId: ceo2.id, reason: "owner_chat" });
+    await c.db.insert(decisions).values({ id: decision2, companyId: other.company.id, kind: "question", question: "Other Co secret question", options: ["Yes", "No"], recommendedOption: "Yes", raisedByAgentId: ceo2.id, tier: "ceo" });
+    const port = (c.app.server.address() as { port: number }).port;
+    const connect = async (companyId: string, agentId: string) => {
+      const token = await issueRunToken(c.db, { companyId, agentId, runId: randomUUID() });
+      const client = new Client({ name: "test", version: "0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1:" + port + "/mcp"), { requestInit: { headers: { authorization: "Bearer " + token } } }));
+      return client;
+    };
+    // This company's CEO sees its own server facts but not the other company's work.
+    const mine = await connect(c.company.id, c.ceo.id);
+    const view = JSON.parse(textOf(await mine.callTool({ name: "server_status", arguments: {} })));
+    const seen = JSON.stringify(view);
+    expect(seen).not.toContain(run2);
+    expect(seen).not.toContain(wake2);
+    expect(textOf(await mine.callTool({ name: "decisions", arguments: { action: "list" } }))).not.toContain("Other Co secret question");
+    await mine.close();
+    // The other company's CEO does see them.
+    const theirs = await connect(other.company.id, ceo2.id);
+    const theirView = JSON.parse(textOf(await theirs.callTool({ name: "server_status", arguments: {} })));
+    expect(JSON.stringify(theirView.runs.recent)).toContain(run2);
+    expect(JSON.stringify(theirView.wakes.waiting)).toContain(wake2);
+    expect(textOf(await theirs.callTool({ name: "decisions", arguments: { action: "list" } }))).toContain("Other Co secret question");
+    await theirs.close();
   });
 
   it("sends the owner's draft to the CEO with how to question them, before anything is created", async () => {
