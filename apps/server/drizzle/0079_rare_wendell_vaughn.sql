@@ -1,0 +1,1 @@
+ALTER TABLE "skill_proposals" ADD COLUMN "replaces_bundle_hash" text;

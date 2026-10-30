@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, decisions, notifications, runners, settings } from "../src/db/schema.js";
+import { agents, decisions, notifications, runners, settings, skills } from "../src/db/schema.js";
 import { cleanPath, normalise, parseGitHub, parseSkillMd, skillName } from "../src/services/skills.js";
 import { issueRunToken } from "../src/mcp.js";
 
@@ -227,6 +227,57 @@ describe("skills library (R71)", () => {
     expect((await c.req("PUT", `${base}/${made.id}`, { name: "web-fetch", description: "Fetch public pages as text.", body: "# Rules\n\nTwo pages at most." })).statusCode).toBe(200);
     expect(await md()).toContain('description: "Fetch public pages as text."');
     expect(await md()).toContain("Two pages at most.");
+  });
+
+  it("marks skills with no instructions and refuses to empty a body without confirmation", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const [empty] = (await c.req("POST", base, { from: "written", name: "empty-body", description: "Says what it does, but has no steps.", body: "" })).json();
+    const [full] = (await c.req("POST", base, { from: "written", name: "full-body", description: "Has real steps.", body: "# Rules\n\nDo the thing." })).json();
+    const list = (await c.req("GET", base)).json() as Array<{ name: string; hasInstructions: boolean; instructionsUnreadable: boolean }>;
+    expect(list.find((x) => x.name === "empty-body")).toMatchObject({ hasInstructions: false, instructionsUnreadable: false });
+    expect(list.find((x) => x.name === "full-body")).toMatchObject({ hasInstructions: true, instructionsUnreadable: false });
+    expect(((await c.req("GET", `${base}/${empty.id}`)).json() as { instructions: unknown }).instructions).toEqual({ path: "SKILL.md", body: "", empty: true, unreadable: false });
+    // An empty editor must not silently replace real instructions.
+    const refused = await c.req("PUT", `${base}/${full.id}`, { name: "full-body", description: "Has real steps.", body: "" });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().message).toMatch(/instructions/i);
+    expect(((await c.req("GET", `${base}/${full.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Rules\n\nDo the thing.");
+    expect((await c.req("PUT", `${base}/${full.id}`, { name: "full-body", description: "Has real steps.", body: "", confirmEmptyBody: true })).statusCode).toBe(200);
+    expect(((await c.req("GET", `${base}/${full.id}`)).json() as { instructions: { empty: boolean } }).instructions.empty).toBe(true);
+  });
+
+  it("shows the body when a legacy skill's SKILL.md has different casing, and flags one that isn't text", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    const legacyMd = "---\nname: legacy\ndescription: Legacy casing.\n---\n\n# Steps\n\nUse it.";
+    await c.db.insert(skills).values({ companyId: c.company.id, name: "legacy", description: "Legacy casing.", source: "upload", files: [{ path: "skill.md", content: b64(legacyMd) }], sizeBytes: Buffer.byteLength(legacyMd) });
+    const legacy = ((await c.req("GET", base)).json() as Array<{ id: string; name: string }>).find((x) => x.name === "legacy")!;
+    expect(((await c.req("GET", `${base}/${legacy.id}`)).json() as { instructions: unknown }).instructions).toEqual({ path: "skill.md", body: "# Steps\n\nUse it.", empty: false, unreadable: false });
+    const binary = Buffer.concat([Buffer.from("---\nname: binary\ndescription: Has a binary body.\n---\n\n"), Buffer.from([0, 1, 2])]);
+    const [odd] = (await c.req("POST", base, { from: "upload", files: [{ path: "SKILL.md", content: binary.toString("base64") }] })).json();
+    expect(((await c.req("GET", `${base}/${odd.id}`)).json() as { instructions: unknown }).instructions).toEqual({ path: "SKILL.md", body: null, empty: true, unreadable: true });
+    expect(((await c.req("GET", base)).json() as Array<{ name: string; instructionsUnreadable: boolean }>).find((x) => x.name === "binary")).toMatchObject({ instructionsUnreadable: true });
+  });
+
+  it("shows the body when the description is quoted with escapes, or a folded block", async () => {
+    const c = (ctx = await setup());
+    const base = `/api/companies/${c.company.id}/skills`;
+    // The shape of content-strategy's description: a quoted value with escaped quotes inside.
+    const quotedMd = '---\nname: quoted\ndescription: "When the user mentions \\"content strategy,\\" and \\"topic clusters.\\""\n---\n\n# Steps\n\nThe body after an escaped description.';
+    // The shape of british-plain-english's description: a block scalar with several lines.
+    const foldedMd = "---\nname: folded\ndescription: |\n  Write plain British English.\n  Explain every term.\n---\n\n# Rules\n\nKeep sentences short.";
+    await c.db.insert(skills).values([
+      { companyId: c.company.id, name: "quoted", description: "Quoted", source: "upload", files: [{ path: "SKILL.md", content: b64(quotedMd) }], sizeBytes: Buffer.byteLength(quotedMd) },
+      { companyId: c.company.id, name: "folded", description: "Folded", source: "upload", files: [{ path: "SKILL.md", content: b64(foldedMd) }], sizeBytes: Buffer.byteLength(foldedMd) },
+    ]);
+    const list = (await c.req("GET", base)).json() as Array<{ id: string; name: string; hasInstructions: boolean }>;
+    const quoted = list.find((x) => x.name === "quoted")!;
+    const folded = list.find((x) => x.name === "folded")!;
+    expect(quoted.hasInstructions).toBe(true);
+    expect(folded.hasInstructions).toBe(true);
+    expect(((await c.req("GET", `${base}/${quoted.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Steps\n\nThe body after an escaped description.");
+    expect(((await c.req("GET", `${base}/${folded.id}`)).json() as { instructions: { body: string } }).instructions.body).toBe("# Rules\n\nKeep sentences short.");
   });
 
   it("lets the CEO give and take skills, and tells the owner", async () => {

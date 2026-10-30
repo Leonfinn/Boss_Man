@@ -104,7 +104,7 @@ export const agents = pgTable(
     duty: text("duty"),
     /**
      * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
-     * migration 0076 moved every use into the review policy, and it is read only for a leftover
+     * migration 0082 moved every use into the review policy, and it is read only for a leftover
      * "marked" cell. Kept one release so a rollback has it; drop it after.
      */
     reviewKind: text("review_kind"),
@@ -327,6 +327,8 @@ export const tickets = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
+    urgent: boolean("urgent").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -529,7 +531,9 @@ export const runs = pgTable("runs", {
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
-export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama"]);
+export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
+/** What routine work does when a subscription window passes its hold threshold (BOS-227). */
+export const quotaOverageMode = pgEnum("quota_overage_mode", ["pause", "urgent", "all"]);
 
 export const fundingSources = pgTable("funding_sources", {
   id: id(),
@@ -542,6 +546,16 @@ export const fundingSources = pgTable("funding_sources", {
   cycleAnchor: timestamp("cycle_anchor", { withTimezone: true }),
   /** The credential agents on this source use. */
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Subscription utilisation at which routine work is held (0.8–1, default 0.95). */
+  quotaHoldAt: real("quota_hold_at").notNull().default(0.95),
+  /** Whether extra usage may be spent, and for which work: pause (default), urgent, or all. */
+  quotaOverage: quotaOverageMode("quota_overage").notNull().default("pause"),
+  /** Window names (as the adapter reports them) that never trigger the hold. Empty means all of them can. */
+  quotaDisabledWindows: jsonb("quota_disabled_windows").$type<string[]>().notNull().default([]),
+  /** The owner was told the current hold started; cleared when it lifts. */
+  quotaHeldNotified: boolean("quota_held_notified").notNull().default(false),
+  /** The owner was told credits are in use; cleared when overage stops. */
+  quotaOverageNotified: boolean("quota_overage_notified").notNull().default(false),
   createdAt: createdAt(),
 });
 
@@ -822,6 +836,11 @@ export const workflowChanges = pgTable(
     evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
     approver: text("approver").$type<"ceo" | "owner">().notNull(),
     decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    /** Why the decision went the way it did, and the wiki page (optionally a section, slug#Heading) that explains it (BOS-216). */
+    reason: text("reason"),
+    reasonLink: text("reason_link"),
+    /** Who applied or skipped it. Older changes have none. */
+    decidedBy: text("decided_by").$type<"ceo" | "owner">(),
     status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     checkDueAt: timestamp("check_due_at", { withTimezone: true }),
@@ -1110,6 +1129,10 @@ export const features = pgTable(
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
+    /** A plain-language summary for readers outside the team; null until written. */
+    publicSummary: text("public_summary"),
+    /** Off by default; nothing is published anywhere until a later public roadmap uses it. */
+    showPublicly: boolean("show_publicly").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1415,6 +1438,8 @@ export const skillProposals = pgTable(
     proposedByAgentId: uuid("proposed_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** Set: this proposal is a new version of that installed skill. */
     replacesSkillId: uuid("replaces_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    /** Fingerprint of the skill this replaces when the proposal was made: install refuses if it was edited since. */
+    replacesBundleHash: text("replaces_bundle_hash"),
     /** Worked out by the system from the files, never taken from the CEO. */
     hasScripts: boolean("has_scripts").notNull(),
     scriptFiles: jsonb("script_files").$type<string[]>().notNull().default([]),

@@ -112,6 +112,8 @@ export type ProposeInput = {
   byAgentId: string | null;
   why: string;
   agentIds: string[];
+  /** A caller that must record the id before this call (the retro links a change to its proposal first). */
+  id?: string;
   /** The owner pressed "check for updates": the agents are whoever already holds the skill, possibly nobody. */
   refresh?: boolean;
 } & ({ source: "draft" | "retro"; files: SkillFile[]; name?: string | null } | { source: "link"; url: string; skill?: string | null });
@@ -252,6 +254,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
         [row] = await db
           .insert(skillProposals)
           .values({
+            ...(input.id ? { id: input.id } : {}),
             companyId: input.companyId,
             name,
             source: input.source,
@@ -264,6 +267,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
             proposedAgentIds: agentIds,
             proposedByAgentId: input.byAgentId,
             replacesSkillId: had?.id ?? null,
+            replacesBundleHash: had ? hashFiles(had.files).bundleHash : null,
             hasScripts,
             scriptFiles: scripts,
             reviewRequired: needsReview,
@@ -348,6 +352,16 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
     /** Re-reads the source at the pinned version, if it has one, and says what differs from the files that were reviewed. */
     async sourceMatches(p: Proposal): Promise<{ ok: true } | { ok: false; reason: string }> {
       if (hashFiles(p.files).bundleHash !== p.bundleHash) return { ok: false, reason: "the stored files no longer match their fingerprint" };
+      // An update writes over an installed skill: if that skill has been edited since the proposal was
+      // made, installing would silently throw away the newer version. Say so instead, like a moved link.
+      if (p.replacesSkillId) {
+        const [there] = await db.select({ files: skills.files }).from(skills).where(and(eq(skills.id, p.replacesSkillId), eq(skills.companyId, p.companyId)));
+        if (!there) return { ok: false, reason: "the skill it would replace has been deleted since the review" };
+        const current = hashFiles(there.files).bundleHash;
+        // `current === p.bundleHash` is a retry after a crash between install and the status write: the
+        // new bytes are already there, so carry on rather than calling the proposal stale.
+        if (current !== p.bundleHash && p.replacesBundleHash && current !== p.replacesBundleHash) return { ok: false, reason: "the skill it would replace has been edited since this was proposed" };
+      }
       if (p.source !== "link") return { ok: true };
       let again: SkillFile[] | null = null;
       try {
@@ -464,6 +478,22 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.installed", summary: `Installed ${skill.name}${p.pinnedRef ? ` (version ${p.pinnedRef.slice(0, 12)})` : ""}, ${p.files.length} files, fingerprint ${p.bundleHash.slice(0, 12)}.`, at });
       await told(`The owner added the skill ${skill.name}. Given to: ${given.join(", ") || "nobody"}.${failed.length ? ` Not given: ${failed.join(", ")}.` : ""}`);
       return p;
+    },
+
+    /**
+     * Stops a nomination that never installed, because the workflow check's Revert was answered.
+     * Nothing is in the library and no agent has the skill, so no install is undone: the review is
+     * closed and the owner's card, if one was raised, is withdrawn.
+     */
+    async cancel(companyId: string, proposalId: string): Promise<void> {
+      const p = await this.get(companyId, proposalId);
+      if (!["proposed", "in_review", "awaiting_owner"].includes(p.status)) return;
+      const at = now();
+      await patch(p.id, { status: "rejected", decidedBy: "reverted", decidedAt: at, updatedAt: at });
+      await withdrawStrayCards(p.id);
+      if (p.reviewTicketId) await deps.closeReview?.(p.reviewTicketId, "The workflow check's Revert closed this review: the playbook will not be added.");
+      await record(db, { companyId, ticketId: p.reviewTicketId, kind: "skill.decided", summary: `Revert stopped the nomination of ${p.name} before it reached anyone.`, at });
+      if (p.proposedByAgentId) await deps.tell?.(p.proposedByAgentId, `The workflow check reverted the change, so the playbook ${p.name} will not be added.`);
     },
 
     /**
