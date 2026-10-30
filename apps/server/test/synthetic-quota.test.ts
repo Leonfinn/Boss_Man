@@ -41,7 +41,7 @@ describe("Synthetic quota", () => {
     const s = await source(c, "sk-syn-good");
     const res = await c.req("GET", `/api/funding-sources/${s.id}/status`);
     expect(res.statusCode).toBe(200);
-    expect(res.json().providerQuota).toEqual({ used: 123, limit: 1000, renewsAt: "2026-11-30T00:00:00.000Z" });
+    expect(res.json().providerQuota).toMatchObject({ used: 123, limit: 1000, renewsAt: "2026-11-30T00:00:00.000Z", ageSeconds: expect.any(Number), warned: [] });
     expect(c.calls.find((x) => x.url === "https://api.synthetic.new/v2/quotas")!.authorization).toBe("Bearer sk-syn-good");
     expect(res.body).not.toContain("sk-syn-good");
   });
@@ -52,7 +52,7 @@ describe("Synthetic quota", () => {
     const { secret } = (await c.req("POST", "/api/secrets", { name: "Synthetic key", kind: "generic", value: "sk-syn-good" })).json();
     await c.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "SYNTHETIC_API_KEY" });
     const s = (await c.req("POST", "/api/funding-sources", { name: "Synthetic", kind: "subscription", provider: "synthetic" })).json();
-    expect((await c.req("GET", `/api/funding-sources/${s.id}/status`)).json().providerQuota).toEqual({ used: 123, limit: 1000, renewsAt: "2026-11-30T00:00:00.000Z" });
+    expect((await c.req("GET", `/api/funding-sources/${s.id}/status`)).json().providerQuota).toMatchObject({ used: 123, limit: 1000, renewsAt: "2026-11-30T00:00:00.000Z" });
   });
 
   it("shows an unknown quota on a failed call instead of failing the request", async () => {
@@ -60,7 +60,7 @@ describe("Synthetic quota", () => {
     const s = await source(c, "sk-bad");
     const res = await c.req("GET", `/api/funding-sources/${s.id}/status`);
     expect(res.statusCode).toBe(200);
-    expect(res.json().providerQuota).toEqual({ used: null, limit: null, renewsAt: null });
+    expect(res.json().providerQuota).toMatchObject({ used: null, limit: null, renewsAt: null, ageSeconds: null, history: [] });
   });
 
   it("doesn't call Synthetic for other providers", async () => {

@@ -568,6 +568,13 @@
       "when": 1793380000000,
       "tag": "0081_quota_hold",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1793392781927,
+      "tag": "0082_provider_quota_readings",
+      "breakpoints": true
     }
   ]
 }
