@@ -27,6 +27,15 @@ const PROVIDER_QUOTA_HISTORY = 20;
 /** The percentages of the limit the owner hears about, each once per period. */
 export const PROVIDER_QUOTA_THRESHOLDS = [80, 100] as const;
 
+/** The key that groups warnings by renewal period: the renewal time rounded down to the hour, so a
+ * renewal time that drifts by a few minutes between readings doesn't warn the owner twice. */
+export function providerQuotaPeriod(renewsAt: string | null): string {
+  if (!renewsAt) return "";
+  const ms = Date.parse(renewsAt);
+  if (Number.isNaN(ms)) return "";
+  return new Date(Math.floor(ms / 3_600_000) * 3_600_000).toISOString();
+}
+
 export type ProviderQuotaView = {
   /** The current reading, or null counts when there is none and Synthetic couldn't be reached. */
   used: number | null;
@@ -148,7 +157,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     const warned = await db
       .select({ threshold: providerQuotaWarnings.threshold })
       .from(providerQuotaWarnings)
-      .where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, renewsAt ?? "")));
+      .where(and(eq(providerQuotaWarnings.fundingSourceId, source.id), eq(providerQuotaWarnings.period, providerQuotaPeriod(renewsAt))));
     return {
       used: at.used,
       limit: at.limit,
@@ -167,7 +176,7 @@ export function fundingService(db: Db, deps: FundingDeps = {}) {
     if (source.provider !== "synthetic") return [];
     const view = await providerQuota(source);
     if (!view || view.used === null || view.limit === null || view.limit <= 0) return [];
-    const period = view.renewsAt ?? "";
+    const period = providerQuotaPeriod(view.renewsAt);
     const percent = (view.used / view.limit) * 100;
     const paid = await db.select({ name: agents.name, company: companies.name }).from(agents).innerJoin(companies, eq(companies.id, agents.companyId)).where(and(eq(agents.fundingSourceId, source.id), sql`${agents.retiredAt} is null`)).orderBy(agents.name);
     const when = (iso: string | null) =>

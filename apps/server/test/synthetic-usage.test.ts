@@ -9,6 +9,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { agents, fundingSources, notifications, providerQuotaReadings, providerQuotaWarnings, runs, runners } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { providerQuotaPeriod } from "../src/services/funding.js";
 
 type Built = Awaited<ReturnType<ReturnType<typeof setup>["build"]>>;
 let ctx: Built | undefined;
@@ -190,6 +191,19 @@ describe("Synthetic quota warnings (BOS-239)", () => {
       ["2026-11-30T00:00:00.000Z", 100],
       ["2026-12-30T00:00:00.000Z", 80],
     ]);
+  });
+
+  it("doesn't warn twice in a period when Synthetic's renewal time drifts by a few minutes", async () => {
+    const c = (ctx = await setup().build());
+    c.answer.body = { subscription: { limit: 1000, requests: 810, renewsAt: "2026-11-30T00:02:00.000Z" } };
+    await c.refreshSyntheticQuota();
+    expect(await c.db.select().from(notifications)).toHaveLength(1);
+    // The same renewal, reported three minutes later: still one period, so no second flag.
+    c.answer.body = { subscription: { limit: 1000, requests: 820, renewsAt: "2026-11-30T00:05:00.000Z" } };
+    await run(c);
+    expect(await c.db.select().from(notifications)).toHaveLength(1);
+    // Both readings fall in the same hour, so they share a period.
+    expect(providerQuotaPeriod("2026-11-30T00:05:00.000Z")).toBe(providerQuotaPeriod("2026-11-30T00:02:00.000Z"));
   });
 
   it("sends nothing when Synthetic can't be reached", async () => {
