@@ -86,7 +86,7 @@ describe("the CEO builds the team (R62)", () => {
     const client = await c.mcp(c.ceo.id);
     const options = JSON.parse(textOf(await client.callTool({ name: "model_options", arguments: {} })));
     expect(options.harnesses).toEqual([{ value: "claude", label: "Claude Code" }, { value: "codex", label: "Codex" }, { value: "opencode", label: "OpenCode" }]);
-    expect(options.providers).toEqual(expect.arrayContaining([{ value: "anthropic", label: "Anthropic" }, { value: "ollama", label: "Ollama" }]));
+    expect(options.providers).toEqual(expect.arrayContaining([{ value: "anthropic", label: "Anthropic" }, { value: "ollama", label: "Ollama" }, { value: "synthetic", label: "Synthetic" }]));
     expect(options.fundingSources).toEqual([expect.objectContaining({ id: c.funding.id, name: "Claude Max", provider: "anthropic" })]);
 
     // An Ollama source can't run a Claude Code agent, and the provider must match the source.
@@ -96,9 +96,13 @@ describe("the CEO builds the team (R62)", () => {
     expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "C", fundingSourceId: "not-a-uuid" }) }))).toContain("Invalid UUID");
 
     // A model list the runner reported is enforced for a real model ID.
-    await c.db.insert(settings).values({ key: `models:${c.company.id}:opencode`, value: { models: [{ value: "ollama/qwen3:8b", name: "Qwen3" }], observedAt: new Date().toISOString() } });
+    await c.db.insert(settings).values({ key: `models:${c.company.id}:opencode`, value: { models: [{ value: "ollama/qwen3:8b", name: "Qwen3" }, { value: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017", name: "DeepSeek V4.1 Flash" }], observedAt: new Date().toISOString() } });
     expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "D", harness: "opencode", provider: "ollama", fundingSourceId: ollama.id, model: "ollama/unknown" }) }))).toContain("isn't in the list");
     expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "D", harness: "opencode", provider: "ollama", fundingSourceId: ollama.id, model: "ollama/qwen3:8b" }) }))).toMatch(/waiting for the owner's approval/);
+
+    // A Synthetic plan pays for an OpenCode agent on a Synthetic model.
+    const synthetic = (await c.req("POST", "/api/funding-sources", { name: "Synthetic", kind: "subscription", provider: "synthetic" })).json() as { id: string };
+    expect(textOf(await client.callTool({ name: "propose_hire", arguments: setupArgs(c, { name: "E", harness: "opencode", provider: "synthetic", fundingSourceId: synthetic.id, model: "synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" }) }))).toMatch(/waiting for the owner's approval/);
     await client.close();
   });
 

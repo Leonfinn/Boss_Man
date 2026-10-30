@@ -179,7 +179,7 @@ export async function buildApp(opts: AppOptions) {
   await app.register(websocket);
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
-  const funding = fundingService(db);
+  const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch });
   const runners = runnersService(db, funding);
   const notesSvc = notesService(db);
   const agentsSvc = agentsService(db, {

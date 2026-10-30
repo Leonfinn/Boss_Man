@@ -18,7 +18,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 - **An AI provider for at least one agent program.** The runner supports three:
   - **Claude Code**: a Claude Pro or Max subscription, or an Anthropic API key.
   - **Codex**: an OpenAI API key, or a ChatGPT plan.
-  - **OpenCode**: an OpenRouter or Ollama Cloud key (or an OpenAI or Anthropic key).
+  - **OpenCode**: an OpenRouter, Ollama Cloud or Synthetic key (or an OpenAI or Anthropic key).
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
@@ -253,7 +253,7 @@ Make each secret on your own computer, then paste it into the form. Boss Man enc
 claude setup-token
 ```
 
-It prints a long-lived token for your subscription. Paste it into **Value**, leave **Variable name** as `CLAUDE_CODE_OAUTH_TOKEN`, then choose **Check** and save. Boss Man refuses a token with stray spaces or quotes and says why. In the table, choose **Check with Claude**: it runs one tiny prompt on the runner and uses a little of your allowance. If you use an API key instead, choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key** or **Ollama Cloud API key** from the same list.
+It prints a long-lived token for your subscription. Paste it into **Value**, leave **Variable name** as `CLAUDE_CODE_OAUTH_TOKEN`, then choose **Check** and save. Boss Man refuses a token with stray spaces or quotes and says why. In the table, choose **Check with Claude**: it runs one tiny prompt on the runner and uses a little of your allowance. If you use an API key instead, choose **Anthropic API key**. Codex or OpenCode agents use **OpenAI API key**, **OpenRouter API key**, **Ollama Cloud API key** or **Synthetic API key** from the same list.
 
 **A git token.** Choose **Git token (GitHub or Gitea)** under **Add**. Agents get it as `GIT_TOKEN`.
 - **GitHub:** create a fine-grained personal access token. Repository access: only the repos the company works on. Permissions: Contents, Pull requests and Workflows, read and write (Workflows lets agents change the repo's CI files under `.github/workflows/`). The wizard's **How do I get a token?** also lists Checks read, so Boss Man can read CI results.
@@ -273,6 +273,10 @@ Check it worked: the message says "The token can read and push to the repo." If 
 3. Under "The CEO runs on", pick that source.
 
 Check it worked: the step shows a tick. Funding sources also live under **Settings > Funding**.
+
+### Synthetic (OpenCode)
+
+Synthetic (synthetic.new) is an OpenCode provider. Add its key under **Settings > Secrets > Add** as **Synthetic API key**; it reaches agents as `SYNTHETIC_API_KEY`, and OpenCode lists the models as `synthetic/<model>` (for example `synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`). Under **Settings > Funding**, add a source with kind **Subscription (setup-token)** and provider **Synthetic** for a standard plan. The Funding page reads the Synthetic key you granted to the company and shows requests used of the plan's limit and when it renews. If Synthetic can't be reached the card says the quota is unknown; it never stops a run. Keys are never logged or shown after saving.
 
 ## 11. Hire a first agent
 

@@ -10,12 +10,12 @@ afterEach(() => {
 });
 
 describe("funding source provider", () => {
-  it("only offers Anthropic and OpenAI for a subscription, and resets an invalid provider", async () => {
+  it("only offers plans for a subscription, and resets an invalid provider", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", { status: 200 })));
     render(<Funding company={{ id: "c1", name: "Co", mission: null, paused: false, agents: [] } as Company} onChanged={() => {}} />);
     const provider = (await screen.findByLabelText("Provider")) as HTMLSelectElement;
     const options = () => [...provider.options].map((o) => o.value);
-    expect(options()).toEqual(["anthropic", "openai"]);
+    expect(options()).toEqual(["anthropic", "openai", "ollama", "synthetic"]);
     fireEvent.change(screen.getByLabelText("Kind"), { target: { value: "api_payg" } });
     expect(options()).toContain("bedrock");
     fireEvent.change(provider, { target: { value: "bedrock" } });

@@ -90,6 +90,23 @@ export function parseCodexRateLimits(resp: unknown): QuotaSample[] {
   return out;
 }
 
+export type SyntheticQuota = { used: number; limit: number; renewsAt: Date | null };
+
+/**
+ * Synthetic's own quota endpoint (`GET /v2/quotas`) returns the subscription's request
+ * allowance. The used count and renewal are sometimes beside `subscription`, sometimes
+ * inside it, so both shapes are read. A response without a usable used/limit pair is unknown.
+ */
+export function parseSyntheticQuota(resp: unknown): SyntheticQuota | null {
+  if (!isRecord(resp)) return null;
+  const sub = isRecord(resp["subscription"]) ? resp["subscription"] : {};
+  const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  const used = count(sub["requests"]) ?? count(resp["requests"]);
+  const limit = count(sub["limit"]) ?? count(resp["limit"]);
+  if (used === null || limit === null || limit === 0) return null;
+  return { used, limit, renewsAt: toDate(sub["renewsAt"]) ?? toDate(resp["renewsAt"]) };
+}
+
 export type UsageCost = { costMicros: number; currency: string; model: string | null; contextUsed: number | null };
 
 /**
