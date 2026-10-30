@@ -840,6 +840,30 @@ describe("open issues and the timeline (BOS-199)", () => {
     expect(alert.status).toBe("answered");
   });
 
+  it("keeps a stuck ticket open when a run or activity happened after the warning", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Still stuck", stateChangedAt: ctx.ago(130) });
+    await ctx.watchdog.run();
+    const flagged = (await ctx.watchdog.issues(ctx.companyId)).find((x) => x.ticketId === t.id);
+    expect(flagged).toBeTruthy();
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, startedAt: ctx.now() });
+    await ctx.db.insert(activity).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, kind: "message", summary: "Woke and kept working", at: ctx.now() });
+    const after = await ctx.watchdog.issues(ctx.companyId);
+    expect(after.some((x) => x.ticketId === t.id)).toBe(true);
+    expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id)))[0]!.status).toBe("open");
+  });
+
+  it("does not auto-answer an owner-rung alert on a live ticket", async () => {
+    const t = await ctx.ticket({ title: "Owner is deciding", stateChangedAt: ctx.ago(1) });
+    const ladder = { rung: "owner", since: ctx.now().toISOString(), minutes: 5, ticketId: t.id, about: [], hops: [] };
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "The deploy is stuck. Keep waiting?", options: ["Keep waiting"], recommendedOption: "Keep waiting", context: { type: "alert", ladder } }).returning();
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, startedAt: ctx.now() });
+    await ctx.db.insert(activity).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, kind: "message", summary: "A nudge reached the ticket", at: ctx.now() });
+    const issues = await ctx.watchdog.issues(ctx.companyId);
+    expect(issues.some((x) => x.ticketId === t.id && x.holder === "owner")).toBe(true);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+  });
+
   it("leaves plan and permission hand-overs on the ladder alone", async () => {
     const t = await ctx.ticket({ title: "Needs approval", stateChangedAt: ctx.ago(1) });
     const ladder = { rung: "ceo", since: ctx.now().toISOString(), minutes: 5, ticketId: t.id, about: [], hops: [] };

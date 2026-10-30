@@ -629,8 +629,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
   // ---------- Open issues (BOS-199) ----------
   // An "issue" is an open watchdog flag or an open Boss Man alert on the ladder that names a ticket.
   // Both are warnings the health badge counts, and both settle themselves once their ticket is done
-  // or has moved on (a new state, a run, or activity from the assignee). Settling an issue never
-  // changes the alert ladder's rungs or timings: it only closes a warning whose ticket is finished.
+  // or cancelled. Settling an issue never changes the alert ladder's rungs or timings: it only closes
+  // a warning whose ticket is finished.
 
   /** Same outer cap as alert-ladder.ts: a card with the CEO reaches the owner by then at the latest. */
   const CEO_ALERT_OUTER_CAP_MINUTES = 20;
@@ -650,18 +650,15 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
   const ordinal = (n: number) => (n === 1 ? "1st" : n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`);
   const dayKey = (d: Date) => d.toISOString().slice(0, 10);
 
-  /** Why an issue's ticket means the warning is over: done, cancelled, or moved on since `since`. */
-  function settledReason(ticket: typeof tickets.$inferSelect | undefined, prefix: string | null, since: Date, activityRows: Array<{ ticketId: string | null; agentId: string | null; at: Date }>, runRows: Array<{ ticketId: string | null; startedAt: Date }>) {
+  /** Why an issue's ticket means the warning is over: the ticket is done or was cancelled. */
+  function settledReason(ticket: typeof tickets.$inferSelect | undefined, prefix: string | null) {
     if (!ticket) return null;
     const ref = ticketRef(prefix, ticket.number) ?? "The ticket";
-    if (ticket.systemState === "done") return ticket.outcome === "cancelled" ? `Settled: ${ref} was cancelled` : ticket.mergeCommit ? `Settled: ${ref} merged` : `Settled: ${ref} is done`;
-    if (ticket.stateChangedAt.getTime() > since.getTime()) return `Settled: ${ref} moved on`;
-    if (ticket.assigneeAgentId && activityRows.some((a) => a.ticketId === ticket.id && a.agentId === ticket.assigneeAgentId && a.at.getTime() > since.getTime())) return `Settled: ${ref} moved on`;
-    if (runRows.some((r) => r.ticketId === ticket.id && r.startedAt.getTime() > since.getTime())) return `Settled: ${ref} moved on`;
-    return null;
+    if (ticket.systemState !== "done") return null;
+    return ticket.outcome === "cancelled" ? `Settled: ${ref} was cancelled` : ticket.mergeCommit ? `Settled: ${ref} merged` : `Settled: ${ref} is done`;
   }
 
-  /** Closes open flags and ticket alerts whose ticket is finished or has moved on, with a plain note. */
+  /** Closes open flags and ticket alerts whose ticket is finished, with a plain note. */
   async function settleIssues(companyId: string) {
     const t = now();
     const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
@@ -675,27 +672,20 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       .from(decisions)
       .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), isAlertDecision));
     const laddered = openAlerts.map(({ d }) => ({ d, ladder: (d.context as { ladder?: LadderLike }).ladder })).filter((x): x is { d: typeof decisions.$inferSelect; ladder: LadderLike } => !!x.ladder?.ticketId);
-    const ticketIds = [...new Set([...openFlags.map((x) => x.ticket.id), ...laddered.map((x) => x.ladder.ticketId!)])];
-    if (!ticketIds.length) return;
-    const [ticketRows, activityRows, runRows] = await Promise.all([
-      db.select().from(tickets).where(inArray(tickets.id, ticketIds)),
-      db.select({ ticketId: activity.ticketId, agentId: activity.agentId, at: activity.at }).from(activity).where(inArray(activity.ticketId, ticketIds)),
-      db.select({ ticketId: runs.ticketId, startedAt: runs.startedAt }).from(runs).where(inArray(runs.ticketId, ticketIds)),
-    ]);
-    const byId = new Map(ticketRows.map((x) => [x.id, x]));
 
-    for (const { f } of openFlags) {
-      const note = settledReason(byId.get(f.ticketId), c?.prefix ?? null, f.lastFlaggedAt ?? f.openedAt, activityRows, runRows);
+    for (const { f, ticket } of openFlags) {
+      const note = settledReason(ticket, c?.prefix ?? null);
       if (!note) continue;
       const closed = await db.update(watchdogFlags).set({ status: "closed", closedAt: t }).where(and(eq(watchdogFlags.id, f.id), eq(watchdogFlags.status, "open"))).returning({ id: watchdogFlags.id });
       if (!closed.length) continue;
       await log({ companyId, kind: "alert_resolved", ticketId: f.ticketId, flagId: f.id, reason: note, summary: `Boss Man settled the warning: ${note}` });
     }
 
+    const alertTicketIds = [...new Set(laddered.map((x) => x.ladder.ticketId!))];
+    const alertTickets = alertTicketIds.length ? await db.select().from(tickets).where(inArray(tickets.id, alertTicketIds)) : [];
+    const alertById = new Map(alertTickets.map((x) => [x.id, x]));
     for (const { d, ladder } of laddered) {
-      const ticket = byId.get(ladder.ticketId!);
-      const since = new Date(ladder.hops.at(-1)?.at ?? ladder.since);
-      const note = settledReason(ticket, c?.prefix ?? null, since, activityRows, runRows);
+      const note = settledReason(alertById.get(ladder.ticketId!), c?.prefix ?? null);
       if (!note) continue;
       const closed = await db
         .update(decisions)
