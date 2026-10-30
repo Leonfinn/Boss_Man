@@ -517,12 +517,12 @@ function Proposals({ companyId }: { companyId: string }) {
   const rows = (list.data ?? []).slice(0, 10);
   if (!rows.length) return null;
   return (
-    <section className="card" aria-label="Skills the CEO proposed" style={{ marginBottom: 16 }}>
-      <h2>Proposed by the CEO</h2>
+    <section className="card" aria-label="Skill proposals" style={{ marginBottom: 16 }}>
+      <h2>Skill proposals</h2>
       <ul>
         {rows.map((p) => (
           <li key={p.id}>
-            <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
+            <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : p.source === "retro" ? "from a workflow retro" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
             {` · security review: ${p.verdict ? p.verdict.replace("_", " ") : "pending"}`}
             {p.overridden ? " · added against the reviewer's advice" : ""}
             {p.status === "awaiting_owner" ? <> · <a href="#/decisions">Decide</a></> : null}

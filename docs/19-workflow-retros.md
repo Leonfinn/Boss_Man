@@ -73,6 +73,7 @@ New records:
 
 Rules:
 - The Apply on a playbook is a nomination, not an install. It goes to the add-a-skill flow: the Security Reviewer checks it, then the owner decides. Nothing reaches the library or an agent before that.
+- A playbook update never overwrites a newer copy: if the owner edits the skill after the retro proposed the update, Apply (or the owner's Add) refuses and says the playbook changed, so the edit is kept.
 - When the CEO runs the retro (no Product Manager), its playbooks and lessons go to the owner: the CEO never approves its own proposal.
 - Only one live change per agent per setting.
 - At most 3 proposals per retro.
@@ -89,6 +90,7 @@ Not built yet: plan-first (there is no per-company setting for it; it follows th
   - Keep is recommended if it improved or held, or if either number can't be measured. Revert is recommended if it got worse.
 - Revert puts the saved old value back through the same code the Apply used. If the value has changed again since, Revert is refused and the decision stays open: Boss Man never overwrites a newer change.
 - A playbook that is reverted is taken away from the agents Apply gave it to, and stays in the library. Boss Man has no archive for skills, so "nobody uses it" is the archive. If the add-a-skill flow never installed it, Revert says so and leaves everything alone.
+- A playbook's check can come round while the add-a-skill flow still has the nomination. The card then says Revert cancels the pending nomination, and answering it closes the change and the review; nothing ever reached an agent. If the nomination ends without installing, the change is closed as skipped with no Keep/Revert card.
 - A lesson that is reverted is dropped from the brief's Lessons section.
 
 ## Skipped

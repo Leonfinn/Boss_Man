@@ -31,7 +31,7 @@ import {
   type WorkflowLever,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { activity, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skillProposals, skills as skillsTable, ticketReviews, tickets, watchdogFlags, wikiPages, wikiRevisions, workflowChanges } from "../db/schema.js";
+import { activity, agentSkills, agents, companies, costEvents, decisions, projects, retros, reviewRequests, runs, settings, skillProposals, skills as skillsTable, ticketReviews, tickets, watchdogFlags, wikiPages, wikiRevisions, workflowChanges } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkPolicy } from "./review-policy.js";
 import { LESSON_ADD, LESSON_DROP, LESSON_EDIT, LESSON_MAX, lessonsForCeo, lessonsFrom, lessonsPageRow, normalizeLesson, removeLessonLine } from "./project-brief.js";
@@ -79,6 +79,7 @@ const MAX_FINDINGS = 12;
 const OUTPUT_CAP = 12_000;
 const WORST = 10;
 const DAY = 86_400_000;
+const PENDING_PROPOSAL_STATUS = ["proposed", "in_review", "awaiting_owner"];
 
 /** What a retro run is told, after the wake's own note. */
 export const RETRO_DUTY = [
@@ -158,7 +159,7 @@ export function retroService(
   deps: {
     agents: Pick<ReturnType<typeof agentsService>, "update">;
     skills: Pick<ReturnType<typeof skillsService>, "take">;
-    skillProposals: Pick<ReturnType<typeof skillProposalsService>, "propose">;
+    skillProposals: Pick<ReturnType<typeof skillProposalsService>, "propose" | "cancel">;
     watchdog: Pick<ReturnType<typeof watchdogService>, "update">;
     notify: (agentId: string, input: { reason: string; note: string; priority?: number }) => Promise<unknown>;
     now?: () => Date;
@@ -656,6 +657,11 @@ export function retroService(
         const [have] = await db.select().from(skillsTable).where(and(eq(skillsTable.companyId, c.companyId), eq(skillsTable.name, name)));
         const was = (before as { skillId: string | null }).skillId;
         if (was ? have?.id !== was : have) return `A skill called ${name} has changed since this was proposed, so the playbook can't be applied. Choose Skip.`;
+        // The bytes matter, not only the id: an edit after the proposal would be overwritten by Apply,
+        // and Revert would later put back the older copy captured when the retro planned the change.
+        const beforeFiles = (before as { files?: Array<{ path: string; content: string }> }).files;
+        if (was && have && beforeFiles && hashFiles(have.files).bundleHash !== hashFiles(beforeFiles).bundleHash)
+          return `The playbook ${name} has been edited since this was proposed, so applying it would overwrite that edit. Choose Skip; the next retro can propose it again.`;
       }
       return null;
     },
@@ -719,7 +725,20 @@ export function retroService(
         const holders = team.filter((a) => roleOf(a) === c.targetRole && a.duty !== "assistant");
         const holderIds = holders.map((a) => a.id).sort();
         const refs = [...(await refsFor(c.companyId, c.evidence)).values()];
-        const proposal = await deps.skillProposals.propose({
+        // Who already held the playbook before this change: an update installs the new version for
+        // every holder, but Revert only takes it away from agents who did not have it already.
+        const had = before.skillId
+          ? new Set((await db.select({ id: agentSkills.agentId }).from(agentSkills).where(eq(agentSkills.skillId, before.skillId))).map((r) => r.id))
+          : new Set<string>();
+        // Record the proposal id on the change first: propose() writes several rows, and a crash
+        // between them used to leave the change unable to find (and so unable to undo) its proposal.
+        const proposalId = randomUUID();
+        await db
+          .update(workflowChanges)
+          .set({ after: { ...after, proposalId, assignedAgentIds: holderIds.filter((id) => !had.has(id)) } })
+          .where(eq(workflowChanges.id, c.id));
+        await deps.skillProposals.propose({
+          id: proposalId,
           companyId: c.companyId,
           byAgentId: retro?.agentId ?? null,
           source: "retro",
@@ -728,12 +747,6 @@ export function retroService(
           why: `A workflow retro proposed this playbook for ${c.targetRole} agents: ${plain(c.summary)}. Evidence: ${refs.join(", ")}.`,
           agentIds: holderIds,
         });
-        // Which agents would get it from this change, so Revert takes it back from them only. An
-        // update leaves the existing holders in place, and Revert puts the old version back instead.
-        await db
-          .update(workflowChanges)
-          .set({ after: { ...after, proposalId: proposal.id, assignedAgentIds: before.skillId ? [] : holderIds } })
-          .where(eq(workflowChanges.id, c.id));
       }
     },
 
@@ -756,6 +769,24 @@ export function retroService(
     /** Measures one change again over the time since Apply and raises the decision, unless too few relevant tickets have been done and the cap isn't up. */
     async check(c: typeof workflowChanges.$inferSelect): Promise<boolean> {
       const t = now();
+      // A playbook change has not happened until the add-a-skill flow installs it. While the nomination
+      // is pending the card is still useful: Revert cancels it before it reaches anyone.
+      let playbookInstalled = true;
+      if (c.lever === "playbook") {
+        const after = (c.after ?? {}) as Record<string, any>;
+        const [proposal] = after.proposalId
+          ? await db.select().from(skillProposals).where(and(eq(skillProposals.id, after.proposalId), eq(skillProposals.companyId, c.companyId)))
+          : [];
+        const installed = await installedPlaybook(c.companyId, after);
+        if (!installed && !(proposal && PENDING_PROPOSAL_STATUS.includes(proposal.status))) {
+          // Rejected, stale, expired, or never recorded: it never reached an agent, so there is no
+          // effect to check and no Keep/Revert card to raise.
+          await db.update(workflowChanges).set({ status: "skipped", checkDueAt: null }).where(and(eq(workflowChanges.id, c.id), eq(workflowChanges.status, "applied")));
+          await record(db, { companyId: c.companyId, kind: "workflow_change", summary: `Workflow change not applied (${c.lever}): the playbook never reached the agents.`, at: t });
+          return false;
+        }
+        playbookInstalled = !!installed;
+      }
       const since = c.appliedAt!;
       const capped = t.getTime() - since.getTime() >= CHECK_CAP_DAYS * DAY;
       const sc = await workflowService(db, { now }).scorecard(c.companyId, Math.max((t.getTime() - since.getTime()) / DAY, 1 / 24));
@@ -780,7 +811,7 @@ export function retroService(
         `Measured by: ${METRIC_LABEL[c.metric]}${scopeText(scope)}. Before it: ${showMetric(c.metric, c.baseline)}. Now: ${showMetric(c.metric, value)}.`,
         `That rests on ${sample} ${unit} since it was applied${sample < CHECK_MIN_SAMPLES ? `. Fewer than ${CHECK_MIN_SAMPLES} happened in ${days} days, so treat it with care` : ""}.`,
         `${verdict} ${worse ? "Revert" : "Keep"} is recommended.`,
-        `Keep leaves the change as it is. Revert ${revertText(c)}.`,
+        `Keep leaves the change as it is. Revert ${revertText(c, playbookInstalled)}.`,
       ].join("\n\n");
       const [row] = await db
         .insert(decisions)
@@ -813,7 +844,8 @@ export function retroService(
         if (key) return moved(`The watchdog's ${key}`);
       } else if (c.lever === "playbook") {
         const installed = await installedPlaybook(c.companyId, after);
-        if (!installed) return "The playbook never reached the agents: it is still with the Security Reviewer or the owner, or it was not added. There is nothing to take back. Choose Keep.";
+        // A nomination that never installed can still be cancelled; nothing reached an agent.
+        if (!installed) return null;
         if (!installed.skill) return "The playbook has been deleted since, so there is nothing to put back. Choose Keep.";
         // The proposal holds the exact bytes that were installed, so a different skill means someone changed it since.
         const changedSince = installed.proposal ? hashFiles(installed.skill.files).bundleHash !== installed.proposal.bundleHash : after.skillUpdatedAt ? installed.skill.updatedAt.toISOString() !== after.skillUpdatedAt : false;
@@ -854,7 +886,11 @@ export function retroService(
         await deps.watchdog.update(c.companyId, before);
       } else if (c.lever === "playbook") {
         const installed = await installedPlaybook(c.companyId, after);
-        if (!installed) return;
+        if (!installed) {
+          // Nothing reached an agent: Revert stops the nomination so it can never install later.
+          if (after.proposalId) await deps.skillProposals.cancel(c.companyId, after.proposalId);
+          return;
+        }
         // Boss Man has no archive for skills: the playbook stays in the library (source "retro") with nobody using it. Only the agents Apply gave it to lose it.
         for (const id of (after.assignedAgentIds ?? []) as string[]) await deps.skills.take(c.companyId, installed.skill?.name ?? after.name, id);
         if (before.skillId) await db.update(skillsTable).set({ description: before.description, files: before.files, sizeBytes: (before.files as Array<{ content: string }>).reduce((n, f) => n + Buffer.from(f.content, "base64").length, 0), updatedAt: now() }).where(eq(skillsTable.id, before.skillId));
@@ -890,11 +926,15 @@ export function retroService(
 }
 
 /** What Revert does, for the check's question. */
-function revertText(c: { lever: string; after: unknown }) {
+function revertText(c: { lever: string; before: unknown; after: unknown }, playbookInstalled: boolean) {
   const after = (c.after ?? {}) as Record<string, unknown>;
   if (c.lever === "review_policy") return `puts the old review policy for ${after.tier}-risk tickets back`;
   if (c.lever === "watchdog") return "puts the old watchdog limits back";
-  if (c.lever === "playbook") return "takes the playbook away from the agents it was given to. It stays in the library, with nobody using it";
+  if (c.lever === "playbook") {
+    if (!playbookInstalled) return "cancels the pending skill nomination: nothing is in the library and no agent has the playbook yet";
+    // An update puts the earlier version back in place; only a new playbook is taken away.
+    return (c.before as { skillId?: string | null }).skillId ? "puts the playbook's earlier version back, leaving it with the agents that already had it" : "takes the playbook away from the agents it was given to. It stays in the library, with nobody using it";
+  }
   if (c.lever === "lesson") return "drops the lesson from the brief";
   return `puts the agent's earlier ${c.lever} back`;
 }
