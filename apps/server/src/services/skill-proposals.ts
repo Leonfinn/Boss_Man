@@ -5,6 +5,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agentSkills, agents, decisions, projects, skillProposals, skills, tickets, type SkillFinding } from "../db/schema.js";
 import { record } from "./activity.js";
+import { securityReviewers } from "./review-policy.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "./decisions.js";
 import { hashFiles, scriptFilesOf, sha256, unreadableFile } from "./skill-files.js";
 import { normalise, parseSkillMd, skillName, skillNameOf, SkillError, type SkillFile, type skillsService } from "./skills.js";
@@ -168,10 +169,9 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
     const open = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `skill:${proposalId}`), eq(decisions.status, "open")));
     for (const d of open) await deps.withdrawDecision(d.id);
   };
-  /** The agent marked as the company's security reviewer, never the proposer. */
+  /** The first available agent Settings > Reviews (or the old agent-page mark) names for security reviews; never the proposer. */
   async function securityReviewer(companyId: string, not: string | null) {
-    const pool = await db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.reviewKind, "security"), isNull(agents.retiredAt))).orderBy(asc(agents.createdAt));
-    return pool.find((a) => !a.paused && a.id !== not) ?? null;
+    return (await securityReviewers(db, companyId)).find((a) => !a.paused && a.id !== not) ?? null;
   }
   async function reviewProject(companyId: string) {
     const [p] = await db.select({ id: projects.id }).from(projects).where(and(eq(projects.companyId, companyId), isNull(projects.archivedAt))).orderBy(asc(projects.createdAt));
@@ -245,7 +245,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       // A review that nobody can do must not leave a proposal stuck: check before storing.
       const reviewer = needsReview ? await securityReviewer(input.companyId, input.byAgentId) : null;
       const projectId = needsReview ? await reviewProject(input.companyId) : null;
-      if (needsReview && !reviewer) throw new SkillError(409, "This skill needs a security review, but the company has no Security Reviewer available. Ask the owner to hire one.");
+      if (needsReview && !reviewer) throw new SkillError(409, "This skill needs a security review, but the company has no Security Reviewer available. Ask the owner to name one in Settings > Reviews (Security review), or to hire one.");
       if (needsReview && !projectId) throw new SkillError(409, "This skill needs a security review, but the company has no open project to put the review task in.");
 
       let row;
@@ -302,8 +302,7 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
     async recordVerdict(companyId: string, reviewerId: string | null, proposalId: string, v: VerdictInput) {
       const p = await this.get(companyId, proposalId);
       if (!reviewerId) throw new SkillError(403, "Only the Security Reviewer can give a verdict.");
-      const [me] = await db.select({ kind: agents.reviewKind }).from(agents).where(and(eq(agents.id, reviewerId), eq(agents.companyId, companyId)));
-      if (me?.kind !== "security") throw new SkillError(403, "Only the Security Reviewer can give a verdict.");
+      if (!(await securityReviewers(db, companyId)).some((a) => a.id === reviewerId)) throw new SkillError(403, "Only the Security Reviewer can give a verdict.");
       if (p.status === "expired") throw new SkillError(409, `This proposal expired after ${EXPIRES_AFTER_DAYS} days with no decision, and its review task was closed. No verdict can be given; if the skill is still wanted, the CEO can propose it again.`);
       if (p.status !== "in_review" || !p.reviewTicketId) throw new SkillError(409, "This proposal isn't waiting for a review.");
       const [t] = await db.select({ assignee: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, p.reviewTicketId));
