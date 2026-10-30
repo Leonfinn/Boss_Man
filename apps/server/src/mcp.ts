@@ -1175,7 +1175,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, and recent server errors with secrets redacted. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, and the Synthetic plan's quota (syntheticUsage: used of the limit, when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),

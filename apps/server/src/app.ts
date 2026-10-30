@@ -189,7 +189,7 @@ export async function buildApp(opts: AppOptions) {
   await app.register(websocket);
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
-  const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch });
+  const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
   const notesSvc = notesService(db);
   const agentsSvc = agentsService(db, {
@@ -309,6 +309,8 @@ export async function buildApp(opts: AppOptions) {
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
     errors: errorBuffer,
+    // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
+    syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     commit: process.env.BOSSMAN_COMMIT || "dev",
     startedAt: new Date(STARTED_AT),
     now: opts.now,
@@ -364,6 +366,14 @@ export async function buildApp(opts: AppOptions) {
       });
     }
   }
+  // Synthetic's own quota is cached on the server and read again at most every 5 minutes (BOS-239).
+  // Every run end asks for a refresh, whatever the agent's provider: it is cheap because the reading
+  // is served from the cache inside the 5-minute window, and a Synthetic run is the case that moved
+  // the plan's counter. It warns the owner once per period at 80% and 100%.
+  async function refreshSyntheticQuota() {
+    const ownerTz = (await notes.getSettings()).quietHours?.timeZone ?? OWNER_TZ;
+    await funding.refreshSynthetic((n) => notes.notify({ companyId: null, agentId: null, ...n }), ownerTz);
+  }
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
     if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
@@ -400,6 +410,9 @@ export async function buildApp(opts: AppOptions) {
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
+      // A run ended; ask for a quota refresh. Any provider ends here, but the reading is cached for
+      // 5 minutes so only a refresh after a Synthetic run actually calls Synthetic (BOS-239).
+      void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
   });
   const sweeps = sweepService(db, {
@@ -2302,5 +2315,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }

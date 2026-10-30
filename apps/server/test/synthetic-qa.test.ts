@@ -59,7 +59,7 @@ describe("Synthetic provider QA (BOS-226)", () => {
       const src = await syntheticSource(c);
       const res = await c.req("GET", `/api/funding-sources/${src.id}/status`);
       expect(res.statusCode).toBe(200);
-      expect(res.json().providerQuota).toEqual(UNKNOWN);
+      expect(res.json().providerQuota).toMatchObject(UNKNOWN);
       expect(res.body).not.toContain(KEY);
       await c.app.close();
       await c.close();
