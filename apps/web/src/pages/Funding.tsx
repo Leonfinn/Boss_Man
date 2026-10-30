@@ -134,7 +134,9 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
             return (
               <label key={w} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
                 <input type="checkbox" checked={!off.includes(w)} onChange={(e) => toggle(w, e.target.checked)} />
-                <span style={{ flex: 1 }}>Can trigger the hold: {windowLabel(w).name}</span>
+                <span style={{ flex: 1 }}>
+                  Can trigger the hold: {windowLabel(w).name} <span className="mono">({w})</span>
+                </span>
                 {latest && <span className="mono muted">{pct(latest.utilization)}</span>}
               </label>
             );
