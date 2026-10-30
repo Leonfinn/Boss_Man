@@ -442,9 +442,11 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
-    // A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
+    // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
+    // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
+    // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
     land: (ticketId, reviewer) =>
-      review.land(ticketId, reviewer).catch(async (err) => {
+      review.landVisible(ticketId, reviewer).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
         if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
