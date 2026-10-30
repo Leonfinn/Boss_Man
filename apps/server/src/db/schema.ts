@@ -323,6 +323,8 @@ export const tickets = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
+    urgent: boolean("urgent").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
@@ -525,7 +527,9 @@ export const runs = pgTable("runs", {
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
-export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama"]);
+export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
+/** What routine work does when a subscription window passes its hold threshold (BOS-227). */
+export const quotaOverageMode = pgEnum("quota_overage_mode", ["pause", "urgent", "all"]);
 
 export const fundingSources = pgTable("funding_sources", {
   id: id(),
@@ -538,6 +542,16 @@ export const fundingSources = pgTable("funding_sources", {
   cycleAnchor: timestamp("cycle_anchor", { withTimezone: true }),
   /** The credential agents on this source use. */
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Subscription utilisation at which routine work is held (0.8–1, default 0.95). */
+  quotaHoldAt: real("quota_hold_at").notNull().default(0.95),
+  /** Whether extra usage may be spent, and for which work: pause (default), urgent, or all. */
+  quotaOverage: quotaOverageMode("quota_overage").notNull().default("pause"),
+  /** Window names (as the adapter reports them) that never trigger the hold. Empty means all of them can. */
+  quotaDisabledWindows: jsonb("quota_disabled_windows").$type<string[]>().notNull().default([]),
+  /** The owner was told the current hold started; cleared when it lifts. */
+  quotaHeldNotified: boolean("quota_held_notified").notNull().default(false),
+  /** The owner was told credits are in use; cleared when overage stops. */
+  quotaOverageNotified: boolean("quota_overage_notified").notNull().default(false),
   createdAt: createdAt(),
 });
 

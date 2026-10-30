@@ -60,6 +60,15 @@ describe("model lists without a chat message", () => {
     expect(c.sent.some((x) => x.type === "models.probe")).toBe(false);
   });
 
+  it("probes OpenCode when a Synthetic key is granted", async () => {
+    const c = (ctx = await setup());
+    c.connect();
+    await c.grant("SYNTHETIC_API_KEY");
+    await c.wait();
+    expect(c.sent.filter((x) => x.type === "models.probe")).toMatchObject([{ agentKind: "opencode" }]);
+    expect((await c.lists()).runner.opencode.models.map((m: { value: string }) => m.value)).toEqual(["default", "sonnet"]);
+  });
+
   it("probes after a credential is saved, and the refresh endpoint probes on demand", async () => {
     const c = (ctx = await setup());
     c.connect();

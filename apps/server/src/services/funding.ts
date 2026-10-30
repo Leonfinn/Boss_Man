@@ -6,14 +6,19 @@ import {
   forecastQuota,
   parseClaudeRateLimit,
   parseCodexRateLimits,
+  parseSyntheticQuota,
   type BudgetWindow,
   type QuotaSample,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agents, budgetPolicies, companies, costEvents, fundingSources, quotaSamples, runs } from "../db/schema.js";
+import { agents, budgetPolicies, companies, costEvents, fundingSources, quotaSamples, runs, secretGrants } from "../db/schema.js";
 
 type FundingRow = typeof fundingSources.$inferSelect;
 type PolicyRow = typeof budgetPolicies.$inferSelect;
+/** Used and limit for a provider's own quota endpoint; null used/limit means the reading is unknown. */
+export type ProviderQuota = { used: number | null; limit: number | null; renewsAt: string | null };
+
+type FundingDeps = { reveal?: (secretId: string) => Promise<string | null>; fetch?: typeof fetch };
 
 function toWindow(p: PolicyRow, source: FundingRow | undefined): BudgetWindow {
   switch (p.windowKind) {
@@ -29,7 +34,33 @@ function toWindow(p: PolicyRow, source: FundingRow | undefined): BudgetWindow {
   }
 }
 
-export function fundingService(db: Db) {
+export function fundingService(db: Db, deps: FundingDeps = {}) {
+  const http = deps.fetch ?? fetch;
+  const unknown: ProviderQuota = { used: null, limit: null, renewsAt: null };
+
+  async function fetchProviderQuota(source: FundingRow): Promise<ProviderQuota | null> {
+    if (source.provider !== "synthetic") return null;
+    // A failed or missing reading is unknown, never an error: it must not block a run.
+    if (!deps.reveal) return unknown;
+    try {
+      // A Synthetic source usually has no secret attached; the key is the one granted to the
+      // company as SYNTHETIC_API_KEY from Settings > Secrets.
+      const [granted] = source.secretId
+        ? [{ secretId: source.secretId }]
+        : await db.select({ secretId: secretGrants.secretId }).from(secretGrants).where(eq(secretGrants.envName, "SYNTHETIC_API_KEY"));
+      const key = granted ? await deps.reveal(granted.secretId) : null;
+      if (!key) return unknown;
+      // Synthetic's quota endpoint is free and doesn't count against the plan's limits.
+      const res = await http("https://api.synthetic.new/v2/quotas", { headers: { authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) return unknown;
+      const q = parseSyntheticQuota(await res.json());
+      return q ? { used: q.used, limit: q.limit, renewsAt: q.renewsAt?.toISOString() ?? null } : unknown;
+    } catch {
+      // Never log the request or the key: a quota failure only leaves the reading unknown.
+      return unknown;
+    }
+  }
+
   async function spendFor(where: SQL | undefined) {
     return db.select({ occurredAt: costEvents.occurredAt, costMicros: costEvents.costMicros }).from(costEvents).where(where);
   }
@@ -81,6 +112,8 @@ export function fundingService(db: Db) {
           ? creditStatus({ grantMicros: source.monthlyGrantMicros, anchor: source.cycleAnchor }, events, now)
           : null;
       const quota = source.kind === "subscription" ? await latestQuota(id) : [];
+      // Every window name the adapter has reported, so the owner can switch each one on or off (BOS-227).
+      const windowsSeen = source.kind === "subscription" ? [...new Set((await db.selectDistinct({ window: quotaSamples.window }).from(quotaSamples).where(eq(quotaSamples.fundingSourceId, id))).map((r) => r.window))].sort() : [];
       // When each window runs out at the recent rate (R78).
       const recent = quota.length ? await db.select().from(quotaSamples).where(and(eq(quotaSamples.fundingSourceId, id), gte(quotaSamples.observedAt, new Date(now.getTime() - 3 * 3_600_000)))) : [];
       const forecasts = Object.fromEntries(quota.map((q) => [q.window, forecastQuota(recent.filter((r) => r.window === q.window), now)]));
@@ -88,7 +121,10 @@ export function fundingService(db: Db) {
         source,
         credit,
         quota,
+        windowsSeen,
         forecasts,
+        /** Synthetic's own used/limit reading; null for other providers. */
+        providerQuota: await fetchProviderQuota(source),
         daily: await this.daily(id, now, timeZone),
         byCompany: await this.byCompany(id, now),
         totalSpentMicros: events.reduce((s, e) => s + e.costMicros, 0),

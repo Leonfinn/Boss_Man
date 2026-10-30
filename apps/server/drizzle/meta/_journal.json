@@ -554,6 +554,20 @@
       "when": 1793337292825,
       "tag": "0079_rare_wendell_vaughn",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1793337352825,
+      "tag": "0080_synthetic_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1793380000000,
+      "tag": "0081_quota_hold",
+      "breakpoints": true
     }
   ]
 }

@@ -685,6 +685,20 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </>
                     )}
                     {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
+                    {advice?.state === "advised" && (
+                      <div className="ceo-advice">
+                        <p style={{ fontWeight: 600 }}>The CEO's advice</p>
+                        {advice.what && <p>What it does: {advice.what}</p>}
+                        {advice.needed && <p>Does this ticket need it? {advice.needed}</p>}
+                        {advice.recommendation && (
+                          <p>
+                            <span className={`tag ${advice.recommendation === "allow" ? "green" : "red"}`}>{advice.recommendation === "allow" ? "Recommend Allow" : "Recommend Deny"}</span>{" "}
+                            {advice.why}
+                          </p>
+                        )}
+                        <p className="muted" style={{ fontSize: 13 }}>The card is still yours to answer.</p>
+                      </div>
+                    )}
                     {advice?.state === "replacement" && advice.replaces && <p className="muted">Written by the CEO to replace an earlier, unclear decision. <a href="#/decisions">The original is closed</a>; it is listed under "Settled or withdrawn by the team" with what it asked.</p>}
                     <p className="muted" style={{ fontSize: 13 }}>{why(d)}</p>
                     <div className="meta">
@@ -930,7 +944,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             </div>
                           </form>
                         )}
-                        {d.kind !== "permission" && d.context?.type !== "permission" && !asking && ownWords[d.id] === undefined && (
+                        {!asking && ownWords[d.id] === undefined && advice?.state !== "advised" && (
                           <details className="advice">
                             <summary>Not enough detail?</summary>
                             <div className="field">

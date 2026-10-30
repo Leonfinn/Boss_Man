@@ -276,6 +276,19 @@ describe("review card during a merge", () => {
     expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
   });
 
+  it("shows a merge started by the last reviewer, waiting for its check or the lock, with no approval buttons", async () => {
+    const startedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    // A reviewer's approval starts the merge; no command yet means it may be waiting for the shared lock.
+    stub(() => ({ state: "running", startedAt, command: null, startedBy: "Senior Developer (Senior Developer)" }));
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText(/Checking and merging\./)).toBeTruthy();
+    expect(screen.getByText(/Started by Senior Developer \(Senior Developer\) at/)).toBeTruthy();
+    expect(screen.getByText("checking and merging")).toBeTruthy();
+    expect(screen.queryByText("waiting for you")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
+  });
+
   it("turns the server's 'already being checked' refusal into a neutral notice and shows the check", async () => {
     let started = false;
     const startedAt = new Date().toISOString();

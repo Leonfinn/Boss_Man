@@ -12,11 +12,12 @@ afterEach(() => {
 const soon = new Date(Date.now() + 36 * 3_600_000).toISOString();
 const later = new Date(Date.now() + 96 * 3_600_000).toISOString();
 
-function stubApi(forecast: Record<string, unknown>) {
+function stubApi(forecast: Record<string, unknown>, overageInUse = false) {
   const status = {
     source: { id: "s1", name: "Claude Max", kind: "subscription", provider: "anthropic" },
     credit: null,
-    quota: [{ window: "seven_day_overage_included", utilization: 0.33, resetsAt: later, status: null, overageInUse: false }],
+    quota: [{ window: "seven_day_overage_included", utilization: 0.33, resetsAt: later, status: null, overageInUse }],
+    windowsSeen: ["seven_day_overage_included"],
     forecasts: { seven_day_overage_included: { utilization: 0.33, resetsAt: later, perHour: 0.02, ...forecast } },
     daily: [],
     totalSpentMicros: 0,
@@ -29,12 +30,13 @@ function stubApi(forecast: Record<string, unknown>) {
 }
 
 describe("quota card wording", () => {
-  it("labels the Fable limit and never shows a raw key", async () => {
+  it("labels the Fable limit and shows the raw key only in the hold switches", async () => {
     stubApi({ runsOutAt: soon, beforeReset: true });
     render(<Funding companies={[]} />);
     expect(await screen.findByText("Fable (this week)")).toBeTruthy();
     expect(screen.getByText(/Fable can use up to 50% of your weekly limit/)).toBeTruthy();
-    expect(screen.queryByText(/overage/i)).toBeNull();
+    // The owner sees the adapter's own name in the switches, so it is never a guess (BOS-227).
+    expect(screen.getByText("(seven_day_overage_included)")).toBeTruthy();
     const day = new Date(soon).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
     expect(screen.getByText(new RegExp(`Runs out about ${day} at `))).toBeTruthy();
     expect(screen.queryByText(/own allowance/)).toBeNull();
@@ -54,9 +56,50 @@ describe("quota card wording", () => {
     expect(screen.queryByText(/Runs out/)).toBeNull();
   });
 
+  it("names each window by its raw adapter name with its latest percentage, and says when credits are in use", async () => {
+    stubApi({ runsOutAt: later, beforeReset: false }, true);
+    render(<Funding companies={[]} />);
+    expect(await screen.findByText(/seven_day_overage_included/)).toBeTruthy();
+    expect(screen.getAllByText("33%").length).toBeGreaterThan(0);
+    expect(screen.getByText(/using usage credits/)).toBeTruthy();
+  });
+
   it("gives an unknown limit a readable fallback name", () => {
     expect(windowLabel("some_new_thing").name).toBe("Some new thing limit");
     expect(windowLabel("seven_day_opus").name).not.toBe(windowLabel("seven_day_sonnet").name);
     expect(windowLabel("90_min").name).toBe("90-minute window");
+  });
+});
+
+describe("Synthetic quota", () => {
+  const synthetic = (providerQuota: Record<string, unknown>) => {
+    const status = {
+      source: { id: "s2", name: "Synthetic", kind: "subscription", provider: "synthetic" },
+      credit: null,
+      quota: [],
+      forecasts: {},
+      providerQuota,
+      daily: [],
+      totalSpentMicros: 0,
+      coverage: "boss_man_runs_only",
+    };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const body = url.includes("/status") ? status : url.includes("funding-sources") ? [status.source] : [];
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    render(<Funding companies={[]} />);
+  };
+
+  it("shows requests used of the limit and when it renews", async () => {
+    synthetic({ used: 123, limit: 1000, renewsAt: later });
+    expect(await screen.findByText("123 of 1,000")).toBeTruthy();
+    const day = new Date(later).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    expect(screen.getByText(new RegExp(`Renews ${day}`))).toBeTruthy();
+  });
+
+  it("says the quota is unknown rather than showing an error", async () => {
+    synthetic({ used: null, limit: null, renewsAt: null });
+    expect(await screen.findByText(/Quota unknown/)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
