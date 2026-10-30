@@ -436,7 +436,7 @@ export const SKILL_OVERRIDE = "Add it anyway, against the advice";
  * decision stays open and answerable by the owner the whole time.
  */
 export type Advice = {
-  state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement";
+  state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement" | "advised";
   /** The owner's one-line "what's unclear". */
   note?: string;
   askedAt?: string;
@@ -450,6 +450,14 @@ export type Advice = {
   summary?: string;
   /** clarified: the first wording, before the CEO rewrote it. */
   originalQuestion?: string;
+  /** advised: what the command does, in plain words. */
+  what?: string;
+  /** advised: whether the ticket actually needs it, in plain words. */
+  needed?: string;
+  /** advised: the CEO's recommendation, shown on the card. */
+  recommendation?: "allow" | "deny";
+  /** advised: why the CEO recommends it. */
+  why?: string;
 };
 export const adviceOf = (context: unknown): Advice | undefined => (context as { advice?: Advice } | null)?.advice;
 export const ADVICE_DEFAULT_MINUTES = 120;
@@ -1412,7 +1420,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (!d) return null;
       // Pressing twice is harmless.
       if (adviceOf(d.context)?.state === "asking") return { id, advice: adviceOf(d.context)! };
-      if (d.kind === "permission") throw new AnswerError("A permission request holds a live run, so it can't be put to the CEO. Answer it, or deny it.");
       // The CEO proposed the skill on this card, so it must not get to reword the card the owner decides on (BOS-168).
       if (d.kind === "skill") throw new AnswerError("The CEO proposed this skill, so it can't rewrite this card. If something is unclear, ask the CEO about it in chat.");
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
@@ -1425,21 +1432,39 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .returning({ id: decisions.id });
       if (!claimed) return null;
       const ctx = d.context as DecisionContext;
-      const [held] = await db
+      const [dependency] = await db
         .select({ ticketId: tickets.id, title: tickets.title })
         .from(ticketDependencies)
         .innerJoin(tickets, eq(tickets.id, ticketDependencies.blockedTicketId))
         .where(eq(ticketDependencies.blockerDecisionId, id));
-      const lines = [
-        "The owner asked for your advice on a decision that arrived without enough detail. It stays open and the owner can still answer it.",
-        `Decision ${d.id}: ${d.question}`,
-        `Options: ${(d.options as string[]).join(" | ") || "none"} (recommended: ${d.recommendedOption})`,
-        ...(ctx.type === "question" && ctx.triedFirst ? [`What was tried first: ${ctx.triedFirst}`] : []),
-        ...(ctx.type === "question" && ctx.steps?.length ? [`Steps given: ${ctx.steps.join(" / ")}`] : []),
-        ...(held ? [`It holds up the ticket "${held.title}" (${held.ticketId}).`] : []),
-        note ? `What's unclear, in the owner's words: ${note}` : "The owner didn't say what is unclear.",
-        "Use the decisions tool, action advise. outcome reissue: post a clearer replacement (question, options, recommended, triedFirst, and numbered steps when the owner must act). outcome handled: only if the team can settle it without a secret, host step, sign-off or owner-only choice. If it needs the owner, use reissue: a plain question is replaced by a clearer one; any other kind is rewritten in place (new question, triedFirst, steps; options stay). Do this within the time limit or it returns to the owner as it was.",
-      ];
+      const permission = ctx.type === "permission" ? ctx : null;
+      const [run] = permission ? await db.select({ ticketId: runs.ticketId }).from(runs).where(eq(runs.id, permission.runId)) : [];
+      const ticketId = dependency?.ticketId ?? run?.ticketId ?? null;
+      const [held] = ticketId
+        ? await db.select({ ticketId: tickets.id, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId))
+        : [dependency];
+      const lines = permission
+        ? [
+            "The owner asked for your advice on a permission request. It stays open and the owner can still answer it.",
+            `Decision ${d.id}: ${d.question}`,
+            `Command: ${permission.explain?.command ?? "the request didn't include one"}`,
+            `Boss Man's plain reading: ${permission.explain?.summary ?? "Boss Man couldn't read this request"}`,
+            ...(permission.explain?.reason ? [`The agent says it is for: ${permission.explain.reason}`] : []),
+            `Options: ${(d.options as string[]).join(" | ") || "none"} (recommended: ${d.recommendedOption})`,
+            ...(held ? [`The ticket it belongs to: "${held.title}" (${held.ticketId}).`] : []),
+            note ? `What's unclear, in the owner's words: ${note}` : "The owner wants to know what the command does and whether to allow it.",
+            "Use the decisions tool, action advise, outcome advice: give what (what the command does, in plain words), needed (whether the ticket actually needs it), recommendation (allow or deny) and why (a short reason). The owner sees this on the card. If the card is genuinely yours to settle, you may instead use outcome handled with summary and answer, under the existing routing rules. Do this within the time limit or it returns to the owner as it was.",
+          ]
+        : [
+            "The owner asked for your advice on a decision that arrived without enough detail. It stays open and the owner can still answer it.",
+            `Decision ${d.id}: ${d.question}`,
+            `Options: ${(d.options as string[]).join(" | ") || "none"} (recommended: ${d.recommendedOption})`,
+            ...(ctx.type === "question" && ctx.triedFirst ? [`What was tried first: ${ctx.triedFirst}`] : []),
+            ...(ctx.type === "question" && ctx.steps?.length ? [`Steps given: ${ctx.steps.join(" / ")}`] : []),
+            ...(held ? [`It holds up the ticket "${held.title}" (${held.ticketId}).`] : []),
+            note ? `What's unclear, in the owner's words: ${note}` : "The owner didn't say what is unclear.",
+            "Use the decisions tool, action advise. outcome reissue: post a clearer replacement (question, options, recommended, triedFirst, and numbered steps when the owner must act). outcome handled: only if the team can settle it without a secret, host step, sign-off or owner-only choice. If it needs the owner, use reissue: a plain question is replaced by a clearer one; any other kind is rewritten in place (new question, triedFirst, steps; options stay). Do this within the time limit or it returns to the owner as it was.",
+          ];
       await wake({ agentId: ceo.id, reason: "decision", note: lines.join("\n").slice(0, 4000) });
       await record(db, { companyId: d.companyId, ticketId: held?.ticketId, kind: "decision_advice_asked", summary: `Owner asked the CEO for advice on "${d.question}"${note ? `: ${note}` : ""}`, at: now() });
       return { id, advice };
@@ -1450,7 +1475,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
      * blocked onto it and closes the original without an answer; "handled" settles it (never an owner-only kind).
      * Returns null when the owner answered first.
      */
-    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[] } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string }) {
+    async advise(input: { id: string; companyId: string; agentId: string | null; outcome: "reissue"; runId?: string; question: string; options: string[]; recommended: string; triedFirst: string; steps?: string[] } | { id: string; companyId: string; agentId: string | null; outcome: "handled"; runId?: string; summary: string; answer?: string } | { id: string; companyId: string; agentId: string | null; outcome: "advice"; runId?: string; what: string; needed: string; recommendation: "allow" | "deny"; why: string }) {
       const via = input.runId ? ` (CEO run ${input.runId})` : "";
       const [d] = await db.select().from(decisions).where(and(eq(decisions.id, input.id), eq(decisions.companyId, input.companyId)));
       if (!d) throw new AnswerError("No decision with that id.");
@@ -1458,7 +1483,26 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const advice = adviceOf(d.context);
       if (advice?.state !== "asking") throw new AnswerError(advice?.state === "timed_out" ? "The time ran out and the decision went back to the owner." : "The owner hasn't asked for advice on this decision.");
       const at = now().toISOString();
+      if (input.outcome === "advice") {
+        // Only a command the owner has been asked to allow makes sense here: the advice says what it does
+        // and whether to allow it, and stays on the card while the owner decides.
+        if (d.kind !== "permission" || (d.context as { type?: string }).type !== "permission") throw new AnswerError("Advice in these words is for a permission request. For other cards use reissue or handled.");
+        const what = input.what.trim();
+        const needed = input.needed.trim();
+        const why = input.why.trim();
+        if (what.length < 10 || needed.length < 5 || why.length < 10) throw new AnswerError("Say what the command does, whether the ticket needs it, and why, in short plain sentences.");
+        const [done] = await db
+          .update(decisions)
+          .set({ context: { ...(d.context as object), advice: { ...advice, state: "advised", at, what, needed, recommendation: input.recommendation, why } } })
+          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), sql`${decisions.context}->'advice'->>'state' = 'asking'`))
+          .returning({ id: decisions.id });
+        if (!done) return null;
+        const held = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
+        await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held[0]?.ticketId, kind: "decision_advised", summary: `CEO advised ${input.recommendation === "allow" ? "Allow" : "Deny"} on "${d.question}": ${why}${via}`, at: now() });
+        return { outcome: "advice" as const, id: d.id };
+      }
       if (input.outcome === "reissue") {
+        if (d.kind === "permission") throw new AnswerError("A permission request has its command and options already. Use outcome advice to tell the owner what it does and whether to allow it.");
         // The CEO proposed this skill, so it must not get to reword the card the owner decides on (BOS-168).
         if (d.kind === "skill") throw new AnswerError("The CEO proposed this skill, so it can't rewrite this card. If something is unclear, the owner can ask the CEO about it in chat.");
         const ctx = d.context as DecisionContext;
@@ -1506,7 +1550,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         return { outcome: "reissue" as const, id: newId, inPlace: false };
       }
       const raiser = d.raisedByAgentId ? (await db.select({ role: agents.role }).from(agents).where(eq(agents.id, d.raisedByAgentId)))[0] : undefined;
-      if (!ceoCanHandle(d, raiser?.role === "ceo" || d.raisedByAgentId === input.agentId)) throw new AnswerError("Only the owner can settle this one: only an agent's plain question can be handled by the CEO, never the CEO's own request, an approval, a permission, or anything with steps for the owner. Rewrite it with reissue instead, or leave it for the owner.");
+      // A permission request may be settled here only where the routing already lets the CEO settle it
+      // (a card at the CEO's tier with no owner-only hold). An owner-tier request stays the owner's.
+      const maySettlePermission = d.kind === "permission" && (d.context as { type?: string }).type === "permission" && ceoAnswerRefusal(d, input.answer) === null;
+      if (!maySettlePermission && !ceoCanHandle(d, raiser?.role === "ceo" || d.raisedByAgentId === input.agentId)) throw new AnswerError("Only the owner can settle this one: only an agent's plain question can be handled by the CEO, never the CEO's own request, an approval, a permission the routing leaves to the owner, or anything with steps for the owner. Rewrite it with reissue instead, or leave it for the owner.");
       const summary = input.summary.trim();
       const options = d.options as string[];
       let r;
