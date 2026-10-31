@@ -92,6 +92,11 @@ if command -v flock >/dev/null; then
   [ "$rc" = 75 ] || fail "busy slots: expected exit 75, got $rc: $out"
   grep -q "place 1 of 1" <<<"$out" || fail "busy slots: no place message: $out"
   grep -q "gave up" <<<"$out" || fail "busy slots: messages missing: $out"
+  # A leading zero in a stored duration or in a queue name is read as base 10, not octal (09 would abort the wait).
+  mkdir "$t/zstore"; echo '{"status":"pass","duration_seconds":09}' >"$t/zstore/a.json"
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2 BOSSMAN_CHECK_STORE="$t/zstore") || rc=$?
+  [ "$rc" = 75 ] || fail "leading zero: expected exit 75, got $rc: $out"
+  grep -q "about 1 min" <<<"$out" || fail "leading zero: no estimate: $out"
   [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "gave-up check left its queue entry"
   kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
 

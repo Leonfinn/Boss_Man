@@ -101,10 +101,11 @@ if command -v flock >/dev/null; then
   }
   # Prints "<my place> <checks waiting>", dropping queue entries whose process is gone.
   queue_place() {
-    local f mine=0 total=0
+    local f pid mine=0 total=0
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
-      if ! kill -0 "${f##*-}" 2>/dev/null; then rm -f "$f"; continue; fi
+      pid=${f##*-}
+      if ! [[ $pid =~ ^[0-9]+$ ]] || ! kill -0 "$((10#$pid))" 2>/dev/null; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
     done
     echo "$mine $total"
@@ -116,7 +117,7 @@ if command -v flock >/dev/null; then
       while read -r f; do
         grep -q '"status":"pass"' "$f" || continue
         d=$(sed -n 's/.*"duration_seconds":\([0-9]*\).*/\1/p' "$f")
-        if [ -n "$d" ] && [ "$d" -gt 0 ]; then sum=$((sum + d)); n=$((n + 1)); fi
+        if [ -n "$d" ] && [ "$((10#$d))" -gt 0 ]; then sum=$((sum + 10#$d)); n=$((n + 1)); fi
       done < <(find "$BOSSMAN_CHECK_STORE" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' | sort -rn | head -n 10 | cut -d' ' -f2-)
     fi
     if [ "$n" -gt 0 ]; then echo $((sum / n)); else echo 600; fi
