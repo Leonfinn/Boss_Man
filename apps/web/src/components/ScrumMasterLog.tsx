@@ -139,21 +139,16 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded }: { compa
     // On a ticket's own page: a folded heading with a summary, the last 3 actions one line each (newest first), and each line opens to its full text. An open issue is never hidden.
     const issues = groups.filter((g) => g.issueKey);
     // What one line stands for: a warning's whole journey (it opens to every row), or a single action.
-    const shown = issues.length
-      ? [...issues.slice(3).filter((g) => g.status === "open"), ...issues.slice(0, 3)]
-      : groups.slice(0, 3);
-    const hidden = issues.length
-      ? issues.slice(3).filter((g) => g.status !== "open").reduce((n, g) => n + g.rows.length, 0) + issues.slice(0, 3).reduce((n, g) => n + Math.max(0, g.rows.length - 1), 0)
-      : groups.length - 3;
+    // Newest first as the feed comes; the last 3 are the newest 3, and any older open issue is kept on top of them.
+    const last3 = groups.slice(0, 3);
+    const olderOpen = groups.slice(3).filter((g) => g.status === "open");
+    const shown = rows.length && issues.length ? [...olderOpen, ...last3] : last3;
     const total = groups.reduce((n, g) => n + (g.issueKey ? g.rows.length : 1), 0);
-    const time = (iso: string) => (
-      <span className="label" style={{ flex: "none" }}>
-        {actionTime(iso)}
-      </span>
-    );
     const line = (g: (typeof groups)[number]) => (
       <>
-        {time(g.rows[0]!.createdAt)}
+        <span className="label" style={{ flex: "none" }}>
+          {actionTime(g.rows[0]!.createdAt)}
+        </span>
         {g.issueKey && <span className={`tag ${g.status === "open" ? "green" : "grey"}`}>{g.status === "open" ? "Open" : "Settled"}</span>}
         <span style={{ minWidth: 0 }}>
           {actionSummary(g.rows[0]!)}: {g.rows[0]!.reason}
@@ -169,16 +164,16 @@ export function ScrumMasterLog({ companyId, ticketId, heading, folded }: { compa
         </button>
         {error && <p role="alert" className="error">{error}</p>}
         {!log.data ? <p className="muted">Loading…</p> : !rows.length ? <p className="muted">Nothing yet. The Scrum Master's actions appear here with the reason for each.</p> : null}
-        <ul style={{ margin: 0, listStyle: "none", paddingLeft: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
+        <ul style={{ margin: 0, listStyle: "none", padding: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 14 }}>
           {(all ? groups : shown).map((g) => (
             <li key={g.key}>
               <details open={all || undefined}>
-                <summary style={{ cursor: "pointer", display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>{line(g)}</summary>
+                <summary style={{ cursor: "pointer", display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", minWidth: 0 }}>{line(g)}</summary>
                 <ul style={{ listStyle: "none", paddingLeft: 18, margin: 0 }}>{g.rows.map(row)}</ul>
               </details>
             </li>
           ))}
-          {!all && hidden > 0 && (
+          {!all && groups.length > 3 && (
             <li>
               <button type="button" className="link" onClick={() => setAll(true)}>
                 Show all {total} actions
