@@ -5,6 +5,9 @@
 #
 #   proxy         Caddy. Owns the host ports (UI and portal) and the network name "server", so runners keep dialling
 #                 ws://server:3100 and reach whichever colour is live. Has no docker.sock and no launcher network.
+#   front         a private network (internal) shared by the proxy and the two colours only. The proxy has a fixed address on it
+#                 (BOSSMAN_FRONT_PROXY_IP) and reaches the live colour there as server-<colour>-front, a name that
+#                 resolves on this network alone. The colours trust forwarded headers from that one address and nobody else.
 #   server-blue / server-green   the same image built twice (tags boss-man-server:blue / :green). One leads; the other
 #                 is a standby. The host deployer builds the idle one, hands over and flips the proxy.
 #   migrate       one-shot `node dist/migrate.js`, run by the deployer before the idle colour starts.
@@ -50,6 +53,8 @@ x-server-env: &server-env
   BOSSMAN_DEPLOYER_DIR: /run/deployer
   # The deployer runs the migrations (the migrate service) before a colour starts; a server only checks.
   BOSSMAN_MIGRATE_ON_START: "0"
+  # Forwarded headers are believed from the proxy's fixed address on the private "front" network, and from nobody else.
+  BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_FRONT_PROXY_IP:-172.30.0.18}
 
 services:
   # Parked: the proxy took its name and ports. `--profile single-server` would bring it back, which is not a supported mix.
@@ -60,6 +65,11 @@ services:
   server-blue:
     <<: *server
     image: boss-man-server:blue
+    networks:
+      default:
+      launcher:
+      front:
+        aliases: [server-blue-front]
     environment:
       <<: *server-env
       BOSSMAN_COLOUR: blue
@@ -69,6 +79,11 @@ services:
   server-green:
     <<: *server
     image: boss-man-server:green
+    networks:
+      default:
+      launcher:
+      front:
+        aliases: [server-green-front]
     environment:
       <<: *server-env
       BOSSMAN_COLOUR: green
@@ -94,6 +109,8 @@ services:
     networks:
       default:
         aliases: [server]
+      front:
+        ipv4_address: ${BOSSMAN_FRONT_PROXY_IP:-172.30.0.18}
     ports:
       # Same variables as the single server: UI on BOSSMAN_HOST_PORT, portal on BOSSMAN_PORTAL_HOST_PORT.
       - "${BOSSMAN_BIND:-127.0.0.1}:${BOSSMAN_HOST_PORT:-3100}:3100"
@@ -122,3 +139,13 @@ services:
 
   runner-app-co:
     depends_on: !override [proxy]
+
+networks:
+  # Proxy and the two colours only: no runners, no Tailscale, no internet. Fixed proxy address, colours from the range.
+  # If the default subnets clash with something on the host ("Pool overlaps"), set the three BOSSMAN_FRONT_* variables.
+  front:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${BOSSMAN_FRONT_SUBNET:-172.30.0.16/28}
+          ip_range: ${BOSSMAN_FRONT_RANGE:-172.30.0.24/29}
