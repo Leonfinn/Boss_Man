@@ -24,11 +24,11 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-type Answers = { verify?: unknown; merge?: unknown; diff?: unknown };
+type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; migrations?: unknown };
 
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
-  const answers: Answers = { merge: { status: "merged", commit: "c".repeat(40) }, ...opts.answers };
+  const answers: Answers = { merge: { status: "merged", commit: "c".repeat(40) }, migrations: { needed: false, reason: "No other branch uses this ticket's migration numbers." }, ...opts.answers };
   const { db, close } = await openPglite();
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws" });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
@@ -51,6 +51,7 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
         else queueMicrotask(reply);
       }
       if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
+      if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.migrations }));
       return true;
     });
   }
@@ -231,6 +232,29 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(c.sent.find((x) => x.type === "workspace.verify")).toMatchObject({ command: "pnpm test" });
     expect(c.sent.find((x) => x.type === "workspace.merge")).toMatchObject({ target: "develop", message: `Merge "Add rate limiting" (${c.ticket.id})` });
     expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
+  });
+
+  it("sends a ticket back when a migration number is already taken, and never merges it (BOS-219)", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 }, migrations: { needed: true, number: 75, next: 76, why: ["0075_mine shares its number with 0075_theirs on another branch"], others: [] } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", defaultBranch: "develop" });
+    expect((await approve(c)).json()).toMatchObject({ outcome: "verify_failed" });
+    expect(c.sent.some((x) => x.type === "workspace.merge")).toBe(false);
+    expect(await state(c)).toMatchObject({ systemState: "in_progress", mergeCommit: null });
+    const [w] = await c.db.select().from(wakes);
+    expect(w).toMatchObject({ reason: "migration number taken", agentId: c.worker.id });
+    expect(w!.note).toContain("0075_mine");
+    expect(w!.note).toContain("0076");
+    expect(c.sent.find((x) => x.type === "workspace.migrations")).toMatchObject({ type: "workspace.migrations", target: "develop" });
+  });
+
+  it("checking at merge time compares against the default branch only, so two clashing tickets don't keep sending each other back (BOS-219)", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", defaultBranch: "develop" });
+    // Another open ticket on the same project picked the same number. It must not be looked at here.
+    const open = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Another migration", assigneeAgentId: c.worker.id, state: "in_progress" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${open.id}` }).where(eq(tickets.id, open.id));
+    expect((await approve(c)).json()).toMatchObject({ outcome: "merged" });
+    expect(c.sent.find((x) => x.type === "workspace.migrations")).toMatchObject({ type: "workspace.migrations", target: "develop", others: [] });
   });
 
   it("closes a ticket that changed nothing in the repository, without running the check or merging", async () => {
