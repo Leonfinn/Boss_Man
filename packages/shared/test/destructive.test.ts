@@ -152,6 +152,13 @@ describe("destructive commands, however they're written (BOS-116)", () => {
     "git clean -fdx",
     "git push origin +main",
     "git push --force-with-lease",
+    "git clean --forc -d",
+    "git clean --f",
+    "git push --del origin x",
+    "git push --forc origin x",
+    "git push --force-w origin x",
+    "git push --mir origin",
+    "git push --pru origin",
     "git -C /x -c alias.y='!rm -rf /x' y",
     "dd if=/dev/zero of=/x",
     "mkfs.ext4 /dev/sda1",
@@ -296,6 +303,7 @@ describe("destructive commands, however they're written (BOS-116)", () => {
       'docker run "$IMG"',
       "docker ps -a",
       "git clean -n",
+      "git clean --dry-run -d",
       "awk '{print $1}' x",
     ]) {
       expect(commandRisks(c), c).toEqual([]);

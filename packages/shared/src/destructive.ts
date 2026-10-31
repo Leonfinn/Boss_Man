@@ -558,10 +558,15 @@ export function commandRisks(command: string | string[]): Risk[] {
           const opts = rest.slice(1).map((a) => a.text);
           // Also a refspec: git push origin "$b" with b=+main force-pushes.
           const unknownOpt = rest.slice(1).some(mayBeOption);
+          // Like GNU rm, git accepts any start of a long option: --forc is --force, --del is --delete.
+          const longOf = (o: string, names: string[]) => {
+            const long = /^--([^=]+)/.exec(o)?.[1];
+            return !!long && names.some((n) => n.startsWith(long));
+          };
           if (sub === "push") {
             add("pushes", "pushes to a remote (git push)", all, plain);
-            if (unknownOpt || opts.some((o) => /^-[a-zA-Z]*[fd]|^--(force|mirror|delete|prune)|^[+:]/.test(o))) destroys("overwrites or deletes on the remote (git push --force/--delete)");
-          } else if (sub === "clean" && (unknownOpt || opts.some((o) => /^-[a-zA-Z]*f|^--force$/.test(o)))) destroys("deletes untracked files (git clean -f)");
+            if (unknownOpt || opts.some((o) => /^-[a-zA-Z]*[fd]|^[+:]/.test(o) || longOf(o, ["force", "force-with-lease", "force-if-includes", "mirror", "delete", "prune"]))) destroys("overwrites or deletes on the remote (git push --force/--delete)");
+          } else if (sub === "clean" && (unknownOpt || opts.some((o) => /^-[a-zA-Z]*f/.test(o) || longOf(o, ["force"])))) destroys("deletes untracked files (git clean -f)");
           return;
         }
         if (prog === "docker" || prog === "podman") {
