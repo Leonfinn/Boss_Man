@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { systemAuthor } from "@boss-man/shared";
 import { api, type Agent } from "../api";
-import { usePoll } from "../hooks";
+import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
 import { ImagePreviews, useImageAttach, withImage } from "./ImageAttach";
 import { outcomeTag, when } from "../pages/Runs";
@@ -157,12 +157,30 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
       setNote({ ok: false, text: (err as Error).message });
     }
   };
+  // A phone keyboard has no Shift, so there Return adds a line and Send sends.
+  const coarse = useCoarsePointer();
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (coarse) return;
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       void send();
     }
   };
+  const placeholder = coarse
+    ? other
+      ? `Ask ${other.name} about this task.`
+      : live
+        ? `Message ${live.agent ?? "the agent"} while it works.`
+        : assignee
+          ? `Message ${assignee}`
+          : "Write a note. Assign the task to have an agent pick it up."
+    : other
+      ? `Ask ${other.name} about this task. ${working ? `${working} carries on undisturbed.` : ""}`.trim()
+      : live
+        ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.`
+        : assignee
+          ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.`
+          : "Write a note. Assign the task to have an agent pick it up.";
 
   return (
     <section className="card activity" aria-labelledby="activity-h">
@@ -223,7 +241,8 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           id="activity-text"
           rows={2}
           maxLength={4000}
-          placeholder={other ? `Ask ${other.name} about this task. ${working ? `${working} carries on undisturbed.` : ""}`.trim() : live ? `Message ${live.agent ?? "the agent"} while it works. Enter sends after its current step.` : assignee ? `Message ${assignee}. Enter sends, Shift+Enter adds a line.` : "Write a note. Assign the task to have an agent pick it up."}
+          enterKeyHint={NEWLINE_KEY_HINT}
+          placeholder={placeholder}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}

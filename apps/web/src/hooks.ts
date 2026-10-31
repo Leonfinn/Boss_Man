@@ -14,6 +14,31 @@ export function useRoute(): [string[], (to: string) => void] {
 }
 
 /**
+ * What a phone keyboard's Return key should do. `newline` is in the HTML spec but React's types
+ * are behind it, so the cast keeps the intent readable (BOS-245).
+ */
+export const NEWLINE_KEY_HINT = "newline" as "enter";
+
+/**
+ * True on a phone, where the on-screen keyboard has no Shift (BOS-245): Return should add a line
+ * and the Send button should send. A tablet or a touch laptop is wider than this and keeps
+ * Enter-to-send, like the desktop.
+ */
+export function useCoarsePointer(): boolean {
+  const query = "(pointer: coarse) and (max-width: 640px)";
+  const read = () => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(query).matches;
+  const [coarse, setCoarse] = useState(read);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(query);
+    const on = () => setCoarse(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return coarse;
+}
+
+/**
  * Loads data now and again every `everyMs`, plus whenever the tab comes back into view.
  * The browser only ever reads: all autonomy runs on the server (R43), so a slow or closed
  * tab can't hold an agent up.
