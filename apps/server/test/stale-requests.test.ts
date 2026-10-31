@@ -8,6 +8,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { decisions, ticketDependencies, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { STALE_REASON } from "../src/services/stale-requests.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -63,7 +64,7 @@ describe("stale requests (BOS-123)", () => {
     const [ticketRow] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
     expect(ticketRow!.stateNoteStaleAt).toBeInstanceOf(Date);
 
-    const stale = (await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "stale request"))));
+    const stale = (await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, STALE_REASON))));
     expect(stale).toHaveLength(1);
     expect(stale[0]!.note).toMatch(/out of date/i);
   });
@@ -105,8 +106,38 @@ describe("stale requests (BOS-123)", () => {
     expect(waiter!.stateNoteStaleAt).toBeInstanceOf(Date);
     const [after] = await c.db.select().from(decisions).where(eq(decisions.id, card.id));
     expect(after!.staleAt).toBeInstanceOf(Date);
-    const stale = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, "stale request")));
+    const stale = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, STALE_REASON)));
     expect(stale.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("wakes only the agent whose own card or note could be out of date, not every agent downstream (BOS-254)", async () => {
+    const c = (ctx = await setup());
+    // The alert is about a card George raised on BOS-239; BOS-249 waits on BOS-239 and belongs to Bungle.
+    const blocker = await c.ticket("Funding layout base", c.worker.id);
+    const downstream = await c.ticket("Funding layout", c.other.id);
+    await c.work.addDependency(downstream.id, { ticketId: blocker.id });
+    const card = await c.decisions.raise({ companyId: c.company.id, agentId: c.worker.id, question: "Should the base ship first?", options: ["Yes", "No"], recommended: "Yes", blocksTicketId: blocker.id, triedFirst: "Read both tickets" });
+
+    await c.decisions.answer(card.id, "Yes");
+
+    // Bungle (other) is downstream with no card about this. The old code woke it too, for no reason:
+    // being listed downstream is not a stale card. It is not woken now; only an agent whose own
+    // card could be out of date is, and the card's author is skipped.
+    const stale = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.other.id), eq(wakes.reason, STALE_REASON)));
+    expect(stale).toEqual([]);
+    // The downstream ticket still shows its blocker; it is just not woken for it.
+    const [down] = await c.db.select().from(tickets).where(eq(tickets.id, downstream.id));
+    expect(down!.systemState).not.toBe("in_progress");
+  });
+
+  it("tells a woken agent to end the run when nothing of theirs is affected", async () => {
+    const c = (ctx = await setup());
+    const t = await c.ticket("Fix the footer", c.worker.id);
+    await c.work.updateTicket(t.id, { stateNote: "Waiting on the owner to pick a colour." });
+    const card = await c.decisions.raise({ companyId: c.company.id, agentId: c.other.id, question: "Which colour?", options: ["Blue", "Navy"], recommended: "Blue", blocksTicketId: t.id, triedFirst: "Checked the brand guide" });
+    await c.decisions.answer(card.id, "Blue");
+    const [stale] = await c.db.select().from(wakes).where(and(eq(wakes.agentId, c.worker.id), eq(wakes.reason, STALE_REASON)));
+    expect(stale!.note).toMatch(/If nothing of yours is affected, end the run/i);
   });
 
   it("stateNoteLine says a note may be out of date when the owner acted after it", () => {

@@ -8,6 +8,9 @@ import { decisions, deploys, runs, ticketDependencies, ticketMessages, tickets }
 
 type DecisionRow = typeof decisions.$inferSelect;
 
+/** Why a stale-request wake starts a run (BOS-254): plain words, not "stale request". */
+export const STALE_REASON = "checking an old card";
+
 /** Wakes an agent; the scheduler's notify matches this shape. */
 export type WakeFn = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => Promise<unknown>;
 
@@ -87,11 +90,17 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   const flaggedDecisions = flagged.map((d) => d.id);
   if (flaggedDecisions.length) await db.update(decisions).set({ staleAt: now, staleReason: input.reason }).where(inArray(decisions.id, flaggedDecisions));
 
-  // One wake per agent, naming what changed and what to do about it.
+  // One wake per agent, naming what changed and what to do about it. Only an agent that actually
+  // holds a card or a state note the answer could have made out of date is woken (BOS-254): a
+  // ticket that merely waits on one in scope is flagged for its own note, but its assignee is not
+  // woken just for the wait, and a ticket with no note has nobody to wake.
   const skip = new Set(input.skipAgents?.filter((id): id is string => !!id) ?? []);
   // not state: built per call and thrown away.
   const targets = new Map<string, { ticketId: string | null }>();
   for (const d of flagged) if (d.raisedByAgentId && !skip.has(d.raisedByAgentId) && !targets.has(d.raisedByAgentId)) targets.set(d.raisedByAgentId, { ticketId: null });
+  // Woken only for a note or card of their own: `noted` is every flagged note (a dependent's own
+  // "waiting on it" note counts, it is really out of date), and `flagged` is every open card about
+  // anything in scope. Nobody is woken just for a ticket being listed downstream.
   for (const n of noted) if (n.assigneeAgentId && !skip.has(n.assigneeAgentId) && !targets.has(n.assigneeAgentId)) targets.set(n.assigneeAgentId, { ticketId: n.id });
   const woken: string[] = [];
   if (input.wake) {
@@ -99,11 +108,12 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
       const w = await input.wake({
         agentId,
         ticketId: target.ticketId,
-        reason: "stale request",
+        reason: STALE_REASON,
         note: [
           `The owner acted (${input.reason}), so a decision card or the state note you left may now be out of date.`,
           "Check the live state before you repeat anything to them: their latest answers, what's deployed, and whether the tickets involved are done.",
-          "If what you asked for is done, take the card back (a question card you raised can be withdrawn with withdraw_decision) and update the ticket's state note in this run. If it still needs them, say so plainly and don't repeat an old \"waiting on you\" note.",
+          "If what you asked for is done, take the card back (a question card you raised can be withdrawn with withdraw_decision) and update the ticket's state note in this run.",
+          "If nothing of yours is affected, end the run.",
         ].join("\n"),
       });
       if (!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped")) continue;

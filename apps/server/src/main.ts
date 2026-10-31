@@ -19,7 +19,7 @@ const leader = createLeader({
   log: (m) => console.warn(m),
 });
 
-const { app, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners } = await buildApp({
+const { app, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
@@ -62,6 +62,8 @@ const bg = createBackground(
     // What each runner's add-ons say about their health (docs/12).
     { name: "add-on check", everyMs: Number(env.BOSSMAN_ADDON_CHECK_MS ?? 30 * 60_000), run: () => runners.checkAllAddons() },
     { name: "drain step", everyMs: Number(env.BOSSMAN_DRAIN_MS ?? 5000), run: () => maintenance.step() },
+    // Synthetic's quota, cached and read at most every 5 minutes; warns the owner once per period at 80% and 100% (BOS-239).
+    { name: "synthetic quota", everyMs: Number(env.BOSSMAN_SYNTHETIC_QUOTA_MS ?? 5 * 60_000), run: () => refreshSyntheticQuota() },
   ],
   (err, name) => app.log.error({ err }, `${name} failed`),
 );

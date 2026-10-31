@@ -39,6 +39,25 @@ export function whyRun(r: RunRow) {
 }
 
 /**
+ * A run with no ticket: if it has since picked one up a run that found real work sets it (BOS-254),
+ * that ticket is the headline with the wake reason underneath. With no ticket it is the shared label.
+ */
+function WorkOrWhy({ run }: { run: RunRow }) {
+  if (run.ticketId) {
+    return (
+      <>
+        <a href={`#/tickets/${run.ticketId}`}>{run.ticket ?? "its ticket"}</a>
+        {run.ticket && run.runTicketRef ? <span className="muted"> · {run.runTicketRef}</span> : null}
+        <div className="muted" style={{ fontSize: 13 }}>
+          {whyRun(run) ? `woken by: ${whyRun(run)}` : ""}
+        </div>
+      </>
+    );
+  }
+  return <RunLabelLink run={run} />;
+}
+
+/**
  * What a run without a ticket was doing: the shared label, linking the run it started and the
  * ticket it was about when one was named (BOS-118).
  */
@@ -108,10 +127,18 @@ function RunTable({ rows, companies, finished }: { rows: RunRow[]; companies: Co
                 <span className="muted"> · {companies.find((c) => c.id === r.companyId)?.name}</span>
               </td>
               <td>
-                {r.ticket && r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : null}
-                <div className="muted" style={{ fontSize: 13 }}>
-                  {r.ticketId ? whyRun(r) : <RunLabelLink run={r} />}
-                </div>
+                {r.ticketId ? (
+                  // What the run is really on comes first; why it was woken is the smaller line under it (BOS-254).
+                  <>
+                    <a href={`#/tickets/${r.ticketId}`}>{r.ticket ?? "its ticket"}</a>
+                    {r.ticket && r.runTicketRef ? <span className="muted"> · {r.runTicketRef}</span> : null}
+                    <div className="muted" style={{ fontSize: 13 }}>
+                      {whyRun(r) ? `woken by: ${whyRun(r)}` : ""}
+                    </div>
+                  </>
+                ) : (
+                  <WorkOrWhy run={r} />
+                )}
               </td>
               <td className="mono">{r.model ?? "default"}</td>
               <td>{outcomeTag(finished ? r.outcome : null)}</td>

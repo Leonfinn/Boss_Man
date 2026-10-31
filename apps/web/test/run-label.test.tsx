@@ -89,7 +89,15 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     for (const link of screen.getAllByText("its ticket")) expect(link.getAttribute("href")).toBe("#/tickets/t-9");
   });
 
-  it("escapes a nudge's reason, which an agent wrote", async () => {
+  it("shows the ticket a run is on as the headline, with why it was woken as a smaller line (BOS-254)", async () => {
+    stub(dashboard(run()), [run({ ticketId: "t-1", ticket: "Funding layout", reason: "checking an old card", startedAt: new Date().toISOString(), endedAt: null, outcome: null })]);
+    render(<Runs companies={companies} />);
+    const ticketLinks = await screen.findAllByText("Funding layout");
+    for (const link of ticketLinks) expect(link.closest("a")!.getAttribute("href")).toBe("#/tickets/t-1");
+    for (const detail of screen.getAllByText(/woken by: Checking an old card/)) expect(detail).toBeTruthy();
+  });
+
+  it("escapes a nudge.s reason, which an agent wrote", async () => {
     stub(dashboard(run({ origin: "nudge", originFrom: "CEO", originNote: "<img src=x onerror=alert(1)> ok" })), []);
     const { container } = render(<Dashboard company={companies[0]} />);
     await screen.findByText("Nudged by CEO: <img src=x onerror=alert(1)> ok");

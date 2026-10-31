@@ -189,7 +189,7 @@ export async function buildApp(opts: AppOptions) {
   await app.register(websocket);
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
-  const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch });
+  const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
   const notesSvc = notesService(db);
   const agentsSvc = agentsService(db, {
@@ -309,6 +309,8 @@ export async function buildApp(opts: AppOptions) {
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
     errors: errorBuffer,
+    // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
+    syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     commit: process.env.BOSSMAN_COMMIT || "dev",
     startedAt: new Date(STARTED_AT),
     now: opts.now,
@@ -364,6 +366,14 @@ export async function buildApp(opts: AppOptions) {
       });
     }
   }
+  // Synthetic's own quota is cached on the server and read again at most every 5 minutes (BOS-239).
+  // Every run end asks for a refresh, whatever the agent's provider: it is cheap because the reading
+  // is served from the cache inside the 5-minute window, and a Synthetic run is the case that moved
+  // the plan's counter. It warns the owner once per period at 80% and 100%.
+  async function refreshSyntheticQuota() {
+    const ownerTz = (await notes.getSettings()).quietHours?.timeZone ?? OWNER_TZ;
+    await funding.refreshSynthetic((n) => notes.notify({ companyId: null, agentId: null, ...n }), ownerTz);
+  }
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
     if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
@@ -400,6 +410,9 @@ export async function buildApp(opts: AppOptions) {
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
         .then(() => scheduler.tick())
         .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
+      // A run ended; ask for a quota refresh. Any provider ends here, but the reading is cached for
+      // 5 minutes so only a refresh after a Synthetic run actually calls Synthetic (BOS-239).
+      void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
   });
   const sweeps = sweepService(db, {
@@ -492,7 +505,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -1320,12 +1333,18 @@ export async function buildApp(opts: AppOptions) {
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
-      const [held] = await db
-        .select({ until: wakes.notBefore, reason: wakes.statusReason })
-        .from(wakes)
-        .where(and(eq(wakes.ticketId, id), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
-        .limit(1);
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null };
+      // The ticket's own held wake, or, when its wake was merged into another ticket's, the one
+      // its assignee is held by (BOS-253): the page still offers Run now and says why it's held.
+      const heldBy = (own: boolean) =>
+        db
+          .select({ until: wakes.notBefore, reason: wakes.statusReason })
+          .from(wakes)
+          .where(and(own ? eq(wakes.ticketId, id) : eq(wakes.agentId, row.t.assigneeAgentId!), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+          .limit(1);
+      let [held] = await heldBy(true);
+      const heldByAgent = !held;
+      if (!held && row.t.assigneeAgentId) [held] = await heldBy(false);
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1654,13 +1673,27 @@ export async function buildApp(opts: AppOptions) {
     // A held wake can be run now: it gets high priority, which passes the quota hold, and starts on the next pass.
     owner.post("/api/tickets/:id/run-now", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, id));
+      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title, assigneeAgentId: tickets.assigneeAgentId, systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
       if (!t) return reply.code(404).send({ error: "not_found" });
+      const release = { status: "queued" as const, statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` };
       const released = await db
         .update(wakes)
-        .set({ status: "queued", statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` })
+        .set(release)
         .where(and(eq(wakes.ticketId, id), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
         .returning({ id: wakes.id });
+      // The ticket's wake can be merged into another of its assignee's held wakes (BOS-253): with
+      // none of its own, give it one now, so Run now starts this ticket rather than that other work.
+      const canStart = t.assigneeAgentId && (t.systemState === "ready" || t.systemState === "in_progress");
+      if (!released.length && canStart) {
+        const [waiting] = await db
+          .select({ id: wakes.id, priority: wakes.priority })
+          .from(wakes)
+          .where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
+          .limit(1);
+        if (waiting) await db.update(wakes).set(release).where(eq(wakes.id, waiting.id));
+        else await scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: id, reason: "woken by owner", priority: DEFAULT_LIMITS.highPriority, note: "The owner ran this ticket now, past the quota hold." });
+        released.push({ id: waiting?.id ?? id });
+      }
       if (released.length) await scheduler.tick();
       await record(db, { companyId: t.companyId, ticketId: id, kind: "quota", summary: `Owner ran it now past the quota hold (${released.length} wake${released.length === 1 ? "" : "s"})`, at: new Date() });
       return { released: released.length };
@@ -2299,5 +2332,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }

@@ -59,7 +59,7 @@ describe("Synthetic provider QA (BOS-226)", () => {
       const src = await syntheticSource(c);
       const res = await c.req("GET", `/api/funding-sources/${src.id}/status`);
       expect(res.statusCode).toBe(200);
-      expect(res.json().providerQuota).toEqual(UNKNOWN);
+      expect(res.json().providerQuota).toMatchObject(UNKNOWN);
       expect(res.body).not.toContain(KEY);
       await c.app.close();
       await c.close();
@@ -102,8 +102,10 @@ describe("migration 0080 (synthetic provider)", () => {
     cpSync(migrationsFolder, old, { recursive: true });
     const jp = path.join(old, "meta/_journal.json");
     const journal = JSON.parse(readFileSync(jp, "utf8")) as { entries: Array<{ tag: string }> };
-    expect(journal.entries.at(-1)!.tag).toBe("0080_synthetic_provider");
-    journal.entries.pop();
+    // Roll back to just before 0080, dropping it and any migration that landed after it.
+    const at = journal.entries.findIndex((e) => e.tag === "0080_synthetic_provider");
+    expect(at).toBeGreaterThan(0);
+    journal.entries.splice(at);
     writeFileSync(jp, JSON.stringify(journal));
     const client = new PGlite({ extensions: { vector } });
     const db = drizzle(client);

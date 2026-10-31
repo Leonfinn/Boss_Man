@@ -429,7 +429,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         <div className="card" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
             <strong>Routine work is held until {when(t.quotaHeldUntil)}.</strong>{" "}
-            <span className="muted">{t.quotaHeldReason ? `${windowLabel(t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")).name} is nearly used up. ` : ""}You can run this one now, or mark it urgent so it always runs through the hold.</span>
+            <span className="muted">
+              {t.quotaHeldReason ? `${windowLabel(t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")).name} is nearly used up. ` : ""}
+              {t.quotaHeldAgent ? "This ticket is ready but its agent is held by other work. " : ""}You can run this one now, or mark it urgent so it always runs through the hold.
+            </span>
           </span>
           <button type="button" className="btn primary" disabled={busy} onClick={() => void runNow()}>
             Run now

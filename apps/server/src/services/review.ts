@@ -512,7 +512,7 @@ export function reviewService(
     /** Moves the ticket back to in progress and gives the agent the review. */
     async sendBack(ticketId: string, text: string, reviewer: string, causedByRunId?: string | null) {
       const { t } = await ticketWithRepo(ticketId);
-      await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
+      await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true, internal: true });
       return tellAgent({ ...t, systemState: "in_progress" }, text, "review", causedByRunId);
     },
 
@@ -596,7 +596,7 @@ export function reviewService(
         }
       };
       const sendBack = async (text: string, reason: string) => {
-        await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
+        await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true, internal: true });
         return tellAgent({ ...t, systemState: "in_progress" }, text, reason, causedByRunId);
       };
       // Checks can run for half an hour and merges can queue behind other work: keep saying the ticket
@@ -726,7 +726,7 @@ export function reviewService(
       await db.update(tickets).set({ pullRequestCi: key }).where(eq(tickets.id, ticketId));
       await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: "ci", passed: c.state === "passed", detail: c.state === "failed" ? c.failing.join(", ") || null : null });
       if (c.state === "failed" && t.assigneeAgentId) {
-        await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true });
+        await deps.work.updateTicket(ticketId, { state: "in_progress", overLimit: true, internal: true });
         await tellAgent({ ...t, systemState: "in_progress" }, `The checks on your pull request ${t.pullRequestUrl ?? ""} failed: ${c.failing.join(", ") || "see the host"}. Fix them, push, then move the ticket back to review.`, "ci failed");
       }
       if (c.state === "passed") {

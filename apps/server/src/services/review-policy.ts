@@ -180,17 +180,19 @@ export async function otherReviewers(db: Db, t: ReviewTicket, kind: ReviewSlot, 
 
 /**
  * The skill add flow's security reviewers: the agents the company's policy names for security reviews
- * at any tier (projects' overrides aside, as a skill belongs to the company). Agents only: a cell set to
- * the CEO or the Senior Developer names nobody here, as the CEO proposes skills. A legacy "marked"
- * cell still counts the agent marked for security. Retired agents and the CEO never count; paused ones are listed.
+ * at any tier (projects' overrides aside, as a skill belongs to the company). A cell set to the CEO
+ * names nobody here, as the CEO proposes skills; a "senior-dev" cell counts the senior developers
+ * (BOS-220). A legacy "marked" cell still counts the agent marked for security. Retired agents and the
+ * CEO never count; paused ones are listed.
  */
 export async function securityReviewers(db: Db, companyId: string): Promise<Array<Who & { paused: boolean }>> {
   const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
   const refs = c ? RISK_TIERS.map((t) => c.policy[t].kinds?.security).filter((r) => r !== undefined) : [];
   const ids = [...new Set(refs.flatMap((r) => (Array.isArray(r) ? r : r === "ceo" || r === SENIOR_DEV || r === MARKED ? [] : [r])))];
   const marked = refs.includes(MARKED);
-  if (!ids.length && !marked) return [];
-  const named = or(...(ids.length ? [inArray(agents.id, ids)] : []), ...(marked ? [eq(agents.reviewKind, "security")] : []));
+  const senior = refs.includes(SENIOR_DEV);
+  if (!ids.length && !marked && !senior) return [];
+  const named = or(...(ids.length ? [inArray(agents.id, ids)] : []), ...(marked ? [eq(agents.reviewKind, "security")] : []), ...(senior ? [eq(agents.template, SENIOR_DEV_TEMPLATE)] : []));
   // Never the CEO, even if a policy names it by id: the CEO proposes skills, so it must not judge them.
   return db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), ne(agents.role, "ceo"), named)).orderBy(asc(agents.createdAt));
 }

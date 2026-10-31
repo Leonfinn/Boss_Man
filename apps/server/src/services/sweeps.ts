@@ -34,6 +34,8 @@ export type SweepLimits = {
   keepWaitingMs: number;
   /** A run whose runner is offline (or never reported it) this long past the stall limit is ended by the server. */
   lostAfterMs: number;
+  /** A run with no ticket after this long is flagged to the Scrum Master (BOS-254). */
+  ticketlessAfterMs: number;
 };
 export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   staleAfterMs: 24 * 3_600_000,
@@ -43,6 +45,7 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   missedEveryMs: 4 * 3_600_000,
   keepWaitingMs: 30 * 60_000,
   lostAfterMs: 30 * 60_000,
+  ticketlessAfterMs: 10 * 60_000,
 };
 // After this many nudges in a day the owner is told instead (R82).
 const MISSED_NUDGES_PER_DAY = 2;
@@ -216,6 +219,43 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       if (row) raised++;
     }
     return { open: stalled.size, raised };
+  }
+
+  /**
+   * A run that has been going this long with no ticket is flagged to the Scrum Master (BOS-254):
+   * a run that found nothing to do should end, not sit there saying nothing useful for quarter of
+   * an hour. The owner chat is not a ticketless run, and neither is a run that is only waiting on
+   * a permission answer (it is the owner's, not a mystery).
+   */
+  async function longTicketlessRuns(t: Date) {
+    const waiting = await waitingOnOwner();
+    const live = await db
+      .select({ run: runs, agentName: agents.name })
+      .from(runs)
+      .leftJoin(agents, eq(agents.id, runs.agentId))
+      .where(and(isNull(runs.endedAt), isNull(runs.ticketId), sql`${runs.purpose} is distinct from 'chat'`));
+    let raised = 0;
+    for (const { run, agentName } of live) {
+      if (waiting.has(run.id)) continue;
+      if (t.getTime() - run.startedAt.getTime() < limits.ticketlessAfterMs) continue;
+      // Say what it is really doing if it says anything at all; otherwise only how long it has run.
+      const doing = run.lastEventAt ? `It last did something ${ago(t.getTime() - run.lastEventAt.getTime())} ago.` : "It hasn't reported anything since it started.";
+      const row = await opts.alert({
+        companyId: run.companyId,
+        kind: "question",
+        question: `${agentName ?? "An agent"} has been running for ${ago(t.getTime() - run.startedAt.getTime())} without a ticket ("${run.origin ?? run.purpose ?? "no reason recorded"}"). ${doing} Settle it: stop the run if there is nothing for it to do, or tell it on the ticket it should be on.`,
+        options: ["Got it"],
+        recommended: "Got it",
+        from: "scrum_master",
+        duty: true,
+        about: [run.agentId],
+        raisedByAgentId: run.agentId,
+        dedupeKey: `ticketless:${run.id}`,
+        context: { type: "question" },
+      });
+      if (row) raised++;
+    }
+    return { raised };
   }
 
   /**
@@ -440,7 +480,9 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const missed = held ? { woken: 0, gaveUp: 0 } : await missedWork(t);
       const reviews = held ? { woken: 0, gaveUp: 0 } : await stalledReviews(t);
       const unmerged = held ? 0 : await unmergedApprovals(t);
-      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged };
+      // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
+      const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
+      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless };
     },
   };
 }
