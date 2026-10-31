@@ -427,8 +427,10 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     for (const f of due.filter((x) => x.rule === "owner_decision_waiting")) {
       const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), eq(watchdogActions.kind, "owner_reminder"))).limit(1);
       await db.update(watchdogFlags).set({ dueAt: later(f), lastFlaggedAt: t }).where(eq(watchdogFlags.id, f.id));
-      // The owner may have acted since this flag opened; don't tell them again that they are holding it up (BOS-123).
-      if (!told && !(await recentOwnerAnswer(db, { companyId: c.id, ticketIds: [f.ticketId], since: f.openedAt, decisionTypes: ["question", "deploy"] }))) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
+      // The owner may have answered the card since this flag opened; don't tell them again that they are
+      // holding it up (BOS-123). Only an answer to this very card settles it: another card's answer or a
+      // passing message on the ticket leaves it waiting (BOS-175).
+      if (!told && !(await recentOwnerAnswer(db, { companyId: c.id, ticketIds: [f.ticketId], since: f.openedAt, decisionTypes: ["question", "deploy"], decisionId: (f.detail as Trip["detail"]).decisionId ?? null }))) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
     }
     if (reminders.length > MAX_OWNER_REMINDERS) {
       const oldest = Math.max(...reminders.map((r) => r.idle));
@@ -1003,7 +1005,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       // Don't ask again what the owner has already answered (BOS-123).
       if (!input.stillNeeded?.trim()) {
         const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id));
-        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: sm.id, question: input.question });
+        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: input.question });
         if (earlier) throw new WatchdogError(409, `${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
       }
       const f = await handedFlag(companyId, t.id, "raise_decision");
