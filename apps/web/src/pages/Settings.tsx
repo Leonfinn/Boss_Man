@@ -1393,6 +1393,43 @@ function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => v
   );
 }
 
+/** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
+export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
+  const act = useAction();
+  const n = Number(gb);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 100_000;
+  return (
+    <Section id="workspace-disk-h" title="Workspace disk">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Each ticket keeps its working files on the runner's disk until it has been done for a while. When the company's workspaces grow past this cap, Boss Man tells you once a day with the biggest ones named. It is a warning only: it never stops runs or refuses new workspaces. Worktrees of tickets done more than 7 days ago are released automatically.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="disk-cap">Disk cap (GB)</label>
+        <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { diskCapGb: n } });
+              onChanged();
+              return "Saved. It applies at the next hourly clean-up.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      <p className="muted" style={{ fontSize: 13 }}>
+        {company.diskCapBytes != null ? `Currently ${(company.diskCapBytes / 1024 ** 3).toFixed(1)} GB.` : "Currently the server default, 20 GB."}
+      </p>
+      {act.view}
+    </Section>
+  );
+}
+
 function Chapters({ company }: { company: Company }) {
   const list = usePoll((signal) => api<Chapter[]>(`/api/companies/${company.id}/chapters`, { signal }), 30_000, `ch-${company.id}`);
   const act = useAction();
@@ -1969,6 +2006,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />
