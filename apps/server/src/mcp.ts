@@ -43,6 +43,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
+import { cleanSummary, SUMMARY_MAX } from "./services/phone-approve.js";
 import type { serverStatusService } from "./services/server-status.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
@@ -473,7 +474,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   server.registerTool(
     "raise_decision",
     {
-      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you can write \"the steps are on the ticket\" instead of pasting a URL. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again.",
+      description: "Ask the owner to decide or do something only they can. Always give your recommended answer, which must be one of the options. If a ticket can't move until this is answered, pass its ID so it waits. triedFirst is required: what you already tried yourself, and why an agent can't do it (no host access, a secret only the owner can grant, owner sign-off); a vague or empty one is refused. Set ownerMustDo to true when the owner has to do something (run, click, grant, check); then steps is required: short numbered steps in plain words with exact paths in the app (for example Settings → Server and runner → Updates → Build and update runners), ending with how to undo it. Prefer pointing to a button in the app over host commands. The owner is not a developer. The card links to the ticket it blocks and to any ticket you name in the text (like BOS-70), so you can write \"the steps are on the ticket\" instead of pasting a URL. If the owner already answered this on the ticket or its blockers, the call is refused and quotes their answer; pass stillNeeded saying what changed if it really must be asked again. approveSummary (optional, one line, up to 120 characters, plain text) says what choosing your recommended option does, e.g. \"Use deSEC for DNS on the website\": with it, the owner's phone notification can offer an Approve button that answers with your recommended option. Approve is offered only on a plain question with 2 to 4 options and no blocksTicketId, steps, ownerMustDo or stillNeeded, so write the summary so it can be approved without opening the card.",
       inputSchema: {
         question: z.string().min(1).max(1000),
         options: z.array(z.string().min(1).max(200)).min(2).max(6),
@@ -483,10 +484,14 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         ownerMustDo: z.boolean().optional(),
         steps: z.array(z.string().min(1).max(500)).max(12).optional(),
         stillNeeded: z.string().max(500).optional(),
+        approveSummary: z.string().max(SUMMARY_MAX).optional(),
       },
     },
-    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded }) => {
+    async ({ question, options, recommended, blocksTicketId, triedFirst, ownerMustDo, steps, stillNeeded, approveSummary }) => {
       if (!options.includes(recommended)) return fail("The recommended answer must be one of the options.");
+      // Stored cleaned, so the phone shows exactly what is stored (BOS-243 rule 2).
+      const summary = approveSummary === undefined ? undefined : cleanSummary(approveSummary);
+      if (summary === null) return fail("approveSummary is empty once line breaks and control characters are taken out. Write one plain line saying what your recommended option does, or leave it out.");
       const bad = checkAsk({ triedFirst, ownerMustDo, steps });
       if (bad) return fail(bad);
       if (blocksTicketId) {
@@ -514,7 +519,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       let d: { id: string };
       try {
-        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined });
+        d = await decisions.raise({ companyId: scope.companyId, agentId: scope.agentId, question, options, recommended, blocksTicketId, triedFirst: triedFirst.trim(), steps: steps?.length ? steps : undefined, stillNeeded: stillNeeded?.trim() || undefined, ownerMustDo: ownerMustDo || undefined, approveSummary: summary });
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
         throw err;

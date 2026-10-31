@@ -14,6 +14,7 @@ import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck,
 import type { AlertInput } from "./alert-ladder.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
 import { getHold } from "./maintenance.js";
+import { sweepPhoneApprove } from "./approve-tokens.js";
 import { activeRows, evaluate, latestRows } from "./review-kinds.js";
 import { MISSED_REASON, REVIEW_REASON, type WakeInput } from "./scheduler.js";
 
@@ -472,6 +473,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       await opts.expireSkills?.();
       await opts.endUnconfirmedCancels(t);
       await opts.expireAdvice?.();
+      // Phone Approve links and tap records are kept a day (BOS-243 rule 8).
+      const phoneApprove = await sweepPhoneApprove(db, t);
       const lost = await lostRuns(t);
       const staleB = await staleBlockers(t);
       const stalled = await stalledRuns(t);
@@ -482,7 +485,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       const unmerged = held ? 0 : await unmergedApprovals(t);
       // A run with no ticket after ten minutes is the Scrum Master's to settle or stop (BOS-254).
       const ticketless = held ? { raised: 0 } : await longTicketlessRuns(t);
-      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless };
+      return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless, phoneApprove };
     },
   };
 }

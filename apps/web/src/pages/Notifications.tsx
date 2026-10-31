@@ -59,6 +59,7 @@ type Form = {
   clearToken: boolean;
   pushLevels: NotifyLevel[];
   publicUrl: string;
+  approveButtons: boolean;
 };
 
 const browserZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -77,6 +78,7 @@ function toForm(s: NotifySettings): Form {
     clearToken: false,
     pushLevels: s.pushLevels,
     publicUrl: s.publicUrl ?? (window.location.protocol === "https:" ? window.location.origin : ""),
+    approveButtons: s.approveButtons !== false,
   };
 }
 
@@ -112,6 +114,7 @@ function SettingsForm() {
           ntfy: form.phone ? { url: form.url.trim(), topic: form.topic.trim(), ...(form.token ? { token: form.token } : form.clearToken ? { token: null } : {}) } : null,
           pushLevels: form.pushLevels,
           publicUrl: form.publicUrl.trim() || null,
+          approveButtons: form.approveButtons,
         },
       });
       setSaved(s);
@@ -205,6 +208,15 @@ function SettingsForm() {
               <label htmlFor="public-url">Boss Man's address on your phone, so a tap opens the evidence</label>
               <input id="public-url" type="url" placeholder="https://bossman.your-tailnet.ts.net" value={form.publicUrl} onChange={(e) => set({ publicUrl: e.target.value })} spellCheck={false} />
             </div>
+            <label style={check}>
+              <input type="checkbox" checked={form.approveButtons} onChange={(e) => set({ approveButtons: e.target.checked })} />
+              Offer an Approve button on simple agent questions
+            </label>
+            {saved?.approve && (
+              <p className="muted" style={{ fontSize: 14 }} aria-live="polite">
+                {saved.approve.on ? "Phone Approve: on. Simple agent questions get an Approve button that answers with the agent's recommendation." : `Phone Approve: off because ${saved.approve.why}. Every push still gets an Open in Boss Man button.`}
+              </p>
+            )}
           </>
         )}
       </fieldset>

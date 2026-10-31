@@ -29,6 +29,7 @@ import {
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { addTicketDependency } from "./ticket-links.js";
+import { revokeApproveTokens } from "./approve-tokens.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
 import { APPLY_CHANGE, REVERT_CHANGE, checkChangeLink, checkChangeReason } from "./retro.js";
@@ -109,7 +110,7 @@ export type DeployUpdate = {
 export type DecisionContext =
   | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
-  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string }
+  | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string; /** The owner has to act (BOS-243 rule 1: never phone-approvable). */ ownerMustDo?: true; /** One line, by the asking agent, on what the recommended option does: the phone Approve text (BOS-243). */ approveSummary?: string }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
   | { type: "stalled_run"; runnerId: string; runId: string }
   | { type: "deploy"; deployId: string }
@@ -123,7 +124,7 @@ export type DecisionContext =
    * commit differs, the hand-apply reached the host (BOS-122). `lastFailure` keeps the owner's note from
    * "A step failed" on the card.
    */
-  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate }
+  | { type: "owner_todo"; ofDecisionId: string; steps: string[]; ownerMustDo?: true; check?: string; rollback?: string; /** What the to-do applies: a self-deploy's target and commit, or a deploy target's deploy id. */ target?: "server" | "runner"; commit?: string; fromCommit?: string; deployId?: string; lastFailure?: { note: string; at: string }; /** What the approved update contains, so the to-do says the same as the card (BOS-213). */ update?: DeployUpdate }
   /** Boss Man updating itself through the host deployer; `infra` ones are only an alert (the owner deploys those by hand on the host). */
   | { type: "self_deploy"; target: "server" | "runner"; commit: string; fromCommit: string; runnerChanged?: boolean; infra?: boolean; /** Commit subjects, so the "updated" note says what changed. */ changes?: string[]; /** For an infra change the owner applies by hand: numbered steps, how to check it worked, and how to roll back. */ handSteps?: string[]; check?: string; rollback?: string; /** What the update contains, in plain words (BOS-213). */ update?: DeployUpdate; result?: { result: string; message: string; at: string } }
   /** The runner update's deadline question (services/maintenance.ts): stop the rest, wait more, or cancel. */
@@ -328,7 +329,7 @@ export async function raiseOwnerTodo(
       tier: "owner",
       raisedByAgentId: t.raisedByAgentId ?? null,
       dedupeKey: t.key,
-      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}) } satisfies DecisionContext,
+      context: { type: "owner_todo", ofDecisionId: t.ofDecisionId, steps: t.steps, ownerMustDo: true, ...(t.check ? { check: t.check } : {}), ...(t.rollback ? { rollback: t.rollback } : {}), ...(t.target ? { target: t.target } : {}), ...(t.commit ? { commit: t.commit } : {}), ...(t.fromCommit ? { fromCommit: t.fromCommit } : {}), ...(t.deployId ? { deployId: t.deployId } : {}), ...(t.update ? { update: t.update } : {}) } satisfies DecisionContext,
     })
     .onConflictDoNothing()
     .returning({ id: decisions.id });
@@ -1084,7 +1085,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
-    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string }) {
+    async raise(input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string; ownerMustDo?: boolean; approveSummary?: string }) {
       const raised = await db.transaction(async (tx) => {
         const [row] = await tx
           .insert(decisions)
@@ -1095,7 +1096,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             options: input.options,
             recommendedOption: input.recommended,
             raisedByAgentId: input.agentId,
-            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}) },
+            context: { type: "question", ...(input.blocksTicketId ? { ticketId: input.blocksTicketId } : {}), ...(input.triedFirst ? { triedFirst: input.triedFirst } : {}), ...(input.steps?.length ? { steps: input.steps } : {}), ...(input.stillNeeded ? { stillNeeded: input.stillNeeded } : {}), ...(input.ownerMustDo ? { ownerMustDo: true as const } : {}), ...(input.approveSummary ? { approveSummary: input.approveSummary } : {}) } satisfies DecisionContext,
           })
           .returning();
         if (input.blocksTicketId) {
@@ -1425,11 +1426,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, d.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
       if (!ceo || !wake) throw new AnswerError("This company has no CEO to ask.");
       const advice: Advice = { state: "asking", askedAt: now().toISOString(), ...(note ? { note } : {}), ...(adviceOf(d.context)?.originalQuestion ? { originalQuestion: adviceOf(d.context)!.originalQuestion } : {}) };
-      const [claimed] = await db
-        .update(decisions)
-        .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify(advice)}::jsonb)` })
-        .where(and(eq(decisions.id, id), eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'advice'->>'state', '') <> 'asking'`))
-        .returning({ id: decisions.id });
+      const claimed = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(decisions)
+          .set({ context: sql`jsonb_set(${decisions.context}, '{advice}', ${JSON.stringify(advice)}::jsonb)` })
+          .where(and(eq(decisions.id, id), eq(decisions.status, "open"), sql`coalesce(${decisions.context}->'advice'->>'state', '') <> 'asking'`))
+          .returning({ id: decisions.id });
+        // The card may now be reworded by the CEO: a phone Approve link sent for it must not outlive that (BOS-243 rule 5).
+        if (row) await revokeApproveTokens(tx as unknown as Db, id, now());
+        return row;
+      });
       if (!claimed) return null;
       const ctx = d.context as DecisionContext;
       const [dependency] = await db
@@ -1511,11 +1517,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           // An approval, plan, hire, deploy and the like keep their id, kind, options and context, so what resumes on
           // them still works: the CEO only rewrites the question and adds what was tried and the steps.
           const clarified = { ...(d.context as object), triedFirst: input.triedFirst.trim(), ...(input.steps?.length ? { steps: input.steps } : {}), advice: { ...advice, state: "clarified", at, originalQuestion: advice.originalQuestion ?? d.question } };
-          const [done] = await db
-            .update(decisions)
-            .set({ question: input.question, context: clarified })
-            .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), asking))
-            .returning({ id: decisions.id });
+          const done = await db.transaction(async (tx) => {
+            const [row] = await tx
+              .update(decisions)
+              .set({ question: input.question, context: clarified })
+              .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), asking))
+              .returning({ id: decisions.id });
+            if (row) await revokeApproveTokens(tx as unknown as Db, d.id, now());
+            return row;
+          });
           if (!done) return null;
           const [held] = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, d.id));
           await record(db, { companyId: d.companyId, agentId: input.agentId, ticketId: held?.ticketId, kind: "decision_reissued", summary: `CEO rewrote "${d.question}" with more detail${via}`, at: now() });
@@ -1530,6 +1540,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             .where(and(eq(decisions.id, d.id), eq(decisions.status, "open"), asking))
             .returning({ id: decisions.id });
           if (!claimed) return false;
+          await revokeApproveTokens(tx as unknown as Db, d.id, now());
           await tx.insert(decisions).values({
             id: newId,
             companyId: d.companyId,
@@ -1631,11 +1642,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         throw new AnswerError("This card is the owner's. Withdraw it only when it is stale (its ticket is done or cancelled) or a duplicate of another open card.");
       }
       const withdrawal: Withdrawal = { by: "ceo", agentId: input.agentId, name: ceo.name, note, at: now().toISOString() };
-      const [closed] = await db
-        .update(decisions)
-        .set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, context: { ...(d.context as object), withdrawn: withdrawal } })
-        .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
-        .returning({ id: decisions.id });
+      const closed = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(decisions)
+          .set({ status: "withdrawn", answeredAt: now(), dedupeKey: null, context: { ...(d.context as object), withdrawn: withdrawal } })
+          .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+          .returning({ id: decisions.id });
+        if (row) await revokeApproveTokens(tx as unknown as Db, d.id, now());
+        return row;
+      });
       if (!closed) return null;
       await record(db, { companyId: d.companyId, agentId: input.agentId, kind: "decision_withdrawn", summary: `${ceo.name} withdrew "${d.question}": ${note}`, at: now() });
       // A withdrawn card must never be left holding a ticket (BOS-149): move its hold to an identical
@@ -2019,7 +2034,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // card would delete the dependency and let the ticket merge without the owner's sign-off.
       const type = (d.context as { type?: string } | null)?.type;
       if (d.kind !== "question" || type !== "question") throw new AnswerError("Only a question card you raised with raise_decision can be withdrawn; this card belongs to another flow and has to be answered.");
-      const [closed] = await db.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+      const closed = await db.transaction(async (tx) => {
+        const [row] = await tx.update(decisions).set({ status: "withdrawn", answeredAt: now(), dedupeKey: null }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning({ id: decisions.id });
+        if (row) await revokeApproveTokens(tx as unknown as Db, id, now());
+        return row;
+      });
       if (!closed) return null;
       const freed = await db.select({ ticketId: ticketDependencies.blockedTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
       await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
