@@ -49,7 +49,7 @@ export const NOTHING_CHANGED = "Nothing in the repository changed. Make the chan
 
 /** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
-  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }> };
+  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string };
   const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
   switch (r.outcome) {
     case "merged":
@@ -59,7 +59,9 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
     case "pull_request":
       return `${d.url ? `Pull request opened: ${d.url}.` : "Approved."}${d.note ? ` It hasn't merged yet: ${d.note}` : ""}`;
     case "carried":
-      return `Approved, but not merged: its branch also carries unapproved work from ${(d.carried ?? []).map((c) => `"${c.title}"`).join(", ")}. That ticket must merge first; the ticket stays in review.`;
+      return d.unchecked
+        ? `Approved, but not merged: Boss Man couldn't check whether the branch carries other tickets' unmerged work (${d.unchecked}), so it didn't merge. The ticket stays in review; approving it again tries the check again.`
+        : `Approved, but not merged: its branch also carries unapproved work from ${(d.carried ?? []).map((c) => `"${c.title}"`).join(", ")}. That ticket must merge first; the ticket stays in review.`;
     case "empty":
       return `Approved, but not closed: nothing in the repository changed. ${back} to make the change, or to mark the ticket as not needing code.`;
     case "verify_failed":
@@ -147,16 +149,18 @@ export function reviewService(
 
   /**
    * The unmerged commits of other open tickets' branches that this branch carries (BOS-130): the
-   * runner works it out from git. A runner too old to answer doesn't hold the merge; each carried
-   * ticket's own pull request on the host (when there is one) says which commits went in.
+   * runner works it out from git. This is a safety gate, so it refuses rather than merges when it
+   * can't answer: the runner failing or timing out is an error, and a runner too old to do the
+   * check falls back to the host's own answer, which refuses when it can't give one either.
    */
   async function carriedBetween(runnerId: string, t: typeof tickets.$inferSelect, defaultBranch: string, gitHost: string | null, gitApiBase: string | null): Promise<CarriedInfo[]> {
     const others = (await otherOpenBranches(t)).filter((o): o is typeof o & { branch: string } => !!o.branch && o.branch !== t.branch);
     if (!others.length) return [];
-    let ids: string[] | null = null;
+    let ids: string[];
     if (deps.runners.can(runnerId, "carried-check")) {
+      let r: { carried?: CarriedTicket[] };
       try {
-        const r = await deps.runners.request<{ carried?: CarriedTicket[] }>(runnerId, (requestId) => ({
+        r = await deps.runners.request<{ carried?: CarriedTicket[] }>(runnerId, (requestId) => ({
           type: "workspace.carried",
           requestId,
           projectId: t.projectId,
@@ -164,40 +168,64 @@ export function reviewService(
           target: defaultBranch,
           branches: others.map((o) => ({ ticketId: o.ticketId, branch: o.branch })),
         }));
-        ids = r.carried?.map((c) => c.ticketId) ?? null;
-      } catch {
-        ids = null;
+      } catch (err) {
+        throw new ReviewError(409, `Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged: ${(err as Error).message} Try approving it again.`);
       }
+      if (!Array.isArray(r.carried)) throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged. Try approving it again.");
+      ids = r.carried.map((c) => c.ticketId);
+    } else {
+      // An older runner: the host's pull requests are the only other answer, and they must give one.
+      ids = await carriedOnHost(t, gitHost, gitApiBase, others);
     }
-    if (!ids) ids = (await carriedOnHost(t, gitHost, gitApiBase, others).catch(() => null))?.map((c) => c.ticketId) ?? null;
-    if (!ids) return [];
     return others.filter((o) => ids.includes(o.ticketId)).map((o) => ({ ticketId: o.ticketId, branch: o.branch, title: o.title, risk: o.risk }));
   }
 
   /**
-   * The host's own answer, for when the runner can't give one (BOS-130): a ticket is carried when
-   * the commit its pull request was merged as is one of the commits this ticket's pull request is
-   * made of, up to the commit that was reviewed.
+   * The host's own answer, for a runner too old to compare branches (BOS-130): a ticket is carried
+   * when the commit its pull request was reviewed at is one of the commits this ticket's pull
+   * request is made of, up to the commit that was reviewed. An open pull request carries that too,
+   * since its head is the reviewed commit and this branch already has it. Anything the host can't
+   * answer is an error, never an empty list, so nothing merges on a guess.
    */
-  async function carriedOnHost(t: typeof tickets.$inferSelect, gitHost: string | null, gitApiBase: string | null, others: Array<{ ticketId: string; branch: string; title: string }>): Promise<CarriedTicket[]> {
-    if (!deps.gitHosts || !deps.gitToken || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase) return [];
+  async function carriedOnHost(t: typeof tickets.$inferSelect, gitHost: string | null, gitApiBase: string | null, others: Array<{ ticketId: string; branch: string; title: string }>): Promise<string[]> {
+    if (!deps.gitHosts || !deps.gitToken || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase)
+      throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work: Boss Man doesn't know this project's git host or has no git token. Nothing was merged.");
     const { t: fresh, defaultBranch, repoUrl } = await ticketWithRepo(t.id);
     const { cfg, token } = await prTarget(fresh.companyId, repoUrl, gitHost, gitApiBase);
     const viaHost = deps.gitHosts;
-    // The commits the host merged each other open ticket's pull request as.
-    const theirs: Array<{ ticketId: string; mergeCommit: string }> = [];
+    // The commit the host reviewed each other open ticket's pull request at.
+    const theirs: Array<{ ticketId: string; head: string }> = [];
     for (const o of others) {
-      const [row] = await db.select({ number: tickets.pullRequestNumber }).from(tickets).where(eq(tickets.id, o.ticketId));
-      if (!row?.number) continue;
-      const pull = await viaHost.get(cfg, token, row.number).catch(() => null);
-      if (pull?.mergeCommit) theirs.push({ ticketId: o.ticketId, mergeCommit: pull.mergeCommit });
+      const [row] = await db.select({ number: tickets.pullRequestNumber, head: tickets.pullRequestHead, branch: tickets.branch }).from(tickets).where(eq(tickets.id, o.ticketId));
+      if (!row?.branch) continue;
+      // No pull request yet: the branch's own head at the host is what is waiting to land.
+      const head = row.head ?? (await viaHost.branchHead(cfg, token, row.branch).catch((err) => {
+        throw new ReviewError(409, `Couldn't read the branch of "${o.title}" on the host, so it wasn't merged: ${(err as Error).message}`);
+      }));
+      theirs.push({ ticketId: o.ticketId, head });
     }
     if (!theirs.length) return [];
     let mine: string[];
-    if (fresh.pullRequestNumber) mine = (await viaHost.getWithCommits(cfg, token, fresh.pullRequestNumber, fresh.pullRequestHead)).commits;
-    // No pull request yet: the commits on the branch since the target, from the host's compare.
-    else mine = fresh.branch ? await viaHost.compare(cfg, token, defaultBranch, fresh.branch).catch(() => []) : [];
-    return others.filter((o) => theirs.some((x) => x.ticketId === o.ticketId && mine.includes(x.mergeCommit))).map((o) => ({ ticketId: o.ticketId, branch: o.branch }));
+    try {
+      if (fresh.pullRequestNumber) mine = (await viaHost.getWithCommits(cfg, token, fresh.pullRequestNumber, fresh.pullRequestHead)).commits;
+      // No pull request yet: the commits on the branch since the target, from the host's compare.
+      else mine = fresh.branch ? await viaHost.compare(cfg, token, defaultBranch, fresh.branch) : [];
+    } catch (err) {
+      throw new ReviewError(409, `Couldn't read this branch's commits on the host, so it wasn't merged: ${(err as Error).message}`);
+    }
+    return theirs.filter((x) => mine.includes(x.head)).map((x) => x.ticketId);
+  }
+
+  /**
+   * What to do when the check can't say whether the branch carries other open tickets' work
+   * (BOS-130): a safety gate refuses when it can't answer. Nothing merges, the ticket stays in
+   * review with the reason on it, the owner hears, and the assignee is asked to move it back.
+   */
+  async function refuseUnchecked(t: typeof tickets.$inferSelect, err: ReviewError) {
+    await wait(t, `Not merged: Boss Man couldn't check whether this branch carries other tickets' unmerged work (${err.message}). Nothing was merged.`);
+    const text = `The review of "${t.title}" was approved, but Boss Man couldn't check whether its branch carries other tickets' unmerged work (${err.message}), so it didn't merge. Move the ticket back to review to try again.`;
+    const delivered = await tellAgent({ ...t, systemState: "in_progress" }, text, "carried check failed").catch(() => null);
+    return { outcome: "carried" as const, delivered, detail: { unchecked: err.message } };
   }
 
   /**
@@ -566,7 +594,14 @@ export function reviewService(
       // A branch that also carries another open ticket's unmerged work can't go on the target: that
       // work hasn't been reviewed, signed off or checked at its own risk (BOS-130). One approval is
       // never enough for two tickets, so this is checked before anything runs or is pushed.
-      const carried = await carriedBetween(runner.id, t, defaultBranch, gitHost, gitApiBase);
+      let carried: CarriedInfo[];
+      try {
+        carried = await carriedBetween(runner.id, t, defaultBranch, gitHost, gitApiBase);
+      } catch (err) {
+        if (!(err instanceof ReviewError)) throw err;
+        const r = await refuseUnchecked(t, err);
+        return { outcome: r.outcome, delivered: r.delivered, detail: r.detail };
+      }
       if (carried.length) {
         const r = await refuseCarried(t, carried, { reviewerAgentId: null });
         return { outcome: "carried", delivered: r.delivered ?? null, detail: r.detail };
@@ -661,9 +696,10 @@ export function reviewService(
         // Already merged on the host (someone did it by hand): the ticket is finished, whatever the branch had.
         if (now.merged) return finishMerged(t, now.mergeCommit);
         const others = (await otherOpenBranches(t)).filter((o): o is typeof o & { branch: string } => !!o.branch);
-        const carried = await carriedOnHost(t, gitHost, gitApiBase, others);
+        const ids = await carriedOnHost(t, gitHost, gitApiBase, others);
+        const carried = others.filter((o) => ids.includes(o.ticketId));
         if (carried.length) {
-          const names = others.filter((o) => carried.some((c) => c.ticketId === o.ticketId)).map((o) => `"${o.title}"`).join(", ");
+          const names = carried.map((o) => `"${o.title}"`).join(", ");
           return wait(t, `Not merged: this branch also carries unmerged work from ${names}, which must merge first. Nothing was merged.`);
         }
         if (now.closed) return wait(t, "The pull request was closed on the host without merging. Reopen it there, or approve the ticket again to open a new one.");

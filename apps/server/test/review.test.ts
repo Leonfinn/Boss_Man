@@ -51,7 +51,10 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
         else queueMicrotask(reply);
       }
       if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
-      if (c.type === "workspace.carried") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.carried ?? { carried: [] } }));
+      if (c.type === "workspace.carried") {
+        const a = answers.carried as { error?: string } | undefined;
+        queueMicrotask(() => built.runners.resolveReply(a?.error ? { requestId: c.requestId, ok: false, error: a.error } : { requestId: c.requestId, ok: true, data: a ?? { carried: [] } }));
+      }
       return true;
     }, ["carried-check"]);
   }
@@ -359,5 +362,18 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     await approveAndWait(c.req, c.ticket.id);
     const asked = c.sent.find((x): x is Extract<RunnerCommand, { type: "workspace.carried" }> => x.type === "workspace.carried");
     expect(asked!.branches).toEqual([{ ticketId: other.id, branch: other.branch }]);
+  });
+
+  it("refuses rather than merging when the runner can't answer the check", async () => {
+    const c = (ctx = await setup({ answers: { carried: { error: "git rev-list failed" } } }));
+    const other = await otherTicket(c, "Permission gate");
+    const r = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(r).toMatchObject({ verdict: "approved", outcome: "carried" });
+    expect(r.message).toContain("git rev-list failed");
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
+    expect(await state(c)).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.pullRequestNote).toContain("git rev-list failed");
+    const w = (await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed");
+    expect(w!.note).toContain("git rev-list failed");
   });
 });
