@@ -59,7 +59,7 @@ backup_db() {
   mkdir -p "$BACKUP_DIR"
   BACKUP="$BACKUP_DIR/bossman-$(date +%F-%H%M).sql.gz"
   if ((DRY)); then say "[dry-run] pg_dump | gzip > $BACKUP (then check it is not empty and gzip -t passes)"; return; fi
-  docker compose exec -T db pg_dump -U bossman bossman | gzip >"$BACKUP.partial" || { rm -f "$BACKUP.partial"; die "The backup failed. Nothing was changed."; }
+  (umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$BACKUP.partial") || { rm -f "$BACKUP.partial"; die "The backup failed. Nothing was changed."; }
   if ! { [[ -s $BACKUP.partial ]] && gzip -t "$BACKUP.partial"; }; then rm -f "$BACKUP.partial"; die "The backup is empty or damaged. Nothing was changed."; fi
   mv "$BACKUP.partial" "$BACKUP"
   say "Backup saved: $BACKUP ($(du -h "$BACKUP" | cut -f1))"
