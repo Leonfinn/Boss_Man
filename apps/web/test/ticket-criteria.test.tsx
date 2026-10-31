@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Company } from "../src/api";
 import { Ticket } from "../src/pages/Ticket";
+
+// Vitest stubs a `?raw` CSS import to an empty string, so read the sheet the app ships.
+const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
 
 Element.prototype.scrollIntoView = () => {};
 afterEach(() => {
@@ -132,5 +137,34 @@ describe("the collapsible Work panel", () => {
     await screen.findByRole("button", { name: "Hide" });
     expect(container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(false);
     expect(screen.queryByText(/^· In review/)).toBeNull();
+  });
+
+  // jsdom has no layout, and Ticket is not exported as a DOM-tree helper, so assert the phone rules
+  // that decide the order: the review and the conversation come before the description, the Work
+  // panel goes last. A later rule that quietly inverts them fails here too (BOS-246 review).
+  it("on a phone, the review and the conversation are ordered above the description and the Work panel", () => {
+    const phones = [...styles.matchAll(/@media \(max-width: 640px\)\s*\{/g)].map((m) => {
+      let depth = 1;
+      let i = (m.index ?? 0) + m[0].length;
+      const start = i;
+      for (; i < styles.length && depth > 0; i++) depth += styles[i] === "{" ? 1 : styles[i] === "}" ? -1 : 0;
+      return styles.slice(start, i - 1);
+    });
+    const order = (selector: string): number => {
+      const rule = new RegExp(`(?:^|[;{])\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^{]*\\{[^}]*\\border:\\s*(-?\\d+)`, "m");
+      let value = 0;
+      for (const block of phones) {
+        const found = rule.exec(block);
+        if (found) value = Number(found[1]);
+      }
+      return value;
+    };
+    const review = order(".ticket-main > .review-card");
+    const activity = order(".ticket-main > .activity");
+    const desc = order(".ticket-main > section.card");
+    const work = order(".ticket-props");
+    expect(review).toBeLessThan(activity);
+    expect(activity).toBeLessThan(desc);
+    expect(desc).toBeLessThan(work);
   });
 });
