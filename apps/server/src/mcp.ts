@@ -24,7 +24,7 @@ import { RunError, type runsService } from "./services/runs.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
-import { WorkError, type workService } from "./services/work.js";
+import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, missingVerdicts, readVerdicts } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
@@ -92,6 +92,8 @@ export type McpHooks = {
   nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
   /** Wakes an agent, e.g. the CEO for a note request. */
   wake?: (agentId: string, input: { reason: string; note: string }) => Promise<unknown>;
+  /** A run with no ticket touched one: record it as the run's ticket so the Runs list shows it (BOS-254). */
+  onRunTicket?: (ticketId: string, runId: string) => Promise<unknown>;
 };
 
 /** The ticket row for an agent, with its state note shown with its age (R85). */
@@ -179,6 +181,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
+  // A run that had no ticket now works on one: say so on the run (BOS-254). Never blocks the tool.
+  const noteRunTicket = (ticketId: string) => (scope.agentId ? Promise.resolve(hooks.onRunTicket?.(ticketId, scope.runId)).catch(() => undefined) : undefined);
 
   async function isManager() {
     const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
@@ -398,6 +402,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const when = inMinutes !== undefined ? new Date(Date.now() + inMinutes * 60_000) : new Date(at!);
       try {
         const u = await work.setMonitor(ticketId, { at: when, note, maxChecks, by: { agentId: scope.agentId, companyId: scope.companyId } });
+        await noteRunTicket(ticketId);
         return text(`You will be woken on ticket ${ticketId} at ${u.monitorAt!.toISOString()} to re-check (check ${u.monitorAttempts + 1} of ${u.monitorMax}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -438,6 +443,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (err instanceof TicketChatError) return fail(err.message);
         throw err;
       }
+      await noteRunTicket(ticketId);
       const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId }).from(tickets).where(eq(tickets.id, ticketId));
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
@@ -1698,6 +1704,8 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
   const chatRefusal = async () => (chat && !(await isManager()) ? "In chat only your CEO or a manager can move tickets. Offer the owner to create a ticket for the work, or nudge your CEO." : null);
+  // A run that had no ticket now works on one: say so on the run (BOS-254). Never blocks the tool.
+  const noteRunTicket = (ticketId: string) => (scope.agentId ? Promise.resolve(hooks.onRunTicket?.(ticketId, scope.runId)).catch(() => undefined) : undefined);
 
   server.registerTool(
     "update_ticket",
@@ -1744,6 +1752,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(size !== undefined ? { size } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}: ${reason}` });
+        await noteRunTicket(ticketId);
         return text(`Ticket ${ticketId} updated (version ${u.version}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -1785,10 +1794,25 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         }
       }
       if ((blocked_until || blocked_reason) && state !== "blocked") return fail("blocked_until and blocked_reason only go with state blocked.");
-      if (blocked_reason && !blocked_until) return fail("blocked_reason goes with blocked_until: give the date and time you are waiting for.");
-      if (blocked_reason && /[\r\n]/.test(blocked_reason.trim())) return fail("blocked_reason must be one line.");
+      if (blocked_reason && !blocked_until) return fail("blocked_reason goes with blocked_until: give the date and time you are waiting for.");      if (blocked_reason && /[\r\n]/.test(blocked_reason.trim())) return fail("blocked_reason must be one line.");
       const until = blocked_until ? new Date(blocked_until) : null;
       if (until && until.getTime() <= Date.now()) return fail("blocked_until must be in the future.");
+      if (state === "in_progress") {
+        // A run can't start a ticket that still waits on unfinished work, or a Backlog ticket nobody
+        // handed it (BOS-254). The owner, the CEO and managers override.
+        const [current] = await db.select({ systemState: tickets.systemState, createdAt: tickets.createdAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        if (current && current.systemState !== "in_progress") {
+          const blockers = await db
+            .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagementsTable.status })
+            .from(ticketDependencies)
+            .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+            .leftJoin(engagementsTable, eq(engagementsTable.id, ticketDependencies.blockerEngagementId))
+            .where(eq(ticketDependencies.blockedTicketId, ticketId));
+          const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+          const refusal = startRefusal(current, blockers, { agentId: scope.agentId, role: me?.role ?? null });
+          if (refusal) return fail(refusal);
+        }
+      }
       if (until && until.getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) return fail(`blocked_until can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead. For a longer wait, block without a time and raise a decision for the owner.`);
       if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
       // With criteria on the ticket, moving to review is only allowed once the state note reports
@@ -1836,6 +1860,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
       }
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
+      await noteRunTicket(ticketId);
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.

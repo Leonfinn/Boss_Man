@@ -38,7 +38,7 @@ async function setup() {
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const ticket = async (body: Record<string, unknown>) => (await req("POST", `/api/projects/${project.id}/tickets`, body)).json() as { id: string };
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
-  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number };
+  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
   return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
 }
@@ -500,5 +500,26 @@ describe("the server ends runs it can't reach", () => {
     ctx.advance(3 * HOUR);
     expect((await ctx.sweep()).lostRuns).toBe(0);
     expect((await row(runId)).endedAt).toBeNull();
+  });
+
+  it("flags a run that has had no ticket for ten minutes to the Scrum Master, saying what woke it (BOS-254)", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    // A ticketless run going for eleven minutes, woken to check a stale card.
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "checking an old card", startedAt: new Date(ctx.clock().getTime() - 11 * 60_000), lastEventAt: new Date(ctx.clock().getTime() - 30_000) });
+    const res = await ctx.sweep();
+    expect(res.longTicketlessRuns.raised).toBe(1);
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(card!.question).toMatch(/CEO has been running for 11 minutes without a ticket .*checking an old card/);
+    // One open card per run, not one per sweep.
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
+  });
+
+  it("leaves a young ticketless run and the owner chat alone", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "wiki upkeep", startedAt: new Date(ctx.clock().getTime() - 5 * 60_000) });
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: null, purpose: "chat", origin: "owner_chat", startedAt: new Date(ctx.clock().getTime() - 30 * 60_000) });
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
   });
 });

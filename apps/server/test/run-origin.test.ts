@@ -173,6 +173,24 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect(board.workingAgents).toBe(2);
   });
 
+  it("shows the ticket a ticketless run starts working on, and keeps its wake reason as a detail (BOS-254)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Pick up the loose end", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.work.updateTicket(t.id, { state: "ready", byAgentId: c.ceo.id });
+    // Woken for a housekeeping check with no ticket, then it finds real work on its own ticket.
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: null, origin: "checking an old card", startedAt: new Date() });
+    const client = await agent(c, c.worker.id, runId);
+    const r = (await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Nothing of mine was stale; this needed doing." } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(r.isError).toBeFalsy();
+    await client.close();
+    const row = await c.latestRun(c.worker.id);
+    expect(row).toMatchObject({ id: runId, ticketId: t.id, origin: "checking an old card" });
+    // The runs list now headlines the ticket and shows the reason underneath.
+    const listed = (await c.req("GET", "/api/runs")).json() as Array<{ id: string; ticketId: string | null; runTicketRef: string | null; origin: string | null }>;
+    expect(listed.find((x) => x.id === runId)).toMatchObject({ ticketId: t.id, runTicketRef: expect.stringMatching(/-/), origin: "checking an old card" });
+  });
+
   it("says a scheduled wiki sweep was a sweep", async () => {
     const c = (ctx = await setup());
     const [keeper] = await c.db.select().from(agents).where(eq(agents.duty, "wiki"));
