@@ -24,6 +24,27 @@ describe("speaker names (BOS-265)", () => {
     }
   });
 
+  it("refuses an invisible format character hiding a reserved label (BOS-281)", () => {
+    // Soft hyphen, word joiner, zero-width joiner and BOM are Unicode format characters (Cf).
+    for (const bad of ["Own\u00ADer", "Own\u2060er", "Own\u200Der", "Own\uFEFFer"]) {
+      expect(speakerNameProblem(bad), JSON.stringify(bad)).toMatch(/line breaks, tabs or other control characters/);
+      expect(isReservedSpeaker(bad), JSON.stringify(bad)).toBe(true);
+    }
+    // An accent or variation selector thickens a letter without changing its code point.
+    for (const bad of ["O\u0301wner", "Own\uFE0Fer"]) {
+      expect(speakerNameProblem(bad), JSON.stringify(bad)).toMatch(/invisible accent or formatting characters/);
+    }
+    // A reserved label built from lookalike letters from another alphabet reads as "Owner" too.
+    expect(speakerNameProblem("\u039Fwner")).toMatch(/different alphabets/);
+    expect(speakerNameProblem("\u041Ewner")).toMatch(/different alphabets/);
+  });
+
+  it("still allows ordinary names, including accented ones outside a Latin word", () => {
+    for (const good of ["Zippy - Developer", "Quinn (QA)", "Zo\u00EB - Designer", "Ren\u00E9e", "R&D Lead", "\u674E\u96F7 - Engineer"]) {
+      expect(speakerNameProblem(good), good).toBeNull();
+    }
+  });
+
   it("refuses a colon, which would read as a new speaker at the start of a line", () => {
     expect(speakerNameProblem("Owner: approved")).toMatch(/colon/);
     expect(speakerNameProblem("Zippy: Developer")).toMatch(/colon/);
