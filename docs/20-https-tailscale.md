@@ -21,7 +21,7 @@ If the default range clashes with a network the host already uses (your LAN, a V
 
 ## What each host needs
 
-The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It needs no `/dev/net/tun`, no `NET_ADMIN` and no extra capabilities, so the same file works on all three hosts. In this mode Tailscale reaches the server over the ordinary Docker network, so the server still sees each request arrive from `BOSSMAN_EDGE_IP` and the trusted-proxy check holds unchanged. The cost: this container serves Boss Man but is not a general tailnet router (not needed here).
+The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It needs no `/dev/net/tun`, no `NET_ADMIN` and no extra capabilities, so the same file works on all three hosts. In this mode Tailscale reaches the server over the ordinary Docker network, so the server still sees each request arrive from `BOSSMAN_EDGE_IP` and the trusted-proxy check holds unchanged. (The connection to the server is opened by the Tailscale container itself, so its source is that container's `edge` address; the client's tailnet address only appears in the forwarded header. Step 8's Secure-cookie check proves this on your host.) The cost: this container serves Boss Man but is not a general tailnet router (not needed here).
 
 - **Plain Linux Docker host:** nothing extra.
 - **Proxmox VM running Docker:** nothing extra.
@@ -49,20 +49,20 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    ```
 
    If `.env` has no `COMPOSE_FILE` line, add `COMPOSE_FILE=docker-compose.yml:deploy/tailscale.yml`.
-5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. After it is up, delete the `TS_AUTHKEY` line from `.env` (the login is kept in the state folder).
+5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. After it is up you can delete the `TS_AUTHKEY` line from `.env`: the login is kept in the state folder, and an empty key is fine. If the line stays, the key is spent after first use and does no harm.
 6. In the Tailscale admin console the machine `boss-man` appears. Check Serve is on and Funnel is off:
 
    ```sh
    docker compose exec tailscale tailscale serve status
    ```
 
-   It must show `https://boss-man.<tailnet>.ts.net` proxying to `http://server:3100` and say "(tailnet only)", not "Funnel on".
+   It must show `https://boss-man.<tailnet>.ts.net` proxying to `http://server:3100` and say "(tailnet only)", not "Funnel on". Use the address this prints, not one guessed from the example.
 7. Prove the trusted address is not shared with LAN traffic. This lists everything on `edge`; it must be only the `tailscale` and `server` containers:
 
    ```sh
    docker network inspect $(docker network ls -q --filter name=edge) --format '{{.Name}}: {{range .Containers}}{{.Name}} {{.IPv4Address}}; {{end}}'
    ```
-8. From your phone, on the tailnet, open the address. The padlock should be valid and login should work. Off the tailnet (mobile data with Tailscale turned off) it must not load.
+8. From your phone, on the tailnet, open the address. The padlock should be valid and login should work. After logging in, open the browser developer tools (Application or Storage > Cookies) and check the `bm_session` cookie is marked **Secure**. If it is not, Serve is not passing the HTTPS marker on; logins still work but tell Boss Man's engineer rather than guessing. Off the tailnet (mobile data with Tailscale turned off) it must not load.
 9. In Boss Man, open **Notifications** and set **Boss Man's address on your phone** to the ts.net address, so notification links open it.
 
 To undo: `docker compose stop tailscale`, remove `:deploy/tailscale.yml` from `COMPOSE_FILE` (or restore `.env.bak`), then `docker compose up -d server`. The LAN address is unaffected throughout.
@@ -81,10 +81,14 @@ Tailscale's login is kept in `$BOSSMAN_DATA/tailscale`. Include that folder in y
 ## Host notes
 
 ### TrueNAS
-- Use `COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml`, with `BOSSMAN_DATA` under your apps dataset (see `docs/06-install-truenas.md`).
+- Use `COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml`, with `BOSSMAN_DATA` under your apps dataset (for example `/mnt/<pool>/boss-man/data`; see `docs/06-install-truenas.md`).
 - Do not use the TrueNAS Tailscale app: it cannot show that LAN traffic is kept apart from the trusted address.
 - Keep the `tailscale` folder in a dataset your snapshots and replication cover.
 
 ### Proxmox
 - A VM is the same as a plain Linux host. For an LXC, see "What each host needs".
 - Back up the VM or container with Proxmox backup, and also keep `$BOSSMAN_DATA/tailscale` in your own file-level backup. Unknown: where your Proxmox backups are stored; find out in **Datacenter > Backup**.
+
+## The Tailscale image
+
+`deploy/tailscale.yml` pins `tailscale/tailscale` by version and digest (v1.104.4 at the time of writing). It was not run on a host before this change, so the first start is the test: check `docker compose logs tailscale`. To update: pick a new release on Docker Hub, copy its multi-arch digest into the `image:` line, run `docker compose pull tailscale && docker compose up -d tailscale`; the state folder keeps the login. Check the Tailscale security bulletins when you do.

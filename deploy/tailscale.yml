@@ -11,11 +11,13 @@
 # only the owner's web/login port (server:3100), never the feedback portal (3101).
 services:
   tailscale:
-    image: tailscale/tailscale:v1.78.1
+    image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c
     restart: unless-stopped
     hostname: ${TS_HOSTNAME:-boss-man}
     environment:
-      TS_AUTHKEY: ${TS_AUTHKEY:?Set TS_AUTHKEY in .env (a one-off, non-reusable key from the Tailscale admin console)}
+      # Only needed the first time: the login is then kept in the state folder, so an empty value is fine.
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
       TS_STATE_DIR: /var/lib/tailscale
       TS_SERVE_CONFIG: /config/serve.json
       # Userspace networking: no /dev/net/tun and no extra capabilities, so it also runs in a Proxmox LXC. Serve only proxies to the server over Docker's network.
@@ -33,7 +35,10 @@ services:
     depends_on: [server]
 
   server:
+    # Name every network: the server also needs default (the published port) and launcher (runner starts).
     networks:
+      default: {}
+      launcher: {}
       edge: {}
     environment:
       BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_EDGE_IP:-172.30.0.2}

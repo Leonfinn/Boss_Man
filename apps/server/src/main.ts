@@ -19,13 +19,15 @@ const leader = createLeader({
   log: (m) => console.warn(m),
 });
 
+const trustedProxies = (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+
 const { app, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, feedback, review, semantic, selfDeploy, maintenance, runners, refreshSyntheticQuota } = await buildApp({
   db,
   master,
   liveValidator: providerLiveValidator,
   // Per request: Secure over https through the trusted proxy, plain http on the LAN still logs in.
-  secureCookies: env.BOSSMAN_INSECURE_COOKIES === "1" ? false : "auto",
-  trustedProxies: (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+  secureCookies: env.BOSSMAN_INSECURE_COOKIES === "1" ? false : trustedProxies.length ? "auto" : true,
+  trustedProxies,
   leader,
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,

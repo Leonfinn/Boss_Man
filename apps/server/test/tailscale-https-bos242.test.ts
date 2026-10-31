@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
@@ -55,5 +56,20 @@ describe("BOS-242 https through the trusted hop", () => {
     expect((await via("100.64.0.1", "guess9")).statusCode).toBe(429);
     // A second phone behind the same hop is not locked out by the first.
     expect((await via("100.64.0.2", "leon", pw)).statusCode).toBe(200);
+  });
+});
+
+describe("BOS-242 deploy/tailscale.yml shape", () => {
+  const yml = readFileSync(new URL("../../../deploy/tailscale.yml", import.meta.url), "utf8");
+  it("parses with TS_AUTHKEY unset: the key is optional, never required", () => {
+    expect(yml).toMatch(/TS_AUTHKEY: \$\{TS_AUTHKEY:-\}/);
+    expect(yml).not.toMatch(/\$\{[A-Z_]+:\?/);
+  });
+  it("keeps the server on default and launcher as well as edge", () => {
+    const server = yml.slice(yml.indexOf("\n  server:"));
+    for (const n of ["default", "launcher", "edge"]) expect(server).toMatch(new RegExp(`\\n      ${n}: \\{\\}`));
+  });
+  it("pins the image by digest", () => {
+    expect(yml).toMatch(/image: tailscale\/tailscale:v[\d.]+@sha256:[0-9a-f]{64}/);
   });
 });
