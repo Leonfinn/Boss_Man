@@ -75,3 +75,12 @@ describe("ticket in review", () => {
     expect(await screen.findByText("Approving marks it done.")).toBeTruthy();
   });
 });
+
+describe("phone ordering hooks (BOS-245)", () => {
+  it("the folded Review card still gets its marker, so the phone can put it above the conversation", async () => {
+    show({}, []);
+    const review = (await screen.findByText("waiting for you")).closest("details")!;
+    expect(review.classList.contains("fold")).toBe(true);
+    expect(review.classList.contains("review-card")).toBe(true);
+  });
+});

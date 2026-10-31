@@ -113,4 +113,24 @@ describe("the collapsible Work panel", () => {
     render(<Ticket id="t1" companies={[company]} />);
     await screen.findByRole("button", { name: "Hide" });
   });
+
+  it("starts collapsed on a phone, with the status and assignee on the one-line heading (BOS-245)", async () => {
+    localStorage.clear();
+    vi.stubGlobal("fetch", stub({ assignee: "Bungle" }));
+    vi.stubGlobal("innerWidth", 390);
+    const { container } = render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByRole("button", { name: "Show" });
+    expect(container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(true);
+    expect(screen.getByText("· In review · Bungle")).toBeTruthy();
+  });
+
+  it("still remembers the owner's own choice on a phone, so an opened panel stays open", async () => {
+    localStorage.setItem("bossman.ticket.workCollapsed", "0");
+    vi.stubGlobal("fetch", stub({}));
+    vi.stubGlobal("innerWidth", 390);
+    const { container } = render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByRole("button", { name: "Hide" });
+    expect(container.querySelector("#ticket-props-body")!.hasAttribute("hidden")).toBe(false);
+    expect(screen.queryByText(/^· In review/)).toBeNull();
+  });
 });
