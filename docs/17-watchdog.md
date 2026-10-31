@@ -85,6 +85,20 @@ Counted from `watchdog_actions` over a rolling hour:
 
 The next one over the cap switches the watchdog off. It sets `watchdog_tripped_at`, logs `tripped`, and sends one "Got it" decision to the owner. Only the owner switching it back on clears the trip. The sweep wake is exempt from the ticketless-wakes limit (6 an hour per agent); the other scheduler limits still apply. When the run cap trips, the owner's notice says how many problems were due and from which rules. The backtest uses the same one-wake-per-sweep count and reports when the cap would first trip.
 
+## Record-only mode (BOS-166)
+
+Settings → Watchdog has a **Record only (rehearse)** tick (`recordOnly`, off by default), meant for a first day of watching before the full switch-on.
+
+While it is on, a sweep is a rehearsal:
+- The rules still run, and flags still open, refresh and close on their normal schedule (including the back-off on repeat flags), so the board, the health chip and **Open now** are exactly what they would be.
+- Nothing reaches anyone. There is no Scrum Master wake, nudge, assignment, escalation or reminder, no Page to the owner, and no daily summary sent. The alert ladder and the Scrum Master's own `watchdog` tool actions are refused with a message saying the watchdog is only recording.
+- Nothing spends the hourly cap and a rehearsal can never trip it. The rows are written with a `recorded` mark and never count toward the once-per-hand-off rule.
+- Each thing it would have done is written to `watchdog_actions` as `record_sweep_wake` (one per hand-off, naming the flags), `record_owner_reminder`, `record_auto_escalate` or `record_urgent_page`. The Scrum Master view badges them **Not sent** and offers no Undo; the health chip reads "record only (not acting)".
+- The daily summary is still built and written to the activity log, marked "Record only …" and "Would have done (not sent)", instead of going to the owner; a day with only rehearsals still reports.
+- Untick it and the next sweep acts for real: anything still due is handed over then. Switching the watchdog off works as before.
+
+What it can't show: the owner and the Scrum Master react to nothing during the rehearsal, so a flag that would have been nudged away stays open and may climb (back-off, auto-escalation) exactly as if nobody had acted.
+
 ## Read API (owner)
 
 - `GET` and `PATCH /api/companies/:id/watchdog`: settings, plus `scrumMasterAgentId`; also the health fields (`lastSweepAt`, `trippedAt`, `trippedReason`, `openFlags`).
@@ -100,7 +114,7 @@ The next one over the cap switches the watchdog off. It sets `watchdog_tripped_a
 
 ## What the owner sees (BOS-60)
 
-- **Scrum Master view** (sidebar → Scrum Master): an **Open now** section above the timeline lists every warning the health chip counts, with the ticket, the warning, who has it, what was done and what happens next. If nothing is open it says so. A finished or cancelled ticket settles its warning automatically with a plain note. The timeline groups a warning's entries, shows each as open or settled, and tells a repeat warning on one ticket apart ("2nd warning on BOS-149 today"). Every logged action keeps its one-line reason and an Undo while one is possible. The same list, filtered to one ticket, shows on the ticket page. Sweep wakes are hidden from the company view.
-- **Health chip** on the board: "Watchdog: last check 3 min ago · 2 issues being handled", or "off", or "stopped itself (safety cap hit)". Amber when no check has run for 15 minutes.
+- **Scrum Master view** (sidebar → Scrum Master): an **Open now** section above the timeline lists every warning the health chip counts, with the ticket, the warning, who has it, what was done and what happens next. If nothing is open it says so. A finished or cancelled ticket settles its warning automatically with a plain note. The timeline groups a warning's entries, shows each as open or settled, and tells a repeat warning on one ticket apart ("2nd warning on BOS-149 today"). Every logged action keeps its one-line reason and an Undo while one is possible; a record-only entry (BOS-166) is badged "Not sent" and has no Undo. The same list, filtered to one ticket, shows on the ticket page. Sweep wakes are hidden from the company view.
+- **Health chip** on the board: "Watchdog: last check 3 min ago · 2 issues being handled", or "off", or "stopped itself (safety cap hit)", or "record only (not acting)" while rehearsing. Amber when no check has run for 15 minutes.
 - **Daily summary** (`dailySummary`, run after each sweep): a "note" in the owner's feed, from 8:00 owner-local time, at most once a day, and only if something was caught, cleared or done since the last one. It carries counts, what is still open and who it waits on, owner decisions with their age, and a headline (stuck tickets and the oldest). Owner-decision waits are not counted as stuck.
 - **Urgent** (`urgentCheck`): one owner decision holding three or more unfinished tickets sends a Page (once per decision). The "holds" count follows the chain: the ticket the decision blocks plus every unfinished ticket waiting on it, directly or further down. The other Page-level case is the watchdog switching itself off at its safety cap: `trip()` pages the owner once per trip (the "Got it" decision it also raises is only a quiet flag). Those two are the only interrupts; the 8-hour decision reminder stays a quiet flag. Both are logged as `urgent_alert` and `daily_summary` actions.

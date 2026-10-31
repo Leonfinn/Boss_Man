@@ -214,6 +214,7 @@ export function alertLadder(
    * their duty either way. Still refuse anyone who isn't the company's active Scrum Master.
    */
   async function dutyActor(companyId: string, agentId: string) {
+    if (await deps.watchdog.recordOnly(companyId)) throw new WatchdogError(409, "The watchdog is in record-only mode: it writes down what it would do and reaches nobody. The owner switches it to full action in Settings.");
     const [sm] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY), isNull(agents.retiredAt)));
     if (!sm || sm.id !== agentId) throw new WatchdogError(403, "Only the company's Scrum Master can settle these alerts.");
     return { sm };
@@ -269,6 +270,9 @@ export function alertLadder(
         .where(and(eq(decisions.status, "open"), sql`${decisions.context}->'ladder'->>'rung' in ('scrum_master', 'ceo')`));
       let moved = 0;
       for (const { d, watchdog } of open) {
+        // Record only (BOS-166): a rehearsal never reaches anyone, so an alert waiting on the Scrum
+        // Master isn't moved up by itself, into their queue or their phone. It keeps its place.
+        if (watchdog && typeof watchdog === "object" && readWatchdogSettings(watchdog).recordOnly) continue;
         const ladder = (d.context as { ladder: Ladder }).ladder;
         const minutes = ladder.minutes ?? readWatchdogSettings(watchdog).alertMinutes;
         if ((await dueAt(d.companyId, ladder, minutes)) > now().getTime()) continue;

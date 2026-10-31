@@ -4,6 +4,11 @@ import { z } from "zod";
 
 export const WatchdogSettings = z.object({
   enabled: z.boolean(),
+  /**
+   * Record-only (rehearsal) mode (BOS-166): the sweep still opens and closes flags and logs what it
+   * would have done, but wakes, nudges, assigns, escalates or reminds nobody and spends no cap.
+   */
+  recordOnly: z.boolean(),
   /** A ready or in-progress ticket with no assignee for this long is flagged; short, so a ticket mid-creation isn't. */
   unassignedMinutes: z.number().int().min(1).max(24 * 60),
   inProgressHours: z.number().min(0.25).max(24 * 14),
@@ -28,6 +33,7 @@ export type WatchdogSettings = z.infer<typeof WatchdogSettings>;
 
 export const DEFAULT_WATCHDOG: WatchdogSettings = {
   enabled: false,
+  recordOnly: false,
   unassignedMinutes: 15,
   inProgressHours: 2,
   reviewHours: 2,
@@ -68,8 +74,20 @@ export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   owner_decision_waiting: "it waits on the owner's decision",
 };
 
-export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert", "alert_hop", "alert_resolved"] as const;
+export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert", "alert_hop", "alert_resolved", "record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page"] as const;
 export type WatchdogActionKind = (typeof WATCHDOG_ACTIONS)[number];
+
+/**
+ * Record-only entries (BOS-166): what the watchdog would have done in rehearsal. Nothing reached
+ * anyone, so they never count toward a cap or toward the once-per-hand-off rule.
+ */
+export const WATCHDOG_RECORD_KINDS: readonly WatchdogActionKind[] = ["record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page"];
+
+/** The caps and the once-per-hand-off rule never count these (BOS-166); every other log entry is real. */
+export const WATCHDOG_NON_CAPPED_KINDS: readonly WatchdogActionKind[] = [...WATCHDOG_RECORD_KINDS, "urgent_alert", "alert_hop", "alert_resolved", "tripped", "undo", "daily_summary"];
+
+/** True for a rehearsal entry, written while record-only mode was on. */
+export const isRecordedAction = (kind: string) => (WATCHDOG_RECORD_KINDS as readonly string[]).includes(kind);
 
 /** Actions that reach another agent or the owner; they count toward maxNudgesPerHour (an undone one still counts, so undo can't refill the cap). */
 export const WATCHDOG_NUDGE_KINDS: readonly WatchdogActionKind[] = ["nudge", "assign", "rewake", "chase_review", "escalate", "auto_escalate", "raise_decision"];
@@ -99,4 +117,9 @@ export const WATCHDOG_ACTION_LABEL: Record<WatchdogActionKind, string> = {
   urgent_alert: "Paged you",
   alert_hop: "Passed a warning on",
   alert_resolved: "Settled a warning",
+  // Record-only: written while the watchdog is rehearsing, so they say "would have" and are never sent.
+  record_sweep_wake: "Would have woken the Scrum Master",
+  record_owner_reminder: "Would have reminded you",
+  record_auto_escalate: "Would have escalated to the CEO",
+  record_urgent_page: "Would have paged you",
 };

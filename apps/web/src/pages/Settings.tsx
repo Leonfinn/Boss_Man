@@ -1130,6 +1130,7 @@ export function Watchdog({ company }: { company: Company }) {
       return "Saved.";
     });
   const on = status.settings.enabled;
+  const recordOnly = status.settings.recordOnly;
   return (
     <Section id="watchdog-h" title="Watchdog">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -1141,9 +1142,19 @@ export function Watchdog({ company }: { company: Company }) {
           : status.trippedAt && !on
           ? `Switched itself off ${when(status.trippedAt)}: ${status.trippedReason}. Look at its recent actions, then switch it back on.`
           : on
-            ? `On. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
+            ? `On${recordOnly ? " (record only: it writes down what it would do and reaches nobody)" : ""}. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
             : "Off."}
       </p>
+      {/* Record-only mode (BOS-166): a rehearsal day, written down and sent to nobody. */}
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <input id="wd-record" type="checkbox" checked={recordOnly} onChange={(e) => void save({ recordOnly: e.target.checked })} style={{ marginTop: 4 }} />
+        <label htmlFor="wd-record" style={{ maxWidth: 720 }}>
+          <strong>Record only (rehearse)</strong>:{" "}
+          <span className="muted">
+            The watchdog still checks the board and keeps its warnings up to date, but it writes down what it would have done and reaches nobody: no wake, nudge, assignment, escalation or reminder to you, and its hourly limits aren’t used. The log and the daily summary mark these as not sent. Untick this to let it act again from the next check.
+          </span>
+        </label>
+      </div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <label htmlFor="wd-sm">Scrum Master</label>
         <select id="wd-sm" value={sm} onChange={(e) => setSm(e.target.value)}>
