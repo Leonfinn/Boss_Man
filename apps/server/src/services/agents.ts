@@ -1,7 +1,7 @@
 // The Agents tab (R62): who works for each company, what they cost this month, and every change
 // to them, with what it was before so it can be undone.
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
+import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, providerLabel, speakerNameProblem } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
@@ -277,8 +277,9 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       if (a.companyId !== companyId) throw new AgentError(404, "No such agent.");
       if (a.role === "ceo") throw new AgentError(409, "The CEO can't be renamed this way; the owner can rename it on the Agents page.");
       if (a.retiredAt) throw new AgentError(409, `${a.name} is retired, so they can't be renamed.`);
+      const problem = speakerNameProblem(newName);
+      if (problem) throw new AgentError(422, problem);
       const name = newName.trim();
-      if (!name) throw new AgentError(422, "A name can't be empty.");
       if (name.length > NAME_MAX) throw new AgentError(422, `That name is ${name.length} characters; names are at most ${NAME_MAX}.`);
       const [same] = await db
         .select({ id: agents.id })
@@ -312,8 +313,11 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     async applyRename(agentId: string, name: string, byAgentId: string | null, reason?: string): Promise<AgentRow> {
       const a = await agent(agentId);
       if (a.role === "ceo") throw new AgentError(409, "The CEO can't be renamed this way; the owner can rename it on the Agents page.");
+      // Re-checked here, not only in rename(): the owner's approval comes through this path too, and a name
+      // that reads as "Owner" or carries a line break would let this agent's words pass for the owner's (BOS-265 review).
+      const problem = speakerNameProblem(name);
+      if (problem) throw new AgentError(422, problem);
       const clean = name.trim();
-      if (!clean) throw new AgentError(422, "A name can't be empty.");
       if (clean.length > NAME_MAX) throw new AgentError(422, `That name is ${clean.length} characters; names are at most ${NAME_MAX}.`);
       const [same] = await db
         .select({ id: agents.id })
@@ -509,6 +513,9 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     async hire(companyId: string, input: { name: string; template?: string; title?: string | null; instructions?: string | null; role?: "manager" | "worker"; agentKind?: string; model?: string | null; thinking?: string | null; fundingSourceId?: string | null; reportsTo?: string | null }, byAgentId: string | null = null) {
       const tpl = input.template ? AGENT_TEMPLATES.find((x) => x.id === input.template) : undefined;
       if (input.template && !tpl) throw new AgentError(422, `There's no template called ${input.template}.`);
+      // A new agent's name is a speaker label in agent conversations too, so the rename rules apply (BOS-265 review).
+      const problem = speakerNameProblem(input.name);
+      if (problem) throw new AgentError(422, problem);
       // One assistant per company (R87); it starts paused so the owner picks its (cheap) model first.
       if (tpl?.duty && (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, tpl.duty), isNull(agents.retiredAt)))).length) throw new AgentError(409, `This company already has an active ${tpl.title}; retire it first.`);
       const [a] = await db
