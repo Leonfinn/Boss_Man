@@ -631,6 +631,22 @@ describe("/tmp note and switch vouch only for programs that can't follow a symli
     }
   });
 
+  it("gives no note or auto-allow when a .. or . part could climb out through a symlink (security review)", () => {
+    // The kernel resolves lnk/.. from where the link points, not from /tmp, so these can delete or create outside /tmp.
+    for (const c of [
+      "rm -rf /tmp/lnk/../x",
+      "rm -rf /tmp/a && rm -rf /tmp/lnk/../x",
+      "mkdir -p /tmp/lnk/../x",
+      "mkdir /tmp/lnk/../x",
+      "rm -rf /tmp/lnk/./x",
+      "rm -rf /tmp/./a",
+      "rm -rf /tmp/lnk/..",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+  });
+
   it("keeps the note for rm, rmdir, unlink and mkdir of one plain entry, reads included", () => {
     for (const c of ["rm -rf /tmp/a", "rmdir /tmp/a && unlink /tmp/b", "rm -rf /tmp/a && mkdir -p /tmp/a", "rm -rf /tmp/a && ls -la /tmp && cat /tmp/b"]) {
       expect(explainCommand(c).scratch, c).toBeDefined();

@@ -291,10 +291,11 @@ function scratchOnly(parts: Part[]): { unchecked: string[] } | null {
     if (p.effect !== "changes" && p.effect !== "deletes") continue;
     wrote = true;
     if (!SCRATCH_WRITES.has(p.program ?? "")) return null;
-    // norm() reads paths as written, but the shell expands globs and braces (/tmp/*, /tmp/{a,../home}) after it.
-    if (!p.targets.length || p.targets.some((t) => /\/$|\/\/|[*?[{]/.test(t))) return null;
-    const where = p.targets.map(norm);
-    if (where.some((w) => !w || !TEMP_ONLY.test(w))) return null;
+    // Test the raw target, not norm(t): norm removes ".." as plain text, but the kernel resolves
+    // a/../b from where the link at a points (security round: rm -rf /tmp/lnk/../x, mkdir -p /tmp/lnk/../x).
+    // TEMP_PATH holds the target to one plain entry directly in /tmp, so a trailing slash, //, a glob
+    // or brace (/tmp/*, /tmp/{a,../home}), and any . or .. part all fail the test.
+    if (!p.targets.length || p.targets.some((t) => !TEMP_ONLY.test(t))) return null;
   }
   return wrote ? { unchecked: [] } : null;
 }
