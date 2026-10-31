@@ -40,6 +40,7 @@ const RECORD_WORDS: Record<string, string> = {
   record_owner_reminder: "owner reminders",
   record_auto_escalate: "escalations to the CEO",
   record_urgent_page: "pages to you about a decision",
+  record_alert_skip: "Boss Man alerts passed up the ladder",
 };
 
 /** Null on a day nothing happened: no new problems, no actions, nothing cleared. Record-only runs always report. */

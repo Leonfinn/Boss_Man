@@ -74,14 +74,14 @@ export const WATCHDOG_RULE_LABEL: Record<WatchdogRule, string> = {
   owner_decision_waiting: "it waits on the owner's decision",
 };
 
-export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert", "alert_hop", "alert_resolved", "record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page"] as const;
+export const WATCHDOG_ACTIONS = ["sweep_wake", "nudge", "assign", "rewake", "chase_review", "snooze", "escalate", "raise_decision", "owner_reminder", "auto_escalate", "tripped", "undo", "daily_summary", "urgent_alert", "alert_hop", "alert_resolved", "record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page", "record_alert_skip"] as const;
 export type WatchdogActionKind = (typeof WATCHDOG_ACTIONS)[number];
 
 /**
  * Record-only entries (BOS-166): what the watchdog would have done in rehearsal. Nothing reached
  * anyone, so they never count toward a cap or toward the once-per-hand-off rule.
  */
-export const WATCHDOG_RECORD_KINDS: readonly WatchdogActionKind[] = ["record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page"];
+export const WATCHDOG_RECORD_KINDS: readonly WatchdogActionKind[] = ["record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page", "record_alert_skip"];
 
 /** The caps and the once-per-hand-off rule never count these (BOS-166); every other log entry is real. */
 export const WATCHDOG_NON_CAPPED_KINDS: readonly WatchdogActionKind[] = [...WATCHDOG_RECORD_KINDS, "urgent_alert", "alert_hop", "alert_resolved", "tripped", "undo", "daily_summary"];
@@ -122,4 +122,5 @@ export const WATCHDOG_ACTION_LABEL: Record<WatchdogActionKind, string> = {
   record_owner_reminder: "Would have reminded you",
   record_auto_escalate: "Would have escalated to the CEO",
   record_urgent_page: "Would have paged you",
+  record_alert_skip: "Would have passed Boss Man's own alert up the ladder",
 };

@@ -26,6 +26,8 @@ export type Rung = "scrum_master" | "ceo" | "owner";
 const RUNGS: Rung[] = ["scrum_master", "ceo", "owner"];
 const LABEL: Record<Rung, string> = { scrum_master: "the Scrum Master", ceo: "the CEO", owner: "the owner" };
 export const GOT_IT = "Got it";
+/** A skip that only happens because the watchdog is rehearsing (BOS-166). */
+const RECORD_SKIP = /record-only/i;
 
 export type Ladder = {
   rung: Rung;
@@ -82,6 +84,12 @@ export function alertLadder(
     await record(db, { companyId, agentId: row.actorAgentId ?? null, ticketId: row.ticketId, kind: "watchdog", summary: row.summary, at: now() });
   }
 
+  /** A rehearsal entry (BOS-166): what the ladder would have done. It reached nobody, so the caps never count it. */
+  async function recordRehearsal(companyId: string, row: { kind: "record_alert_skip"; ticketId: string | null; decisionId: string; reason: string; summary: string }) {
+    await db.insert(watchdogActions).values({ companyId, kind: row.kind, ticketId: row.ticketId, reason: row.reason.slice(0, 500), after: { decisionId: row.decisionId, recorded: true }, createdAt: now() });
+    await record(db, { companyId, agentId: null, ticketId: row.ticketId, kind: "watchdog", summary: row.summary, at: now() });
+  }
+
   /**
    * When a card on its rung is due to move up. The Scrum Master's rung counts from the hop. The CEO's
    * minutes count from when a CEO run that can see the card starts (one that began after it was
@@ -116,6 +124,9 @@ export function alertLadder(
     if (!c || c.paused) return { skip: "the company is paused" };
     if (rung === "scrum_master") {
       const s = readWatchdogSettings(c.watchdog);
+      // Record only (BOS-166): the Scrum Master can't act in this mode, so an alert waiting here would
+      // sit forever. Treat it like "watchdog off" and let the alert climb to the CEO and then the owner.
+      if (s.recordOnly) return { skip: "the watchdog is in record-only mode" };
       // A stalled run is the Scrum Master's duty whether or not the watchdog is switched on (BOS-119).
       if ((!s.enabled || watchdogPausedUntil(c, now())) && !duty) return { skip: "the watchdog is off" };
       const [sm] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.duty, SCRUM_MASTER_DUTY), isNull(agents.retiredAt)));
@@ -187,6 +198,8 @@ export function alertLadder(
       const h = await holder(d.companyId, rung, ladder.about, ladder.duty);
       if ("skip" in h) {
         reason = `${LABEL[rung]} was skipped: ${h.skip}`;
+        // Record only (BOS-166): the rehearsal would have passed it up, so write that down, but nothing is sent.
+        if (RECORD_SKIP.test(h.skip)) await recordRehearsal(d.companyId, { kind: "record_alert_skip", ticketId: ladder.ticketId, decisionId: d.id, reason, summary: `Record only: would have passed Boss Man's alert past ${LABEL[rung]} and up the ladder (${h.skip}). Nothing was sent.` });
         continue;
       }
       const next = hop(rung, reason);
@@ -270,9 +283,6 @@ export function alertLadder(
         .where(and(eq(decisions.status, "open"), sql`${decisions.context}->'ladder'->>'rung' in ('scrum_master', 'ceo')`));
       let moved = 0;
       for (const { d, watchdog } of open) {
-        // Record only (BOS-166): a rehearsal never reaches anyone, so an alert waiting on the Scrum
-        // Master isn't moved up by itself, into their queue or their phone. It keeps its place.
-        if (watchdog && typeof watchdog === "object" && readWatchdogSettings(watchdog).recordOnly) continue;
         const ladder = (d.context as { ladder: Ladder }).ladder;
         const minutes = ladder.minutes ?? readWatchdogSettings(watchdog).alertMinutes;
         if ((await dueAt(d.companyId, ladder, minutes)) > now().getTime()) continue;

@@ -480,6 +480,16 @@ describe("the hourly cap (BOS-58)", () => {
   });
 
 
+  it("a log row without an \"after\" still counts toward the cap (BOS-166 hardening)", async () => {
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    const ts = [await ctx.ticket({ title: "A", stateChangedAt: ctx.ago(130) })];
+    // A real action written without the optional before/after columns must still be seen as spent.
+    await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "nudge", targetAgentId: ctx.dev.id, ticketId: ts[0]!.id, reason: "no detail" });
+    const s = readWatchdogSettings((await ctx.db.select().from(companies).where(eq(companies.id, ctx.companyId)))[0]!.watchdog);
+    await expect(ctx.watchdog.capOrFail(ctx.companyId, s)).rejects.toThrow(/hourly limit/);
+    expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).not.toBeNull();
+  });
+
   it("caps Scrum Master wakes per hour too", async () => {
     await ctx.switchOn({ maxSmRunsPerHour: 1, unassignedMinutes: 1 });
     await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });

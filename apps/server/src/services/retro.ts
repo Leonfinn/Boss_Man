@@ -128,7 +128,8 @@ const ProposeIn = z.object(ProposeShape);
 
 const PlaybookIn = z.object({ name: Str(64), description: Str(1024), body: Str(20_000) }).strict();
 const PolicyPatch = z.object({ planApprover: z.string().min(1).optional(), reviewer: z.string().min(1).optional(), ownerSignoff: z.boolean().optional() }).strict();
-const WatchdogPatch = WatchdogSettings.omit({ enabled: true }).partial().strict();
+// `recordOnly` is an owner-only choice like `enabled` (BOS-166): an agent may not propose quietly silencing the watchdog.
+const WatchdogPatch = WatchdogSettings.omit({ enabled: true, recordOnly: true }).partial().strict();
 
 export const hrs = (ms: number | null) => (ms === null ? "n/a" : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : ms < 48 * 3_600_000 ? `${(ms / 3_600_000).toFixed(1)} h` : `${(ms / DAY).toFixed(1)} days`);
 const pct = (v: number | null) => (v === null ? "n/a" : `${Math.round(v * 100)}%`);

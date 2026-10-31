@@ -13,6 +13,8 @@ The plan, with the agreed data shapes, is on the wiki: `product/analysis/scrum-m
   - the hourly cap and trip
   - undo
   - settings and the read API
+- `apps/server/src/services/alert-ladder.ts`: Boss Man's own alerts (a wake-chain loop, a runaway, a stalled run) and the climb from the Scrum Master to the CEO to the owner.
+- `apps/server/src/services/watchdog-summary.ts`: the daily summary the owner reads.
 - `apps/server/src/services/watchdog-backtest.ts`: replays the rules over history.
 - `apps/server/src/main.ts`: the `watchdog` loop. It runs on the leader only, every `BOSSMAN_WATCHDOG_MS` (default 5 minutes).
 - `apps/server/src/mcp.ts`: the Scrum Master's restricted tool server (`SCRUM_MASTER_TOOLS`) and its `watchdog` tool.
@@ -91,11 +93,14 @@ Settings → Watchdog has a **Record only (rehearse)** tick (`recordOnly`, off b
 
 While it is on, a sweep is a rehearsal:
 - The rules still run, and flags still open, refresh and close on their normal schedule (including the back-off on repeat flags), so the board, the health chip and **Open now** are exactly what they would be.
-- Nothing reaches anyone. There is no Scrum Master wake, nudge, assignment, escalation or reminder, no Page to the owner, and no daily summary sent. The alert ladder and the Scrum Master's own `watchdog` tool actions are refused with a message saying the watchdog is only recording.
+- The watchdog itself does nothing to anyone. There is no Scrum Master wake, nudge, assignment, escalation or reminder, no Page to the owner, and no daily summary sent. The Scrum Master's own `watchdog` tool actions are refused with a message saying the watchdog is only recording.
+- **Boss Man's own alerts are not silenced.** A wake-chain loop, a runaway or a stalled run still raises its alert, and the ladder still climbs: the Scrum Master rung is skipped (it could not act in this mode anyway) with a `record_alert_skip` row saying so, the CEO takes it, and past the limits it reaches the owner. Record-only is meant to be no riskier than simply switching the watchdog off, so a problem on rehearsal day still gets to someone. No alert is ever left sitting on a rung until the rehearsal ends.
 - Nothing spends the hourly cap and a rehearsal can never trip it. The rows are written with a `recorded` mark and never count toward the once-per-hand-off rule.
-- Each thing it would have done is written to `watchdog_actions` as `record_sweep_wake` (one per hand-off, naming the flags), `record_owner_reminder`, `record_auto_escalate` or `record_urgent_page`. The Scrum Master view badges them **Not sent** and offers no Undo; the health chip reads "record only (not acting)".
+- Each thing it would have done is written to `watchdog_actions` as `record_sweep_wake` (one per hand-off, naming the flags), `record_owner_reminder`, `record_auto_escalate` or `record_urgent_page` (plus `record_alert_skip` when one of Boss Man's own alerts passes the Scrum Master by). The Scrum Master view badges them **Not sent** and offers no Undo; the health chip reads "record only (not acting)".
 - The daily summary is still built and written to the activity log, marked "Record only …" and "Would have done (not sent)", instead of going to the owner; a day with only rehearsals still reports.
 - Untick it and the next sweep acts for real: anything still due is handed over then. Switching the watchdog off works as before.
+
+It is the owner's choice alone, like switching the watchdog on: the settings route is owner-only, and an agent's workflow-retro proposal may not include it, so a proposal can't quietly silence the watchdog.
 
 What it can't show: the owner and the Scrum Master react to nothing during the rehearsal, so a flag that would have been nudged away stays open and may climb (back-off, auto-escalation) exactly as if nobody had acted.
 

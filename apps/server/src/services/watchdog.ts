@@ -246,7 +246,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     const [row] = await db
       .select({ n: sql<number>`count(*)::int` })
       .from(watchdogActions)
-      .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, kinds), gt(watchdogActions.createdAt, new Date(now().getTime() - H)), group === "runs" ? sql`${watchdogActions.after}->>'dropped' is null` : undefined, sql`not (${watchdogActions.after} ? 'recorded')`, notInArray(watchdogActions.kind, [...WATCHDOG_NON_CAPPED_KINDS])));
+      .where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, kinds), gt(watchdogActions.createdAt, new Date(now().getTime() - H)), group === "runs" ? sql`${watchdogActions.after}->>'dropped' is null` : undefined, sql`coalesce(${watchdogActions.after} ? 'recorded', false) = false`, notInArray(watchdogActions.kind, [...WATCHDOG_NON_CAPPED_KINDS])));
     if ((row?.n ?? 0) < max) return true;
     await trip(companyId, group === "runs" ? `it would have woken the Scrum Master more than ${max} times in an hour${detail ? ` (${detail})` : ""}` : `the Scrum Master would have taken more than ${max} actions that reach someone in an hour`);
     return false;
