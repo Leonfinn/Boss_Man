@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, readPush, TEMP_DELETE, tempCleanup, writesBeyondTmp } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -101,7 +101,9 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     if (new RegExp(`${DESTRUCTIVE}|${PUSHING}`, "i").test(cmd)) return false;
   }
   if (rule.scratchOnly) {
-    // shortcut: paths are checked as written, so a symlink inside /tmp pointing elsewhere isn't caught; resolving them needs the runner's filesystem.
+    // Paths are checked as written, so the note (scratchOnly in explain.ts) vouches only for
+    // programs that can't follow a symlink at their target: rm/rmdir/unlink/mkdir of one plain
+    // /tmp entry, no redirects (BOS-165).
     const scratch = explainCommand(commandOf(info.rawInput) ?? "").scratch;
     if (!scratch || scratch.unchecked.length) return false;
   }
@@ -167,6 +169,9 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
 /** Build output in the agent's working folder (node_modules, dist…), by a plain relative path: no component starting with a dot (so no .., . or .git), no ~, $ or globs. Source folders such as src aren't vouched for. */
 const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-][\w.+@-]*\/)*(?:node_modules|dist|build|coverage|out|target)\/?)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 
+/** find -delete rooted at one plain /tmp entry: kept Allow as BOS-111 pinned it. Root must be one level, quoted patterns kept simple. */
+const FIND_TMP_DELETE = /^find\s+\/tmp\/[A-Za-z0-9._+@-]+(?:\s+-(?:name|iname|type|path|mindepth|maxdepth|mtime|mmin|newer|empty|print)(?:\s+'[^']*'|"[^"]*"|\S+)?)*\s+-delete$/;
+
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
  * files isn't a reason to refuse on its own: temp-file cleanup and deletes of build output in the
@@ -191,8 +196,13 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const scratch = explainCommand(cmd).scratch;
   if (scratch && !scratch.unchecked.length) return "allow";
   if (!hits.length) return "allow";
-  if (hits.some((h) => !/^rm\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
+  if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
-  return pieces.every((s) => !destructive.test(s) || WORKSPACE_DELETE.test(s)) ? "allow" : "deny";
+  // A plain delete of one-level /tmp entries never makes the suggestion Deny, whatever else the
+  // command does (BOS-165, from BOS-153 finding 2). TEMP_DELETE accepts no trailing slash, deeper
+  // path, glob or redirect to a file, so /tmp/a/, /tmp/a/b and rm > /home/x stay Deny. A piece with
+  // no vouched delete is accepted only when it can't reach beyond /tmp either (writesBeyondTmp),
+  // so cp -t /home and a redirect into the home folder still pay Deny.
+  return pieces.every((s) => (destructive.test(s) ? WORKSPACE_DELETE.test(s) || TEMP_DELETE.test(s) || FIND_TMP_DELETE.test(s) : !writesBeyondTmp(s))) ? "allow" : "deny";
 }

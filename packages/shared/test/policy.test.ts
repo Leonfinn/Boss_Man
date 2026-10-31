@@ -6,7 +6,7 @@ const exec = (command: string) => ({ title: command, kind: "execute", rawInput: 
 
 describe("the /tmp-only switch", () => {
   it("allows commands that only work in /tmp when on, and still asks when off", () => {
-    for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && cp -r src /tmp/a", "find /tmp/x -delete"]) {
+    for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && rm -rf /tmp/b", "rm -f /tmp/x && rmdir /tmp/y"]) {
       expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toEqual({ outcome: "allow", rule: SCRATCH_RULE.name });
     }
     expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("ceo");
@@ -444,9 +444,13 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     }
   });
 
-  it("keeps the note for listed options", () => {
-    for (const c of ["rm -rf /tmp/a", "rm -rf /tmp/a && mkdir -p /tmp/a/b && cp -r /tmp/c /tmp/a/b", "rm -rf /tmp/a && ls -la /tmp && cat /tmp/b > /tmp/a.log 2>&1", "find /tmp/x -name '*.log' -delete"]) {
+  it("keeps the note for listed options on the vouched-for programs", () => {
+    for (const c of ["rm -rf /tmp/a", "rm -rf /tmp/a && mkdir -p /tmp/b"]) {
       expect(explainCommand(c).scratch, c).toBeDefined();
+    }
+    // BOS-165 narrows the note to rm/rmdir/unlink/mkdir of one plain /tmp entry: cp, redirects and find -delete follow links at the destination.
+    for (const c of ["rm -rf /tmp/a && mkdir -p /tmp/a/b && cp -r /tmp/c /tmp/a/b", "rm -rf /tmp/a && ls -la /tmp && cat /tmp/b > /tmp/a.log 2>&1", "find /tmp/x -name '*.log' -delete"]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
     }
   });
 
@@ -513,10 +517,12 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
       if (/rm -\w*[rf]/.test(c)) expect(recommendedVerdict(exec(c)), c).toBe("deny");
       expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
     }
-    for (const c of ["rm -rf /tmp/a 2>/dev/null", "ls /tmp > /tmp/x.log", "rm -rf /tmp/a 2>&1 >/dev/null"]) {
+    for (const c of ["rm -rf /tmp/a 2>/dev/null", "rm -rf /tmp/a 2>&1 >/dev/null"]) {
       expect(explainCommand(c).scratch, c).toBeDefined();
       expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).toBe(SCRATCH_RULE.name);
     }
+    // A redirect to any file loses the note (BOS-165): the file could be a link pointing outside /tmp.
+    expect(explainCommand("ls /tmp > /tmp/x.log").scratch).toBeUndefined();
   });
 
   it("sends the ticket's own command to the CEO with Allow, its install log not deleted first (adversarial round 14)", () => {
@@ -578,8 +584,7 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
     expect(tempCleanup(bare)).toBe(false);
   });
 
-  // Fails today: the plan says a command whose only delete is in /tmp is never recommended Deny. The fix is tracked in follow-up ticket cd2c2730 (and BOS-165); remove `.fails` when it lands.
-  it.fails("never recommends Deny for an install that logs into /tmp (finding 2, known gap)", () => {
+  it("never recommends Deny for an install that logs into /tmp (finding 2, fixed in BOS-165)", () => {
     expect(recommendedVerdict(exec("rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1"))).not.toBe("deny");
   });
 
@@ -595,5 +600,49 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
   it("pins the verdict for shred and find -delete (finding 4)", () => {
     expect(recommendedVerdict(exec("shred /tmp/a"))).toBe("deny");
     expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
+  });
+});
+
+describe("/tmp note and switch vouch only for programs that can't follow a symlink (BOS-165, with BOS-148)", () => {
+  it("gives no note and no auto-allow to programs that follow a link at the destination", () => {
+    // Each one's destination is a /tmp entry that could be a symlink to somewhere outside /tmp: writing through it is real.
+    for (const c of [
+      "rm -rf /tmp/a && tee /tmp/lnk",
+      "rm -rf /tmp/a && cp -r /tmp/b /tmp/lnk",
+      "rm -rf /tmp/a && mv /tmp/b /tmp/lnk",
+      "rm -rf /tmp/a && ln /tmp/b /tmp/lnk",
+      "rm -rf /tmp/a && touch /tmp/lnk",
+      "rm -rf /tmp/a && chmod 644 /tmp/lnk",
+      "rm -rf /tmp/a && chown 0:0 /tmp/lnk",
+      "find /tmp/lnk/ -name '*' -delete",
+      "find /tmp/lnk -name x -delete",
+      "rm -rf /tmp/a && echo x > /tmp/lnk",
+      "rm -rf /tmp/a && ls > /tmp/lnk 2>&1",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+  });
+
+  it("gives no note to deeper paths or a trailing slash (BOS-148)", () => {
+    for (const c of ["rm -rf /tmp/a/b", "rm -rf /tmp/a/", "echo x > /tmp/a/b", "mkdir /tmp/a/b"]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).not.toBe(SCRATCH_RULE.name);
+    }
+  });
+
+  it("keeps the note for rm, rmdir, unlink and mkdir of one plain entry, reads included", () => {
+    for (const c of ["rm -rf /tmp/a", "rmdir /tmp/a && unlink /tmp/b", "rm -rf /tmp/a && mkdir -p /tmp/a", "rm -rf /tmp/a && ls -la /tmp && cat /tmp/b"]) {
+      expect(explainCommand(c).scratch, c).toBeDefined();
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE]).rule, c).toBe(SCRATCH_RULE.name);
+    }
+  });
+
+  it("never pays off a plain /tmp delete with a Deny suggestion, and keeps the trailing slash Deny", () => {
+    expect(recommendedVerdict(exec("rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1"))).toBe("allow");
+    expect(recommendedVerdict(exec("rm -f /tmp/x && cp -r src /tmp/y"))).toBe("allow");
+    for (const c of ["rm -rf /tmp/a/", "rm -rf /tmp/a/b", "rm -rf /tmp/a && rm -rf /home/x", "find . -name x -delete"]) {
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
   });
 });
