@@ -1,7 +1,7 @@
 // Review routing: which policy applies to a ticket, and who it names once paused, retired, missing or
 // conflicted agents are accounted for. The CEO is always the fallback.
-import { and, asc, eq, isNull } from "drizzle-orm";
-import { MARKED, ruleFor, SENIOR_DEV, SENIOR_DEV_TEMPLATE, type ReviewPolicy, type ReviewSlot, type RiskTier } from "@boss-man/shared";
+import { and, asc, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { MARKED, RISK_TIERS, policyAgentIds, ReviewPolicySchema, ruleFor, SENIOR_DEV, SENIOR_DEV_TEMPLATE, type ReviewPolicy, type ReviewSlot, type RiskTier } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, companies, projects } from "../db/schema.js";
 
@@ -14,6 +14,19 @@ export async function effectivePolicy(db: Db, t: { companyId: string; projectId:
   if (p?.policy) return p.policy;
   const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, t.companyId));
   return c!.policy;
+}
+
+/** Validates a policy, and that every agent it names is an active agent of the company; returns the policy or what is wrong with it. */
+export async function checkPolicy(db: Db, companyId: string, body: unknown): Promise<ReviewPolicy | string> {
+  const parsed = ReviewPolicySchema.safeParse(body);
+  if (!parsed.success) return parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  const named = policyAgentIds(parsed.data);
+  if (named.length) {
+    const ok = new Set((await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), inArray(agents.id, named)))).map((a) => a.id));
+    const bad = named.find((a) => !ok.has(a));
+    if (bad) return `Agent ${bad} isn't an active agent of this company.`;
+  }
+  return parsed.data;
 }
 
 /**
@@ -81,4 +94,19 @@ export async function otherReviewers(db: Db, companyId: string, kind: ReviewSlot
     .where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), ref === SENIOR_DEV ? eq(agents.template, SENIOR_DEV_TEMPLATE) : eq(agents.reviewKind, kind)))
     .orderBy(asc(agents.createdAt));
   return pool.filter((a) => !a.paused && a.id !== author && !exclude.includes(a.id)).map(({ id, name }) => ({ id, name }));
+}
+
+/**
+ * The skill add flow's security reviewers (BOS-220): the agents the company's Settings > Reviews names
+ * for security reviews at any tier (projects' overrides aside, as a skill belongs to the company), plus
+ * any agent still carrying the agent page's security mark, so nothing that worked before stops working.
+ * A "senior-dev" cell counts the senior developers. Never the CEO, even if a cell names it: the CEO
+ * proposes skills, so it must not judge them. Retired agents never count; paused ones are listed.
+ */
+export async function securityReviewers(db: Db, companyId: string): Promise<Array<Who & { paused: boolean }>> {
+  const [c] = await db.select({ policy: companies.reviewPolicy }).from(companies).where(eq(companies.id, companyId));
+  const refs = c ? RISK_TIERS.map((t) => c.policy[t].kinds?.security).filter((r): r is string => !!r) : [];
+  const ids = refs.filter((r) => r !== "ceo" && r !== SENIOR_DEV && r !== MARKED);
+  const named = or(eq(agents.reviewKind, "security"), ...(ids.length ? [inArray(agents.id, ids)] : []), ...(refs.includes(SENIOR_DEV) ? [eq(agents.template, SENIOR_DEV_TEMPLATE)] : []));
+  return db.select({ id: agents.id, name: agents.name, paused: agents.paused }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), ne(agents.role, "ceo"), named)).orderBy(asc(agents.createdAt));
 }

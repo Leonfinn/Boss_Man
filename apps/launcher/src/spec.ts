@@ -25,6 +25,8 @@ export type LauncherConfig = {
   /** Where runners dial the server. */
   serverUrl: string;
   memoryBytes: number;
+  /** BOSSMAN_RUNNER_PIDS: process/thread ceiling per runner. */
+  pidsLimit: number;
 };
 
 export const containerName = (slug: string) => `boss-man-runner-${slug}`;
@@ -52,7 +54,7 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
       PidMode: "",
       IpcMode: "private",
       UTSMode: "",
-      PidsLimit: 1024,
+      PidsLimit: cfg.pidsLimit,
       // An init as PID 1 reaps the zombies agents' tools leave, which would otherwise fill the pid limit.
       Init: true,
       Memory: cfg.memoryBytes,
@@ -68,4 +70,11 @@ export function parseMemory(v: string | undefined, fallback = 4 * 1024 ** 3): nu
   if (!m) throw new Error(`BOSSMAN_RUNNER_MEMORY should look like 4g or 512m, not ${v}`);
   const unit = { "": 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[m[2]!.toLowerCase() as "" | "k" | "m" | "g"];
   return Number(m[1]) * unit;
+}
+
+/** A positive whole number of processes and threads, as in compose's pids_limit. */
+export function parsePids(v: string | undefined, fallback = 4096): number {
+  if (!v) return fallback;
+  if (!/^\d+$/.test(v.trim()) || Number(v) < 64) throw new Error(`BOSSMAN_RUNNER_PIDS should be a whole number of at least 64, not ${v}`);
+  return Number(v);
 }

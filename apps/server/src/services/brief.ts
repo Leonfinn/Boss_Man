@@ -1,10 +1,11 @@
 // The brief an agent gets at every wake (R84): built by code from live tables, no model call.
 // Every section is capped, and says how many more there are.
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
-import { untrusted } from "@boss-man/shared";
+import { runLabel, untrusted } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { getHold } from "./maintenance.js";
 import { activity, agents, decisions, engagements, paAnswers, runs, ticketDependencies, tickets } from "../db/schema.js";
+import { runOriginQuery } from "./runs.js";
 
 const MORE = (n: number) => `- +${n} more: use whats_new or tickets`;
 const one = (s: string, n = 160) => {
@@ -30,7 +31,11 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const m = Math.max(0, Math.round((now.getTime() - d.getTime()) / 60_000));
     return m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
   };
-  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null }) => (t.stateNote && t.stateNoteAt ? ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}` : "");
+  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null; stateNoteStaleAt?: Date | null }) => {
+    if (!t.stateNote || !t.stateNoteAt) return "";
+    const stale = t.stateNoteStaleAt != null && (!t.stateNoteAt || t.stateNoteStaleAt > t.stateNoteAt);
+    return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? " (may be out of date: the owner acted after it, so check before repeating it)" : ""}`;
+  };
   const from = since ?? new Date(now.getTime() - 24 * 3_600_000);
   const notMe = agentId ? sql`${activity.agentId} is distinct from ${agentId}` : undefined;
 
@@ -47,16 +52,19 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
           .where(and(eq(activity.companyId, companyId), gt(activity.at, from), notMe, relevant ? inArray(activity.ticketId, relevant) : undefined))
           .orderBy(desc(activity.at));
 
-  /** Other agents' live runs that aren't owner chat. */
+  /** Other agents' live runs that aren't owner chat: what each is doing, in the same words the dashboard uses (BOS-118). */
   const flightLines = async () => {
     const rows = await db
-      .select({ agent: agents.name, ticket: tickets.title, state: tickets.systemState })
+      .select({ agent: agents.name, ticket: tickets.title, state: tickets.systemState, ref: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = "runs"."ticket_id")`, ...runOriginQuery("runs") })
       .from(runs)
       .innerJoin(agents, eq(agents.id, runs.agentId))
       .leftJoin(tickets, eq(tickets.id, runs.ticketId))
       .where(and(eq(runs.companyId, companyId), isNull(runs.endedAt), sql`${runs.purpose} is distinct from 'chat'`, agentId ? ne(runs.agentId, agentId) : undefined))
       .orderBy(asc(runs.startedAt));
-    return rows.map((r) => `- ${r.agent}: ${r.ticket ? `"${one(r.ticket, 40)}" (${r.state})` : "no ticket"}`);
+    return rows.map((r) => {
+      if (r.ticket) return `- ${r.agent}: "${one(r.ticket, 40)}" (${r.state})`;
+      return `- ${r.agent}: ${one(runLabel(r).text, 160)}`;
+    });
   };
 
   let body: string[];

@@ -1,6 +1,74 @@
 import { describe, expect, it } from "vitest";
 import { evaluatePermission } from "../src/policy.js";
-import { alwaysChoices, explainCommand, explainPermission } from "../src/explain.js";
+import { alwaysChoices, explainCommand, explainPermission, readPush } from "../src/explain.js";
+
+describe("readPush", () => {
+  const ticket = "11111111-2222-4333-8444-555555555555";
+
+  it("names a ticket branch, and other branches plainly", () => {
+    expect(readPush(`git push origin bossman/${ticket}`)).toMatchObject({ kind: "ticket", headline: "Pushes to its ticket branch", ticketId: ticket, warnings: [], dangerous: false });
+    expect(readPush("git push origin feature/login")).toMatchObject({ kind: "branch", headline: "Pushes to feature/login", dangerous: false });
+    expect(readPush("git push --repo=origin feature/login")).toMatchObject({ kind: "branch", headline: "Pushes to feature/login" });
+    expect(readPush(`git push origin HEAD:refs/heads/bossman/${ticket}`)).toMatchObject({ kind: "ticket", ticketId: ticket });
+    expect(readPush("git -C x status")).toBeNull();
+    expect(readPush(`git commit -m "explain git push origin main"`)).toBeNull();
+  });
+
+  it("flags main wherever it is written", () => {
+    for (const c of ["git push origin main", "git push origin HEAD:main", "git push origin HEAD:refs/heads/main"]) {
+      const r = readPush(c);
+      expect(r?.dangerous, c).toBe(true);
+      expect(r?.warnings.join(" "), c).toContain("Pushes to main");
+    }
+  });
+
+  it("flags force, delete, every branch/tag, and more than one branch", () => {
+    for (const c of ["git push --force origin x", "git push -f origin x", "git push --force-with-lease origin x", "git push origin +x"]) {
+      expect(readPush(c)?.warnings.join(" "), c).toContain("Force push");
+      expect(readPush(c)?.dangerous, c).toBe(true);
+    }
+    for (const c of ["git push --delete origin x", "git push -d origin x", "git push origin :x"]) {
+      expect(readPush(c)?.warnings.join(" "), c).toContain("Deletes a branch");
+      expect(readPush(c)?.dangerous, c).toBe(true);
+    }
+    for (const c of ["git push --all origin", "git push --mirror origin", "git push --tags origin"]) {
+      expect(readPush(c)?.dangerous, c).toBe(true);
+    }
+    expect(readPush("git push origin main feature")).toMatchObject({ kind: "many", dangerous: true });
+    expect(readPush("git push origin main feature")?.warnings.join(" ")).toContain("more than one branch");
+  });
+
+  it("flags a push that doesn't name the branch", () => {
+    for (const c of ["git push", "git push origin", "git push origin HEAD"]) {
+      const r = readPush(c);
+      expect(r?.kind, c).toBe("unnamed");
+      expect(r?.warnings.join(" "), c).toContain("Branch not named: may push to main");
+      expect(r?.dangerous, c).toBe(true);
+    }
+  });
+
+  it("never calls a form it can't read safe", () => {
+    for (const c of [
+      "git status && git push origin main",
+      "git push origin main; rm -rf /",
+      "git push origin main | tee /tmp/log",
+      "git push origin main > /tmp/log",
+      "sudo git push origin main",
+      "git push origin $(cat branch)",
+      "git push --receive-pack=evil origin main",
+      "git push 'origin' main",
+      "git push origin main && git push origin main",
+    ]) {
+      expect(readPush(c), c).toMatchObject({ kind: "unreadable", headline: "Couldn't read this push, check the exact command", dangerous: true });
+    }
+  });
+
+  it("does not call a delete of its own ticket branch safe", () => {
+    expect(readPush(`git push origin :bossman/${ticket}`)).toMatchObject({ kind: "branch", headline: "Deletes a branch on the remote", dangerous: true });
+    expect(readPush("git push origin +main")?.dangerous).toBe(true);
+    expect(readPush("git push --mirror origin")?.dangerous).toBe(true);
+  });
+});
 
 describe("explainCommand", () => {
   it("says the owner's memory check only reads", () => {
@@ -101,7 +169,8 @@ describe("alwaysChoices", () => {
     expect(c!.label).toBe("Always allow every agent in this company to read files");
     const rule = [{ name: "all", match: { kinds: ["execute"], safeOnly: true }, outcome: "allow" as const }];
     const run = (command: string) => evaluatePermission({ title: command, kind: "execute", rawInput: { command } }, rule);
-    expect(run("rm -rf dist").outcome).toBe("owner");
+    expect(run("rm -rf /srv/dist").outcome).toBe("owner");
+    expect(run("rm -rf dist").outcome).toBe("ceo");
     expect(run("git push origin main").outcome).toBe("owner");
     expect(run("ls").rule).toBe("all");
   });
@@ -110,12 +179,17 @@ describe("alwaysChoices", () => {
 describe("work only in a temporary folder", () => {
   const scratch = (c: string) => explainCommand(c).scratch;
 
-  it("says so when every change and delete is under /tmp, following cd, and names programs it can't check", () => {
-    const s = scratch(`cd /tmp && rm -rf hol398-parent && git clone -q /home/node/workspaces/tickets/abc hol398-parent 2>&1 | tail -2; cd hol398-parent && git checkout -q 6471aee^ && cp /home/node/workspaces/tickets/abc/tests/x.test.mjs tests/ && node tests/x.test.mjs; echo "EXIT=$?"`);
-    expect(s?.unchecked).toEqual(["node"]);
+  it("says so when every change and delete names an absolute path under /tmp", () => {
+    const s = scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && touch /tmp/opencode/mut/x.js");
+    expect(s?.unchecked).toEqual([]);
     expect(s?.note).toMatch(/^Works only in a temporary folder \(\/tmp\)/);
-    expect(s?.note).toContain("It also runs node in that folder");
-    expect(scratch("rm -rf /tmp/opencode/mut && mkdir -p /tmp/opencode/mut && sed -i 's/a/b/' /tmp/opencode/mut/x.js")?.unchecked).toEqual([]);
+  });
+
+  it("doesn't follow cd, so any cd, pushd or popd means not /tmp-only (BOS-111 security re-checks)", () => {
+    expect(scratch(`cd /tmp && rm -rf hol398-parent && git clone -q /home/node/workspaces/tickets/abc hol398-parent 2>/dev/null && cd hol398-parent && git checkout -q 6471aee^ && node tests/x.test.mjs`)).toBeUndefined();
+    for (const c of ["cd /tmp/a && rm -rf x", "cd /tmp/a && rm -rf /tmp/a/x", "cd /tmp/a && node x.js", "cd /tmp/a && cd -- /home && rm -rf x", "CDPATH=/home cd x && rm -rf y", "pushd /tmp/a && rm -rf /tmp/a/x", "popd; rm -rf /tmp/a"]) {
+      expect(scratch(c), c).toBeUndefined();
+    }
   });
 
   it("doesn't when anything could reach outside /tmp", () => {
@@ -149,7 +223,7 @@ describe("git subcommands (BOS-111)", () => {
   it("recognises worktrees, -C and branch deletes", () => {
     expect(explainCommand("git worktree list").effect).toBe("reads");
     for (const c of ["git worktree add /tmp/rv86 origin/main", "git worktree remove --force /tmp/rv86", "git worktree prune"]) {
-      expect(explainCommand(c), c).toMatchObject({ effect: "changes", summary: "Adds or removes a second checkout of the project (git worktree)." });
+      expect(explainCommand(c), c).toMatchObject({ effect: "changes", summary: "Adds or removes a second checkout of the project (git worktree). The git worktree step also writes into the project's repository (.git), and can create a branch there." });
       // It also writes the repository's .git, so it isn't /tmp-only work.
       expect(explainCommand(c).scratch, c).toBeUndefined();
     }
@@ -160,5 +234,32 @@ describe("git subcommands (BOS-111)", () => {
     expect(explainCommand("git branch -D old").effect).toBe("changes");
     expect(explainCommand("git branch --list").effect).toBe("reads");
     expect(explainCommand("git frobnicate").summary).toBe("Runs a git command Boss Man doesn't recognise: frobnicate.");
+  });
+});
+
+describe("round-5 regression pins (BOS-153)", () => {
+  it("says so on the card when an install in a temp checkout or a worktree prune reaches outside /tmp (finding 3)", () => {
+    const install = explainCommand("rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && npm install");
+    expect(install.scratch).toBeUndefined();
+    expect(install.summary).toMatch(/install scripts/);
+    const prune = explainCommand("rm -rf /tmp/a && git worktree prune");
+    expect(prune.scratch).toBeUndefined();
+    expect(prune.summary).toMatch(/writes into the project's repository/);
+  });
+
+  it("gives no /tmp note when an option carries the real target (finding 1)", () => {
+    for (const c of [
+      "rm -rf /tmp/a && cp -t /home/node /tmp/a",
+      "rm -rf /tmp/a && cp --target-directory=/home/node /tmp/a",
+      "rm -rf /tmp/a && diff --output=/home/node/x /tmp/a /tmp/b",
+      "rm -rf /tmp/a && sort -o/home/node/x /tmp/a",
+    ]) {
+      expect(explainCommand(c).scratch, c).toBeUndefined();
+    }
+  });
+
+  it("keeps the /tmp note for find -delete, and gives none for shred (finding 4)", () => {
+    expect(explainCommand("find /tmp/x -delete").scratch?.note).toMatch(/^Works only in a temporary folder/);
+    expect(explainCommand("shred /tmp/a").scratch).toBeUndefined();
   });
 });

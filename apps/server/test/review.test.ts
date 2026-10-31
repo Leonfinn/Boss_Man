@@ -1,11 +1,11 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runs, tickets, wakes } from "../src/db/schema.js";
-import { checkNeverFinished, landingText } from "../src/services/review.js";
+import { activity, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
+import { checkNeverFinished, checkWaitedForLock, LOCK_RETRY_ATTEMPTS, setLockRetryBase, landingText } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -147,6 +147,69 @@ describe("approval lands in the background (B)", () => {
     await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
     const { landing } = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json();
     expect(landing.text).toBe("Approved, but not merged: the check failed (exit code 2). It's gone back to Engineer to fix; the check's output is in the conversation below.");
+    expect(await c.db.select().from(checkResults)).toEqual([expect.objectContaining({ ticketId: c.ticket.id, kind: "verify", passed: false, detail: "boom" })]);
+  });
+
+  it("treats a running marker as stale once the ticket has gone quiet, so the owner can try again", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(202);
+    const running = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    expect(running).toMatchObject({ state: "running", startedBy: "the owner" });
+    expect(running.stale).toBe(false);
+    // The check stopped saying it is alive: the marker is a leftover, so approving again starts a fresh landing.
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 2 * 3_600_000) }).where(eq(tickets.id, c.ticket.id));
+    expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toMatchObject({ state: "running", stale: true });
+    const again = await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" });
+    expect(again.statusCode).toBe(202);
+    expect(again.json().landing).toMatchObject({ state: "running", startedBy: "the owner" });
+    await vi.waitFor(() => expect(c.held.length).toBeGreaterThanOrEqual(2));
+    c.held.forEach((release) => release());
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+  });
+
+  it("is not called stale on its first poll because the ticket was quiet before the last review", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    // The ticket sat in review for hours before anyone finished reviewing it.
+    await c.db.update(tickets).set({ lastActivityAt: new Date(Date.now() - 2 * 3_600_000) }).where(eq(tickets.id, c.ticket.id));
+    expect((await c.req("POST", `/api/tickets/${c.ticket.id}/review`, { verdict: "approved" })).statusCode).toBe(202);
+    const landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    expect(landing).toMatchObject({ state: "running", startedBy: "the owner", stale: false });
+    c.held.forEach((release) => release());
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+  });
+
+  it("shows a merge started by the last reviewer's approval while it runs", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "pending" });
+    expect(await c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "CEO", reviewerAgentId: c.ceo.id, background: true })).toMatchObject({ outcome: "landing" });
+    const landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+    expect(landing).toMatchObject({ state: "running", startedBy: "CEO", stale: false });
+    c.held.forEach((release) => release());
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+  });
+
+  it("shows a merge the owner starts from the sign-off card while it runs", async () => {
+    const c = (ctx = await setup({ hold: true, answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "approval", question: "Merge it?", options: ["Approve and merge", "Send it back"], recommendedOption: "Approve and merge", tier: "owner", context: { type: "risk_review", ticketId: c.ticket.id, reviewer: "Senior Developer" } })
+      .returning();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerDecisionId: d!.id });
+    const answering = c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve and merge" });
+    try {
+      await vi.waitFor(async () => {
+        const landing = (await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing;
+        expect(landing).toMatchObject({ state: "running", startedBy: "the owner", stale: false });
+      });
+    } finally {
+      c.held.forEach((release) => release());
+      await answering;
+    }
+    await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing).toBeNull());
   });
 
   it("says each outcome in plain words", () => {
@@ -207,6 +270,70 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(checkNeverFinished(v({ output: "Error: Worker exited unexpectedly" }))).toBe("killed");
     expect(checkNeverFinished(v({ output: "FAIL limit.test.ts\n expected 1000 got 100" }))).toBeNull();
     expect(landingText({ outcome: "check_stuck" }, { branch: "main", assignee: null })).toContain("it's in your Decisions");
+  });
+
+  it("starts the merge when every review is already in and a reviewer confirms, instead of refusing with no open review", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    const r = await c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "CEO", reviewerAgentId: c.ceo.id });
+    expect(r).toMatchObject({ outcome: "merged" });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("done");
+    // Someone with no slot is still refused.
+    const d = await setup();
+    await d.db.insert(reviewRequests).values({ ticketId: d.ticket.id, kind: "code", reviewerAgentId: d.ceo.id, round: 1, seq: 0, status: "approved" });
+    await expect(d.review.submit(d.ticket.id, { verdict: "approved", reviewer: "Other", reviewerAgentId: randomUUID() })).rejects.toThrow(/no open review/);
+    await d.app.close(); await d.close();
+  });
+
+  it("does not restart the merge while an owner sign-off is still open", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } } }));
+    await c.db.insert(reviewRequests).values({ ticketId: c.ticket.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "approval", question: "Sign off?", recommendedOption: "yes" }).returning();
+    await c.db.insert(ticketDependencies).values({ blockedTicketId: c.ticket.id, blockerDecisionId: d!.id });
+    await expect(c.review.submit(c.ticket.id, { verdict: "approved", reviewer: "CEO", reviewerAgentId: c.ceo.id })).rejects.toThrow(/waiting on the owner/);
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
+  });
+
+  describe("a check that only waited too long for the shared lock", () => {
+    const gaveUp = { ok: false, exitCode: 75, timedOut: false, output: "check-all: gave up waiting for the heavy-phase lock /tmp/x.lock", ms: 600_000 };
+    const landed = async (c: Awaited<ReturnType<typeof setup>>) => {
+      await vi.waitFor(async () => expect((await c.req("GET", `/api/tickets/${c.ticket.id}/landing`)).json().landing.state).toBe("finished"));
+    };
+
+    it("is told apart from a real failure", () => {
+      expect(checkWaitedForLock(gaveUp)).toBe(true);
+      expect(checkWaitedForLock({ exitCode: 1, output: gaveUp.output })).toBe(false);
+      expect(checkWaitedForLock({ exitCode: 75, output: "FAIL limit.test.ts" })).toBe(false);
+    });
+
+    it("is retried by Boss Man, stays in review, says so, and merges once the lock frees up", async () => {
+      setLockRetryBase(1);
+      const c = (ctx = await setup({ answers: { verify: gaveUp } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "scripts/check-all.sh" });
+      const first = approveAndWait(c.req, c.ticket.id);
+      await vi.waitFor(() => expect(c.sent.filter((x) => x.type === "workspace.verify").length).toBeGreaterThanOrEqual(2));
+      c.answers.verify = { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 };
+      await first;
+      await landed(c);
+      const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+      expect(t.systemState).toBe("done");
+      const log = (await c.db.select().from(activity)).filter((a) => a.ticketId === c.ticket.id && a.kind === "merge_check_lock_wait");
+      expect(log.length).toBeGreaterThanOrEqual(1);
+      expect(log[0]!.summary).toContain("Merge check waiting for lock, retrying");
+    });
+
+    it("asks the owner, not the agent, after every try ran out", async () => {
+      setLockRetryBase(1);
+      const c = (ctx = await setup({ answers: { verify: gaveUp } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "scripts/check-all.sh" });
+      await approveAndWait(c.req, c.ticket.id);
+      await landed(c);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(LOCK_RETRY_ATTEMPTS);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
+      expect(await c.db.select().from(wakes)).toHaveLength(0);
+      expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("shared lock");
+    }, 30_000);
   });
 
   describe("a check that was killed is the owner's call", () => {

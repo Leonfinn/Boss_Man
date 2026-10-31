@@ -97,6 +97,18 @@ req server "$c1" 11111111-1111-1111-1111-111111111111
 host
 has "$D/outbox/status.json" "already handled"
 
+# 3b. A history line written with a space after the colon is still recognised.
+printf '{"id": "22222222-2222-2222-2222-222222222222", "result": "deployed"}\n' >>"$D/outbox/history.jsonl"
+req server "$c1" 22222222-2222-2222-2222-222222222222
+host
+has "$D/outbox/status.json" "already handled"
+
+# 3c. A compact history line (no space) is still recognised.
+printf '{"id":"33333333-3333-3333-3333-333333333333","result":"deployed"}\n' >>"$D/outbox/history.jsonl"
+req server "$c1" 33333333-3333-3333-3333-333333333333
+host
+has "$D/outbox/status.json" "already handled"
+
 # 4. Rate limit: a second server deploy inside 10 minutes is refused, and the webhook says so.
 c2="$(push apps/server/b)"
 req server "$c2"
@@ -144,6 +156,31 @@ has "$D/outbox/status.json" "expected format"
 ln -s /etc/passwd "$D/inbox/request.json"; host; has "$D/outbox/status.json" "plain file"
 head -c 5000 /dev/zero | tr '\0' ' ' >"$D/inbox/request.json"; host; has "$D/outbox/status.json" "under 4 KB"
 [[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a bad request ran something"
+
+# 7b. More hostile shapes: a repeated key, a nested object, an extra field with odd characters, a NUL byte, a bare string.
+good='"requestedAt":"2026-10-20T12:00:00Z","approvedBy":"x"'
+for body in \
+  "{\"id\":\"11111111-1111-1111-1111-111111111114\",\"id\":\"11111111-1111-1111-1111-111111111115\",\"target\":\"server\",\"commit\":\"$c3\",$good}" \
+  "{\"id\":\"11111111-1111-1111-1111-111111111114\",\"target\":\"server\",\"commit\":\"$c3\",$good,\"x\":{\"a\":\"b\"}}" \
+  "{\"id\":\"11111111-1111-1111-1111-111111111114\",\"target\":\"server\",\"commit\":\"$c3\",$good,\"x\":\"a b\\\"c\"}" \
+  "\"$c3\"" "[]"; do
+  rm -f "$D/outbox/status.json"; printf '%s\n' "$body" >"$D/inbox/request.json"; host
+  has "$D/outbox/status.json" "expected format"
+done
+rm -f "$D/outbox/status.json"
+printf '{"id":"11111111-1111-1111-1111-111111111114","target":"server","commit":"%s\0",%s}\n' "$c3" "$good" >"$D/inbox/request.json"; host
+has "$D/outbox/status.json" "expected format"
+[[ ! -e $T/pwned && $(calls) == 1 ]] || fail "a hostile request ran something"
+# 7c. A pretty-printed request (other writers, other spacing) is still read.
+rm -f "$D/outbox/status.json"
+printf '{\n  "id": "11111111-1111-1111-1111-111111111116",\n  "target": "server",\n  "commit": "%s",\n  %s\n}\n' "$c3" "${good/,/,$'\n  '}" >"$D/inbox/request.json"; host
+[[ $(status id) == 11111111-1111-1111-1111-111111111116 ]] || fail "a pretty-printed request was not read"
+rm -f "$D/state/last-server"
+# 7d. Status text with quotes, backslashes and newlines is written as valid JSON.
+(eval "$(sed -n '/^jstr() {/,/^}/p;/^json() {/,/^}/p' "$here/host-deployer.sh")"; json message=$'say "hi"\\ \n\tdone' >"$T/j.json")
+[[ $(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).message)' "$T/j.json") == $'say "hi"\\ \n\tdone' ]] || fail "json escaping"
+# 7e. The host needs no node: the script only runs node inside a container (compose exec).
+! grep -nE '(^|[^a-z-])node -e' "$here/host-deployer.sh" | grep -v 'compose exec' || fail "host-deployer.sh runs node on the host"
 
 # 8. Runner updates: only to the deployed commit; never needs the tip.
 head="$(git -C "$T/src" rev-parse HEAD)"

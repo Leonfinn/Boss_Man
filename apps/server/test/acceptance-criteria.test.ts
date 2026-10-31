@@ -78,10 +78,10 @@ describe("acceptance criteria", () => {
   it("create_ticket accepts 1 to 10 criteria and refuses 11; the tickets tool shows them", async () => {
     const c = await agent(ctx.dev.id);
     const ten = Array.from({ length: 10 }, (_, i) => `criterion ${i + 1}`);
-    const ok = await c.callTool({ name: "create_ticket", arguments: { project: "Customer app", title: "With criteria", acceptanceCriteria: ten } });
+    const ok = await c.callTool({ name: "create_ticket", arguments: { size: 3, project: "Customer app", title: "With criteria", acceptanceCriteria: ten } });
     expect(textOf(ok)).toMatch(/Created ticket/);
     const eleven = [...ten, "criterion 11"];
-    const refused = await c.callTool({ name: "create_ticket", arguments: { project: "Customer app", title: "Too many", acceptanceCriteria: eleven } });
+    const refused = await c.callTool({ name: "create_ticket", arguments: { size: 3, project: "Customer app", title: "Too many", acceptanceCriteria: eleven } });
     expect(textOf(refused)).toMatch(/too_big|10/i);
     const created = (await ctx.db.select().from(tickets).where(eq(tickets.title, "With criteria")))[0]!;
     const shown = textOf(await c.callTool({ name: "tickets", arguments: { action: "read", ticketId: created.id } }));

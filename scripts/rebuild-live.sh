@@ -45,26 +45,32 @@ BOSSMAN_COMMIT="$commit" docker compose build "server-$colour" || die "the build
 step "3/5 Migrate"
 BOSSMAN_MIGRATE_TAG="$colour" docker compose run --rm migrate || die "the migration failed; $colour still runs its old image. Backup: $backup"
 
-step "4/5 Restart server-$colour and tell it to take charge"
+step "4/5 Restart server-$colour"
 docker compose up -d --no-deps --force-recreate "server-$colour" || die "the restart failed. Backup: $backup"
-# Green starts as a standby and only contests the leader lock after SIGUSR2; blue contests anyway, so it's harmless there.
-docker compose kill -s SIGUSR2 "server-$colour" || die "couldn't signal server-$colour; send it by hand: docker compose kill -s SIGUSR2 server-$colour"
 
-step "5/5 Wait until it leads at ${commit:0:7}"
-field() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let o;try{o=JSON.parse(s)}catch{process.stdout.write("");return}const v=o==null?undefined:o[process.argv[1]];process.stdout.write(v===true?"True":v===false?"False":v==null?"":String(v))})' "$1" 2>/dev/null || true; }
-end=$((SECONDS + WAIT_SECONDS)) body="" sent=$SECONDS
+step "5/5 Tell it to take charge and wait until it leads at ${commit:0:7}"
+# The host (TrueNAS) has no node, jq or python, so /api/ready is read inside the container, which prints "ok role commit"
+# (or nothing while the server isn't answering). Green starts as a standby and only contests the leader lock after
+# SIGUSR2; blue contests anyway, so the signal is harmless there. A signal sent before the server is listening is lost
+# (node as PID 1 ignores it), so the first one goes out only once /api/ready answers, then again every 30 s while standby.
+probe() { docker compose exec -T "server-$colour" node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>{const o=await r.json();console.log(String(o.ok===true),o.role||'-',o.commit||'-')}).catch(()=>{})" 2>/dev/null || true; }
+end=$((SECONDS + WAIT_SECONDS)) ok="" role="" got="" sent=-1 answer="" last_role="none (it never answered)"
 while :; do
-  body="$(docker compose exec -T "server-$colour" node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>{console.log(await r.text())}).catch(()=>{})" 2>/dev/null || true)"
-  role="$(field role <<<"$body")"
-  if [[ $(field ok <<<"$body") == True && $role == leader && $(field commit <<<"$body") == "$commit" ]]; then
+  answer="$(probe)"
+  ok="" role="" got=""
+  read -r ok role got <<<"$answer" || true
+  if [[ -n $role ]]; then last_role="$role"; fi
+  if [[ $ok == true && $role == leader && $got == "$commit" ]]; then
     echo "server-$colour leads at ${commit:0:7}. Done. Backup: $backup"
     exit 0
   fi
-  # A server that came up after the first signal missed it: ask again every 30 seconds while it's a standby.
-  if [[ $role == standby ]] && ((SECONDS - sent >= 30)); then docker compose kill -s SIGUSR2 "server-$colour" >/dev/null 2>&1 || true; sent=$SECONDS; fi
+  if [[ $role == standby ]] && { ((sent < 0)) || ((SECONDS - sent >= 30)); }; then
+    echo "server-$colour is a standby; telling it to take charge."
+    docker compose kill -s SIGUSR2 "server-$colour" >/dev/null 2>&1 || true; sent=$SECONDS
+  fi
   ((SECONDS < end)) || break
   sleep "$POLL_SECONDS"
 done
-echo "Last answer from /api/ready: ${body:-none}"
+echo "Last answer from /api/ready: ${answer:-none}"
 docker compose logs --tail 200 "server-$colour" 2>&1 | grep LEADER | tail -5 || true
-die "server-$colour didn't become leader at ${commit:0:7} within ${WAIT_SECONDS}s. If another colour is running, it may hold the lock: docker compose ps. Backup: $backup"
+die "server-$colour didn't become leader at ${commit:0:7} within ${WAIT_SECONDS}s. Last role seen: $last_role. To tell it to take charge by hand: docker compose kill -s SIGUSR2 server-$colour. If another colour is running, it may hold the lock: docker compose ps. Backup: $backup"

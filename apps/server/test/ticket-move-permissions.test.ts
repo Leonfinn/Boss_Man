@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, tickets } from "../src/db/schema.js";
+import { agents, settings, tickets } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -94,6 +94,14 @@ describe("set_ticket_state permissions (BOS-73)", () => {
     expect((await (await as(ctx.lead.id))({ ticketId: b.id, state: "done", outcome: "cancelled", summary: "Dropped by the owner." })).isError).toBeFalsy();
     expect(await ctx.row(a.id)).toMatchObject({ systemState: "done", outcome: "cancelled" });
     expect(await ctx.row(b.id)).toMatchObject({ systemState: "done", outcome: "cancelled" });
+  });
+
+  it("tells the agent to end its turn while a runner update waits", async () => {
+    const t = await ctx.ticket({ assigneeAgentId: ctx.alice.id });
+    const move = await as(ctx.alice.id);
+    expect((await move({ ticketId: t.id, state: "ready" })).content[0]!.text).not.toContain("end your turn");
+    await ctx.db.insert(settings).values({ key: "maintenance", value: { reason: "runner update" } });
+    expect((await move({ ticketId: t.id, state: "done", summary: "Written." })).content[0]!.text).toContain("end your turn now");
   });
 
   it("leaves the owner's moves alone", async () => {

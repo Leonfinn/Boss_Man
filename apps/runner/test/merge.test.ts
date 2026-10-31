@@ -129,6 +129,25 @@ describe("verify before done (R47)", () => {
     expect(await ws.verify(spec, "sleep 5", 200)).toMatchObject({ ok: false, timedOut: true });
   });
 
+  it("kills the whole process group on timeout, including grandchildren that ignore SIGTERM", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const res = await ws.verify(spec, `(trap '' TERM; sleep 60) & echo pid=$!; wait`, 500);
+    expect(res).toMatchObject({ ok: false, timedOut: true });
+    const pid = Number(/pid=(\d+)/.exec(res.output)?.[1]);
+    expect(pid).toBeGreaterThan(1);
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i++) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((r) => setTimeout(r, 100));
+      } catch {
+        alive = false;
+      }
+    }
+    expect(alive).toBe(false);
+  });
+
   it("puts a released ticket's worktree back from its branch, with the work saved at release", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");

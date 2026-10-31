@@ -1,8 +1,9 @@
 // The home screen (R74): what the company's agents are doing, the headline numbers, the last
 // 14 days at a glance, and what happened recently.
-import { api, type Company } from "../api";
+import { api, type Company, type RunRow } from "../api";
 import { usePoll } from "../hooks";
 import { Avatar } from "../components/Avatar";
+import { RunLabelLink } from "./Runs";
 
 type Result = "running" | "succeeded" | "failed" | "other";
 type AgentCard = {
@@ -11,7 +12,7 @@ type AgentCard = {
   role: "ceo" | "manager" | "worker";
   paused: boolean;
   duty: string | null;
-  run: { id: string; ticketId: string | null; ticket: string | null; purpose: string | null; startedAt: string; endedAt: string | null; result: Result } | null;
+  run: (RunRow & { result: Result }) | null;
 };
 type Day = { day: string } & Record<string, number | string>;
 type DashboardData = {
@@ -145,7 +146,7 @@ export function Dashboard({ company }: { company: Company | undefined }) {
                       <span className={`rstate ${res!.tone}`} aria-label={res!.label}>
                         {res!.icon}
                       </span>
-                      {r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : <a href={`#/runs/${r.id}`}>{r.purpose === "chat" ? (r.endedAt ? "Answered in chat" : "Answering in chat") : "Work with no task"}</a>}
+                      {r.ticketId ? <a href={`#/tickets/${r.ticketId}`}>{r.ticket}</a> : <RunLabelLink run={r} />}
                     </>
                   ) : (
                     <span className="muted">Hasn't run yet</span>

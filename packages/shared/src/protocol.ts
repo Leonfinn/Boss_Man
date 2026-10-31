@@ -208,6 +208,15 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+/** How long the runner lets a ticket's check run (R47), and how long the server waits for its answer (a minute longer). */
+export const VERIFY_TIMEOUT_MS = 30 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_TIMEOUT_MS + 60_000;
+/**
+ * How long an approved ticket can go without any activity before its merge is treated as stopped:
+ * longer than the server waits for a merge check, so a check still running is never mistaken for one
+ * that died. The unmerged-approvals sweep and the merge card's stale marker both use it.
+ */
+export const MERGE_MISSED_AFTER_MS = VERIFY_ASK_TIMEOUT_MS + 5 * 60_000;
 
 /** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };

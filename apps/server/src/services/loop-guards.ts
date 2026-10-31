@@ -5,7 +5,8 @@
 import { and, count, eq, gt } from "drizzle-orm";
 import { failureSignature, findingFingerprint, type ReviewComment } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { decisions, failureSignatures, ticketDependencies, ticketReviews, tickets } from "../db/schema.js";
+import { decisions, failureSignatures, ticketReviews, tickets } from "../db/schema.js";
+import { addTicketDependency } from "./ticket-links.js";
 import type { AlertInput } from "./alert-ladder.js";
 
 export type LoopLimits = { repeatedFinding: number; maxRounds: number; circularFailures: number; circularWindowMs: number };
@@ -58,8 +59,7 @@ export function loopGuards(db: Db, opts: { limits?: Partial<LoopLimits>; now?: (
             .insert(decisions)
             .values({ ...ask, recommendedOption: STOP_WORK })
             .returning({ id: decisions.id });
-      await db.insert(ticketDependencies).values({ blockedTicketId: input.ticketId, blockerDecisionId: d!.id });
-      await db.update(tickets).set({ systemState: "blocked", lastActivityAt: now() }).where(eq(tickets.id, input.ticketId));
+      await addTicketDependency(db, { companyId: t!.companyId, blockedTicketId: input.ticketId, blockerDecisionId: d!.id, actor: { type: "system" }, hold: true, now });
       return { round: rounds.length, escalated: d!.id };
     },
 

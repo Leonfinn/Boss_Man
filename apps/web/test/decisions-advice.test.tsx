@@ -44,9 +44,40 @@ describe("ask the CEO for advice", () => {
     expect(JSON.parse(init.body as string)).toEqual({ note: "What is A?" });
   });
 
-  it("has no ask button on a permission request", () => {
-    render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission" } })]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
-    expect(screen.queryByText("Not enough detail?")).toBeNull();
+  it("shows the ask button on a permission request and posts it", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const onAnswered = vi.fn();
+    render(<Decisions decisions={[decision({ kind: "permission", options: ["Allow once", "Deny"], context: { type: "permission" } })]} companies={[company]} loaded agentsWorking={0} onAnswered={onAnswered} />);
+    fireEvent.click(screen.getByText("Not enough detail?"));
+    fireEvent.click(screen.getByRole("button", { name: "Ask the CEO for advice" }));
+    await waitFor(() => expect(onAnswered).toHaveBeenCalled());
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/decisions/d1/ask-advice");
+  });
+
+  it("shows the CEO's advice on a permission card", () => {
+    render(
+      <Decisions
+        decisions={[
+          decision({
+            kind: "permission",
+            options: ["Allow once", "Deny"],
+            context: { type: "permission", advice: { state: "advised", what: "Copies part of a database file into another file.", needed: "No, this ticket doesn't need it.", recommendation: "deny", why: "It reads data the ticket can get another way." } },
+          }),
+        ]}
+        companies={[company]}
+        loaded
+        agentsWorking={0}
+        onAnswered={() => {}}
+      />,
+    );
+    expect(screen.getByText(/The CEO's advice/)).toBeTruthy();
+    expect(screen.getByText(/Copies part of a database file/)).toBeTruthy();
+    expect(screen.getByText(/this ticket doesn't need it/)).toBeTruthy();
+    expect(screen.getByText("Recommend Deny")).toBeTruthy();
+    expect(screen.getByText(/It reads data the ticket can get another way/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Ask the CEO for advice" })).toBeNull();
   });
 
   it("shows 'CEO is looking at this' greyed but still answerable", () => {

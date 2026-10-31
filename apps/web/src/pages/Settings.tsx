@@ -25,6 +25,7 @@ const CREDENTIALS = [
   { kind: "openai_api_key", label: "OpenAI API key", env: "OPENAI_API_KEY", help: "For Codex agents." },
   { kind: "generic", label: "OpenRouter API key", env: "OPENROUTER_API_KEY", help: "For OpenCode agents. Models are named openrouter/<model>." },
   { kind: "generic", label: "Ollama Cloud API key", env: "OLLAMA_API_KEY", help: "For OpenCode agents. Models are named ollama-cloud/<model>." },
+  { kind: "generic", label: "Synthetic API key", env: "SYNTHETIC_API_KEY", help: "For OpenCode agents. Models are named synthetic/<model>, e.g. synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017" },
   { kind: "generic", label: "Other", env: "", help: "Any other value an agent needs, under the variable name you choose." },
 ] as const;
 
@@ -600,9 +601,10 @@ const PROVIDERS: Array<[string, string]> = [
   ["gateway", "LLM gateway"],
   ["openrouter", "OpenRouter"],
   ["ollama", "Ollama"],
+  ["synthetic", "Synthetic"],
 ];
-/** Mirrors the server's rule: a subscription is only a Claude or ChatGPT plan. */
-const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai";
+/** Mirrors the server's rule: a subscription is only a Claude, ChatGPT, Ollama Cloud or Synthetic plan. */
+const providerFits = (kind: string, provider: string) => kind !== "subscription" || provider === "anthropic" || provider === "openai" || provider === "ollama" || provider === "synthetic";
 
 export function Funding({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const sources = usePoll((signal) => api<FundingSource[]>("/api/funding-sources", { signal }), 30_000, "sources");
@@ -696,6 +698,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
             <ul style={{ margin: 0, paddingLeft: 18 }}>
               <li>Subscription + Anthropic: a Claude Pro or Max plan, run with a setup-token (<code>CLAUDE_CODE_OAUTH_TOKEN</code>).</li>
               <li>Subscription + OpenAI: a ChatGPT plan, used by Codex agents.</li>
+              <li>Subscription + Ollama or Synthetic: an Ollama Cloud or Synthetic plan, used by OpenCode agents.</li>
               <li>API kinds: a key from that provider (Anthropic, OpenAI).</li>
               <li>
                 Amazon Bedrock (API kinds only): add three credentials with "Other": <code>CLAUDE_CODE_USE_BEDROCK</code> = 1, <code>AWS_REGION</code> and <code>AWS_BEARER_TOKEN_BEDROCK</code> (a Bedrock API key). Name models as Bedrock IDs, e.g. <code>us.anthropic.claude-sonnet-4-6</code>.
@@ -709,7 +712,7 @@ export function Funding({ company, onChanged }: { company: Company; onChanged: (
             </ul>
             <p>Claude agents only: Codex runs on OpenAI.</p>
             <p>
-              OpenCode agents (pick "OpenCode" when hiring) read <code>OPENROUTER_API_KEY</code>, <code>OLLAMA_API_KEY</code> (Ollama Cloud), <code>OPENAI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> by themselves; models are named <code>provider/model</code>. A local Ollama has no key: add a credential with "Other" named <code>OPENCODE_CONFIG_CONTENT</code>, whose value is JSON such as{" "}
+              OpenCode agents (pick "OpenCode" when hiring) read <code>OPENROUTER_API_KEY</code>, <code>OLLAMA_API_KEY</code> (Ollama Cloud), <code>SYNTHETIC_API_KEY</code> (Synthetic), <code>OPENAI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> by themselves; models are named <code>provider/model</code>. A local Ollama has no key: add a credential with "Other" named <code>OPENCODE_CONFIG_CONTENT</code>, whose value is JSON such as{" "}
               <code>{`{"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","name":"Ollama","options":{"baseURL":"http://host.docker.internal:11434/v1"},"models":{"qwen3:8b":{"name":"Qwen3 8B"}}}}}`}</code>.
             </p>
           </div>
@@ -1079,6 +1082,7 @@ type WatchdogStatus = {
   scrumMaster: { id: string; name: string; paused: boolean } | null;
   lastSweepAt: string | null;
   trippedAt: string | null;
+  pausedUntil?: string | null;
   trippedReason: string | null;
   openFlags: number;
 };
@@ -1132,7 +1136,9 @@ export function Watchdog({ company }: { company: Company }) {
         Every few minutes Boss Man checks the board with simple rules (no AI, no cost) and wakes the Scrum Master only when something looks stuck. The Scrum Master can only nudge, assign unassigned work, re-wake, chase a review, snooze, escalate to the CEO or ask you; every action is logged and can be undone.
       </p>
       <p role="status" style={{ fontSize: 14 }}>
-        {status.trippedAt
+        {status.pausedUntil
+          ? `Paused after hitting its hourly limit (${status.trippedReason}). It resumes by itself ${when(status.pausedUntil)}; nothing to do.`
+          : status.trippedAt && !on
           ? `Switched itself off ${when(status.trippedAt)}: ${status.trippedReason}. Look at its recent actions, then switch it back on.`
           : on
             ? `On. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
@@ -1162,8 +1168,8 @@ export function Watchdog({ company }: { company: Company }) {
         <button type="button" className="btn" disabled={act.busy} onClick={() => void save({})}>
           Save
         </button>
-        <button type="button" className="btn" disabled={act.busy || (!on && !sm)} onClick={() => void save({ enabled: !on || !!status.trippedAt })}>
-          {on && !status.trippedAt ? "Switch off" : status.trippedAt ? "Switch back on" : "Switch on"}
+        <button type="button" className="btn" disabled={act.busy || (!on && !sm)} onClick={() => void save({ enabled: !on })}>
+          {on ? "Switch off" : status.trippedAt ? "Switch back on" : "Switch on"}
         </button>
         <button
           type="button"
@@ -1171,11 +1177,11 @@ export function Watchdog({ company }: { company: Company }) {
           disabled={test.busy}
           onClick={() =>
             void test.run(async () => {
-              setBt(await api<Backtest>(`/api/companies/${company.id}/watchdog/backtest?days=14`));
+              setBt(await api<Backtest>(`/api/companies/${company.id}/watchdog/backtest?days=2`));
             })
           }
         >
-          Test on the past 14 days
+          Test on the past 48 hours
         </button>
       </div>
       {act.view}
@@ -1248,6 +1254,70 @@ function GoalCheck({ company, onChanged }: { company: Company; onChanged: () => 
           }
         >
           Save
+        </button>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
+type RetroStatus = { agentId: string | null; runner: { id: string; name: string; source: "chosen" | "default" | "ceo" } | null; last: { startedAt: string; doneCount: number; savedAt: string | null } | null; doneSince: number };
+
+/** Workflow retros (docs/19): who runs the team's look-back, when it last ran, and a button to run one now. */
+function WorkflowRetros({ company }: { company: Company }) {
+  const [status, setStatus] = useState<RetroStatus | null>(null);
+  const act = useAction();
+  const load = async () => setStatus(await api<RetroStatus>(`/api/companies/${company.id}/retro-settings`));
+  useEffect(() => {
+    void load().catch(() => setStatus(null));
+  }, [company.id]);
+  if (!status) return null;
+  const hasPm = company.agents.some((a) => a.template === "product-manager" && !a.paused);
+  return (
+    <Section id="retro-h" title="Workflow retros">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Every 20 finished tickets, or after 7 days if anything was finished, one agent looks back over how the team worked and suggests small changes. It never changes anything without approval: the CEO approves playbooks and brief lessons, and you approve the rest.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label htmlFor="retro-agent">Who runs it</label>
+        <select
+          id="retro-agent"
+          value={status.agentId ?? ""}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              setStatus(await api<RetroStatus>(`/api/companies/${company.id}/retro-settings`, { method: "PUT", body: { agentId: e.target.value || null } }));
+              return "Saved.";
+            })
+          }
+        >
+          <option value="">{hasPm ? "Product Manager (default)" : "CEO (no Product Manager)"}</option>
+          {company.agents
+            .filter((a) => a.duty !== "assistant")
+            .map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+        </select>
+      </div>
+      <p style={{ fontSize: 14 }}>
+        {status.last ? `Last ran ${when(status.last.startedAt)}, over ${status.last.doneCount} finished tickets.` : "It has not run yet. The first one waits for 5 finished tickets."} {status.doneSince} finished since.
+      </p>
+      <div>
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || status.doneSince < 1}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}/retro`, { method: "POST" });
+              await load();
+              return `${status.runner?.name ?? "The agent"} has been asked to run a retro.`;
+            })
+          }
+        >
+          Run a retro now
         </button>
       </div>
       {act.view}
@@ -1901,6 +1971,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <NudgeCap company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <Watchdog company={company} />
+            <WorkflowRetros company={company} />
             <Chapters company={company} />
           </div>
         )}

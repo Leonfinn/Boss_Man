@@ -129,7 +129,9 @@ describe("approve and merge", () => {
     render(<Ticket id="t1" companies={[company]} />);
     fireEvent.click(await screen.findByRole("button", { name: "Approve and merge" }));
     expect(await screen.findByText(/Approved\. Running the pre-merge check \(pnpm test\); this can take several minutes\. Elapsed: 0:0\d/)).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Approve and merge" }) as HTMLButtonElement).disabled).toBe(true);
+    // While the merge runs the card says so, and no button invites a second approval.
+    expect(await screen.findByText(/Checking and merging\./)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
     landing = { state: "finished", outcome: "verify_failed", text: "Approved, but not merged: the check failed (exit code 1). It's gone back to Engineer to fix; the check's output is in the conversation below.", url: null, finishedAt: "x" };
     expect(await screen.findByText(/the check failed \(exit code 1\)\. It's gone back to Engineer/, undefined, { timeout: 4000 })).toBeTruthy();
     await waitFor(() => expect(screen.queryByText(/Running the pre-merge check/)).toBeNull());
@@ -240,5 +242,93 @@ describe("owner moves the status", () => {
     await waitFor(() => expect(posts).toEqual([{ state: "done" }]));
     fireEvent.change(pick, { target: { value: "review" } });
     await waitFor(() => expect(posts.at(-1)).toEqual({ state: "review" }));
+  });
+});
+
+describe("review card during a merge", () => {
+  const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
+  const ticket = { id: "t1", title: "Add limiter", systemState: "review", risk: "medium", repoUrl: "https://x/y.git", defaultBranch: "main", landing: "merge", projectId: "p1", project: "App", companyId: "c1", assignee: "Engineer", createdAt: "2026-10-19T09:00:00Z", lastActivityAt: new Date().toISOString() };
+
+  function stub(landing: () => unknown, onReview?: () => Response) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "/api/tickets/t1/landing") return json({ landing: landing() });
+        if (url === "/api/tickets/t1/review" && init?.method === "POST" && onReview) return onReview();
+        if (url === "/api/tickets/t1") return json(ticket);
+        if (url.includes("/links")) return json({ waitsOn: [], blocks: [], blockedBy: [] });
+        if (url.includes("/features")) return json({ features: [] });
+        if (url.endsWith("/artifacts") || url.endsWith("/reviews") || url.includes("/runs") || url.includes("risk") || url.includes("objectives")) return json([]);
+        if (url.includes("/messages")) return json({ live: null, items: [] });
+        return json({});
+      }),
+    );
+  }
+
+  it("on load, a merge already running shows in the card instead of 'waiting for you'", async () => {
+    const startedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+    stub(() => ({ state: "running", startedAt, command: "pnpm test", startedBy: "the owner" }));
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText(/Checking and merging\./)).toBeTruthy();
+    expect(screen.getByText(/Started by the owner at/)).toBeTruthy();
+    expect(screen.getByText("checking and merging")).toBeTruthy();
+    expect(screen.queryByText("waiting for you")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
+  });
+
+  it("shows a merge started by the last reviewer, waiting for its check or the lock, with no approval buttons", async () => {
+    const startedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    // A reviewer's approval starts the merge; no command yet means it may be waiting for the shared lock.
+    stub(() => ({ state: "running", startedAt, command: null, startedBy: "Senior Developer (Senior Developer)" }));
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText(/Checking and merging\./)).toBeTruthy();
+    expect(screen.getByText(/Started by Senior Developer \(Senior Developer\) at/)).toBeTruthy();
+    expect(screen.getByText("checking and merging")).toBeTruthy();
+    expect(screen.queryByText("waiting for you")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve and merge" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
+  });
+
+  it("turns the server's 'already being checked' refusal into a neutral notice and shows the check", async () => {
+    let started = false;
+    const startedAt = new Date().toISOString();
+    stub(
+      () => (started ? { state: "running", startedAt, command: "pnpm test", startedBy: "the owner" } : null),
+      () => {
+        started = true;
+        return json({ error: "review", message: "This ticket is already being checked and merged." }, 409);
+      },
+    );
+    render(<Ticket id="t1" companies={[company]} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve and merge" }));
+    expect(await screen.findByText(/Already being checked and merged since .*nothing more to do\./)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(await screen.findByText(/Checking and merging\./)).toBeTruthy();
+  });
+
+  it("sends only one review request when the button is double-clicked", async () => {
+    let posts = 0;
+    stub(
+      () => null,
+      () => {
+        posts++;
+        return json({ verdict: "approved", outcome: "landing", landing: { state: "running", startedAt: new Date().toISOString(), command: "pnpm test", startedBy: "the owner" } }, 202);
+      },
+    );
+    render(<Ticket id="t1" companies={[company]} />);
+    const approve = await screen.findByRole("button", { name: "Approve and merge" });
+    fireEvent.click(approve);
+    fireEvent.click(approve);
+    await screen.findByText(/Checking and merging\./);
+    await waitFor(() => expect(posts).toBe(1));
+  });
+
+  it("when the in-progress marker is stale, says so and lets the owner try again", async () => {
+    const startedAt = new Date(Date.now() - 60 * 60_000).toISOString();
+    stub(() => ({ state: "running", startedAt, command: "pnpm test", startedBy: "Ada (CEO)", stale: true }));
+    render(<Ticket id="t1" companies={[company]} />);
+    expect(await screen.findByText(/The merge check looks stuck\./)).toBeTruthy();
+    expect(screen.getByText("the merge check looks stuck; you can try again")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Approve and merge" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

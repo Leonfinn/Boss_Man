@@ -90,6 +90,23 @@ export function parseCodexRateLimits(resp: unknown): QuotaSample[] {
   return out;
 }
 
+export type SyntheticQuota = { used: number; limit: number; renewsAt: Date | null };
+
+/**
+ * Synthetic's own quota endpoint (`GET /v2/quotas`) returns the subscription's request
+ * allowance. The used count and renewal are sometimes beside `subscription`, sometimes
+ * inside it, so both shapes are read. A response without a usable used/limit pair is unknown.
+ */
+export function parseSyntheticQuota(resp: unknown): SyntheticQuota | null {
+  if (!isRecord(resp)) return null;
+  const sub = isRecord(resp["subscription"]) ? resp["subscription"] : {};
+  const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  const used = count(sub["requests"]) ?? count(resp["requests"]);
+  const limit = count(sub["limit"]) ?? count(resp["limit"]);
+  if (used === null || limit === null || limit === 0) return null;
+  return { used, limit, renewsAt: toDate(sub["renewsAt"]) ?? toDate(resp["renewsAt"]) };
+}
+
 export type UsageCost = { costMicros: number; currency: string; model: string | null; contextUsed: number | null };
 
 /**
@@ -108,4 +125,20 @@ export function parseAcpUsageCost(update: unknown): UsageCost | null {
     model: typeof meta["_claude/model"] === "string" ? meta["_claude/model"] : null,
     contextUsed: typeof update["used"] === "number" ? update["used"] : null,
   };
+}
+
+/**
+ * Plain names for the limits Claude reports; anything unknown gets a readable name, never the raw key.
+ * The Fable key is a guess: the owner's screenshot showed "seven day overage included", and no sample of that
+ * data is in the repo, so any key containing `fable` or `overage_included` is taken as the weekly Fable limit.
+ */
+export function windowLabel(key: string): { name: string; note?: string } {
+  if (key === "five_hour") return { name: "5-hour window" };
+  if (key === "seven_day") return { name: "This week" };
+  if (/fable|overage_included/.test(key))
+    return { name: "Fable (this week)", note: "Fable can use up to 50% of your weekly limit." };
+  const m = /^(\d+)_min$/.exec(key);
+  if (m) return { name: `${m[1]}-minute window` };
+  const words = key.replace(/_/g, " ").trim();
+  return { name: words ? `${words[0]!.toUpperCase()}${words.slice(1)} limit` : "Other limit" };
 }

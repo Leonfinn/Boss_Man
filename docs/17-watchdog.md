@@ -45,6 +45,8 @@ All limits are in settings. A rule never trips while a run works on the ticket; 
 - **Why 45 minutes:** Boss Man's own free fixes get the first go: recovery of an interrupted run, the 15-minute "carry on" check, and the missed-work nudge after 30 minutes. The Scrum Master is told only when those didn't move the ticket.
 - **Scheduled work:** a scheduled check, or a queued wake that will happen, on an in-progress ticket is a plan, not a stall. A wake parked behind a paused agent is not a plan: the ticket is still checked.
 - **Held by another ticket or an engagement:** the held ticket is never flagged. The holder is judged on its own, and its flag says how many tickets it holds.
+- **Scheduled work, in detail:** a check set by the assignee for a time still ahead keeps every in-progress rule quiet, including the crashed and ended-run ones. The backtest reads checks back from the "scheduled a check" and "carry on" activity rows; a check that left no row there is the one thing it can miss.
+- **Back-off on repeat flags:** once a flag has been handed to the Scrum Master, the next hand-off for the same ticket and rule waits the rule's limit, then twice that, then four times, and so on, capped at 24 hours (`watchdog_flags.backoff_steps` counts the hand-offs in a row). The wait starts over when the ticket changes state, gets a comment or starts a run since the last hand-off, when the flag clears (a new flag starts at the first step), or on another send-back for `review_loop`. The owner reminder and the automatic escalation to the CEO are not delayed by it. The live sweep and the backtest share `backoffGapMs` in `watchdog-rules.ts`. The hourly cap is unchanged: the back-off is how a quiet week stays under it.
 - **Coming back soon after clearing:** a problem that clears and comes straight back waits out the rest of its limit since the last hand-off, snooze or escalation.
 
 ## Scrum Master actions
@@ -86,6 +88,7 @@ The next one over the cap switches the watchdog off. It sets `watchdog_tripped_a
 ## Read API (owner)
 
 - `GET` and `PATCH /api/companies/:id/watchdog`: settings, plus `scrumMasterAgentId`; also the health fields (`lastSweepAt`, `trippedAt`, `trippedReason`, `openFlags`).
+- `GET /api/companies/:id/watchdog/issues`: every open warning the health chip counts (watchdog flags and Boss Man alerts that name a ticket), with who has it, what was done and what happens next.
 - `GET /api/companies/:id/watchdog/flags?status=&ticketId=`
 - `GET /api/companies/:id/watchdog/actions?ticketId=&since=`
 - `GET /api/companies/:id/watchdog/backtest?days=14`
@@ -97,7 +100,7 @@ The next one over the cap switches the watchdog off. It sets `watchdog_tripped_a
 
 ## What the owner sees (BOS-60)
 
-- **Scrum Master view** (sidebar → Scrum Master): every logged action, newest first, with its one-line reason and an Undo while one is possible. The same list, filtered to one ticket, shows on the ticket page. Sweep wakes are hidden from the company view.
+- **Scrum Master view** (sidebar → Scrum Master): an **Open now** section above the timeline lists every warning the health chip counts, with the ticket, the warning, who has it, what was done and what happens next. If nothing is open it says so. A finished or cancelled ticket settles its warning automatically with a plain note. The timeline groups a warning's entries, shows each as open or settled, and tells a repeat warning on one ticket apart ("2nd warning on BOS-149 today"). Every logged action keeps its one-line reason and an Undo while one is possible. The same list, filtered to one ticket, shows on the ticket page. Sweep wakes are hidden from the company view.
 - **Health chip** on the board: "Watchdog: last check 3 min ago · 2 issues being handled", or "off", or "stopped itself (safety cap hit)". Amber when no check has run for 15 minutes.
 - **Daily summary** (`dailySummary`, run after each sweep): a "note" in the owner's feed, from 8:00 owner-local time, at most once a day, and only if something was caught, cleared or done since the last one. It carries counts, what is still open and who it waits on, owner decisions with their age, and a headline (stuck tickets and the oldest). Owner-decision waits are not counted as stuck.
 - **Urgent** (`urgentCheck`): one owner decision holding three or more unfinished tickets sends a Page (once per decision). The "holds" count follows the chain: the ticket the decision blocks plus every unfinished ticket waiting on it, directly or further down. The other Page-level case is the watchdog switching itself off at its safety cap: `trip()` pages the owner once per trip (the "Got it" decision it also raises is only a quiet flag). Those two are the only interrupts; the 8-hour decision reminder stays a quiet flag. Both are logged as `urgent_alert` and `daily_summary` actions.

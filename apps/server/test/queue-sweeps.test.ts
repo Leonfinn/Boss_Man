@@ -5,7 +5,8 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
-import { activity, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
+import { decisionsService } from "../src/services/decisions.js";
+import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -37,7 +38,7 @@ async function setup() {
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const ticket = async (body: Record<string, unknown>) => (await req("POST", `/api/projects/${project.id}/tickets`, body)).json() as { id: string };
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
-  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number };
+  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
   return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
 }
@@ -62,6 +63,18 @@ describe("ranked decision queue (R20)", () => {
     expect(q[0]!.dueDate).toBe(tomorrow);
     expect(q[0]!.reasons).toEqual(expect.arrayContaining(["Blocks 1 ticket directly and 1 more down the chain", "Holds up P1 objective work", "Due in 1 day"]));
     expect(q[1]!.score).toBeLessThan(q[0]!.score);
+  });
+
+  it("lists the newest card first even when an older one scores higher", async () => {
+    ctx = await setup();
+    const checkout = await ctx.ticket({ title: "Checkout" });
+    const urgent = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Which payment provider?", options: ["Stripe", "Mollie"], recommended: "Stripe", blocksTicketId: checkout.id });
+    ctx.advance(HOUR);
+    const idle = await ctx.decisions.raise({ companyId: ctx.company.id, agentId: ctx.ceo.id, question: "Team name?", options: ["A", "B"], recommended: "A" });
+
+    const q = await ctx.queue();
+    expect(q.map((r) => r.id)).toEqual([idle.id, urgent.id]);
+    expect(q[0]!.score).toBeLessThan(q[1]!.score);
   });
 
   it("links the tickets a card is about and the references in its text, in its own company only", async () => {
@@ -95,6 +108,18 @@ describe("ranked decision queue (R20)", () => {
     const q = (await ctx.queue()) as Array<Row & { about: Array<{ ticketId: string; title: string }> }>;
     expect(q.find((r) => r.id === cap.id)!.about.map((a) => a.ticketId)).toEqual([capped.id]);
     expect(q.find((r) => r.id === deployed.id)!.about).toEqual([expect.objectContaining({ ticketId: finished.id, title: "Finished work" })]);
+  });
+
+  it("links the tickets a hire is for, and shows nothing for a card with no ticket", async () => {
+    ctx = await setup();
+    const waiting = await ctx.ticket({ title: "Waiting for a designer" });
+    const mk = async (question: string, context: Record<string, unknown>) =>
+      (await ctx.db.insert(decisions).values({ companyId: ctx.company.id, kind: "approval", question, options: ["Yes", "No"], recommendedOption: "Yes", context: context as never }).returning())[0]!;
+    const hire = await mk("Hire a designer?", { type: "hire", proposal: { name: "Dee", forTickets: [waiting.id, "not-an-id"] }, byAgentId: ctx.ceo.id });
+    const bare = await mk("Hire anyone?", { type: "hire", proposal: { name: "Eve" }, byAgentId: ctx.ceo.id });
+    const q = (await ctx.queue()) as Array<Row & { about: Array<{ ticketId: string }> }>;
+    expect(q.find((r) => r.id === hire.id)!.about.map((a) => a.ticketId)).toEqual([waiting.id]);
+    expect(q.find((r) => r.id === bare.id)!.about).toEqual([]);
   });
 
   it("keeps a ticket blocked while it still waits on something else", async () => {
@@ -147,11 +172,80 @@ describe("stale blockers (R21)", () => {
     await ctx.sweep();
     const [row] = await ctx.queue();
     expect(row!.recommendedOption).toBe("Reassign");
-    expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign" })).statusCode).toBe(422);
+    const noPick = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign" });
+    expect(noPick.statusCode).toBe(422);
+    expect(noPick.body).toContain("Pick who should take this ticket.");
+    expect(noPick.body).not.toContain("assigneeAgentId");
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
     expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+  });
+
+  it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    const [stored] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(stored!.options).toContain("Let the CEO decide");
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    expect(r.statusCode).toBe(200);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(d).toMatchObject({ status: "open", tier: "ceo" });
+    expect((d!.context as { ladder: { rung: string } }).ladder.rung).toBe("ceo");
+    expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.ceo.id, reason: "decision" })]);
+    expect((await ctx.sweep()).staleBlockers.raised).toBe(0); // not raised a second time
+
+    // The CEO's answer carries out the owner's options.
+    const done = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.ceo.id });
+    expect(done.statusCode).toBe(200);
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.ceo.id);
+  });
+
+  it("won't reassign to an agent from another company", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { ceo: { id: string } };
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: other.ceo.id });
+    expect(r.statusCode).toBe(422);
+    expect(r.body).toContain("Pick someone from the list");
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+  });
+
+  it("a CEO agent can't hand the card back to itself to keep it off the owner's queue", async () => {
+    ctx = await setup();
+    await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    const [before] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    ctx.advance(10 * 60 * 1000);
+    const svc = decisionsService(ctx.db, () => true, ctx.clock);
+    await expect(svc.answer(row!.id, "Let the CEO decide", { settledBy: { agentId: ctx.ceo.id } })).rejects.toThrow("Only the owner");
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect((after!.context as { ladder: { since: string } }).ladder.since).toBe((before!.context as { ladder: { since: string } }).ladder.since);
+  });
+
+  it("refuses to hand the card to the CEO when the company has none", async () => {
+    ctx = await setup();
+    await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    await ctx.db.update(agents).set({ role: "worker" }).where(eq(agents.id, ctx.ceo.id));
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    expect(r.statusCode).toBe(422);
+    expect(r.body).toContain("no CEO");
+    expect(await ctx.queue()).toHaveLength(1);
   });
 
   it("dropping the dependency frees the waiting ticket", async () => {
@@ -276,7 +370,8 @@ describe("stalled runs (R32)", () => {
   it("attaches evidence to a quiet run: last step, runner state, and what it waits on", async () => {
     ctx = await setup();
     const { runId, ticket } = await launch();
-    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "in_progress" } } as unknown as RunnerEvent);
+    // A turn that ended: the runner said something last, and is not mid-command (BOS-217).
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "completed" } } as unknown as RunnerEvent);
     ctx.advance(14 * 60_000);
     await ctx.sweep();
     const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
@@ -308,6 +403,76 @@ describe("stalled runs (R32)", () => {
     expect((await ctx.sweep()).stalledRuns.open).toBe(0);
     // The paused agent outranks other rows.
     expect((await ctx.queue())[0]!.reasons[0]).toBe("An agent is paused until you answer");
+  });
+
+  it("closes the alert by itself, with the reason, when the run ends after it was raised (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    const endedAt = ctx.clock();
+    await ctx.emit({ type: "run.ended", runId, stopReason: "end_turn", error: null });
+    // No sweep: the event alone closes it.
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", dedupeKey: null, context: { withdrawn: { by: "system", note: `the run ended normally at ${endedAt.toISOString().slice(11, 16)}` } } });
+    expect((await ctx.db.select().from(activity)).some((a) => a.kind === "decision_withdrawn" && a.summary.includes('CEO has sent nothing') && a.summary.includes('ended normally'))).toBe(true);
+  });
+
+  it("closes the alert by itself when the run speaks again (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    // No sweep: the event alone closes it.
+    await ctx.emit({ type: "run.update", runId, update: { kind: "agent_message_chunk" } } as RunnerEvent);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system", note: "the run is active again" } } });
+  });
+
+  it("closes the alert on the next sweep too, for a run that ended without an event", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    // The server ended the run itself (e.g. the runner went away): the sweep closes the alert.
+    ctx.offline();
+    ctx.advance(35 * 60_000);
+    const res = await ctx.sweep();
+    expect(res.lostRuns).toBe(1);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system" } } });
+  });
+
+  it("doesn't raise the 5-minute alert while the run waits inside a long command, then does after 15 (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "pnpm check-all", status: "in_progress" } } as unknown as RunnerEvent);
+    ctx.advance(10 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.queue()).toEqual([]);
+    ctx.advance(6 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+    const [row] = await ctx.queue();
+    expect(row!.question).toContain("has sent nothing for 16 minutes");
+    expect(row!.question).toContain("It is still inside pnpm check-all, so it may just be a long command.");
+  });
+
+  it("doesn't raise the 5-minute alert while a connected runner is still answering pings mid-command (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    // A turn boundary is the last event; the runner keeps saying hello while it waits on its own child process.
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "bash", status: "pending" } } as unknown as RunnerEvent);
+    ctx.advance(10 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    ctx.advance(6 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
   });
 
   it("drops a run's open permission request from the queue when the run ends", async () => {
@@ -406,5 +571,26 @@ describe("the server ends runs it can't reach", () => {
     ctx.advance(3 * HOUR);
     expect((await ctx.sweep()).lostRuns).toBe(0);
     expect((await row(runId)).endedAt).toBeNull();
+  });
+
+  it("flags a run that has had no ticket for ten minutes to the Scrum Master, saying what woke it (BOS-254)", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    // A ticketless run going for eleven minutes, woken to check a stale card.
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "checking an old card", startedAt: new Date(ctx.clock().getTime() - 11 * 60_000), lastEventAt: new Date(ctx.clock().getTime() - 30_000) });
+    const res = await ctx.sweep();
+    expect(res.longTicketlessRuns.raised).toBe(1);
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(card!.question).toMatch(/CEO has been running for 11 minutes without a ticket .*checking an old card/);
+    // One open card per run, not one per sweep.
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
+  });
+
+  it("leaves a young ticketless run and the owner chat alone", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "wiki upkeep", startedAt: new Date(ctx.clock().getTime() - 5 * 60_000) });
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: null, purpose: "chat", origin: "owner_chat", startedAt: new Date(ctx.clock().getTime() - 30 * 60_000) });
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
   });
 });

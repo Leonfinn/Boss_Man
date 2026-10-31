@@ -58,7 +58,26 @@ g() { git -C "$REPO" "$@"; }
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { ((DRY)) || printf '%s %s\n' "$(now)" "$*" >>"$LOG"; printf '%s\n' "$*"; }
-json() { node -e 'const d=v=>v===null?"null":v===true?"true":v===false?"false":typeof v==="number"?String(v):typeof v==="string"?JSON.stringify(v):Array.isArray(v)?"["+v.map(d).join(", ")+"]":"{"+Object.keys(v).map(k=>JSON.stringify(k)+": "+d(v[k])).join(", ")+"}";const o={};for(const a of process.argv.slice(1)){const i=a.indexOf("=");o[a.slice(0,i)]=a.slice(i+1)}process.stdout.write(d(o)+"\n")' "$@"; }
+# JSON string literal for a value: escapes \ and ", writes newline/CR/tab as escapes and drops other control characters.
+jstr() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  s=${s//[[:cntrl:]]/}
+  printf '"%s"' "$s"
+}
+json() { # key=value ...: a flat object of strings, written as {"k": "v", ...} and a newline
+  local a out="" sep=""
+  for a in "$@"; do out+="$sep$(jstr "${a%%=*}"): $(jstr "${a#*=}")"; sep=", "; done
+  printf '{%s}\n' "$out"
+}
+# The value of a top-level string, number or boolean field of a flat JSON text on stdin; empty when absent or not simple.
+# Booleans print True/False because callers compare against "True". Only reads; nothing from the text is executed.
+jfield() { # field
+  local line
+  line="$(LC_ALL=C tr -d '\n\r' | LC_ALL=C grep -oE "\"$1\"[[:space:]]*:[[:space:]]*(\"[^\"\\\\]*\"|true|false|-?[0-9]+)" | head -n 1)" || true
+  line="${line#*:}"; line="${line#"${line%%[![:space:]]*}"}"
+  case $line in true) echo True ;; false) echo False ;; \"*) line="${line#\"}"; printf '%s' "${line%\"}" ;; *) printf '%s' "$line" ;; esac
+}
 
 [[ -d $INBOX && -d $OUTBOX ]] || { echo "ERROR: $INBOX and $OUTBOX must exist (docs/06-install-truenas.md, Install the host deployer)." >&2; exit 1; }
 mkdir -p "$STATE"
@@ -117,15 +136,21 @@ refresh_available() {
       tip="" # main is not a fast-forward of what runs: nothing can be offered
     fi
   fi
-  node -e '
-const fs=require("fs");
-const [head,tip,cf,pf,infra,notinfra,runner,at]=process.argv.slice(1);
-const commits=fs.readFileSync(cf,"utf8").split("\n").filter(l=>l.trim()).map(l=>{const i=l.indexOf(" ");return {sha:l.slice(0,i),subject:l.slice(i+1)}});
-const paths=fs.readFileSync(pf,"utf8").split("\n").filter(l=>l.trim());
-const ri=new RegExp(infra),rn=new RegExp(notinfra),rr=new RegExp(runner);
-const d=v=>v===null?"null":v===true?"true":v===false?"false":typeof v==="number"?String(v):typeof v==="string"?JSON.stringify(v):Array.isArray(v)?"["+v.map(d).join(", ")+"]":"{"+Object.keys(v).map(k=>JSON.stringify(k)+": "+d(v[k])).join(", ")+"}";
-process.stdout.write(d({version:1,checkedAt:at,deployed:head,tip:tip,commits,paths:paths.slice(0,300),infraPaths:paths.filter(p=>ri.test(p)&&!rn.test(p)).slice(0,50),runnerChanged:paths.some(p=>rr.test(p))}));
-' "$head" "$tip" "$commits" "$paths" "$INFRA" "$NOT_INFRA" "$RUNNER_PATHS" "$(now)" >"$f.tmp"
+  local out="" sep="" line sha p
+  while IFS= read -r line; do
+    [[ -n ${line//[[:space:]]/} ]] || continue
+    sha="${line%% *}"; out+="$sep{\"sha\": $(jstr "$sha"), \"subject\": $(jstr "${line#* }")}"; sep=", "
+  done <"$commits"
+  local clist="[$out]" plist="" ilist="" runner=false n=0 ni=0
+  sep="" out=""
+  while IFS= read -r p; do
+    [[ -n ${p//[[:space:]]/} ]] || continue
+    if ((n < 300)); then plist+="$sep$(jstr "$p")"; sep=", "; n=$((n + 1)); fi
+    if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]] && ((ni < 50)); then ilist+="${ilist:+, }$(jstr "$p")"; ni=$((ni + 1)); fi
+    if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
+  done <"$paths"
+  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s}' \
+    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
@@ -203,7 +228,6 @@ probe() { # service port path
   if [[ $1 == proxy ]]; then compose exec -T proxy wget -q -T 5 -O - "http://127.0.0.1:$2$3"
   else compose exec -T "$1" node -e "fetch('http://127.0.0.1:$2$3').then(async r=>{console.log(await r.text());process.exit(r.ok?0:1)}).catch(()=>process.exit(1))"; fi
 }
-jfield() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let o;try{o=JSON.parse(s)}catch{process.stdout.write("");return}const v=o==null?undefined:o[process.argv[1]];process.stdout.write(v===true?"True":v===false?"False":v==null?"":String(v))})' "$1" 2>/dev/null || true; }
 
 # Polls /api/ready of a service until it is ok, has this role and (when given) this commit.
 wait_ready() { # service role commit seconds
@@ -377,7 +401,8 @@ do_rollback_bluegreen() {
 }
 
 # Reads a field of scripts/deploy.sh's own status file.
-deploy_status_field() { node -e 'const fs=require("fs");let o;try{o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.stdout.write("");process.exit(0)}const v=o==null?undefined:o[process.argv[2]];process.stdout.write(v===true?"True":v===false?"False":v==null?"":String(v))' "${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" "$1" 2>/dev/null || true; }
+# Booleans print True/False because callers compare against "True".
+deploy_status_field() { jfield "$1" <"${BOSSMAN_DEPLOY_STATUS:-${BOSSMAN_BACKUP_DIR:-$D/..}/deploy-status.json}" 2>/dev/null || true; }
 
 main() {
   local req="$INBOX/request.json"
@@ -404,21 +429,24 @@ main() {
   STARTED="$(now)"; FROM="$(g rev-parse HEAD 2>/dev/null || true)"
 
   [[ -f $mine && ! -L $mine && $(stat -c %s "$mine") -le 4096 ]] || finish rejected "Rejected: the request file is not a plain file under 4 KB."
-  local parsed
-  parsed="$(node -e '
-const fs=require("fs");let d;
-try{d=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{process.exit(1)}
-const str=v=>typeof v==="string";
-const ok=!!d&&typeof d==="object"&&!Array.isArray(d)&&["id","target","commit","requestedAt","approvedBy"].every(k=>str(d[k]))
- && /^[0-9a-fA-F-]{36}$/.test(d.id) && ["server","runner"].includes(d.target) && /^[0-9a-f]{40}$/.test(d.commit)
- && /^[A-Za-z0-9_.-]{1,64}$/.test(d.approvedBy) && /^[0-9T:.+Z-]{10,40}$/.test(d.requestedAt);
-if(!ok)process.exit(1);
-process.stdout.write(d.id+" "+d.target+" "+d.commit);
-' "$mine"
-)" || finish rejected "Rejected: the request file does not match the expected format."
-  read -r REQ_ID TARGET COMMIT <<<"$parsed"
+  # The request is untrusted: it must be one flat object whose five fields are plain strings of safe characters.
+  # Whitespace is dropped first, so the shape check below is one strict pattern; nothing is evaluated or sourced.
+  local k flat id target commit at by
+  [[ $(LC_ALL=C tr -d '\0' <"$mine" | wc -c) -eq $(stat -c %s "$mine") ]] || finish rejected "Rejected: the request file does not match the expected format."
+  flat="$(LC_ALL=C tr -d ' \t\r\n' <"$mine")"
+  local pair='"[A-Za-z]{1,32}":"[A-Za-z0-9_.:+-]{0,64}"'
+  [[ $flat =~ ^\{$pair(,$pair)*\}$ ]] || finish rejected "Rejected: the request file does not match the expected format."
+  for k in id target commit requestedAt approvedBy; do
+    [[ $(grep -oE "\"$k\":" <<<"${flat//,/$'\n'}" | wc -l) -eq 1 ]] || finish rejected "Rejected: the request file does not match the expected format."
+  done
+  id="$(jfield id <<<"$flat")" target="$(jfield target <<<"$flat")" commit="$(jfield commit <<<"$flat")"
+  at="$(jfield requestedAt <<<"$flat")" by="$(jfield approvedBy <<<"$flat")"
+  [[ $id =~ ^[0-9a-fA-F-]{36}$ && $target =~ ^(server|runner)$ && $commit =~ ^[0-9a-f]{40}$ && $by =~ ^[A-Za-z0-9_.-]{1,64}$ && $at =~ ^[0-9T:.+Z-]{10,40}$ ]] ||
+    finish rejected "Rejected: the request file does not match the expected format."
+  REQ_ID=$id TARGET=$target COMMIT=$commit
 
-  if [[ -s $OUTBOX/history.jsonl ]] && grep -qF "\"id\": \"$REQ_ID\"" "$OUTBOX/history.jsonl"; then
+  # Accept both spacings: history lines written by older versions may be compact.
+  if [[ -s $OUTBOX/history.jsonl ]] && grep -qE "\"id\":[[:space:]]*\"$REQ_ID\"" "$OUTBOX/history.jsonl"; then
     finish rejected "Rejected: this request was already handled."
   fi
 

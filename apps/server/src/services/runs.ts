@@ -6,6 +6,40 @@ import type { Db } from "../db/client.js";
 import { agents, costEvents, fundingSources, runnerEvents, runners, runs, tickets, wakes } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
+/**
+ * How a run says what it was doing when it has no ticket (BOS-118): the reason it started,
+ * the sender and words of the nudge that started it, and the ticket it was about without
+ * being on it. A nudge's sender and why come through the wake the nudge delivered: a run's
+ * wake is the one whose runId is the run.
+ */
+export function runOriginQuery(alias: string) {
+  const table = sql.identifier(alias);
+  return {
+    origin: sql<string | null>`${table}."origin"`,
+    originFrom: sql<string | null>`(select a."name" from "agents" a where a."id" = (select n."from_agent_id" from "nudges" n where n."wake_id" = (select w."id" from "wakes" w where w."run_id" = ${table}."id" limit 1) order by n."created_at" desc limit 1))`,
+    originNote: sql<string | null>`(select n."why" from "nudges" n where n."wake_id" = (select w."id" from "wakes" w where w."run_id" = ${table}."id" limit 1) order by n."created_at" desc limit 1)`,
+    // A review wake carries its tickets in the note; the card names them from here.
+    wakeNote: sql<string | null>`(select w."note" from "wakes" w where w."run_id" = ${table}."id" limit 1)`,
+    runTicketId: sql<string | null>`${table}."run_ticket_id"`,
+    /** The ticket's reference (HOL-12), for the "Working on" headline (BOS-254). */
+    runTicketRef: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${table}."ticket_id")`,
+  };
+}
+
+/**
+ * Every run going now in a company: the one source for "who is working", read by the Dashboard's
+ * count and the board's cards, strip and count so the two cannot drift (BOS-155).
+ */
+export async function liveRuns(db: Db, companyId: string) {
+  return db
+    .select({ id: runs.id, agentId: runs.agentId, agent: agents.name, ticketId: runs.ticketId, ticket: tickets.title, purpose: runs.purpose, startedAt: runs.startedAt, ...runOriginQuery("runs") })
+    .from(runs)
+    .leftJoin(agents, eq(agents.id, runs.agentId))
+    .leftJoin(tickets, eq(tickets.id, runs.ticketId))
+    .where(and(eq(runs.companyId, companyId), isNull(runs.endedAt)))
+    .orderBy(asc(runs.startedAt));
+}
+
 export class RunError extends Error {
   constructor(
     readonly status: number,
@@ -39,7 +73,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     /** Runs that have finished, newest first, with what they cost. */
     async recent(limit = 50, companyId?: string) {
       const rows = await db
-        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome , purpose: runs.purpose, reason: wakes.reason, note: wakes.note, inputTokens: runs.inputTokens, outputTokens: runs.outputTokens, cachedReadTokens: runs.cachedReadTokens, cachedWriteTokens: runs.cachedWriteTokens, fundingKind: fundingSources.kind })
+        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, endedAt: runs.endedAt, outcome: runs.outcome , purpose: runs.purpose, reason: wakes.reason, note: wakes.note, ...runOriginQuery("runs"), inputTokens: runs.inputTokens, outputTokens: runs.outputTokens, cachedReadTokens: runs.cachedReadTokens, cachedWriteTokens: runs.cachedWriteTokens, fundingKind: fundingSources.kind })
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .leftJoin(tickets, eq(tickets.id, runs.ticketId))
@@ -95,7 +129,7 @@ export function runsService(db: Db, deps: { runners: ReturnType<typeof runnersSe
     /** Runs still going, newest first, with agent and ticket names. */
     async active(companyId?: string) {
       return db
-        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, lastEventAt: runs.lastEventAt , purpose: runs.purpose, reason: wakes.reason, note: wakes.note })
+        .select({ id: runs.id, companyId: runs.companyId, agent: agents.name, agentId: runs.agentId, ticketId: runs.ticketId, ticket: tickets.title, model: runs.model, startedAt: runs.startedAt, lastEventAt: runs.lastEventAt , purpose: runs.purpose, reason: wakes.reason, note: wakes.note, ...runOriginQuery("runs") })
         .from(runs)
         .leftJoin(agents, eq(agents.id, runs.agentId))
         .leftJoin(tickets, eq(tickets.id, runs.ticketId))

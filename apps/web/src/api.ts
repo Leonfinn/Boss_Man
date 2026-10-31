@@ -63,14 +63,50 @@ export type Risk = "trivial" | "low" | "medium" | "high" | "critical";
 export const RISKS: Risk[] = ["trivial", "low", "medium", "high", "critical"];
 
 /** A permission request in plain words, worked out by the server (shared/explain.ts). */
-export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] } };
+export type PushReading = {
+  kind: "ticket" | "branch" | "many" | "unnamed" | "unreadable";
+  headline: string;
+  ticketId?: string;
+  ref?: string;
+  warnings: string[];
+  dangerous: boolean;
+};
+export type PermissionExplanation = { title: string; summary: string; effect: "reads" | "changes" | "deletes" | "network" | "pushes" | "unknown"; command?: string; reason?: string; alwaysNote?: string; scratch?: { note: string; unchecked: string[] }; push?: PushReading };
 
 /** One of Boss Man's alerts the Scrum Master or the CEO still holds (BOS-64): not the owner's yet. */
 /** Where a decision stands with the CEO after the owner pressed "Ask the CEO for advice". */
-export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string; originalQuestion?: string };
-/** A decision the CEO settled: by advice (advice), or a permission request it answered itself (settled, BOS-111). */
-export type AdvisedDecision = { id: string; companyId: string; question: string; advice?: Advice; settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean } };
+export type Advice = { state: "asking" | "reissued" | "clarified" | "handled" | "timed_out" | "replacement" | "advised"; note?: string; askedAt?: string; at?: string; replacedBy?: string; replaces?: string; summary?: string; originalQuestion?: string; what?: string; needed?: string; recommendation?: "allow" | "deny"; why?: string };
+/** A decision the CEO settled: by advice (advice), a permission request it answered itself (settled, BOS-111), or a stale/duplicate card it cleared (withdrawn, BOS-149). */
+export type AdvisedDecision = {
+  id: string;
+  companyId: string;
+  question: string;
+  about?: Array<{ ticketId: string; ref: string | null; title: string }>;
+  advice?: Advice;
+  settled?: { by: string; answer: string; note: string | null; command: string | null; tempCleanup: boolean; workingCopy?: boolean };
+  withdrawn?: { by: string; note: string };
+};
 export type TeamAlert = { id: string; companyId: string; question: string; holder: string; since: string };
+
+/** An agent's harness/provider/model/paid-from setup on a model-change card (BOS-128). */
+export type ModelConfigView = { harness: string; provider: string; model: string; fundingSourceId: string; fundingSourceName?: string };
+
+/** What a Boss Man update contains, as the deploy card shows it (BOS-213). */
+export type DeployUpdate = {
+  from: string;
+  to: string;
+  total: number;
+  files: number;
+  changes: Array<{ ticketId: string; ref: string; title: string }>;
+  more: number;
+  otherCommits: string[];
+  handBecause?: string;
+  handFiles?: string[];
+  handEffect?: "server" | "deployer" | "both";
+  needsDeployerCopy?: boolean;
+  needsRunnerUpdate?: boolean;
+  risks: string[];
+};
 
 export type Decision = {
   id: string;
@@ -81,6 +117,9 @@ export type Decision = {
   recommendedOption: string | null;
   tier: "ceo" | "owner";
   createdAt: string;
+  /** An owner action made this card possibly out of date; the raising agent is checking it (BOS-123). */
+  staleAt?: string | null;
+  staleReason?: string | null;
   companyName: string;
   agentName: string | null;
   /** The agent a CEO-tier decision is put to instead of the CEO (review policy). */
@@ -94,7 +133,7 @@ export type Decision = {
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
   dueDate: string | null;
-  context?: { type?: string; advice?: Advice; /** Numbered steps when the owner must do something. */ steps?: string[]; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; skills?: string[]; reason: string }>; output?: string; planText?: string | null; ticketId?: string | null; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
@@ -122,10 +161,14 @@ export type Ticket = {
   assignedToOwner: boolean;
   dueDate: string | null;
   blockedBy: Array<{ ticketId: string | null; ticketTitle?: string | null; engagementId: string | null; decisionId: string | null }>;
-  /** Agents running on the ticket right now. */
+  /** Agents running on the ticket right now, with what they're doing (e.g. "Security Reviewer reviewing"). */
   working?: string[];
+  /** When the earliest of those runs began. */
+  workingSince?: string | null;
   branch: string | null;
   risk: Risk | null;
+  /** Relative size: 1, 2, 3, 5 or 8. */
+  size?: number | null;
   planFirst: boolean;
   plan: string | null;
   planApprovedAt: string | null;
@@ -139,6 +182,13 @@ export type Ticket = {
   /** In review with an owner sign-off decision still open (the "Your review" lane). */
   waitingOnOwner?: boolean;
   waitingDecisionId?: string | null;
+  /** Owner-marked urgent: always passes the subscription quota hold. */
+  urgent?: boolean;
+  /** A held wake's reset time and why, when routine work is paused by the quota hold. */
+  quotaHeldUntil?: string | null;
+  quotaHeldReason?: string | null;
+  /** The ticket can start now but its agent is held by the quota hold for other work (BOS-253). */
+  quotaHeldAgent?: boolean;
   /** In review with no agent able to review it, so the owner approves it on the ticket. */
   noReviewer?: boolean;
   /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */
@@ -147,17 +197,34 @@ export type Ticket = {
   ownerQuestion?: string | null;
   approvedBy?: string | null;
 };
-export type TicketDetail = Ticket & { ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: string[]; noCode: boolean; stateNote: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
+export type TicketDetail = Ticket & { ref?: string | null; milestoneId: string | null; featureId: string | null; body: string | null; project: string; projectId: string; companyId: string; repoUrl: string | null; defaultBranch: string; assignee: string | null; mergeCommit: string | null; lastActivityAt: string; createdAt: string; landing: "merge" | "pull_request"; verifyCommand: string | null; ownerSignoff: boolean; pullRequestUrl: string | null; pullRequestNumber: number | null; pullRequestNote: string | null; watcherAgentId: string | null; watchEveryMinutes: number | null; watchedAt: string | null; monitorAt: string | null; monitorNote: string | null; monitorAttempts: number; monitorMax: number; acceptanceCriteria: string[]; noCode: boolean; urgent: boolean; quotaHeldUntil?: string | null; quotaHeldReason?: string | null; stateNote: string | null; blockedUntil: string | null; blockedUntilReason: string | null };
 export type WorkspaceDiff = { baseCommit: string; head: string; commits: Array<{ sha: string; subject: string }>; files: Array<{ path: string; added: number; removed: number }>; diff: string; truncated: boolean; turn?: { number: number; at: string } };
-export type Board = { project: Project; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
+/** A run going now that no card on the board shows (BOS-155). */
+export type UnticketedRun = { id: string; agent: string | null; ticketId: string | null; ticket: string | null; purpose: string | null; origin: string | null; originFrom: string | null; originNote: string | null; wakeNote: string | null; runTicketId: string | null; startedAt: string };
+/** `workingAgents` is the number of agents with a run going, the Dashboard's figure. */
+export type Board = { project: Project; workingAgents: number; withoutTicket: UnticketedRun[]; columns: Array<{ id: string; name: string; systemState: string; wipLimit: number | null; tickets: Ticket[] }> };
 
-export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null };
+export type FundingSource = { id: string; name: string; kind: string; provider: string; monthlyGrantMicros: number | null; cycleAnchor?: string | null; quotaHoldAt?: number; quotaOverage?: "pause" | "urgent" | "all"; quotaDisabledWindows?: string[] };
 export type FundingStatus = {
   source: FundingSource;
   credit: { grantMicros: number; spentMicros: number; remainingMicros: number; fractionUsed: number; cycleStart: string; cycleEnd: string } | null;
   quota: Array<{ window: string; utilization: number; resetsAt: string | null; status: string | null; overageInUse: boolean }>;
+  /** Every window name the adapter has reported for this source, for the hold switches. */
+  windowsSeen: string[];
   /** Per window: when it runs out at the recent rate (R78); null with no readings. */
   forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
+  /** Synthetic's own used/limit reading, cached on the server; null for other providers, null counts mean unknown. */
+  providerQuota?: {
+    used: number | null;
+    limit: number | null;
+    renewsAt: string | null;
+    /** Seconds since the reading was taken from Synthetic (BOS-239); null when there is none. */
+    ageSeconds: number | null;
+    /** Recent readings, newest first. */
+    history: Array<{ used: number; limit: number; renewsAt: string | null; takenAt: string }>;
+    /** The warnings the owner has had this period (80, 100). */
+    warned: number[];
+  } | null;
   /** The last 7 days, oldest first (UTC days). */
   daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
   /** The last 7 days per company, biggest first. */
@@ -189,6 +256,17 @@ export type RunRow = {
   purpose?: string | null;
   reason?: string | null;
   note?: string | null;
+  /** What started it, kept on the run (BOS-118): "nudge", "wiki upkeep", "owner_chat" and so on. */
+  origin?: string | null;
+  /** A nudge's sender and why, when a nudge started the run. */
+  originFrom?: string | null;
+  originNote?: string | null;
+  /** The wake's own note, which names the tickets a review run is about. */
+  wakeNote?: string | null;
+  /** The ticket it was about without being on it (a nudge that named one). */
+  runTicketId?: string | null;
+  /** That ticket's reference, e.g. "HOL-12", for the "Working on" headline (BOS-254). */
+  runTicketRef?: string | null;
   /** Tokens over the run, when the agent reported them (R67). */
   inputTokens?: number | null;
   outputTokens?: number | null;
@@ -250,6 +328,24 @@ export type RoadmapObjective = {
 };
 export type RoadmapCompany = { id: string; name: string; objectives: RoadmapObjective[] };
 
+export type RoadmapFeature = {
+  id: string;
+  title: string;
+  status: FeatureStatus;
+  rank: number | null;
+  horizon: Horizon | null;
+  /** Where it sits: now, next, later, or released (its own folded list). */
+  column: Horizon | "released";
+  priority: number;
+  releasedAt: string | null;
+  objective: { id: string; title: string; priority: number } | null;
+  publicSummary: string | null;
+  showPublicly: boolean;
+  tickets: { total: number; done: number };
+  milestones: Array<{ id: string; title: string; targetDate: string | null; pinned: Horizon | null }>;
+};
+export type FeatureRoadmapCompany = { id: string; name: string; features: RoadmapFeature[] };
+
 export type PlanNode = {
   id: string;
   kind: "ticket" | "engagement" | "decision";
@@ -269,6 +365,10 @@ export type TicketLinks = {
   waitsOn: Array<{ dependencyId: string; kind: "ticket" | "engagement" | "decision"; id: string; title: string; state: string; open: boolean; link: string }>;
   blocks: Array<{ dependencyId: string; id: string; title: string; state: string; link: string }>;
 };
+
+/** One ticket in the ticket page's Related section. */
+export type RelatedTicket = { id: string; ref: string | null; title: string; state: string; cancelled: boolean };
+export type TicketRelated = { feature: { id: string; title: string; status: string } | null; parent: RelatedTicket | null; subtasks: RelatedTicket[]; peers: RelatedTicket[]; waitsOn: RelatedTicket[]; blocks: RelatedTicket[]; mentioned: RelatedTicket[] };
 
 /** Today's date in the browser's time zone, YYYY-MM-DD. */
 export const today = () => new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
@@ -291,10 +391,16 @@ export type Feature = {
   description: string | null;
   status: FeatureStatus;
   effort: number | null;
+  /** A person's 1 (most important) to 5 ordering; null until ranked. */
+  rank: number | null;
+  /** Pinned roadmap column; null follows the status. */
+  horizon: Horizon | null;
   driverScores: Record<string, number | null>;
   milestoneId: string | null;
   objectiveId: string | null;
   portalVisible: boolean;
+  publicSummary: string | null;
+  showPublicly: boolean;
   createdAt: string;
   updatedAt: string;
   releasedAt: string | null;
