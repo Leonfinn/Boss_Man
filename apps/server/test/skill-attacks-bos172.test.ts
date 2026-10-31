@@ -72,7 +72,7 @@ describe("BOS-172: retro playbooks through the add-a-skill flow", () => {
   const applyIt = async (c: Awaited<ReturnType<typeof setup>>) => {
     const [ch] = await c.db.select().from(workflowChanges);
     const ceo = await c.mcp(c.ceo.id);
-    expect(isError(await tool(ceo, "decisions", { action: "answer", id: ch!.decisionId, answer: "Apply" }))).toBe(false);
+    expect(isError(await tool(ceo, "decisions", { action: "answer", id: ch!.decisionId, answer: "Apply", note: "Adds a reviewed skill for the engineers." }))).toBe(false);
     return ch!;
   };
   const recommend = async (c: Awaited<ReturnType<typeof setup>>) => {
