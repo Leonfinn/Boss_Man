@@ -3,7 +3,9 @@
 import { and, desc, eq, gte, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { AGENT_TEMPLATES, CEO_TEMPLATE, FUNDING_PROVIDERS, HARNESSES, harnessLabel, providerLabel } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, tickets, wakes } from "../db/schema.js";
+import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
+import { record as logActivity } from "./activity.js";
+import { pictureType } from "./company-import.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
 import type { ModelChoice } from "./models.js";
 
@@ -39,6 +41,12 @@ export const HIRE = "Hire";
 export const DONT_HIRE = "Don't hire";
 export const APPLY = "Apply the change";
 export const KEEP = "Keep them as they are";
+
+/** The name limits the Agents page has always used (BOS-265). */
+export const NAME_MAX = 80;
+/** A picture copied from a ticket image is capped as an owner's upload is; it is inlined into every run start. */
+const AVATAR_MAX_BYTES = 256 * 1024;
+const REASON_MAX = 240;
 
 type Notify = (n: { companyId: string; agentId: string | null; level: "note" | "flag"; title: string; body: string | null; link: string }) => Promise<unknown>;
 type ModelCatalog = { runner: Record<string, { models: ModelChoice[]; observedAt?: string }>; api: Array<{ fundingSourceId: string; name: string; provider: string; models: ModelChoice[]; error: string | null }> };
@@ -259,6 +267,127 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
     },
 
     /**
+     * The CEO renames an agent (BOS-265). The name is display only: the id ties tickets, runs,
+     * notes and history to the agent, so nothing else moves. The CEO can't be renamed this way,
+     * and the name must be new to the company. Like an instruction change it is applied with a
+     * notification and Undo in the history, unless the owner wants to approve edits too.
+     */
+    async rename(companyId: string, ceoId: string, agentId: string, newName: string, reason?: string): Promise<{ applied: AgentRow; before: string } | { decisionId: string }> {
+      const a = await agent(agentId);
+      if (a.companyId !== companyId) throw new AgentError(404, "No such agent.");
+      if (a.role === "ceo") throw new AgentError(409, "The CEO can't be renamed this way; the owner can rename it on the Agents page.");
+      if (a.retiredAt) throw new AgentError(409, `${a.name} is retired, so they can't be renamed.`);
+      const name = newName.trim();
+      if (!name) throw new AgentError(422, "A name can't be empty.");
+      if (name.length > NAME_MAX) throw new AgentError(422, `That name is ${name.length} characters; names are at most ${NAME_MAX}.`);
+      const [same] = await db
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.companyId, companyId), sql`lower(${agents.name}) = lower(${name})`, isNull(agents.retiredAt), ne(agents.id, a.id)));
+      if (same) throw new AgentError(409, `Another agent in this company is already called ${name}. Pick a name no one else has.`);
+      if (name === a.name) throw new AgentError(422, `${a.name} is already called that.`);
+      if ((await approvals(companyId)) === "hires_and_edits") {
+        const open = await db.select({ context: decisions.context }).from(decisions).where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open")));
+        if (open.some((d) => (d.context as { type?: string; agentId?: string } | null)?.type === "rename" && (d.context as { agentId?: string }).agentId === agentId)) throw new AgentError(409, `A rename of ${a.name} is already waiting for the owner.`);
+        const [d] = await db
+          .insert(decisions)
+          .values({
+            companyId,
+            raisedByAgentId: ceoId,
+            kind: "approval",
+            tier: "owner",
+            question: [`The CEO wants to rename ${a.name} to ${name}.`, reason ? `Why: ${reason}` : null, `Only the display name changes: their id, tickets, runs, notes and history stay with them.`].filter(Boolean).join("\n\n"),
+            options: [APPLY, KEEP],
+            recommendedOption: APPLY,
+            context: { type: "rename", agentId, newName: name, before: a.name, byAgentId: ceoId },
+          })
+          .returning({ id: decisions.id });
+        return { decisionId: d!.id };
+      }
+      const applied = await this.applyRename(agentId, name, ceoId, reason);
+      return { applied, before: a.name };
+    },
+
+    /** Applies a rename (or the owner's approval of one), re-checked here because the team may have changed since. */
+    async applyRename(agentId: string, name: string, byAgentId: string | null, reason?: string): Promise<AgentRow> {
+      const a = await agent(agentId);
+      if (a.role === "ceo") throw new AgentError(409, "The CEO can't be renamed this way; the owner can rename it on the Agents page.");
+      const clean = name.trim();
+      if (!clean) throw new AgentError(422, "A name can't be empty.");
+      if (clean.length > NAME_MAX) throw new AgentError(422, `That name is ${clean.length} characters; names are at most ${NAME_MAX}.`);
+      const [same] = await db
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.companyId, a.companyId), sql`lower(${agents.name}) = lower(${clean})`, isNull(agents.retiredAt), ne(agents.id, a.id)));
+      if (same) throw new AgentError(409, `Another agent in this company is already called ${clean}. Pick a name no one else has.`);
+      const applied = await this.update(agentId, { name: clean }, byAgentId);
+      await logActivity(db, { companyId: a.companyId, agentId: byAgentId, kind: "agent_renamed", summary: `${a.name} was renamed to ${clean}${reason?.trim() ? `: ${reason.trim()}` : ""}` });
+      await notify({
+        companyId: a.companyId,
+        agentId: byAgentId,
+        level: "note",
+        title: `The CEO renamed ${a.name} to ${clean}`,
+        body: `${reason?.trim() ? `${reason.trim()}\n` : ""}Only the display name changed; their tickets, runs and history stay with them. See the change, or undo it, in Agents › ${clean} › History.`,
+        link: "#/agents",
+      });
+      return applied;
+    },
+
+    /**
+     * Every other agent whose standing instructions or title still say the old name, so the CEO can
+     * update them (BOS-265). Settings and review policy store agent ids, never names, so a rename
+     * can't break them; this only reports the places the old name is quoted.
+     */
+    async colleaguesMentioning(companyId: string, agentId: string, oldName: string): Promise<Array<{ id: string; name: string; where: string }>> {
+      const rows = await db.select({ id: agents.id, name: agents.name, title: agents.title, instructions: agents.instructions }).from(agents).where(and(eq(agents.companyId, companyId), isNull(agents.retiredAt), ne(agents.id, agentId)));
+      // Word-ish match on the whole old name, so "Sam" doesn't catch "Samsung"; names ending in a
+      // letter need a boundary after them, and dots in the name are literal.
+      const escaped = oldName.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const mentions = (text: string | null) => !!text && new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`, "i").test(text);
+      const found: Array<{ id: string; name: string; where: string }> = [];
+      for (const r of rows) {
+        const places = [mentions(r.instructions) ? "instructions" : null, mentions(r.title) ? "title" : null].filter((p): p is string => !!p);
+        if (places.length) found.push({ id: r.id, name: r.name, where: places.join(" and ") });
+      }
+      return found;
+    },
+
+    /**
+     * Sets an agent's picture from an image already on one of the company's tickets (BOS-265), or
+     * clears it back to the template's portrait. Only PNG, JPEG or WebP bytes are taken, sized as an
+     * owner's upload; the bytes are kept once per image and shared by every agent that uses it.
+     */
+    async setPicture(companyId: string, ceoId: string, agentId: string, choice: { imageId?: string | null; clear?: boolean }, reason?: string): Promise<{ agent: AgentRow; cleared: boolean }> {
+      const a = await agent(agentId);
+      if (a.companyId !== companyId) throw new AgentError(404, "No such agent.");
+      const why = reason?.trim().slice(0, REASON_MAX) || null;
+      if (choice.clear) {
+        if (!a.avatarAt) return { agent: a, cleared: true };
+        await db.delete(agentAvatars).where(eq(agentAvatars.agentId, agentId));
+        const [after] = await db.update(agents).set({ avatarAt: null }).where(eq(agents.id, agentId)).returning();
+        await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture went back to the default${why ? `: ${why}` : ""}` });
+        await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO set ${a.name}'s picture back to the default`, body: `${why ? `${why}\n` : ""}See it, or undo it, on the Agents page.`, link: "#/agents" });
+        return { agent: after!, cleared: true };
+      }
+      const imageId = choice.imageId?.trim();
+      if (!imageId) throw new AgentError(422, "Give an image id (one attached to a ticket in this company) or set clear to go back to the default.");
+      const [img] = await db.select({ id: ticketImages.id, type: ticketImages.type, size: ticketImages.size, bytes: ticketImages.bytes }).from(ticketImages).where(and(eq(ticketImages.id, imageId), eq(ticketImages.companyId, companyId)));
+      if (!img) throw new AgentError(404, "No image with that id on a ticket in this company. tickets read lists a ticket's images; attach_image adds one.");
+      // The bytes decide, never the stored type or a name.
+      const type = pictureType(img.bytes);
+      if (!type) throw new AgentError(422, `${img.size} bytes that aren't a PNG, JPEG or WebP image. Pick a picture, not a document.`);
+      if (img.bytes.length > AVATAR_MAX_BYTES) throw new AgentError(413, `That picture is ${Math.round(img.bytes.length / 1024)} KB; a picture can be at most ${AVATAR_MAX_BYTES / 1024} KB. Pick a smaller one.`);
+      await db
+        .insert(agentAvatars)
+        .values({ agentId, bytes: img.bytes, type, imageId: img.id })
+        .onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes: img.bytes, type, imageId: img.id } });
+      const [after] = await db.update(agents).set({ avatarAt: now() }).where(eq(agents.id, agentId)).returning();
+      await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture was set from a ticket image${why ? `: ${why}` : ""}` });
+      await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO set ${a.name}'s picture`, body: `${why ? `${why}\n` : ""}It shows on the Agents page, the board and the runs list. You can undo it there.`, link: "#/agents" });
+      return { agent: after!, cleared: false };
+    },
+
+    /**
      * The CEO's team plan for a project or the company (docs/13): every proposed hire in one
      * decision, so the owner ticks the ones they want. Always asked, whatever the hire approvals.
      */
@@ -312,9 +441,10 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       return { hired, failed };
     },
 
-    /** The owner's answer to a hire or instructions decision. */
-    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }, companyId: string, approved: boolean) {
+    /** The owner's answer to a hire, instructions or rename decision. */
+    async onDecision(ctx: { type: "hire"; proposal: HireProposal; byAgentId: string } | { type: "instructions"; agentId: string; instructions: string; byAgentId: string } | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }, companyId: string, approved: boolean) {
       if (!approved) return null;
+      if (ctx.type === "rename") return this.applyRename(ctx.agentId, ctx.newName, ctx.byAgentId, "The owner approved it.");
       if (ctx.type === "hire") {
         const config = await validateModelConfig(companyId, ctx.proposal);
         const hired = await this.hire(companyId, { ...ctx.proposal, agentKind: config.harness, model: config.model, fundingSourceId: config.fundingSourceId }, ctx.byAgentId);

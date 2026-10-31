@@ -1851,7 +1851,8 @@ export async function buildApp(opts: AppOptions) {
       if (!type) return reply.code(415).send({ error: "bad_type", message: "The picture must be a PNG, JPEG or WebP image." });
       const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, id));
       if (!a) return reply.code(404).send({ error: "not_found", message: "No such agent." });
-      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type } });
+      // An upload replaces any picture the CEO copied from a ticket image (BOS-265).
+      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type, imageId: null } });
       const [row] = await db.update(agents).set({ avatarAt: new Date() }).where(eq(agents.id, id)).returning({ avatarAt: agents.avatarAt });
       return row;
     });

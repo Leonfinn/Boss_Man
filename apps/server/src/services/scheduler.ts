@@ -745,6 +745,8 @@ export function schedulerService(
       runId,
       agentId: agent.id,
       agentKind: agent.agentKind,
+      // The name now, not the one the agent was hired under: a rename shows in their commits (BOS-265).
+      agentName: agent.name,
       model: agent.model,
       ...(agent.thinking ? { thinking: agent.thinking } : {}),
       fundingSourceId: agent.fundingSourceId,
