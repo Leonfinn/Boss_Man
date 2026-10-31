@@ -150,7 +150,7 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
   ```
 
   If either is taken, pick other free ports and use them in `.env` and in the addresses below.
-- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running, you can remove this line: Boss Man then marks the cookie Secure on HTTPS requests that come through it, and leaves it off on plain LAN http. Until 10b is set up, keep the line, or the login cookie is Secure and plain http login fails. Never remove it without 10b: with no sidecar the cookie is always Secure.
+- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
 - Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
   - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
 

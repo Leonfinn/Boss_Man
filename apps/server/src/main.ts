@@ -25,8 +25,8 @@ const { app, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, fee
   db,
   master,
   liveValidator: providerLiveValidator,
-  // Per request: Secure over https through the trusted proxy, plain http on the LAN still logs in.
-  secureCookies: env.BOSSMAN_INSECURE_COOKIES === "1" ? false : trustedProxies.length ? "auto" : true,
+  // Per request: Secure over https through the trusted proxy, plain http on the LAN still logs in. With a trusted proxy set this wins over BOSSMAN_INSECURE_COOKIES, so leaving that flag in place is harmless.
+  secureCookies: trustedProxies.length ? "auto" : env.BOSSMAN_INSECURE_COOKIES === "1" ? false : true,
   trustedProxies,
   leader,
   logger: true,
@@ -94,6 +94,7 @@ await app.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.PORT ?? 3100) }
 
 // The feedback portal on its own port, serving nothing else, so it can be shared without the owner's side.
 if (env.BOSSMAN_PORTAL_PORT) {
-  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1", logger: true });
+  // The portal is never fronted by Serve (plain http), so its voter cookie is not Secure once the sidecar is in use.
+  const portal = await buildPortalApp({ feedback, webDir: env.BOSSMAN_WEB_DIR, secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1" && !trustedProxies.length, logger: true });
   await portal.listen({ host: env.HOST ?? "0.0.0.0", port: Number(env.BOSSMAN_PORTAL_PORT) });
 }

@@ -49,6 +49,7 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    ```
 
    If `.env` has no `COMPOSE_FILE` line, add `COMPOSE_FILE=docker-compose.yml:deploy/tailscale.yml`.
+   You do not need to touch `BOSSMAN_INSECURE_COOKIES`: once the sidecar file is in use, Boss Man chooses Secure per request and ignores that line. The feedback portal port is plain http, so its cookie stays non-Secure.
 5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. After it is up you can delete the `TS_AUTHKEY` line from `.env`: the login is kept in the state folder, and an empty key is fine. If the line stays, the key is spent after first use and does no harm.
 6. In the Tailscale admin console the machine `boss-man` appears. Check Serve is on and Funnel is off:
 
