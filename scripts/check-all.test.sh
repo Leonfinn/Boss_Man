@@ -8,8 +8,8 @@ fail() { echo "FAIL: $*"; exit 1; }
 # check-all.sh runs this inside its own child, so drop the markers that would switch the retry loop off
 unset BOSSMAN_CHECK_CHILD BOSSMAN_CHECK_ATTEMPTS BOSSMAN_CHECK_BUDGET_SECONDS BOSSMAN_CHECK_BODY
 export BOSSMAN_CHECK_RETRY_SECONDS=0 BOSSMAN_CHECK_STORE=off
-# check-all.sh sets this for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
-unset BOSSMAN_CHECK_CHILD
+# Also drop the merge gate's and user's settings, which would change what the cases below mean. check-all.sh sets CHILD for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
+unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT
 runs() { grep -c . "$t/count" 2>/dev/null || true; }
 
 # run <expected rc> <expected runs> <label> <stub body> [dir] [command]
