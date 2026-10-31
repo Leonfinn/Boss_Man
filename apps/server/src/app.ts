@@ -31,7 +31,7 @@ import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
 import { selfDeployService } from "./services/self-deploy.js";
-import { sweepService, type SweepLimits } from "./services/sweeps.js";
+import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -414,6 +414,15 @@ export async function buildApp(opts: AppOptions) {
       // 5 minutes so only a refresh after a Synthetic run actually calls Synthetic (BOS-239).
       void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
+  });
+  // A "has sent nothing" alert for a run closes the moment the run ends or speaks again (BOS-217),
+  // so the CEO and the owner are never asked about a run that has already moved on. Awaited before
+  // the event is acknowledged, so nothing reads an alert the run has left behind.
+  runners.onEventSync(async (runner, event) => {
+    if (!("runId" in event) || event.type === "run.started") return;
+    await closeStallAlertForRun(db, event.runId, opts.now)
+      .then((closed) => (closed ? notes.syncDecisions() : null))
+      .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing a stall alert failed"));
   });
   const sweeps = sweepService(db, {
     expireAdvice: () => decisionsSvc.expireAdvice(),
