@@ -1,9 +1,9 @@
 # HTTPS for Boss Man on your tailnet only, through Tailscale Serve (BOS-242). Add it to COMPOSE_FILE in .env:
-#   COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml
-# Steps: docs/06-install-truenas.md, "10b. HTTPS through Tailscale Serve".
+#   COMPOSE_FILE=docker-compose.yml:deploy/tailscale.yml   (plus your host file, if any, e.g. deploy/truenas.yml)
+# Steps: docs/20-https-tailscale.md (any Docker host). The subnet and address are BOSSMAN_EDGE_SUBNET / BOSSMAN_EDGE_IP in .env.
 #
 # Why a sidecar on its own network: Boss Man believes X-Forwarded-For / X-Forwarded-Proto only from
-# the exact address below (BOSSMAN_TRUSTED_PROXIES). That address lives on the private "edge" network, which
+# the exact address BOSSMAN_EDGE_IP (BOSSMAN_TRUSTED_PROXIES). That address lives on the private "edge" network, which
 # only this container and the server join. LAN requests reach the server through the published port on the
 # default network, so they can never arrive from this address.
 #
@@ -18,14 +18,14 @@ services:
       TS_AUTHKEY: ${TS_AUTHKEY:?Set TS_AUTHKEY in .env (a one-off, non-reusable key from the Tailscale admin console)}
       TS_STATE_DIR: /var/lib/tailscale
       TS_SERVE_CONFIG: /config/serve.json
-      # No /dev/net/tun and no extra capabilities: Serve only needs to proxy to the server over Docker's network.
+      # Userspace networking: no /dev/net/tun and no extra capabilities, so it also runs in a Proxmox LXC. Serve only proxies to the server over Docker's network.
       TS_USERSPACE: "true"
     volumes:
-      - ${BOSSMAN_DATA:?Set BOSSMAN_DATA in .env}/tailscale:/var/lib/tailscale
+      - ${BOSSMAN_DATA:-/srv/boss-man/data}/tailscale:/var/lib/tailscale
       - ./deploy/tailscale:/config:ro
     networks:
       edge:
-        ipv4_address: 172.30.0.2
+        ipv4_address: ${BOSSMAN_EDGE_IP:-172.30.0.2}
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m
@@ -36,10 +36,10 @@ services:
     networks:
       edge: {}
     environment:
-      BOSSMAN_TRUSTED_PROXIES: 172.30.0.2
+      BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_EDGE_IP:-172.30.0.2}
 
 networks:
   edge:
     ipam:
       config:
-        - subnet: 172.30.0.0/29
+        - subnet: ${BOSSMAN_EDGE_SUBNET:-172.30.0.0/29}
