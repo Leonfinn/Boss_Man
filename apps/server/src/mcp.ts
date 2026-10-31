@@ -1129,6 +1129,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(`Overruled the ${input.kind} review. ${reviewOutcome(r)}`);
         }
         if (input.action === "diff") {
+          // Reading the diff counts as working on it: a reviewer woken about several tickets
+          // starts on none, and gets shown with the one it is on (BOS-268). Never blocks the tool.
+          await noteRunTicket(input.ticketId);
           const d = await review.diff(input.ticketId, scope.companyId);
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
@@ -1139,6 +1142,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(`${checklist}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
+        // A verdict on a ticket is touching it, like any other hook (BOS-268).
+        await noteRunTicket(input.ticketId);
         const r = await review.submit(input.ticketId, {
           verdict: input.verdict,
           comments: input.comments,
@@ -1181,7 +1186,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, and the Synthetic plan's quota (syntheticUsage: used of the limit, when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
