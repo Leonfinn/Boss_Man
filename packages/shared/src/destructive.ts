@@ -25,6 +25,10 @@ type Word = {
   dynamic: boolean;
   /** Starts with an expansion, so it could turn into an option such as -rf. */
   lead: boolean;
+  /** Holds an unquoted expansion, which the shell splits on spaces: dist$x can become `dist -rf`. */
+  split: boolean;
+  /** Has a brace expansion or glob in it, so it can become several words: -{a,delete} is `-a -delete`. */
+  many: boolean;
   /** Has quotes or escapes in it. */
   quoted: boolean;
 };
@@ -37,8 +41,12 @@ const SHELLS = new Set("sh bash zsh dash ksh mksh ash fish".split(" "));
 const WIPES = new Set("shred truncate wipefs dd mke2fs mkswap blkdiscard sfdisk".split(" "));
 const DELETES = new Set(["rm", "rmdir", "unlink"]);
 
-/** An option whose letters the shell fills in when it runs: -$x, -{r,f}, -[r]f, --$x. Words that start with an expansion are `lead`. */
-const runtimeOption = (w: Word) => w.dynamic && w.text.startsWith("-");
+/**
+ * A word the shell may turn into an option when it runs: $x or "$x" (lead), -$x, -{r,f}, -[r]f,
+ * dist$x (split on spaces into `dist -rf`), {-rf,x}, or * (a file named -rf). Globs and braces after
+ * a plain start (./*, a{b,c}) can't: every word they make starts the same way.
+ */
+const mayBeOption = (w: Word) => w.dynamic && (w.lead || w.split || /^[-{*?[]/.test(w.text));
 
 /** Index of the ")" closing the "(" at s[open], skipping quotes and escapes; -1 when there's none. */
 function matchParen(s: string, open: number): number {
@@ -83,29 +91,33 @@ function parse(src: string): { cmds: Cmd[]; unparsed: boolean } {
     let started = false;
     let dynamic = false;
     let lead = false;
+    let split = false;
     let quoted = false;
     let brace = false;
     let glob = false;
     let redirect: null | "file" | "here" = null;
     const heredocs: Array<{ delim: string; strip: boolean; expand: boolean; cmd: Cmd }> = [];
 
-    const expansion = () => {
+    // An unquoted expansion; $'…' is quoted, so it isn't split.
+    const expansion = (splits = true) => {
       if (!started) lead = true;
+      if (splits) split = true;
       dynamic = started = true;
     };
     const endWord = () => {
       if (!started) return;
-      if (brace && /\{[^{}]*(,|\.\.)[^{}]*\}/.test(word)) dynamic = true;
+      let many = false;
+      if (brace && /\{[^{}]*(,|\.\.)[^{}]*\}/.test(word)) dynamic = many = true;
       // [ on its own (the test command) isn't a pattern; [ab] is.
-      if (glob && /[*?]|\[.*\]/.test(word)) dynamic = true;
-      const w: Word = { text: word, dynamic, lead, quoted };
+      if (glob && /[*?]|\[.*\]/.test(word)) dynamic = many = true;
+      const w: Word = { text: word, dynamic, lead, split, many, quoted };
       if (redirect === "here") cmd.stdin.push(w);
       else if (redirect === "file") {
         // A redirect's target isn't one of the command's words.
       } else if (!(cmd.words.length === 0 && !quoted && KEYWORDS.has(word))) cmd.words.push(w);
       redirect = null;
       word = "";
-      started = dynamic = lead = quoted = brace = glob = false;
+      started = dynamic = lead = split = quoted = brace = glob = false;
     };
     const endCmd = (piped: boolean) => {
       endWord();
@@ -131,7 +143,7 @@ function parse(src: string): { cmds: Cmd[]; unparsed: boolean } {
         // Unless its WORD is quoted, the shell expands $( ) and backticks inside the body.
         const expands = h.expand && /[$`]/.test(body);
         if (expands) expandIn(body, depth);
-        h.cmd.stdin.push({ text: body, dynamic: expands, lead: false, quoted: false });
+        h.cmd.stdin.push({ text: body, dynamic: expands, lead: false, split: false, many: false, quoted: false });
       }
       return i - 1;
     };
@@ -192,7 +204,7 @@ function parse(src: string): { cmds: Cmd[]; unparsed: boolean } {
           for (; j < s.length && s[j] !== "'"; j++) if (s[j] === "\\") j++;
           if (j >= s.length) unparsed = true;
           word += s.slice(i, j + 1);
-          expansion();
+          expansion(false);
           quoted = true;
           i = j;
         } else if (n === "(" || n === "{") {
@@ -313,7 +325,21 @@ function parse(src: string): { cmds: Cmd[]; unparsed: boolean } {
   return { cmds, unparsed };
 }
 
-const plainWords = (texts: string[]): Word[] => texts.map((text) => ({ text, dynamic: false, lead: false, quoted: false }));
+const plainWords = (texts: string[]): Word[] => texts.map((text) => ({ text, dynamic: false, lead: false, split: false, many: false, quoted: false }));
+
+/** True when a word before the program's first plain operand may turn into an option, so whether it runs inline code (bash -c, python -c) is only known when it runs. */
+function unknownMode(args: Word[]): boolean {
+  for (const a of args) {
+    if (mayBeOption(a)) return true;
+    if (!a.text.startsWith("-")) return false;
+  }
+  return false;
+}
+
+// find's tests and actions that take one value: a single word after one of them is that value, whatever it holds.
+const FIND_VALUED = new Set(
+  "-name -iname -path -ipath -wholename -iwholename -regex -iregex -lname -ilname -type -xtype -mtime -mmin -atime -amin -ctime -cmin -newer -anewer -cnewer -size -perm -user -group -uid -gid -links -inum -samefile -maxdepth -mindepth -fstype -used -regextype -context".split(" "),
+);
 
 /** Skips a program's options (and the values of those in `withValue`); returns what follows. */
 function afterOptions(args: Word[], withValue: string[] = []): Word[] {
@@ -461,6 +487,7 @@ export function commandRisks(command: string | string[]): Risk[] {
             if (script?.dynamic) return destroys("runs a script only known when it runs");
             return script ? readScript(script.text, depth + 1) : undefined;
           }
+          if (args.some(mayBeOption)) return destroys("may be given a script by an option only known when it runs");
           w = scriptOption(args);
           wrapped = true;
           continue;
@@ -475,14 +502,19 @@ export function commandRisks(command: string | string[]): Risk[] {
           return remote.length ? readScript(remote.map((a) => a.text).join(" "), depth + 1) : undefined;
         }
         if (prog === "rimraf") return destroys("deletes folders (rimraf)");
-        if (prog === "rsync" && args.some((a) => /^--(del|delete[\w-]*|remove-source-files)(=|$)/.test(a.text))) return destroys("deletes files (rsync --delete)");
+        if (prog === "rsync") {
+          if (args.some((a) => /^--(del|delete[\w-]*|remove-source-files)(=|$)/.test(a.text))) return destroys("deletes files (rsync --delete)");
+          // rsync reads options after its paths too, so any word can be the --delete.
+          if (args.some(mayBeOption)) return destroys("rsync with an option only known when it runs");
+          return;
+        }
 
         if (prog === "rm") {
           if (bulk) return destroys("deletes every file fed to it (xargs, find -exec)");
           for (const a of args) {
             const t = a.text;
             if (t === "--") break;
-            if (a.lead || runtimeOption(a)) return destroys("rm with an option only known when it runs");
+            if (mayBeOption(a)) return destroys("rm with an option only known when it runs");
             const long = /^--([^=]+)/.exec(t)?.[1];
             // GNU rm accepts any unambiguous start of a long option: --rec is --recursive.
             if (long ? ["recursive", "force", "no-preserve-root"].some((o) => o.startsWith(long)) : /^-[a-zA-Z]*[rRf]/.test(t)) return destroys("deletes folders or forces deletes (rm -r/-f)");
@@ -495,7 +527,11 @@ export function commandRisks(command: string | string[]): Risk[] {
           for (let i = 0; i < args.length; i++) {
             const t = args[i]!.text;
             if (t === "-delete") return destroys("deletes what it finds (find -delete)");
-            if (runtimeOption(args[i]!)) return destroys("find with an option only known when it runs");
+            // x=-delete; find . $x, find "$dir" (a path can be -delete too) or find . -name * (a file named -delete).
+            // A single word after -name and the like is only that test's value: find . -name "$PAT".
+            const a = args[i]!;
+            const value = i > 0 && FIND_VALUED.has(args[i - 1]!.text) && !a.split && !a.many;
+            if (mayBeOption(a) && !value) return destroys("find with an option only known when it runs");
             if (/^-(exec|execdir|ok|okdir)$/.test(t)) {
               const end = args.findIndex((a, j) => j > i && (a.text === ";" || a.text === "+"));
               judge({ ...cmd, words: args.slice(i + 1, end < 0 ? args.length : end) }, depth, true);
@@ -517,9 +553,11 @@ export function commandRisks(command: string | string[]): Risk[] {
             if (m) readScript(m[3]!.replace(/^!/, ""), depth + 1);
           }
           const rest = afterOptions(args, valued);
+          if (rest[0]?.dynamic) return destroys("runs a git command only known when it runs");
           const sub = rest[0]?.text;
           const opts = rest.slice(1).map((a) => a.text);
-          const unknownOpt = rest.slice(1).some(runtimeOption);
+          // Also a refspec: git push origin "$b" with b=+main force-pushes.
+          const unknownOpt = rest.slice(1).some(mayBeOption);
           if (sub === "push") {
             add("pushes", "pushes to a remote (git push)", all, plain);
             if (unknownOpt || opts.some((o) => /^-[a-zA-Z]*[fd]|^--(force|mirror|delete|prune)|^[+:]/.test(o))) destroys("overwrites or deletes on the remote (git push --force/--delete)");
@@ -529,11 +567,14 @@ export function commandRisks(command: string | string[]): Risk[] {
         if (prog === "docker" || prog === "podman") {
           const rest = afterOptions(args, ["-H", "--host", "--context", "-c", "--config", "-l", "--log-level"]);
           const [a, b] = [rest[0]?.text, afterOptions(rest.slice(1))[0]?.text];
+          const group = /^(system|volume|container|image|network|builder)$/.test(a ?? "");
+          if (rest[0]?.dynamic || (group && afterOptions(rest.slice(1))[0]?.dynamic)) return destroys(`runs a ${prog} command only known when it runs`);
           if (a === "rm" || a === "rmi" || (/^(system|volume|container|image|network|builder)$/.test(a ?? "") && (b === "prune" || b === "rm"))) destroys(`removes containers, images or volumes (${prog} ${a})`);
           if (a === "push" || (a === "image" && b === "push")) add("pushes", `publishes an image (${prog} push)`, all, plain);
           return;
         }
         if ((prog === "zfs" || prog === "zpool") && args.some((a) => a.text === "destroy")) return destroys(`destroys a dataset or pool (${prog} destroy)`);
+        if ((prog === "zfs" || prog === "zpool") && afterOptions(args)[0]?.dynamic) return destroys(`runs a ${prog} command only known when it runs`);
         if (/^(npm|pnpm|yarn)$/.test(prog) && args.some((a) => a.text === "publish")) return add("pushes", `publishes a package (${prog} publish)`, all, plain);
 
         if (SHELLS.has(prog)) {
@@ -556,6 +597,8 @@ export function commandRisks(command: string | string[]): Risk[] {
             if (script.dynamic) return destroys("runs a script only known when it runs");
             return readScript(script.text, depth + 1);
           }
+          // x=-c; bash $x 'rm -rf /x'
+          if (unknownMode(args)) return destroys("runs a shell whose options are only known when it runs");
           if (script && !stdin) return; // runs a script file (see the shortcut at the top)
           for (const body of cmd.stdin) {
             if (body.dynamic) return destroys("runs a script only known when it runs");
@@ -576,6 +619,8 @@ export function commandRisks(command: string | string[]): Risk[] {
         if (inline) {
           const opts = args.filter((a) => a.text.startsWith("-") || prog === "deno");
           const isInline = prog.endsWith("awk") ? !args.some((a) => /^-[a-zA-Z]*f/.test(a.text)) : opts.some((a) => inline.test(a.text));
+          // x=-c; python3 $x '…'
+          if (!isInline && unknownMode(args)) return destroys(`runs ${prog} with options only known when they run`);
           const reads = isInline || !args.some((a) => !a.text.startsWith("-"));
           if (!reads) return; // runs a script file
           const code = isInline ? args : cmd.stdin;
