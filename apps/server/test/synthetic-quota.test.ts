@@ -18,7 +18,8 @@ async function setup() {
     calls.push({ url, authorization });
     if (url !== "https://api.synthetic.new/v2/quotas") return new Response("{}", { status: 404 });
     if (authorization === "Bearer sk-syn-good") {
-      return new Response(JSON.stringify({ subscription: { limit: 1000, requests: 123, renewsAt: "2026-11-30T00:00:00.000Z" } }), { status: 200 });
+      // The real shape (BOS-260): weekly credits are the measure, and the request window is often 0.
+      return new Response(JSON.stringify({ subscription: { limit: 500, requests: 0, renewsAt: "2026-11-30T00:00:00.000Z" }, planWeeklyLimit: { nextRegenAt: "2026-11-30T00:05:00.000Z", percentRemaining: 87.7, nextRegenPercent: 2 } }), { status: 200 });
     }
     return new Response(JSON.stringify({ error: "unauthorised" }), { status: 401 });
   }) as typeof globalThis.fetch;
@@ -36,12 +37,13 @@ async function source(t: Awaited<ReturnType<typeof setup>>, value: string) {
 }
 
 describe("Synthetic quota", () => {
-  it("reads used, limit and renewal with the key, and never puts the key in the answer", async () => {
+  it("reads the week's credits with the key, and never puts the key in the answer", async () => {
     const c = (ctx = await setup());
     const s = await source(c, "sk-syn-good");
     const res = await c.req("GET", `/api/funding-sources/${s.id}/status`);
     expect(res.statusCode).toBe(200);
-    expect(res.json().providerQuota).toMatchObject({ used: 123, limit: 1000, renewsAt: "2026-11-30T00:00:00.000Z", ageSeconds: expect.any(Number), warned: [] });
+    // 12.3% of the week's credits used, stored as 1,230 of 10,000; the request window's 0 is ignored.
+    expect(res.json().providerQuota).toMatchObject({ used: 1230, limit: 10_000, measure: "weekly", ageSeconds: expect.any(Number), warned: [] });
     expect(c.calls.find((x) => x.url === "https://api.synthetic.new/v2/quotas")!.authorization).toBe("Bearer sk-syn-good");
     expect(res.body).not.toContain("sk-syn-good");
   });
@@ -52,7 +54,7 @@ describe("Synthetic quota", () => {
     const { secret } = (await c.req("POST", "/api/secrets", { name: "Synthetic key", kind: "generic", value: "sk-syn-good" })).json();
     await c.req("POST", `/api/secrets/${secret.id}/grants`, { companyId: company.id, envName: "SYNTHETIC_API_KEY" });
     const s = (await c.req("POST", "/api/funding-sources", { name: "Synthetic", kind: "subscription", provider: "synthetic" })).json();
-    expect((await c.req("GET", `/api/funding-sources/${s.id}/status`)).json().providerQuota).toMatchObject({ used: 123, limit: 1000, renewsAt: "2026-11-30T00:00:00.000Z" });
+    expect((await c.req("GET", `/api/funding-sources/${s.id}/status`)).json().providerQuota).toMatchObject({ used: 1230, limit: 10_000, measure: "weekly" });
   });
 
   it("shows an unknown quota on a failed call instead of failing the request", async () => {
