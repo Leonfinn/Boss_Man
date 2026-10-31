@@ -178,7 +178,7 @@ function CommandBlock({ command }: { command: string }) {
   };
   return (
     <div data-command style={{ display: "flex", gap: 8, alignItems: "flex-start", margin: "6px 0" }}>
-      <pre style={{ flex: 1, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--code-bg, #f3f3f3)", borderRadius: 6, fontSize: 13 }}>
+      <pre style={{ flex: 1, margin: 0, padding: "8px 10px", overflowX: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: "var(--field)", color: "var(--head)", border: "1px solid var(--line-strong)", fontFamily: "var(--mono)", borderRadius: 6, fontSize: 13 }}>
         <code>{command}</code>
       </pre>
       <button type="button" onClick={copy} aria-label="Copy this command">{copied ? "Copied" : "Copy"}</button>
