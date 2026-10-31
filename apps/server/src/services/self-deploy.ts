@@ -13,6 +13,7 @@ import { companies, decisions, owners, settings, tickets } from "../db/schema.js
 import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
+import { sh, step } from "./steps.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -24,6 +25,11 @@ const Available = z.object({
   paths: z.array(z.string()).default([]),
   infraPaths: z.array(z.string()).default([]),
   runnerChanged: z.boolean().default(false),
+  // What the host really looks like (BOS-269). Absent from an older host script: the card then says it can't tell.
+  srcDir: z.string().optional(),
+  deployerDir: z.string().optional(),
+  bluegreen: z.boolean().optional(),
+  liveColour: z.string().optional(),
 });
 export type Available = z.infer<typeof Available>;
 
@@ -41,9 +47,9 @@ const Status = z.object({
 export type DeployStatus = z.infer<typeof Status>;
 
 const short = (sha: string) => sha.slice(0, 8);
-// The install's folders, as docs/06-install-truenas.md names them: every hand-apply command is written in full.
-const SRC = "/mnt/NVME_Apps/Container_files/boss-man/src";
-const DEPLOYER = "/mnt/NVME_Apps/Container_files/boss-man/deployer";
+/** A folder the host reported, if it is safe to put in a command the owner pastes; otherwise null (never guessed). */
+const folder = (p: string | undefined) => (p && /^\/[\w.+@/-]+$/.test(p) && !p.split("/").includes("..") ? p.replace(/\/+$/, "") : null);
+const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 
@@ -141,23 +147,72 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const changed = new Set([...(a?.infraPaths ?? []), ...(a?.paths ?? [])]);
     const hostDeployerChanged = changed.has("scripts/host-deployer.sh");
     const launcherChanged = [...changed].some((p) => p.startsWith("apps/launcher/"));
-    const handSteps = infra
-      ? [
-          "Check your setup first: Settings → Server and runner → Server. \"Blue/green: On\" or Live/Standby means blue/green; anything else is a single server.",
-          `On the server that runs Boss Man, in the folder it deploys from, pin the approved commit: cd ${SRC} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD. The last command must print ${commit}; if it prints anything else, stop and tell us.`,
-          `Apply it: on blue/green run cd ${SRC} && scripts/rebuild-live.sh; on a single server run cd ${SRC} && scripts/deploy.sh --commit ${commit}.`,
-          hostDeployerChanged
-            ? `Copy the changed host-deployer script to the deployer folder: cp ${SRC}/scripts/host-deployer.sh ${DEPLOYER}/host-deployer.sh && chown root:root ${DEPLOYER}/host-deployer.sh && chmod 750 ${DEPLOYER}/host-deployer.sh`
-            : "host-deployer.sh didn't change; no copy needed.",
-          ...(launcherChanged
-            ? [`Rebuild the launcher: cd ${SRC} && docker compose build launcher && docker compose up -d --no-deps launcher. Runners keep their old limits until the next runner update.`]
-            : []),
-          `Blue/green only: check the new server has taken charge. Find the live colour: grep reverse_proxy ${DEPLOYER}/proxy/active.caddy. Then run cd ${SRC} && docker compose exec -T server-<colour> node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))", with <colour> blue or green. If it says standby, run cd ${SRC} && docker compose kill -s SIGUSR2 server-<colour>.`,
-          "Rebuild the runners: Settings → Server and runner → Updates → Build and update runners.",
-        ]
-      : [];
+    const src = folder(a?.srcDir);
+    const deployer = folder(a?.deployerDir);
+    const shaOk = isSha(commit) && isSha(fromCommit);
+    const bg = a?.bluegreen;
+    const colour = a?.liveColour === "blue" || a?.liveColour === "green" ? a.liveColour : null;
+    const noSrc = "Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands.";
+    const handSteps: string[] = [];
+    if (infra) {
+      handSteps.push(
+        bg === true
+          ? `This install runs blue/green${colour ? ` (the live copy is ${colour})` : ""}, so use the blue/green steps below.`
+          : bg === false
+            ? "This install runs a single server, so use the single-server steps below."
+            : "Boss Man can't tell whether this install runs blue/green or a single server, so the apply and rollback commands are not shown. Ask us on this ticket.",
+      );
+      handSteps.push(
+        src && shaOk
+          ? step(`On the machine that runs Boss Man, pin the approved commit ${commit} with this command. The last line it prints must be exactly that commit; if it prints anything else, stop and tell us.`, sh(`cd ${src} && git checkout main && git fetch origin && git merge --ff-only ${commit} && git rev-parse HEAD`))
+          : noSrc,
+      );
+      if (bg !== undefined)
+        handSteps.push(
+          src && shaOk
+            ? bg
+              ? step("Apply it with this command, on the same machine:", sh(`cd ${src} && scripts/rebuild-live.sh`))
+              : step(`Apply it with this command, on the same machine (it deploys exactly ${short(commit)}):`, sh(`cd ${src} && scripts/deploy.sh --commit ${commit}`))
+            : noSrc,
+        );
+      handSteps.push(
+        hostDeployerChanged
+          ? src && deployer
+            ? step("Copy the changed host-deployer script into the deployer folder with this command, on the same machine:", sh(`cp ${src}/scripts/host-deployer.sh ${deployer}/host-deployer.sh && chown root:root ${deployer}/host-deployer.sh && chmod 750 ${deployer}/host-deployer.sh`))
+            : "host-deployer.sh changed and has to be copied into the deployer folder, but Boss Man can't tell where the install or deployer folder is, so no command is shown. Ask us on this ticket."
+          : "host-deployer.sh didn't change; no copy needed.",
+      );
+      if (launcherChanged)
+        handSteps.push(
+          src
+            ? step("Rebuild the launcher with this command, on the same machine. Runners keep their old limits until the next runner update.", sh(`cd ${src} && docker compose build launcher && docker compose up -d --no-deps launcher`))
+            : `The launcher changed and has to be rebuilt, but ${noSrc}`,
+        );
+      if (bg === true)
+        handSteps.push(
+          src && colour
+            ? step(
+                `Check the new server has taken charge. Run this on the same machine; it asks the live copy (${colour}) whether it is ready:`,
+                sh(`cd ${src} && docker compose exec -T server-${colour} node -e "fetch('http://127.0.0.1:3100/api/ready').then(async r=>console.log(await r.text()))"`),
+                "If it says standby, run this next:",
+                sh(`cd ${src} && docker compose kill -s SIGUSR2 server-${colour}`),
+              )
+            : "Check the new server has taken charge. Boss Man can't tell which copy is live or where it is installed, so no command is shown. Open Settings → Server and runner → Server and ask us on this ticket.",
+        );
+      // Only when the runner's files changed: the same flag drives the summary line on the card.
+      if (a?.runnerChanged) handSteps.push("Rebuild the runners: Settings → Server and runner → Updates → Build and update runners.");
+    }
     const check = infra ? `Open Settings → Server and runner → Updates: it should show ${short(commit)}, Settings → Server and runner → Server: Role reads leader, and Settings → Reviews and CEO should still look as expected. The watchdog stays off unless you switched it on.` : undefined;
-    const rollback = infra ? `Blue/green: cd ${SRC} && git checkout ${fromCommit} && scripts/rebuild-live.sh. Single server: cd ${SRC} && scripts/deploy.sh --rollback. Database restore isn't a fallback yet.` : undefined;
+    const rollbackNote = "Database restore isn't a fallback yet.";
+    const rollback = infra
+      ? src && shaOk && bg !== undefined
+        ? step(
+            bg ? "To go back, run this on the machine that runs Boss Man:" : "To go back, run this on the machine that runs Boss Man (code only, never the database):",
+            sh(bg ? `cd ${src} && git checkout ${fromCommit} && scripts/rebuild-live.sh` : `cd ${src} && scripts/deploy.sh --rollback`),
+            rollbackNote,
+          )
+        : `To go back, Boss Man needs to know the install folder and layout, which it can't tell, so no command is shown. Ask us on this ticket. ${rollbackNote}`
+      : undefined;
     const n = a?.paths.length ?? 0;
     const migrations = (a?.paths ?? []).filter((p) => /^apps\/server\/drizzle\/[^/]+\.sql$/.test(p)).length;
     // What changes the risk of the update, in plain words (BOS-213). The deploy itself is unchanged.
@@ -189,7 +244,7 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       target === "runner"
         ? `Update the runners to ${short(commit)}?\n\nThis rebuilds the runner containers from the version Boss Man runs (${short(commit)}); the server itself doesn't change. The new image is built and checked first. Then nothing new starts in any company; runs in progress finish (you are asked after about 30 minutes if some are still going), and each company's runner is swapped as soon as it is idle. Without the launcher the runners restart at once and cut runs off.`
         : infra
-          ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue (scripts/deploy.sh, or the blue/green steps in docs/06-install-truenas.md section 9d) until it's applied or you mark it done.`
+          ? `Main has moved to ${short(commit)}. This update has to be applied by hand on the machine that runs Boss Man, so the steps stay on your queue until it's applied or you mark it done.`
           : `Deploy Boss Man ${short(fromCommit)} -> ${short(commit)}? ${areas}. The database is backed up first, then Boss Man restarts (a minute or two).`;
     // An infra change can't be one-click: approving it leaves the owner a to-do on their queue with the
     // hand-apply steps, because the deploy only happens when they run it on the host (BOS-122).

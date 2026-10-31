@@ -118,6 +118,34 @@ describe("decision queue", () => {
     expect(screen.getByText("Runner update afterwards: not needed.")).toBeTruthy();
   });
 
+  it("shows each hand-apply command in its own block with a Copy button that copies only the command (BOS-269)", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const fence = (c: string) => "```sh\n" + c + "\n```";
+    const d = decision({
+      kind: "approval",
+      question: "Main has moved.",
+      options: ["Approve", "Not now"],
+      recommendedOption: "Approve",
+      blocks: [],
+      context: {
+        type: "self_deploy",
+        handSteps: ["Pin the commit with this command:\n\n" + fence("cd /srv/bm/src && git merge --ff-only abc"), "Apply it:\n\n" + fence("cd /srv/bm/src && scripts/rebuild-live.sh"), "Plain step with no command."],
+        rollback: "To go back:\n\n" + fence("cd /srv/bm/src && scripts/deploy.sh --rollback"),
+      },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    const blocks = document.querySelectorAll("[data-command] pre");
+    expect([...blocks].map((b) => b.textContent)).toEqual(["cd /srv/bm/src && git merge --ff-only abc", "cd /srv/bm/src && scripts/rebuild-live.sh", "cd /srv/bm/src && scripts/deploy.sh --rollback"]);
+    expect(screen.getByText("Plain step with no command.")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("```");
+    const buttons = screen.getAllByRole("button", { name: "Copy this command" });
+    expect(buttons).toHaveLength(3);
+    fireEvent.click(buttons[1]!);
+    await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
+    expect(writeText).toHaveBeenCalledWith("cd /srv/bm/src && scripts/rebuild-live.sh");
+  });
+
   it("links the ticket it is about, the tickets it blocks, and known references in the text", () => {
     const d = decision({
       kind: "question",
