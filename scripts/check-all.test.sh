@@ -122,6 +122,14 @@ if command -v flock >/dev/null; then
   out=$(lock env) || fail "stale waiter: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "stale waiter blocked the queue: $out"
   wait "$h1"
+  # A hostile queue entry name must be removed, never run.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  hostile="$t/lock.queue/1-a[\$(touch PWNED)]-$$"; : >"$hostile"
+  hold 1 2; h1=$!; sleep 0.3
+  out=$(lock env) || fail "hostile entry: expected success, got: $out"
+  [ ! -e PWNED ] || { rm -f PWNED; fail "hostile queue entry name ran a command"; }
+  [ ! -e "$hostile" ] || fail "hostile queue entry was not removed"
+  wait "$h1"
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi

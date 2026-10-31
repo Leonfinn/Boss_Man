@@ -95,11 +95,15 @@ if command -v flock >/dev/null; then
   }
   # Prints "<my place> <checks waiting>", dropping queue entries whose process is gone.
   queue_place() {
-    local f mine=0 total=0 now; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 now; now=$(date +%s)
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
-      # drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused)
-      if ! kill -0 "${f##*-}" 2>/dev/null || [ $((now - $(basename "$f" | cut -d- -f2) / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
+      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is digits only.
+      # Then drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused).
+      base=$(basename "$f")
+      if ! [[ $base =~ ^[01]-[0-9]+-[0-9]+$ ]]; then rm -f "$f"; continue; fi
+      qts=$(cut -d- -f2 <<<"$base"); qpid=${base##*-}
+      if ! kill -0 "$qpid" 2>/dev/null || [ $((now - qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
     done
     echo "$mine $total"
