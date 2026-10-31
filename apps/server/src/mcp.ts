@@ -1129,6 +1129,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(`Overruled the ${input.kind} review. ${reviewOutcome(r)}`);
         }
         if (input.action === "diff") {
+          // Reading the diff counts as working on it: a reviewer woken about several tickets
+          // starts on none, and gets shown with the one it is on (BOS-268). Never blocks the tool.
+          await noteRunTicket(input.ticketId);
           const d = await review.diff(input.ticketId, scope.companyId);
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
@@ -1139,6 +1142,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(`${checklist}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
+        // A verdict on a ticket is touching it, like any other hook (BOS-268).
+        await noteRunTicket(input.ticketId);
         const r = await review.submit(input.ticketId, {
           verdict: input.verdict,
           comments: input.comments,
