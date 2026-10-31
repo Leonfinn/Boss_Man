@@ -55,7 +55,40 @@ type TicketPatch = {
   urgent?: boolean;
   /** Move past a full column anyway. */
   overLimit?: boolean;
+  /** Boss Man's own move (a review sent back, a landing): not an agent starting work, so the start check (BOS-254) does not apply. */
+  internal?: boolean;
 };
+
+/** Roles that may move a ticket into work whatever it waits on (BOS-254): the CEO, a manager, or the owner (no agent). */
+const START_OVERRIDE_ROLES = new Set(["ceo", "manager"]);
+
+/**
+ * Why a ticket may not start (BOS-254): it still waits on an unfinished ticket or engagement, or it is
+ * in the Backlog and nobody handed it over. Null when it may start. `actor.agentId` is the agent
+ * moving it, or null for the owner; the owner, the CEO and managers may always override.
+ */
+export function startRefusal(
+  t: { systemState: SystemState; createdAt: Date | null; lastActivityAt: Date | null },
+  deps: Array<{ ticketState: string | null; ticketTitle?: string | null; engagementStatus: string | null }>,
+  actor: { agentId?: string | null; role?: string | null },
+): string | null {
+  if (t.systemState === "in_progress" || t.systemState === "review" || t.systemState === "done") return null;
+  // The owner (no agent), the CEO and a manager may start anything.
+  if (!actor.agentId) return null;
+  if (actor.role && START_OVERRIDE_ROLES.has(actor.role)) return null;
+  const waiting = deps.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+  if (waiting.length) {
+    const names = waiting.map((d) => (d.ticketTitle ? `"${d.ticketTitle}"` : "another ticket"));
+    return `This ticket still waits on ${names.join(" and ")}, which ${waiting.length === 1 ? "isn't" : "aren't"} finished, so you can't start work on it yet. Finish or drop that first, or ask your CEO to move it on.`;
+  }
+  // Backlog is for work nobody has picked up: only a hand-over (the owner, a manager or a wake that
+  // named it) starts it. Starting it straight from the backlog is refused.
+  if (t.systemState === "backlog") {
+    const handedOver = !!t.lastActivityAt && !!t.createdAt && t.lastActivityAt.getTime() > t.createdAt.getTime();
+    if (!handedOver) return "This ticket is still in the Backlog and nobody handed it to you, so you can't start it. Ask your CEO or the owner to put it on the board, or move it to Ready first.";
+  }
+  return null;
+}
 
 export type WorkHooks = {
   onAssigned?: (ticket: typeof tickets.$inferSelect) => Promise<unknown>;
@@ -394,6 +427,26 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       return row!;
     },
 
+    /**
+     * A run that had no ticket starts working on one, so the runs list, the agent's page and the
+     * ticket page can show it as "Working on BOS-x" (BOS-254). Only the ticket it is really on is
+     * set: a ticket that only waits on it, or one it merely mentioned, never is.
+     */
+    async attachRun(ticketId: string, runId: string) {
+      const [r] = await db.select({ id: runs.id, companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, endedAt: runs.endedAt }).from(runs).where(eq(runs.id, runId));
+      if (!r || r.purpose === "chat" || r.endedAt || r.ticketId) return false;
+      const [t] = await db.select({ id: tickets.id, companyId: tickets.companyId, assigneeAgentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
+      if (!t || t.companyId !== r.companyId) return false;
+      // The ticket must be the run's own: assigned to the agent, or it created it. A stray reply or
+      // nudge about a colleague's ticket is not "working on it".
+      if (!r.agentId) return false;
+      const [own] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), or(eq(tickets.assigneeAgentId, r.agentId), eq(tickets.createdByAgentId, r.agentId))));
+      if (!own) return false;
+      await db.update(runs).set({ ticketId }).where(and(eq(runs.id, runId), isNull(runs.ticketId)));
+      await record(db, { companyId: r.companyId, agentId: r.agentId, ticketId, kind: "run_started", summary: "This run started working on it.", at: now() });
+      return true;
+    },
+
     async updateTicket(ticketId: string, patch: TicketPatch) {
       const [t] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
       if (!t) throw new WorkError(404, "No such ticket.");
@@ -401,7 +454,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       if (patch.milestoneId) await assertLinkInCompany("milestone", patch.milestoneId, t.companyId);
       if (patch.keyResultId) await assertLinkInCompany("keyResult", patch.keyResultId, t.companyId);
       if (patch.featureId) await assertFeatureInCompany(patch.featureId, t.companyId);
-      const { overLimit: _ignored, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
+      const { overLimit: _ignored, internal: _internal, state: _s, columnId: _c, projectId: _p, parentTicketId: newParent, ...fields } = patch;
       const dest = patch.projectId && patch.projectId !== t.projectId ? await project(patch.projectId) : null;
       const kids = dest || newParent ? await db.select().from(tickets).where(eq(tickets.parentTicketId, t.id)) : [];
       if (dest) {
@@ -430,6 +483,19 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const moves = patch.columnId !== undefined || patch.state !== undefined || !!dest;
       // A move between projects keeps the state, in the new board's column for it.
       const col = moves ? await placement(dest?.id ?? t.projectId, { columnId: patch.columnId, state: patch.state ?? (dest ? t.systemState : undefined) }, { ticketId, overLimit: patch.overLimit || !!dest }) : null;
+      // Starting work (BOS-254): a run can't begin a ticket that still waits on something unfinished,
+      // or one in the Backlog nobody handed it. The owner, the CEO and managers override.
+      if (col?.systemState === "in_progress" && t.systemState !== "in_progress" && !patch.internal) {
+        const deps = await db
+          .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
+          .from(ticketDependencies)
+          .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+          .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+          .where(eq(ticketDependencies.blockedTicketId, ticketId));
+        const [who] = patch.byAgentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, patch.byAgentId)) : [];
+        const refusal = startRefusal({ systemState: t.systemState, createdAt: t.createdAt, lastActivityAt: t.lastActivityAt }, deps, { agentId: patch.byAgentId, role: who?.role ?? null });
+        if (refusal) throw new WorkError(409, refusal);
+      }
       if (dest) Object.assign(fields, { projectId: dest.id });
       // Plan first follows the risk level (there's no checkbox): changing the risk before work
       // starts and before a plan is approved turns it on for high and critical, off otherwise.

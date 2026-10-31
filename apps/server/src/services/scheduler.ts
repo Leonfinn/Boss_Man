@@ -144,9 +144,24 @@ export function schedulerService(
   const now = deps.now ?? (() => new Date());
   const workspaceRoot = deps.workspaceRoot ?? "/home/node/workspaces";
 
-  async function startTicket(ticketId: string) {
-    const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId, featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
-    if (t?.state !== "backlog" && t?.state !== "ready") return;
+  /**
+   * A launch puts a waiting ticket in progress, so the board shows what is being worked on (R81).
+   * It never starts a ticket that still waits on something unfinished (BOS-254): a wake for such a
+   * ticket is left without a start, and the agent is told why.
+   */
+  async function startTicket(ticketId: string): Promise<boolean> {
+    const [t] = await db.select({ state: tickets.systemState, projectId: tickets.projectId, featureId: tickets.featureId, createdAt: tickets.createdAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(eq(tickets.id, ticketId));
+    if (t?.state !== "backlog" && t?.state !== "ready") return false;
+    const waits = await db
+      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
+      .from(ticketDependencies)
+      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+      .where(eq(ticketDependencies.blockedTicketId, ticketId));
+    // A launch starts a ticket handed to it; the start check's backlog rule asks about a wake nobody
+    // handed over, which a launch always is.
+    const waiting = waits.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+    if (waiting.length) return false;
     const [col] = await db
       .select({ id: workflowColumns.id })
       .from(workflowColumns)
@@ -158,6 +173,21 @@ export function schedulerService(
       .set({ systemState: "in_progress", columnId: col?.id ?? null, lastActivityAt: now() })
       .where(and(eq(tickets.id, ticketId), inArray(tickets.systemState, ["backlog", "ready"])));
     if (t.featureId) await deps.onFeature?.(t.featureId);
+    return true;
+  }
+
+  /** Why a launch did not start a ticket it was woken for, in words the agent can act on (BOS-254). */
+  async function startRefusalFor(ticketId: string): Promise<string | null> {
+    const deps = await db
+      .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagements.status })
+      .from(ticketDependencies)
+      .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+      .leftJoin(engagements, eq(engagements.id, ticketDependencies.blockerEngagementId))
+      .where(eq(ticketDependencies.blockedTicketId, ticketId));
+    const waiting = deps.filter((d) => (d.ticketState && d.ticketState !== "done") || (d.engagementStatus && d.engagementStatus !== "signed_off"));
+    if (!waiting.length) return null;
+    const names = waiting.map((d) => (d.ticketTitle ? `"${d.ticketTitle}"` : "another ticket"));
+    return `it still waits on ${names.join(" and ")}, which ${waiting.length === 1 ? "isn't" : "aren't"} finished.`;
   }
 
   async function globallyPaused() {
@@ -524,7 +554,7 @@ export function schedulerService(
     return servers.filter((s) => !s.secretEnv || mine.has(s.secretEnv)).map((s) => s.name);
   }
 
-  async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date) {
+  async function prompt(w: typeof wakes.$inferSelect, agent: typeof agents.$inferSelect, companyName: string, briefAt: Date, notStarted?: string | null) {
     const me = agentIdentity(agent, companyName);
     // The CEO's notes and waiting note requests (BOS-85) go in this wake prompt, which every run gets,
     // rather than the chapter's frozen directive, so a note saved mid-chapter shows on the next run.
@@ -550,6 +580,7 @@ export function schedulerService(
       if (t) {
         const ref = ticketRef(t.prefix, t.t.number);
         lines.push("", `Ticket ${ref ? `${ref} (id ${t.t.id})` : t.t.id} in project "${t.project}" (version ${t.t.version}): ${t.t.title}`);
+        if (notStarted) lines.push("", `You have NOT started this ticket: ${notStarted} You can read it, reply on it and suggest what it waits for, but don't begin the work.`);
         if (t.t.body) lines.push("", cut(t.t.body, 8000, () => "read the full ticket with tickets read"));
         const note = stateNoteLine(t.t, now());
         // On an open skill-review ticket the note is a way to talk to the reviewer, so it is
@@ -661,7 +692,9 @@ export function schedulerService(
       .returning({ id: wakes.id });
     if (!claimed.length) return { ok: false, claimed: true };
     // An agent starting on a waiting ticket moves it to in progress, so the board shows what is being worked on; first, so the prompt quotes the bumped version (R81).
-    if (w.ticketId) await startTicket(w.ticketId);
+    // A ticket that still waits on unfinished work is not started (BOS-254); the prompt tells the agent.
+    const startedIt = w.ticketId ? await startTicket(w.ticketId) : false;
+    const notStarted = w.ticketId && !startedIt ? await startRefusalFor(w.ticketId) : null;
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
     const [ticket] = w.ticketId
       ? await db
@@ -674,7 +707,7 @@ export function schedulerService(
     const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
     const copy = await reviewCopy(w);
     const briefAt = now();
-    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt);
+    const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt, notStarted);
     // A CEO's run belongs to its current chapter (CEO continuity).
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     // Why the run started is kept on it, so a run with no ticket still says what it was for

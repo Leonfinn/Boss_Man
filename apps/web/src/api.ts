@@ -263,6 +263,8 @@ export type RunRow = {
   wakeNote?: string | null;
   /** The ticket it was about without being on it (a nudge that named one). */
   runTicketId?: string | null;
+  /** That ticket's reference, e.g. "HOL-12", for the "Working on" headline (BOS-254). */
+  runTicketRef?: string | null;
   /** Tokens over the run, when the agent reported them (R67). */
   inputTokens?: number | null;
   outputTokens?: number | null;
