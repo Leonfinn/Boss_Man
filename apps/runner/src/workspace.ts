@@ -507,8 +507,13 @@ export class Workspaces {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
       await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
-      const refs = async (ref: string) =>
-        (await this.gitCode(["rev-list", ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo })).stdout.split("\n").filter(Boolean);
+      // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
+      // say so, not report the branch clean (BOS-130).
+      const refs = async (ref: string) => {
+        const r = await this.gitCode(["rev-list", ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
+        if (r.code !== 0) throw new Error(`git rev-list ${ref} failed (exit ${r.code}): ${r.stderr.slice(0, 500)}`);
+        return r.stdout.split("\n").filter(Boolean);
+      };
       const mineRef = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo }).then(
         () => true,
         () => false,

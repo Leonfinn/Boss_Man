@@ -196,4 +196,16 @@ describe("a ticket with no branch on this runner (BOS-130)", () => {
     await ws.ensure({ projectId: ids.project, ticketId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", repoUrl: o.url, baseRef: "main" });
     expect(await ws.carried({ projectId: ids.project, ticketId: ids.t }, "main", [{ ticketId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", branch: "bossman/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }])).toEqual({ carried: [] });
   });
+
+  it("says so when git can't answer, rather than reporting the branch clean", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const w = await ws.ensure({ ...spec, ticketId: other });
+    writeFileSync(path.join(w.path, "other.txt"), "their work\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "other ticket's work");
+    // No such target on origin: rev-list can't run, so the gate mustn't look clean.
+    await expect(ws.carried(spec, "no-such-target", [{ ticketId: other, branch: `bossman/${other}` }])).rejects.toThrow(/rev-list/);
+  });
 });

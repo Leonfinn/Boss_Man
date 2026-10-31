@@ -160,6 +160,7 @@ export function reviewService(
     if (deps.runners.can(runnerId, "carried-check")) {
       let r: { carried?: CarriedTicket[] };
       try {
+        // The same wait as a merge: the check queues behind other git jobs for the same repo lock.
         r = await deps.runners.request<{ carried?: CarriedTicket[] }>(runnerId, (requestId) => ({
           type: "workspace.carried",
           requestId,
@@ -167,7 +168,7 @@ export function reviewService(
           ticketId: t.id,
           target: defaultBranch,
           branches: others.map((o) => ({ ticketId: o.ticketId, branch: o.branch })),
-        }));
+        }), MERGE_WAIT_MS);
       } catch (err) {
         throw new ReviewError(409, `Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged: ${(err as Error).message} Try approving it again.`);
       }
