@@ -802,7 +802,9 @@ Boss Man pushes pages and asks to your phone through your own [ntfy](https://git
 
 How it is set up (all in `deploy/ntfy.yml`):
 - **Off by default,** its own Compose project like Penpot. A normal `docker compose up -d` never starts it.
-- **Tailnet and https only.** The container listens on the NAS's own `127.0.0.1` port 2586. Tailscale Serve publishes it to your tailnet over https on port 8443. Never use Tailscale Funnel for it. Use the same Tailscale certificates as Boss Man's own https address.
+- **Tailnet and https only.** No port is opened on the NAS. ntfy joins the private `edge` network of the Tailscale container from section 10b, and that container's Serve config publishes it to your tailnet over https on port 8443 (Boss Man's own address stays on 443). It uses the same Tailscale certificate and the same Tailscale container, so there is only one Tailscale to look after. Funnel stays off.
+
+**Do section 10b (HTTPS through Tailscale Serve) first.** This section builds on it and doesn't work without it.
 - **Deny-all access.** Nobody can publish or read without a user. There is no sign-up and no web page.
 - **Short memory.** Messages are kept for 1 hour (`NTFY_CACHE_DURATION`), then dropped.
 - **No relay.** No upstream server is set, so nothing leaves your network.
@@ -815,18 +817,18 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    ```
    sudo mkdir -p /mnt/<pool>/bossman/ntfy && sudo chown 1000:1000 /mnt/<pool>/bossman/ntfy
    ```
-2. Back up `.env`, then add two lines. The address is your NAS's Tailscale name with port 8443:
+2. Find the name of the `edge` network that section 10b created: run `docker network ls --format '{{.Name}}' | grep _edge`. It should print one line, such as `boss-man_edge`. Back up `.env`, then add three lines. The address is the same ts.net name as in 10b, with port 8443:
    ```
    NTFY_BASE_URL=https://<nas-name>.<tailnet>.ts.net:8443
    NTFY_DATA=/mnt/<pool>/bossman/ntfy
+   NTFY_EDGE_NETWORK=<the name from the command above>
    ```
-3. Start it, and publish it on your tailnet:
+3. Start it. The Tailscale container already publishes it, because `deploy/tailscale/serve.json` has a port 8443 entry that points at `ntfy`:
    ```
    docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
-   sudo tailscale serve --bg --https=8443 http://127.0.0.1:2586
-   tailscale serve status
+   docker exec <tailscale container> tailscale serve status
    ```
-   The status should list `https://<nas-name>.<tailnet>.ts.net:8443` as **tailnet only**. If it says Funnel, run `sudo tailscale serve --https=8443 off` and stop.
+   Use the Tailscale container's name from `docker ps`. The status should list `https://<nas-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it does, stop and tell me.
 4. Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make two users, one that can only publish and one that can only read. `ntfy user add` asks for a password, so type a long one each time:
    ```
    docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
@@ -849,7 +851,7 @@ iPhones only get instant delivery from a self-hosted server if the server forwar
 
 ### Approve buttons
 
-ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the Tailscale Serve address from the HTTPS section). The Approve button (BOS-243) only turns on when a publish token is set and Boss Man's public URL is https.
+ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the address from section 10b). The Approve button (BOS-243) only turns on when a publish token is set and Boss Man's public URL is https.
 
 ### Moving off the Home Assistant webhook
 
@@ -857,7 +859,7 @@ Run both for a day. During that time the webhook keeps getting plain alerts only
 
 ### Rolling back
 
-`docker compose -p boss-man-ntfy -f deploy/ntfy.yml --profile ntfy down` and `sudo tailscale serve --https=8443 off`. Your messages are only kept for an hour, so there is nothing to restore. The users and tokens live in `NTFY_DATA/user.db`; copy that file if you want to keep them.
+`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down`. Port 8443 then answers with an error until you start it again; to remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Your messages are only kept for an hour, so there is nothing to restore. The users and tokens live in `NTFY_DATA/user.db`; copy that file if you want to keep them.
 
 ntfy's docs site wasn't reachable when this was written, so the links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs).
 
