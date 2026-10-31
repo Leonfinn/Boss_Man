@@ -62,13 +62,24 @@ fi
 # The slots and queue (need flock). pnpm/node are stubbed and CHECK_ALL_STOP_AFTER_LOCK stops the child once a slot is held.
 if command -v flock >/dev/null; then
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
-  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 "$@" ./scripts/check-all.sh 2>&1); }
+  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
   hold() { ( exec 8>"$t/lock.slot.$1"; flock 8; sleep "$2" ) & }
 
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
-  # Two slots by default: one busy slot does not stop a second check.
+  # One slot until a side-by-side pair has passed: a busy slot makes a second check wait, and CHECK_ALL_SLOTS=2 alone is ignored.
+  hold 1 3; holder=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1 CHECK_ALL_SLOTS=2) || rc=$?
+  [ "$rc" = 75 ] || fail "no proof: expected exit 75, got $rc: $out"
+  grep -q "ignored" <<<"$out" || fail "no proof: no ignored message: $out"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  hold 1 3; holder=$!; sleep 0.3
+  out=$(lock env CHECK_ALL_PAIR_TRIAL=1) || fail "trial: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "trial: second slot not acquired"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+$1
+  # With a recorded pair, two slots: one busy slot does not stop a second check.
   hold 1 4; holder=$!; sleep 0.3
   out=$(lock env) || fail "second slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "second slot: not acquired"

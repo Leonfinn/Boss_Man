@@ -70,7 +70,7 @@ if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; f
 pnpm install --frozen-lockfile --prefer-offline >/dev/null
 node --test scripts/*.test.mjs
 node scripts/lint-migrations.mjs
-# The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS (default 2) checks run them at once;
+# The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait and does not give up (hand-run checks) or gives up
 # after CHECK_ALL_LOCK_WAIT seconds (default 600, merge check only: exit 75, which Boss Man retries).
@@ -78,7 +78,13 @@ node scripts/lint-migrations.mjs
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
 if command -v flock >/dev/null; then
   LOCK=${CHECK_ALL_LOCK:-/tmp/bossman-check-all}
-  SLOTS=${CHECK_ALL_SLOTS:-2}
+  # One check at a time until a measured side-by-side pair has passed: that run writes the proof file below
+  # (see the Build and test note). CHECK_ALL_PAIR_TRIAL=1 lets the two measuring runs use more slots.
+  PROOF=${CHECK_ALL_PAIR_PROOF:-/var/tmp/bossman-check-pair-passed}
+  SLOTS=1
+  if [ -s "$PROOF" ] || [ -n "${CHECK_ALL_PAIR_TRIAL:-}" ]; then SLOTS=${CHECK_ALL_SLOTS:-2}
+  elif [ "${CHECK_ALL_SLOTS:-1}" -gt 1 ]; then echo "check-all: CHECK_ALL_SLOTS=$CHECK_ALL_SLOTS ignored, no passed side-by-side pair recorded in $PROOF; running one at a time"
+  fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
   if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-600}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
   mkdir -p "$QDIR"
