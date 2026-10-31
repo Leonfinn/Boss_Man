@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff } from "@boss-man/shared";
 
 const run = promisify(execFile);
 
@@ -493,6 +493,41 @@ export class Workspaces {
     }
     if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
     return { status: "clean" as const, tree: tried.stdout.split("\n")[0]!, targetSha, branchSha };
+  }
+
+  /**
+   * Which other tickets' unmerged commits this ticket's branch carries (BOS-130): for another
+   * ticket's branch B, its commits not yet on origin/target, and which of those this branch has.
+   * A commit on this branch that only reached it by merging B means B was carried in; missing
+   * branches are skipped, so a released branch on origin isn't known here and can't be checked.
+   */
+  async carried(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, branches: Array<{ ticketId: string; branch: string }>, secrets: Record<string, string | undefined> = {}): Promise<CarriedResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      const refs = async (ref: string) =>
+        (await this.gitCode(["rev-list", ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo })).stdout.split("\n").filter(Boolean);
+      const mineRef = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo }).then(
+        () => true,
+        () => false,
+      );
+      // A ticket whose branch is gone here has nothing to compare: there is nothing of it to merge.
+      if (!mineRef) return { carried: [] };
+      const mine = new Set(await refs(branchFor(spec.ticketId)));
+      const found: CarriedResult["carried"] = [];
+      for (const b of branches) {
+        if (b.ticketId === spec.ticketId || b.branch === branchFor(spec.ticketId)) continue;
+        const exists = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${b.branch}^{commit}`], { cwd: repo }).then(
+          () => true,
+          () => false,
+        );
+        if (!exists) continue;
+        if ((await refs(b.branch)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
+      }
+      return { carried: found };
+    });
   }
 
   /**

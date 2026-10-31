@@ -23,6 +23,9 @@ function fakeGitea() {
   const pr = { number: 7, html_url: `${GITEA}/leon/site/pulls/7`, state: "open", merged: false, merge_commit_sha: null as string | null };
   const mergeAnswers: Array<{ status: number; body?: unknown }> = [];
   const checks = { state: "pending", statuses: [] as Array<{ context: string; status: string }> };
+  // Pull requests and their commits, by number (BOS-130); 7 is the one the fake opens.
+  const pulls = new Map<number, typeof pr>([[7, pr]]);
+  const commits = new Map<number, string[]>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -38,11 +41,18 @@ function fakeGitea() {
       if (a.status === 200) Object.assign(pr, { state: "closed", merged: true, merge_commit_sha: "e".repeat(40) });
       return json(a.status, a.body);
     }
-    if (method === "GET" && url === `${base}/7`) return json(200, pr);
+    const one = /^\/(\d+)(\/commits)?(\?.*)?$/.exec(url.slice(base.length));
+    if (method === "GET" && one) {
+      const n = Number(one[1]);
+      const pull = pulls.get(n);
+      if (!pull) return json(404, { message: "no such pull request" });
+      if (one[2]) return json(200, (commits.get(n) ?? []).map((sha) => ({ sha })));
+      return json(200, pull);
+    }
     if (method === "GET" && url === `${GITEA}/api/v1/repos/leon/site/commits/${HEAD}/status`) return json(200, checks);
     return json(404, { message: `no fake for ${method} ${url}` });
   }) as typeof globalThis.fetch;
-  return { fetch, calls, pr, mergeAnswers, checks };
+  return { fetch, calls, pr, mergeAnswers, checks, pulls, commits };
 }
 
 async function setup(opts: { token?: boolean } = {}) {
@@ -161,5 +171,29 @@ describe("check results wake the right agent (R86)", () => {
     const [ceo] = await c.db.select().from(agents).where(eq(agents.role, "ceo"));
     const passed = (await c.db.select().from(wakes)).filter((w) => w.reason === "ci passed");
     expect(passed).toEqual([expect.objectContaining({ agentId: ceo!.id, ticketId: c.ticket.id, note: expect.stringContaining("Required status check is not passing") })]);
+  });
+});
+
+describe("a pull request whose branch carries another open ticket's work (BOS-130)", () => {
+  it("doesn't merge it at the host, and says which ticket must go first", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    // A high-risk ticket with its own pull request, whose merge commit is one of this branch's commits.
+    const carried = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Permission gate", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+    const mergedAs = "f".repeat(40);
+    await c.db.update(tickets).set({ branch: `bossman/${carried.id}`, risk: "high", pullRequestNumber: 8, pullRequestHead: "e".repeat(40) }).where(eq(tickets.id, carried.id));
+    c.gitea.pulls.set(8, { number: 8, html_url: `${GITEA}/leon/site/pulls/8`, state: "open", merged: false, merge_commit_sha: mergedAs });
+    // This ticket's pull request: its commits include the one the carried ticket's PR was merged as.
+    c.gitea.pulls.set(7, { number: 7, html_url: `${GITEA}/leon/site/pulls/7`, state: "open", merged: false, merge_commit_sha: null });
+    c.gitea.commits.set(7, ["a".repeat(40), mergedAs]);
+    await c.db.update(tickets).set({ pullRequestNumber: 7, pullRequestUrl: `${GITEA}/leon/site/pulls/7`, pullRequestHead: "b".repeat(40) }).where(eq(tickets.id, c.ticket.id));
+
+    const res = await c.req("POST", `/api/tickets/${c.ticket.id}/pull-request/merge`);
+    expect(res.statusCode).toBe(200);
+    expect(c.gitea.calls.some((x) => x.url.endsWith("/pulls/7/merge"))).toBe(false);
+    const t = await c.state();
+    expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(t.pullRequestNote).toContain('"Permission gate"');
+    expect(t.pullRequestNote).toContain("must merge first");
   });
 });
