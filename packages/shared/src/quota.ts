@@ -90,21 +90,45 @@ export function parseCodexRateLimits(resp: unknown): QuotaSample[] {
   return out;
 }
 
-export type SyntheticQuota = { used: number; limit: number; renewsAt: Date | null };
+/**
+ * Synthetic's own quota reading. `weekly` is the plan's weekly credit pool, which is what the
+ * subscription actually spends (BOS-260): a percentage of the week's credits left, plus how much
+ * comes back at the next regeneration. `requests` is the old request window, kept only so an
+ * account that only reports that can still show something. A missing or unreadable measure is
+ * null, never 0.
+ */
+export type SyntheticQuota = {
+  weekly: { percentRemaining: number; nextRegenAt: Date | null; nextRegenPercent: number | null } | null;
+  requests: { used: number; limit: number; renewsAt: Date | null } | null;
+};
 
 /**
- * Synthetic's own quota endpoint (`GET /v2/quotas`) returns the subscription's request
- * allowance. The used count and renewal are sometimes beside `subscription`, sometimes
- * inside it, so both shapes are read. A response without a usable used/limit pair is unknown.
+ * Synthetic's own quota endpoint (`GET /v2/quotas`). A real response (BOS-260) is:
+ * `{subscription: {limit, requests, renewsAt}, search: {...}, planWeeklyLimit: {nextRegenAt,
+ * percentRemaining, nextRegenPercent}}`. The weekly credits are the measure the plan spends; the
+ * request window is often stuck at 0 and must never be shown as usage on its own.
  */
 export function parseSyntheticQuota(resp: unknown): SyntheticQuota | null {
   if (!isRecord(resp)) return null;
-  const sub = isRecord(resp["subscription"]) ? resp["subscription"] : {};
   const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+  // The used count and renewal are sometimes beside `subscription`, sometimes inside it.
+  const sub = isRecord(resp["subscription"]) ? resp["subscription"] : {};
   const used = count(sub["requests"]) ?? count(resp["requests"]);
   const limit = count(sub["limit"]) ?? count(resp["limit"]);
-  if (used === null || limit === null || limit === 0) return null;
-  return { used, limit, renewsAt: toDate(sub["renewsAt"]) ?? toDate(resp["renewsAt"]) };
+  const requests = used !== null && limit !== null && limit > 0 ? { used, limit, renewsAt: toDate(sub["renewsAt"]) ?? toDate(resp["renewsAt"]) } : null;
+  const weeklyRaw = isRecord(resp["planWeeklyLimit"]) ? resp["planWeeklyLimit"] : null;
+  // percentRemaining is 0..100; anything outside that is not a percentage we can trust.
+  const percentRemaining = weeklyRaw ? count(weeklyRaw["percentRemaining"]) : null;
+  const weekly =
+    percentRemaining !== null && percentRemaining <= 100
+      ? {
+          percentRemaining,
+          nextRegenAt: toDate(weeklyRaw!["nextRegenAt"]),
+          nextRegenPercent: count(weeklyRaw!["nextRegenPercent"]),
+        }
+      : null;
+  if (!weekly && !requests) return null;
+  return { weekly, requests };
 }
 
 export type UsageCost = { costMicros: number; currency: string; model: string | null; contextUsed: number | null };
