@@ -798,11 +798,11 @@ If you edited `.env` after the backup, copy those changes back by hand instead o
 
 ## 10. Phone notifications (optional)
 
-Boss Man pushes pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44), run on the NAS from `deploy/ntfy.yml`. Boss Man only makes outbound requests to it. Nothing is opened at the router and nothing is exposed on your LAN.
+Boss Man pushes pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44), run on the same Docker host as Boss Man from `deploy/ntfy.yml` (any host: TrueNAS, a Proxmox VM or container, or plain Linux). Boss Man only makes outbound requests to it. Nothing is opened at the router and nothing is exposed on your LAN.
 
 How it is set up (all in `deploy/ntfy.yml`):
 - **Off by default,** its own Compose project like Penpot. A normal `docker compose up -d` never starts it.
-- **Tailnet and https only.** No port is opened on the NAS. ntfy joins the private `edge` network of the Tailscale container from section 10b, and that container's Serve config publishes it to your tailnet over https on port 8443 (Boss Man's own address stays on 443). It uses the same Tailscale certificate and the same Tailscale container, so there is only one Tailscale to look after. Funnel stays off.
+- **Tailnet and https only.** No port is opened on the host. ntfy joins the private `edge` network of the Tailscale container from section 10b, and that container's Serve config publishes it to your tailnet over https on port 8443 (Boss Man's own address stays on 443). It uses the same Tailscale certificate and the same Tailscale container, so there is only one Tailscale to look after. Funnel stays off.
 
 **Do section 10b (HTTPS through Tailscale Serve) first.** This section builds on it and doesn't work without it.
 - **Deny-all access.** Nobody can publish or read without a user. There is no sign-up and no web page.
@@ -813,13 +813,18 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
 
 ### Your steps
 
-1. On the NAS, make the data folder and give it to uid 1000 (use your own pool path):
+1. Make the data folder and give it to uid 1000. By default it is `ntfy` inside your Boss Man data folder (`$BOSSMAN_DATA`, as in section 10b), so the usual backup and move steps already cover it:
    ```
-   sudo mkdir -p /mnt/<pool>/bossman/ntfy && sudo chown 1000:1000 /mnt/<pool>/bossman/ntfy
+   sudo mkdir -p "${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy" && sudo chown 1000:1000 "${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy"
    ```
-2. Find the name of the `edge` network that section 10b created: run `docker network ls --format '{{.Name}}' | grep _edge`. It should print one line, such as `boss-man_edge`. Back up `.env`, then add three lines. The address is the same ts.net name as in 10b, with port 8443:
+   It holds the users, tokens and cache. Keep it in your backup: restoring it on a new host keeps the tokens and the phone subscription working.
+2. Back up `.env`, then add one line. The address is the same ts.net name as in 10b, with port 8443:
    ```
-   NTFY_BASE_URL=https://<nas-name>.<tailnet>.ts.net:8443
+   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443
+   ```
+   Nothing else is needed. ntfy finds the `edge` network from section 10b by its default name (`boss-man_edge`). Only if you changed the Compose project name, or set `NTFY_DATA` or `NTFY_EDGE_NETWORK` yourself, add those lines too.| grep _edge`. It should print one line, such as `boss-man_edge`. Back up `.env`, then add three lines. The address is the same ts.net name as in 10b, with port 8443:
+   ```
+   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443
    NTFY_DATA=/mnt/<pool>/bossman/ntfy
    NTFY_EDGE_NETWORK=<the name from the command above>
    ```
@@ -828,7 +833,7 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
    docker exec <tailscale container> tailscale serve status
    ```
-   Use the Tailscale container's name from `docker ps`. The status should list `https://<nas-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it does, stop and tell me.
+   Use the Tailscale container's name from `docker ps`. The status should list `https://<host-name>.<tailnet>.ts.net:8443` as **tailnet only** and must not mention Funnel. If it does, stop and tell me.
 4. Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make two users, one that can only publish and one that can only read. `ntfy user add` asks for a password, so type a long one each time:
    ```
    docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
@@ -843,7 +848,7 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
 7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
 8. In Boss Man, choose **Send a test to my phone**. It should arrive within seconds.
 
-Check that it is locked down: `curl -s -o /dev/null -w '%{http_code}\n' https://<nas-name>.<tailnet>.ts.net:8443/<topic>/json?poll=1` must print `401` or `403`, and from a device that is not on your tailnet the address must not answer at all.
+Check that it is locked down: `curl -s -o /dev/null -w '%{http_code}\n' https://<host-name>.<tailnet>.ts.net:8443/<topic>/json?poll=1` must print `401` or `403`, and from a device that is not on your tailnet the address must not answer at all.
 
 ### iPhone
 
@@ -856,6 +861,10 @@ ntfy action buttons make your phone call Boss Man directly, over Boss Man's http
 ### Moving off the Home Assistant webhook
 
 Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook in **Settings > Notifications**.
+
+### Any Docker host
+
+The same steps work on plain Linux Docker, a Proxmox VM and a Proxmox container (LXC), because ntfy rides on the Tailscale container from section 10b, which runs in Tailscale's userspace mode and needs no `/dev/net/tun`. Nothing here is specific to TrueNAS. Host differences (such as how to back up or add a tun device) are in `docs/20-https-tailscale.md`. Moving to a new host: copy `$BOSSMAN_DATA` (it includes `ntfy` and `tailscale`), bring up section 10b, then run step 3 again. Users, tokens and the phone subscription carry over.
 
 ### Rolling back
 

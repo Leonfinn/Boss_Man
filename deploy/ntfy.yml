@@ -6,13 +6,15 @@
 # file is parsed, so every compose command on the host (including the deployer) would fail.
 #
 # In .env (the address is not a secret; the topic and tokens never go in this file):
-#   NTFY_BASE_URL=https://<nas-name>.<tailnet>.ts.net:8443   # the Tailscale Serve address, https only
-#   NTFY_DATA=/mnt/<pool>/bossman/ntfy                       # folder owned by uid 1000 (cache and users)
-#   NTFY_EDGE_NETWORK=<project>_edge                         # the "edge" network from deploy/tailscale.yml (BOS-242)
+#   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443  # the Tailscale Serve address, https only
+# Optional, with defaults that match BOS-242:
+#   NTFY_DATA=<folder>          # default $BOSSMAN_DATA/ntfy (BOSSMAN_DATA default /srv/boss-man/data); owned by uid 1000.
+#                               # Holds users, tokens and cache: include it in your backup and copy it when you move host.
+#   NTFY_EDGE_NETWORK=<name>    # default ${COMPOSE_PROJECT_NAME:-boss-man}_edge, the "edge" network of deploy/tailscale.yml
 # Optional: NTFY_VERSION (pinned below), NTFY_CACHE_DURATION (1h),
 #   NTFY_UPSTREAM_BASE_URL (leave unset; iPhone only, see the doc).
 #
-# No port is published on the NAS at all. The container joins the "edge" network of the Tailscale sidecar
+# No port is published on the host at all. The container joins the "edge" network of the Tailscale sidecar
 # from deploy/tailscale.yml (BOS-242, set that up first); the sidecar's Serve config (deploy/tailscale/serve.json)
 # publishes it on tailnet port 8443 as http://ntfy:80. Never use Funnel.
 # Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
@@ -30,7 +32,7 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     volumes:
-      - ${NTFY_DATA:?Set NTFY_DATA in .env to the ntfy data folder}:/var/lib/ntfy
+      - ${NTFY_DATA:-${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy}:/var/lib/ntfy
     environment:
       NTFY_BASE_URL: ${NTFY_BASE_URL:?Set NTFY_BASE_URL in .env to the https Tailscale Serve address}
       NTFY_LISTEN_HTTP: ":80"
@@ -56,4 +58,4 @@ services:
 networks:
   edge:
     external: true
-    name: ${NTFY_EDGE_NETWORK:?Set NTFY_EDGE_NETWORK in .env to the edge network name from deploy/tailscale.yml}
+    name: ${NTFY_EDGE_NETWORK:-${COMPOSE_PROJECT_NAME:-boss-man}_edge}
