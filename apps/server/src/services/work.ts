@@ -1,5 +1,5 @@
 // Projects, boards, tickets, dependencies and objectives (Phase 3, R16–R18, R25).
-import { and, asc, eq, inArray, isNull, or, ne, sql } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNull, or, ne, sql } from "drizzle-orm";
 import { columnProblems, DEFAULT_COLUMNS, effectiveDueDate, planFirstByDefault, type ColumnSpec, type RiskTier, type SystemState, type TaskSize } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -251,9 +251,10 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         for (const id of [r.ticketId, r.runTicketId, ...named(r)]) if (id && boardTicketIds.has(id)) found.add(id);
         return found;
       };
-      // What a run is doing, after the agent's name on the card.
-      const doing = (r: (typeof everyLive)[number]) =>
-        r.origin === REVIEW_REASON ? "reviewing" : r.origin === "check due" ? "re-checking" : r.origin === "ci passed" ? "checking the merge" : r.origin === "nudge" ? "picking this up" : "working";
+      // What a run is doing, after the agent's name on the card. A review run that lists several
+      // tickets is on none of them, so "reviewing" shows on a card only when it is really on it.
+      const doing = (r: (typeof everyLive)[number], ticketId?: string) =>
+        r.origin === REVIEW_REASON ? (!r.ticketId || r.ticketId === ticketId ? "reviewing" : "working") : r.origin === "check due" ? "re-checking" : r.origin === "ci passed" ? "checking the merge" : r.origin === "nudge" ? "picking this up" : "working";
       // Runs with no ticket at all: the strip lists them, so the board never under-reports.
       const withoutCard = everyLive.filter((r) => about(r).size === 0);
       const waits = await reviewWaits(db, inReview);
@@ -287,7 +288,7 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         dueDate: effectiveDueDate(t.dueDate, milestoneTarget),
         // Work not linked to any objective may be drifting (R16).
         unlinked: !t.keyResultId && !t.milestoneId,
-        working: [...new Set(everyLive.filter((l) => about(l).has(t.id)).map((l) => `${l.agent ?? "An agent"} ${doing(l)}`))],
+        working: [...new Set(everyLive.filter((l) => about(l).has(t.id)).map((l) => `${l.agent ?? "An agent"} ${doing(l, t.id)}`))],
         // When the earliest of those runs began, so the card can say how long the work has been going.
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
@@ -436,17 +437,36 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
     /**
      * A run that had no ticket starts working on one, so the runs list, the agent's page and the
      * ticket page can show it as "Working on BOS-x" (BOS-254). Only the ticket it is really on is
-     * set: a ticket that only waits on it, or one it merely mentioned, never is.
+     * set: a ticket that only waits on it, or one it merely mentioned, never is. A reviewer is
+     * the exception (BOS-268): the ticket in review is not assigned to it, and reading the diff
+     * and giving a verdict is all the work there is.
      */
     async attachRun(ticketId: string, runId: string) {
       const [r] = await db.select({ id: runs.id, companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, endedAt: runs.endedAt }).from(runs).where(eq(runs.id, runId));
       if (!r || r.purpose === "chat" || r.endedAt || r.ticketId) return false;
       const [t] = await db.select({ id: tickets.id, companyId: tickets.companyId, assigneeAgentId: tickets.assigneeAgentId }).from(tickets).where(eq(tickets.id, ticketId));
       if (!t || t.companyId !== r.companyId) return false;
-      // The ticket must be the run's own: assigned to the agent, or it created it. A stray reply or
-      // nudge about a colleague's ticket is not "working on it".
+      // The ticket must be the run's own: assigned to the agent, one it created, or (for a
+      // reviewer) one in review with a review of it open to the agent. A stray reply or nudge
+      // about a colleague's ticket is not "working on it".
       if (!r.agentId) return false;
-      const [own] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ticketId), or(eq(tickets.assigneeAgentId, r.agentId), eq(tickets.createdByAgentId, r.agentId))));
+      const agentId = r.agentId;
+      const [own] = await db
+        .select({ id: tickets.id })
+        .from(tickets)
+        .where(
+          and(
+            eq(tickets.id, ticketId),
+            or(
+              eq(tickets.assigneeAgentId, agentId),
+              eq(tickets.createdByAgentId, agentId),
+              and(
+                eq(tickets.systemState, "review"),
+                exists(db.select({ id: reviewRequests.id }).from(reviewRequests).where(and(eq(reviewRequests.ticketId, ticketId), eq(reviewRequests.reviewerAgentId, agentId), inArray(reviewRequests.status, ["pending", "approved"])))),
+              ),
+            ),
+          ),
+        );
       if (!own) return false;
       await db.update(runs).set({ ticketId }).where(and(eq(runs.id, runId), isNull(runs.ticketId)));
       await record(db, { companyId: r.companyId, agentId: r.agentId, ticketId, kind: "run_started", summary: "This run started working on it.", at: now() });

@@ -218,6 +218,8 @@ export type FundingStatus = {
     used: number | null;
     limit: number | null;
     renewsAt: string | null;
+    /** "weekly" for the plan's weekly credits (the real measure, BOS-260); "requests" for the old request window. */
+    measure?: "weekly" | "requests";
     /** Seconds since the reading was taken from Synthetic (BOS-239); null when there is none. */
     ageSeconds: number | null;
     /** Recent readings, newest first. */

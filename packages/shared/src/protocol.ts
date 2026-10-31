@@ -122,6 +122,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.image"), requestId: z.string(), ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** Runs the ticket's check in its worktree (R47). */
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
+  /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
+  z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
   z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
@@ -235,3 +237,13 @@ export type CarriedResult = { carried: CarriedTicket[] };
 
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
 export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | { status: "uncommitted"; files: string[] };
+
+/**
+ * Whether a ticket's new migrations take a number another branch already has (BOS-219).
+ * `needed: false` means the branch is fine, `needed: true` gives the number to move to now, and
+ * `needed: null` means the check couldn't say (fetch the branch, or say why): it never blocks work.
+ */
+export type MigrationsResult =
+  | { needed: false; reason: string }
+  | { needed: true; number: number; next: number; why: string[]; others: string[] }
+  | { needed: null; reason: string };

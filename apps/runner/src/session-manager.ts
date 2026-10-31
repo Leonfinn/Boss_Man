@@ -311,6 +311,7 @@ export class SessionManager {
       case "workspace.verify":
       case "workspace.merge":
       case "workspace.push":
+      case "workspace.migrations":
       case "workspace.detect": {
         const reply = this.opts.reply ?? (() => {});
         const ws = this.opts.workspaces;
@@ -326,7 +327,9 @@ export class SessionManager {
                   ? ws.detect({ projectId: command.projectId, repoUrl: command.repoUrl, baseRef: command.baseRef }, secrets)
                   : command.type === "workspace.push"
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
-                    : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets),
+                    : command.type === "workspace.migrations"
+                      ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
+                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),
