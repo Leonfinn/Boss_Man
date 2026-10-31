@@ -462,7 +462,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     // A few are sent one by one; a pile of them is one summary, so a flood can't flood the owner.
     const reminders: Array<{ f: typeof watchdogFlags.$inferSelect; info: ReturnType<typeof snap.titles.get>; idle: number }> = [];
     for (const f of due.filter((x) => x.rule === "owner_decision_waiting")) {
-      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), eq(watchdogActions.kind, "owner_reminder"))).limit(1);
+      // A recorded rehearsal counts as "told" too: live mode reminds once per flag for all time, so a second rehearsal must not record another (BOS-166).
+      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), inArray(watchdogActions.kind, ["owner_reminder", "record_owner_reminder"]))).limit(1);
       await db.update(watchdogFlags).set({ dueAt: later(f), lastFlaggedAt: t }).where(eq(watchdogFlags.id, f.id));
       // The owner may have acted since this flag opened; don't tell them again that they are holding it up (BOS-123).
       if (!told && !(await recentOwnerAnswer(db, { companyId: c.id, ticketIds: [f.ticketId], since: f.openedAt, decisionTypes: ["question", "deploy"] }))) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
@@ -616,7 +617,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
    */
   async function urgentCheck(companyId: string) {
     for (const d of (await ownerDecisions(companyId)).filter((x) => x.blocks.length >= URGENT_BLOCKED)) {
-      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), eq(watchdogActions.kind, "urgent_alert"), sql`${watchdogActions.after}->>'decisionId' = ${d.id}`)).limit(1);
+      // A recorded rehearsal counts as already paged too: live mode pages once per decision, so a second sweep must not record another (BOS-166).
+      const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.kind, ["urgent_alert", "record_urgent_page"]), sql`${watchdogActions.after}->>'decisionId' = ${d.id}`)).limit(1);
       if (told) continue;
       const q = d.question.replace(/\s+/g, " ").trim().slice(0, 140);
       // Record only (BOS-166): no page. The entry is written down so the log and summary say it would have paged.

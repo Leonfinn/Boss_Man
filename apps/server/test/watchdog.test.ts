@@ -977,6 +977,37 @@ describe("record-only mode (BOS-166)", () => {
     expect((row!.after as { body: string }).body).toContain("Record only: the watchdog is rehearsing");
   });
 
+  it("records the owner reminder once per flag, not on every due cycle", async () => {
+    await ctx.switchOn({ recordOnly: true, ownerDecisionHours: 1 });
+    const waiting = await ctx.ticket({ title: "Penpot export", systemState: "blocked", stateChangedAt: ctx.ago(600) });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Add the secrets?", options: ["Done", "Not yet"], recommendedOption: "Done", createdAt: ctx.ago(119) }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: waiting.id, blockerDecisionId: d!.id });
+    await ctx.watchdog.run();
+    // Live mode reminds once per flag for all time; the flag's next due cycle must not record another.
+    for (let i = 0; i < 3; i++) {
+      await ctx.db.update(watchdogFlags).set({ dueAt: ctx.ago(1) }).where(eq(watchdogFlags.status, "open"));
+      ctx.advance(2);
+      await ctx.watchdog.run();
+    }
+    expect((await records()).filter((r) => r.kind === "record_owner_reminder")).toHaveLength(1);
+    expect(await ownerNotes()).toHaveLength(0);
+  });
+
+  it("records the page it would have sent once per decision, not on every sweep", async () => {
+    await ctx.switchOn({ recordOnly: true });
+    const [big] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Pick a layout?", options: ["A", "B"], recommendedOption: "A", createdAt: ctx.ago(5) }).returning();
+    for (let i = 0; i < 3; i++) {
+      const t = await ctx.ticket({ title: `Held ${i}`, systemState: "blocked", stateChangedAt: ctx.ago(5) });
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: big!.id });
+    }
+    await ctx.watchdog.run();
+    await ctx.watchdog.run();
+    await ctx.watchdog.run();
+    // A decision holding 3+ tickets is paged once, so a rehearsal records it once however often it sweeps.
+    expect((await records()).filter((r) => r.kind === "record_urgent_page")).toHaveLength(1);
+    expect(await ownerNotes()).toHaveLength(0);
+  });
+
   it("switches to full action on the next sweep when record-only is turned off, and its caps are unchanged", async () => {
     await ctx.switchOn({ recordOnly: true });
     await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
