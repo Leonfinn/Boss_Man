@@ -247,6 +247,16 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(c.sent.find((x) => x.type === "workspace.migrations")).toMatchObject({ type: "workspace.migrations", target: "develop" });
   });
 
+  it("checking at merge time compares against the default branch only, so two clashing tickets don't keep sending each other back (BOS-219)", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test", defaultBranch: "develop" });
+    // Another open ticket on the same project picked the same number. It must not be looked at here.
+    const open = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Another migration", assigneeAgentId: c.worker.id, state: "in_progress" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${open.id}` }).where(eq(tickets.id, open.id));
+    expect((await approve(c)).json()).toMatchObject({ outcome: "merged" });
+    expect(c.sent.find((x) => x.type === "workspace.migrations")).toMatchObject({ type: "workspace.migrations", target: "develop", others: [] });
+  });
+
   it("closes a ticket that changed nothing in the repository, without running the check or merging", async () => {
     const c = (ctx = await setup({ answers: { diff: { ...DIFF, commits: [], files: [], diff: "" }, verify: { ok: false, exitCode: 1, timedOut: true, output: "", ms: 660_000 } } }));
     await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });

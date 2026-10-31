@@ -94,6 +94,20 @@ describe("checking a ticket's migration numbers (BOS-219)", () => {
     expect(r).toMatchObject({ needed: true, number: 4, next: 5 });
   });
 
+  it("after the first of two clashing tickets merges, the second is sent back with the next free number while the other branch is still open", async () => {
+    const { o, ws, spec } = await ticket(3, "mine", 3000);
+    otherBranch(o, "bossman/other", 3, "theirs", 3100);
+    // At review time the other open branch is looked at: both would take 0003.
+    expect(await ws.migrations(spec, "main", ["bossman/other"])).toMatchObject({ needed: true, number: 3 });
+    // The first ticket merges: main now has 0003, and bossman/other still exists and still has 0003.
+    const dir = mkdtempSync(path.join(tmpdir(), "bm-mig-main-"));
+    git(dir, "clone", "-q", "-b", "bossman/other", o.url, ".");
+    git(dir, "push", "-q", "origin", "HEAD:main");
+    // The merge-time check looks at main only, so it sends this one back rather than bouncing forever.
+    const r = await ws.migrations(spec, "main", []);
+    expect(r).toMatchObject({ needed: true, number: 3, next: 4 });
+  });
+
   it("counts another branch's numbers when picking the next free one", async () => {
     const { o, ws, spec } = await ticket(3, "mine", 3000);
     otherBranch(o, "bossman/other", 3, "theirs", 3100);

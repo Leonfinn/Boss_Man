@@ -236,18 +236,26 @@ export function reviewService(
     },
 
     /**
-     * Whether the ticket's new migration numbers are free (BOS-219), against the default branch and
-     * the other open tickets in its project. An offline runner or an unreadable branch gives
+     * Whether the ticket's new migration numbers are free (BOS-219). At review time it also looks at
+     * the other open tickets in its project, so the agent hears early. The check that counts, just
+     * before the merge, compares only against the default branch: once one ticket has merged, the
+     * next must not be sent back because a branch it clashes with is still open, or two clashing
+     * tickets would keep bouncing each other. An offline runner or an unreadable branch gives
      * "couldn't say", which never holds a ticket up.
      */
-    async migrations(ticketId: string, companyId?: string): Promise<MigrationsResult> {
+    async migrations(ticketId: string, companyId?: string, withOthers = true): Promise<MigrationsResult> {
       const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId, companyId);
       if (!repoUrl || t.noCode) return { needed: null, reason: "This ticket has no code of its own to check." };
-      const open = await db
-        .select({ branch: tickets.branch })
-        .from(tickets)
-        .where(and(eq(tickets.companyId, t.companyId), eq(tickets.projectId, t.projectId), inArray(tickets.systemState, ["in_progress", "review", "blocked"]), isNotNull(tickets.branch)));
-      const others = open.map((o) => o.branch!).filter((b) => b && b !== `bossman/${ticketId}`);
+      const others = !withOthers
+        ? []
+        : (
+            await db
+              .select({ branch: tickets.branch })
+              .from(tickets)
+              .where(and(eq(tickets.companyId, t.companyId), eq(tickets.projectId, t.projectId), inArray(tickets.systemState, ["in_progress", "review", "blocked"]), isNotNull(tickets.branch)))
+          )
+            .map((o) => o.branch!)
+            .filter((b) => b && b !== `bossman/${ticketId}`);
       const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
       if (!runner) return { needed: null, reason: "The company has no runner, so there was nothing to compare." };
       try {
@@ -672,7 +680,7 @@ export function reviewService(
       // Its migrations must not take a number another branch already has (BOS-219): the merge is the
       // moment it matters, so this is checked again here and, when taken, the ticket goes back with
       // the number free right now. A check that can't say never blocks the merge.
-      const migrations = await this.migrations(ticketId).catch(() => null);
+      const migrations = await this.migrations(ticketId, undefined, false).catch(() => null);
       if (migrations?.needed) {
         const delivered = await sendBack(
           `The review was approved, but a migration number is already taken: ${migrations.why.join("; ")}. Another branch merged a migration with the same number, so this can't land as it is. Rename it to ${String(migrations.next).padStart(4, "0")} (and any others it moved), set its journal entry's \`when\` later than the newest one already on ${defaultBranch}, run \`node scripts/lint-migrations.mjs\` (which now catches this), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${migrations.others.length ? `\nOther numbers taken: ${migrations.others.join("; ")}.` : ""}`,
