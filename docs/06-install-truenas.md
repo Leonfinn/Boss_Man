@@ -1,5 +1,7 @@
 # Installing Boss Man on TrueNAS SCALE
 
+> Moving to another host? The host-neutral guide is [docs/21-move-to-new-host.md](21-move-to-new-host.md). This page is the TrueNAS worked example; its `/mnt/NVME_Apps/...` paths are the owner's TrueNAS layout.
+
 This guide puts the whole stack on a TrueNAS SCALE box: Postgres, the server with the web UI, and one runner per company. Every image is built on the NAS itself. The runner image contains Claude Code, which must not be redistributed (see the licence note in `apps/runner/Dockerfile`). Building natively also avoids the arm64-to-x86_64 cross-build you'd need from an Apple Silicon Mac.
 
 Checked against TrueNAS SCALE 25.10 "Goldeye" on 16 Oct 2026. Where TrueNAS doesn't document something, the guide says so.

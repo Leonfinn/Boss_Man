@@ -1,5 +1,6 @@
 # Self-deploy: the host deployer (phase 1) and the runner drain (phase 2)
 
+> Not on TrueNAS? The files here named `truenas-*.yml` are generic (data bind mounts, deployer mounts, blue/green); see [docs/21-move-to-new-host.md](21-move-to-new-host.md) for host-neutral paths and the scheduler note. The `/mnt/NVME_Apps/...` paths below are the TrueNAS layout, and "cron job" means whatever one-minute scheduler your host has.
 Status: built (phases 1 and 2). Phase 0 (`scripts/deploy.sh`, run by hand) is the base. Phase 2's runner drain is described in its own section below. The leader lock and the separate migrate step (phase 3, part 1) are built, and so is the opt-in blue/green swap (phase 3, part 2). Blue/green was first run on a real TrueNAS NAS on 22 and 23 Oct 2026; what that run found is in "Lessons from the first real run" below. Install steps are in `docs/06-install-truenas.md` ("Install the host deployer"). Anything marked **UNVERIFIED** was not checked against a real TrueNAS box or the vendor's current docs.
 
 ## What it does
