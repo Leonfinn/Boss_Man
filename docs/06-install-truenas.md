@@ -150,9 +150,8 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
   ```
 
   If either is taken, pick other free ports and use them in `.env` and in the addresses below.
-- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain HTTP on your LAN.
-  - With HTTPS in front of Boss Man, remove this line. That could be Tailscale Serve, or a reverse proxy on your OPNsense box.
-  - Browsers only allow notifications (R44) on HTTPS pages, so you need HTTPS for those anyway.
+- `BOSSMAN_INSECURE_COOKIES=1` is no longer needed. Boss Man now marks the login cookie Secure only on requests that arrived over HTTPS through the trusted Tailscale proxy (section 10b), so plain `http://<nas-ip>:3101` on your LAN logs in as before. Leaving the line in works but turns Secure off everywhere, including over HTTPS; remove it once 10b is done.
+  - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
 
 ## 5. Build the images and start the server
 
@@ -832,6 +831,44 @@ Then, in Boss Man, open **Notifications** and fill in **How you're told**:
 Choose **Send a test to my phone** to check it. If it fails, the message says what ntfy answered.
 
 ntfy's docs site wasn't reachable when this was written, so these links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs). Setting up ntfy itself on TrueNAS isn't covered here.
+
+## 10b. HTTPS through Tailscale Serve (tailnet only)
+
+Gives Boss Man an `https://boss-man.<your-tailnet>.ts.net` address with a valid certificate, reachable only from devices signed in to your tailnet. It uses Tailscale **Serve**, not Funnel, so nothing is on the public internet. It fronts the web/login port only, never the feedback portal. The LAN address keeps working.
+
+How it works: a small Tailscale container (`deploy/tailscale.yml`) sits on a private Docker network, `edge`, with the fixed address 172.30.0.2. Only it and the server are on that network. Boss Man believes the forwarded address and "https" markers only from 172.30.0.2 (`BOSSMAN_TRUSTED_PROXIES`), so LAN requests cannot pretend to be it, and the login limit counts each phone separately. This guide's single-server install is covered; blue/green (9d) is not yet.
+
+1. Open the Tailscale admin console, **DNS** page. Turn on **MagicDNS**, then under **HTTPS Certificates** click **Enable HTTPS**. Note your tailnet name (it ends in `.ts.net`).
+2. On the **Settings > Keys** page, click **Generate auth key**. Leave **Reusable** off, set a short expiry, and copy the key. Do not paste it anywhere except step 4.
+3. On the NAS, check nothing already uses the private network range, and make the state folder:
+
+   ```sh
+   docker network ls -q | xargs docker network inspect --format "{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}" | grep 172.30.0 || echo free
+   mkdir -p /mnt/NVME_Apps/Container_files/boss-man/data/tailscale
+   ```
+
+   If it prints a network instead of `free`, stop and tell the engineer: the address needs changing.
+4. Back up `.env`, then add the key and the extra compose file (use your own key):
+
+   ```sh
+   cd /mnt/NVME_Apps/Container_files/boss-man/src
+   cp .env .env.bak
+   sed -i "s#^COMPOSE_FILE=.*#&:deploy/tailscale.yml#" .env
+   echo "TS_AUTHKEY=tskey-auth-PASTE-YOUR-KEY" >> .env
+   chmod 600 .env
+   ```
+5. Start it: `docker compose up -d tailscale server`. Then `docker compose logs tailscale | tail` should say it is logged in. After it is up, delete the `TS_AUTHKEY` line from `.env` (the login is kept in the state folder).
+6. In the Tailscale admin console the machine `boss-man` appears. Check Serve is on and Funnel is off:
+
+   ```sh
+   docker compose exec tailscale tailscale serve status
+   ```
+
+   It must show `https://boss-man.<tailnet>.ts.net` proxying to `http://server:3100` and say "(tailnet only)" (not "Funnel on").
+7. From your phone, on the tailnet, open that address. The padlock should be valid and login should work. Off the tailnet (mobile data with Tailscale turned off) it must not load.
+8. In Boss Man, open **Notifications** and set **Boss Man's address on your phone** to the ts.net address, so notification links open it.
+
+To undo: `docker compose stop tailscale`, remove `:deploy/tailscale.yml` from `COMPOSE_FILE` (or restore `.env.bak`), then `docker compose up -d server`. The LAN address is unaffected throughout.
 
 ## 11. Feedback portal (optional)
 

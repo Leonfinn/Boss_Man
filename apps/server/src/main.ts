@@ -23,7 +23,9 @@ const { app, briefUpkeep, retro, scheduler, sweeps, watchdog, alerts, notes, fee
   db,
   master,
   liveValidator: providerLiveValidator,
-  secureCookies: env.BOSSMAN_INSECURE_COOKIES !== "1",
+  // Per request: Secure over https through the trusted proxy, plain http on the LAN still logs in.
+  secureCookies: env.BOSSMAN_INSECURE_COOKIES === "1" ? false : "auto",
+  trustedProxies: (env.BOSSMAN_TRUSTED_PROXIES ?? "").split(",").map((s) => s.trim()).filter(Boolean),
   leader,
   logger: true,
   webDir: env.BOSSMAN_WEB_DIR,

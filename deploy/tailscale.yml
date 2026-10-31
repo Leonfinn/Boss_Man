@@ -1,0 +1,45 @@
+# HTTPS for Boss Man on your tailnet only, through Tailscale Serve (BOS-242). Add it to COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml
+# Steps: docs/06-install-truenas.md, "10b. HTTPS through Tailscale Serve".
+#
+# Why a sidecar on its own network: Boss Man believes X-Forwarded-For / X-Forwarded-Proto only from
+# the exact address below (BOSSMAN_TRUSTED_PROXIES). That address lives on the private "edge" network, which
+# only this container and the server join. LAN requests reach the server through the published port on the
+# default network, so they can never arrive from this address.
+#
+# Serve (not Funnel): serve.json has no AllowFunnel, so nothing is published on the public internet. It fronts
+# only the owner's web/login port (server:3100), never the feedback portal (3101).
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.78.1
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME:-boss-man}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?Set TS_AUTHKEY in .env (a one-off, non-reusable key from the Tailscale admin console)}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      # No /dev/net/tun and no extra capabilities: Serve only needs to proxy to the server over Docker's network.
+      TS_USERSPACE: "true"
+    volumes:
+      - ${BOSSMAN_DATA:?Set BOSSMAN_DATA in .env}/tailscale:/var/lib/tailscale
+      - ./deploy/tailscale:/config:ro
+    networks:
+      edge:
+        ipv4_address: 172.30.0.2
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 128
+    depends_on: [server]
+
+  server:
+    networks:
+      edge: {}
+    environment:
+      BOSSMAN_TRUSTED_PROXIES: 172.30.0.2
+
+networks:
+  edge:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/29
