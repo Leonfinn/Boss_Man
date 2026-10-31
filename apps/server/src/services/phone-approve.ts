@@ -130,6 +130,8 @@ export function phoneApproveService(
   /** Unknown-token taps, counted rather than logged (rule 8). */
   let unknownTaps = 0;
   /** When each IP was last told "Too many taps", so a flood gets one reply per window. Leader memory only. */
+  // shortcut: lost on restart, harmless because a restart costs at most one extra "Too many taps" push per IP;
+  // entries older than the window are pruned on each write, so it stays small.
   const toldTooMany = new Map<string, number>();
 
   async function gate(s?: NotifySettings) {
@@ -261,6 +263,7 @@ export function phoneApproveService(
     if (!(await hit(ip, tok.companyId, t))) {
       // Over a limit, a live link still hears why nothing happened, once per IP per window.
       if (live() && (toldTooMany.get(ip) ?? 0) <= t.getTime() - IP_LIMIT.ms) {
+        for (const [k, at] of toldTooMany) if (at <= t.getTime() - IP_LIMIT.ms) toldTooMany.delete(k);
         toldTooMany.set(ip, t.getTime());
         await tell.tooMany();
       }
