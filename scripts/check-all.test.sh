@@ -68,9 +68,9 @@ if command -v flock >/dev/null; then
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
-  # Two slots by default: one busy slot does not stop a second check.
+  # One slot by default: a busy slot makes a merge check give up. With CHECK_ALL_SLOTS=2 a second check runs.
   hold 1 4; holder=$!; sleep 0.3
-  out=$(lock env) || fail "second slot: expected success, got: $out"
+  out=$(lock env CHECK_ALL_SLOTS=2) || fail "second slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "second slot: not acquired"
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
 
@@ -109,6 +109,19 @@ if command -v flock >/dev/null; then
   out=$(lock env) || fail "dead waiter: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "dead waiter blocked the queue: $out"
   wait "$h1" "$h2"
+
+  # Default is one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  hold 1 3; h1=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 75 ] || fail "default slots: expected one slot (exit 75), got $rc: $out"
+  wait "$h1"
+
+  # A queue entry older than 2 h is dropped even when its pid is alive (a reused pid of a killed waiter).
+  mkdir -p "$t/lock.queue"; : >"$t/lock.queue/1-1000000000000000000-$$"
+  hold 1 2; h1=$!; sleep 0.3
+  out=$(lock env) || fail "stale waiter: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "stale waiter blocked the queue: $out"
+  wait "$h1"
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi

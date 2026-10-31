@@ -48,12 +48,12 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   }
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
-    rc=0; : >"$began_file"
+    rc=0; : >"$began_file"; attempt_start=$SECONDS
     BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
     if [ "$rc" -eq 0 ]; then record pass 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
-    took=0; began=$(cat "$began_file"); [ -z "$began" ] || took=$(($(date +%s) - began))
+    took=$((SECONDS - attempt_start)); began=$(cat "$began_file"); [ -z "$began" ] || took=$(($(date +%s) - began))
     if [ "$n" -lt "$attempts" ] && [ $((SECONDS - start + took + pause)) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       sleep "$pause"
@@ -70,7 +70,7 @@ if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; f
 pnpm install --frozen-lockfile --prefer-offline >/dev/null
 node --test scripts/*.test.mjs
 node scripts/lint-migrations.mjs
-# The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS (default 2) checks run them at once;
+# The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS (default 1 until a clean side-by-side pair is measured) checks run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait and does not give up (hand-run checks) or gives up
 # after CHECK_ALL_LOCK_WAIT seconds (default 600, merge check only: exit 75, which Boss Man retries).
@@ -78,7 +78,7 @@ node scripts/lint-migrations.mjs
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
 if command -v flock >/dev/null; then
   LOCK=${CHECK_ALL_LOCK:-/tmp/bossman-check-all}
-  SLOTS=${CHECK_ALL_SLOTS:-2}
+  SLOTS=${CHECK_ALL_SLOTS:-1}
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
   if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-600}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
   mkdir -p "$QDIR"
@@ -95,10 +95,11 @@ if command -v flock >/dev/null; then
   }
   # Prints "<my place> <checks waiting>", dropping queue entries whose process is gone.
   queue_place() {
-    local f mine=0 total=0
+    local f mine=0 total=0 now; now=$(date +%s)
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
-      if ! kill -0 "${f##*-}" 2>/dev/null; then rm -f "$f"; continue; fi
+      # drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused)
+      if ! kill -0 "${f##*-}" 2>/dev/null || [ $((now - $(basename "$f" | cut -d- -f2) / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
     done
     echo "$mine $total"
