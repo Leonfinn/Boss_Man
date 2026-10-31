@@ -187,6 +187,8 @@ export type Ticket = {
   /** A held wake's reset time and why, when routine work is paused by the quota hold. */
   quotaHeldUntil?: string | null;
   quotaHeldReason?: string | null;
+  /** The ticket can start now but its agent is held by the quota hold for other work (BOS-253). */
+  quotaHeldAgent?: boolean;
   /** In review with no agent able to review it, so the owner approves it on the ticket. */
   noReviewer?: boolean;
   /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */

@@ -1333,12 +1333,18 @@ export async function buildApp(opts: AppOptions) {
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
-      const [held] = await db
-        .select({ until: wakes.notBefore, reason: wakes.statusReason })
-        .from(wakes)
-        .where(and(eq(wakes.ticketId, id), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
-        .limit(1);
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null };
+      // The ticket's own held wake, or, when its wake was merged into another ticket's, the one
+      // its assignee is held by (BOS-253): the page still offers Run now and says why it's held.
+      const heldBy = (own: boolean) =>
+        db
+          .select({ until: wakes.notBefore, reason: wakes.statusReason })
+          .from(wakes)
+          .where(and(own ? eq(wakes.ticketId, id) : eq(wakes.agentId, row.t.assigneeAgentId!), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+          .limit(1);
+      let [held] = await heldBy(true);
+      const heldByAgent = !held;
+      if (!held && row.t.assigneeAgentId) [held] = await heldBy(false);
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1667,13 +1673,27 @@ export async function buildApp(opts: AppOptions) {
     // A held wake can be run now: it gets high priority, which passes the quota hold, and starts on the next pass.
     owner.post("/api/tickets/:id/run-now", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, id));
+      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title, assigneeAgentId: tickets.assigneeAgentId, systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
       if (!t) return reply.code(404).send({ error: "not_found" });
+      const release = { status: "queued" as const, statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` };
       const released = await db
         .update(wakes)
-        .set({ status: "queued", statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` })
+        .set(release)
         .where(and(eq(wakes.ticketId, id), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
         .returning({ id: wakes.id });
+      // The ticket's wake can be merged into another of its assignee's held wakes (BOS-253): with
+      // none of its own, give it one now, so Run now starts this ticket rather than that other work.
+      const canStart = t.assigneeAgentId && (t.systemState === "ready" || t.systemState === "in_progress");
+      if (!released.length && canStart) {
+        const [waiting] = await db
+          .select({ id: wakes.id, priority: wakes.priority })
+          .from(wakes)
+          .where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
+          .limit(1);
+        if (waiting) await db.update(wakes).set(release).where(eq(wakes.id, waiting.id));
+        else await scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: id, reason: "woken by owner", priority: DEFAULT_LIMITS.highPriority, note: "The owner ran this ticket now, past the quota hold." });
+        released.push({ id: waiting?.id ?? id });
+      }
       if (released.length) await scheduler.tick();
       await record(db, { companyId: t.companyId, ticketId: id, kind: "quota", summary: `Owner ran it now past the quota hold (${released.length} wake${released.length === 1 ? "" : "s"})`, at: new Date() });
       return { released: released.length };
@@ -2315,5 +2335,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }

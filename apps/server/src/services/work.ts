@@ -225,12 +225,17 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
       const withoutCard = everyLive.filter((r) => about(r).size === 0);
       const waits = await reviewWaits(db, inReview);
       // A held wake whose reason is the subscription quota (BOS-227), so the card can show it and offer Run now.
+      // A ticket's wake can be merged into another of its assignee's wakes, so the assignee's held
+      // wakes count too (BOS-253), not just ones naming the ticket.
+      const assigneeIds = [...new Set(rows.map((r) => r.t.assigneeAgentId).filter((x): x is string => !!x))];
       const heldWakes = rows.length
         ? await db
-            .select({ ticketId: wakes.ticketId, until: wakes.notBefore, reason: wakes.statusReason })
+            .select({ ticketId: wakes.ticketId, agentId: wakes.agentId, until: wakes.notBefore, reason: wakes.statusReason })
             .from(wakes)
-            .where(and(inArray(wakes.ticketId, rows.map((r) => r.t.id)), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+            .where(and(or(inArray(wakes.ticketId, rows.map((r) => r.t.id)), assigneeIds.length ? inArray(wakes.agentId, assigneeIds) : sql`false`), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
         : [];
+      const heldFor = (t: typeof tickets.$inferSelect) => heldWakes.find((h) => h.ticketId === t.id) ?? (t.assigneeAgentId ? heldWakes.find((h) => h.agentId === t.assigneeAgentId) : undefined);
+      const heldByAgent = (t: typeof tickets.$inferSelect) => !heldWakes.some((h) => h.ticketId === t.id) && !!(t.assigneeAgentId && heldWakes.some((h) => h.agentId === t.assigneeAgentId));
       const doneIds = new Set(rows.filter((r) => r.t.systemState === "done").map((r) => r.t.id));
       const cards = rows.map(({ t, milestoneTarget }) => {
         const waitingDecisionId = t.systemState === "review" ? (deps.find((d) => d.blockedTicketId === t.id && d.blockerDecisionId && signoffs.has(d.blockerDecisionId))?.blockerDecisionId ?? null) : null;
@@ -254,8 +259,9 @@ export function workService(db: Db, hooks: WorkHooks = {}) {
         workingSince: everyLive.filter((l) => about(l).has(t.id)).map((l) => l.startedAt).sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
         // A blocker task already done no longer holds the card up.
         blockedBy: deps.filter((d) => d.blockedTicketId === t.id && !(d.blockerTicketId && doneIds.has(d.blockerTicketId))).map((d) => ({ ticketId: d.blockerTicketId, ticketTitle: rows.find((r) => r.t.id === d.blockerTicketId)?.t.title ?? null, engagementId: d.blockerEngagementId, decisionId: d.blockerDecisionId })),
-        quotaHeldUntil: heldWakes.find((h) => h.ticketId === t.id)?.until?.toISOString() ?? null,
-        quotaHeldReason: heldWakes.find((h) => h.ticketId === t.id)?.reason ?? null,
+        quotaHeldUntil: heldFor(t)?.until?.toISOString() ?? null,
+        quotaHeldReason: heldFor(t)?.reason ?? null,
+        quotaHeldAgent: heldByAgent(t),
         };
       });
       return {
