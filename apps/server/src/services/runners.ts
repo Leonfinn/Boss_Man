@@ -17,6 +17,8 @@ export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type
 export function runnersService(db: Db, funding: ReturnType<typeof fundingService>) {
   let onPermission: PermissionHook | null = null;
   const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
+  // Runs before listeners and is awaited, for cheap bookkeeping a reader must see straight after the event (BOS-217).
+  const syncHooks: Array<(runner: Runner, event: RunnerEvent) => Promise<unknown>> = [];
   const connectListeners: Array<(runnerId: string) => unknown> = [];
   const resumeListeners: Array<(runner: Runner, pending: Array<{ runId: string; requestId: string }>) => unknown> = [];
   // shortcut: pending requests and live sockets belong to this process; lost on restart, harmless because runners reconnect and callers time out.
@@ -39,11 +41,20 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       })
       .where(eq(runs.id, runId))
       .returning({ companyId: runs.companyId, agentId: runs.agentId, ticketId: runs.ticketId, purpose: runs.purpose, outcome: runs.outcome });
-    // A finished run's own questions are moot: its permission requests and stall alerts leave the queue.
+    // A finished run's own questions are moot: its permission requests and stall alerts leave the
+    // queue, and a stall alert says why it went (BOS-217): the run ended by itself.
+    const note = `the run ended normally at ${at.toISOString().slice(11, 16)}`;
+    const withdrawn = { by: "system", note, at: at.toISOString() };
+    const stalledAlerts = await db
+      .update(decisions)
+      .set({ status: "withdrawn", dedupeKey: null, context: sql`jsonb_set(${decisions.context}, '{withdrawn}', ${`${JSON.stringify(withdrawn)}`}::jsonb, true)` })
+      .where(and(eq(decisions.status, "open"), eq(decisions.kind, "stalled_run"), sql`${decisions.context}->>'runId' = ${runId}`))
+      .returning({ companyId: decisions.companyId, question: decisions.question });
+    for (const d of stalledAlerts) await record(db, { companyId: d.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at });
     await db
       .update(decisions)
       .set({ status: "withdrawn", dedupeKey: null })
-      .where(and(eq(decisions.status, "open"), inArray(decisions.kind, ["permission", "stalled_run"]), sql`${decisions.context}->>'runId' = ${runId}`));
+      .where(and(eq(decisions.status, "open"), eq(decisions.kind, "permission"), sql`${decisions.context}->>'runId' = ${runId}`));
     if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
     return ended;
   }
@@ -162,6 +173,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       });
       if (inserted) {
         await apply(runner, entry.event, at);
+        for (const h of syncHooks) await h(runner, entry.event);
         for (const l of listeners) l(runner, entry.event);
       }
       return inserted;
@@ -176,8 +188,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       if (!run) return false;
       await markEnded(runId, at, outcome);
       const [runner] = await db.select().from(runners).where(eq(runners.companyId, run.companyId));
-      // Listeners only read the event, and the runner's company; a company with no runner row still gets the handling.
-      for (const l of listeners) l(runner ?? ({ companyId: run.companyId } as Runner), { type: "run.ended", runId, stopReason: null, error: null });
+      const ended = runner ?? ({ companyId: run.companyId } as Runner);
+      // The sync hooks close what the end settles (BOS-217); listeners only read the event and the company.
+      for (const h of syncHooks) await h(ended, { type: "run.ended", runId, stopReason: null, error: null });
+      for (const l of listeners) l(ended, { type: "run.ended", runId, stopReason: null, error: null });
       return true;
     },
 
@@ -269,6 +283,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     /** Called after each newly stored event's effects are applied. */
     onEvent(listener: (runner: Runner, event: RunnerEvent) => void) {
       listeners.push(listener);
+    },
+
+    /** Called and awaited after each newly stored event's effects are applied, before the event is acknowledged. */
+    onEventSync(hook: (runner: Runner, event: RunnerEvent) => Promise<unknown>) {
+      syncHooks.push(hook);
     },
   };
 }
