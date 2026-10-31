@@ -277,8 +277,10 @@ describe("temp-file cleanup (BOS-111)", () => {
   });
 
   it("doesn't recommend Deny just because a command deletes files", () => {
-    for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
-    for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "cd /tmp/x && rm -rf build", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    for (const c of ["rm -rf node_modules dist", "pnpm build && rm -rf coverage 2>/dev/null"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+    // BOS-150: a trailing slash makes rm follow a symlink into its target, and a deeper build path
+    // (apps/web/dist) still follows a symlinked dist; only single components are recommended Allow.
+    for (const c of ["rm -rf dist/", "rm -rf node_modules/", "rm -rf a/b/", "rm -rf apps/web/dist", "rm -rf apps/web/dist/", "rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "cd /tmp/x && rm -rf build", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 
   it("doesn't follow any cd (BOS-111 security re-checks)", () => {
@@ -303,7 +305,7 @@ describe("working-copy cleanup (BOS-120)", () => {
   it("sends deletes of plain relative paths in the working copy to the CEO", () => {
     for (const [c, files, tmp] of [
       ["rm -f test/zz-probe.test.ts", ["test/zz-probe.test.ts"], []],
-      ["rm -rf dist apps/web/dist/", ["dist", "apps/web/dist/"], []],
+      ["rm -rf dist apps/web/dist", ["dist", "apps/web/dist"], []],
       ["rm -rf .turbo node_modules/.cache", [".turbo", "node_modules/.cache"], []],
       ["rm -rf dist /tmp/x", ["dist"], ["/tmp/x"]],
       ["rm -rf /tmp/x; rm -f test/zz-probe.test.ts 2>/dev/null; git status", ["test/zz-probe.test.ts"], ["/tmp/x"]],
@@ -324,6 +326,8 @@ describe("working-copy cleanup (BOS-120)", () => {
     for (const c of [
       // Leaving the copy, or its root.
       "rm -rf ..", "rm -rf ../x", "rm -rf a/../../b", "rm -rf a/..", "rm -rf ./x", "rm -rf .", "rm -rf ./", "rm -rf a/./b",
+      // A trailing slash (BOS-150): rm -rf NAME/ follows a symlink into the folder it points to.
+      "rm -rf dist/", "rm -rf node_modules/", "rm -rf a/b/",
       "rm -rf /home/node/x", "rm -rf //x", "rm -rf /tmp/a/b", "rm -rf ~/x", "rm -rf ~", "rm -rf -- -x", "rm -rf -x",
       // The repository itself, at any depth and in any case.
       "rm -rf .git", "rm -rf .git/", "rm -rf .git/hooks", "rm -rf a/.git/x", "rm -rf a/.git", "rm -rf .GIT", "rm -rf .Git/objects",

@@ -164,8 +164,8 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
   return { outcome: "owner", rule: "No rule matched" };
 }
 
-/** Build output in the agent's working folder (node_modules, dist…), by a plain relative path: no component starting with a dot (so no .., . or .git), no ~, $ or globs. Source folders such as src aren't vouched for. */
-const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-][\w.+@-]*\/)*(?:node_modules|dist|build|coverage|out|target)\/?)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
+/** Build output directly in the agent's working folder (node_modules, dist…): one component only, no trailing slash. rm -rf NAME/ follows a symlink as if NAME were its target (BOS-150), and a deeper path such as dist/x still follows a symlinked dist, so `rm -rf dist` is the only shape vouched for. */
+const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:node_modules|dist|build|coverage|out|target))+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
