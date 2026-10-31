@@ -79,7 +79,7 @@ describe("rule 1: every writer of a decision card is classified", () => {
     const re = await c.decisions.advise({ id: orig.id, companyId: c.company.id, agentId: c.ceo.id, outcome: "reissue", question: "Clearer?", options: ["Yes", "No"], recommended: "Yes", triedFirst: "The CEO looked into it." });
 
     // A permission answered while its runner is offline leaves a "couldn't reach the runner" notice.
-    const [runner] = await c.db.insert(runners).values({ companyId: c.company.id, name: "r1", tokenHash: randomUUID() }).returning();
+    const [runner] = await c.db.insert(runners).values({ companyId: c.company.id, tokenHash: randomUUID() }).returning();
     const [perm] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "permission", question: "Run rm?", options: [ALLOW, "Deny"], recommendedOption: ALLOW, raisedByAgentId: c.worker.id, context: { type: "permission", runnerId: runner!.id, runId: randomUUID(), requestId: "q1" } }).returning();
     await c.decisions.answer(perm!.id, ALLOW);
     const [undelivered] = await c.db.select().from(decisions).where(eq(decisions.dedupeKey, `undelivered:${perm!.id}`));
