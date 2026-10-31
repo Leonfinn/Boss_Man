@@ -23,7 +23,7 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
 
 1. **Host script plus a one-minute TrueNAS cron job.** No container, no socket.
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
-3. **GitHub is the source of truth.** The `src` checkout pulls from `git@github.com:Leonfinn/Boss_Man.git` over a read-only deploy key set as `core.sshCommand` (`docs/06`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` through that same key: no API token, no second credential.
+3. **GitHub is the source of truth.** The `src` checkout pulls from the public `https://github.com/Leonfinn/Boss_Man.git`, no credential needed (`docs/06`, step 2). Installs made earlier with a read-only deploy key set as `core.sshCommand` keep working unchanged. The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no credential.
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, `scripts/` and the like only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
 6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
@@ -313,7 +313,7 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
 2. **To verify on the NAS:** the cron job survives a TrueNAS upgrade (stored in the TrueNAS configuration database, which carries across updates; UNVERIFIED for 25.10). Verified on the NAS in Oct 2026:
    - the bind mount ownership with the TrueNAS override;
    - `python3` and `flock` on root's cron PATH;
-   - `git ls-remote` over the deploy key from cron;
+   - `git ls-remote` over https (or the deploy key on older installs) from cron;
    - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
 3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.

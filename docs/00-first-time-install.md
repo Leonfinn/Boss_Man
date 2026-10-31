@@ -82,7 +82,7 @@ You should see one commit line.
 
 If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
 
-**Is the repo still private?** (Only before the public launch.) Clone with a read-only deploy key instead: [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+**Older install with a deploy key?** It keeps working; see [docs/06, step 2](06-install-truenas.md#2-get-the-code).
 
 ## 3. Make the folders, the master key and the token file
 
