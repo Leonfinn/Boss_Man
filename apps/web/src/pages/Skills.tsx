@@ -3,15 +3,16 @@
 import { RUNNER_ADDONS } from "@boss-man/shared";
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { unzipSync } from "fflate";
-import { api, type Company } from "../api";
+import { api, ApiError, type Company } from "../api";
 import { Markdown } from "../components/Markdown";
 import { usePoll } from "../hooks";
 import { when } from "./Runs";
 import { SaveButton } from "../components/SaveButton";
 import { Section, useAction } from "./Settings";
 
-type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
-type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; sha256?: string; text: string | null }>; requiresAddons: string[] | null };
+type SkillInstructions = { path: string | null; body: string | null; empty: boolean; unreadable: boolean };
+type SkillRow = { id: string; name: string; description: string; source: "written" | "link" | "upload"; sourceUrl: string | null; sourceRef: string | null; pack: string | null; packUrl: string | null; sizeBytes: number; fileCount: number; hasInstructions?: boolean; instructionsPath?: string | null; instructionsUnreadable?: boolean; addedByOwner?: boolean; updatedAt: string; agents: Array<{ id: string; name: string }> };
+type SkillDetail = Omit<SkillRow, "fileCount"> & { files: Array<{ path: string; size: number; sha256?: string; text: string | null }>; requiresAddons: string[] | null; instructions?: SkillInstructions };
 type Upload = { path: string; content: string };
 type Elsewhere = { id: string; name: string; description: string; companyName: string; requiresAddons: string[] | null; fileCount: number; hasScripts: boolean };
 
@@ -223,12 +224,30 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
       setNote({ ok: false, text: (err as Error).message });
     }
   };
-  const md = s.files.find((f) => f.path === "SKILL.md")?.text ?? "";
+  const instructions = s.instructions;
+  const mainPath = instructions?.path ?? (s.files.some((f) => f.path === "SKILL.md") ? "SKILL.md" : null);
+  const md = s.files.find((f) => f.path === mainPath)?.text ?? "";
+  const body = instructions ? instructions.body ?? "" : stripFrontmatter(md).trim();
+  const unreadable = instructions?.unreadable ?? false;
+  const noInstructions = instructions ? instructions.empty && !instructions.unreadable : !body;
   // Only a skill that is just its SKILL.md can be edited here; a linked one follows its source.
-  const editable = s.source !== "link" && s.files.length === 1;
-  const save = () =>
+  // A SKILL.md that isn't text is never opened as an empty editor, so a save can't wipe it.
+  const editable = s.source !== "link" && s.files.length === 1 && !!mainPath && !unreadable;
+  const save = (confirmed = false) =>
     void run(async () => {
-      await api(`/api/companies/${company.id}/skills/${id}`, { method: "PUT", body: editing });
+      if (!editing) return "Nothing to save.";
+      const put = (confirmEmptyBody: boolean) =>
+        api(`/api/companies/${company.id}/skills/${id}`, { method: "PUT", body: { ...editing, ...(confirmEmptyBody ? { confirmEmptyBody: true } : {}) } });
+      try {
+        await put(confirmed);
+      } catch (err) {
+        if (!confirmed && err instanceof ApiError && err.status === 409 && /instructions/i.test(err.message)) {
+          if (window.confirm("This skill has instructions. Saving an empty Instructions box will delete them. Delete them anyway?")) await put(true);
+          else return "Nothing saved. The skill's instructions are still there.";
+        } else {
+          throw err;
+        }
+      }
       setEditing(null);
       return "Saved. Agents get the new version from their next run.";
     });
@@ -240,6 +259,16 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
             {s.name}
           </h2>
           <p>{s.description}</p>
+          {noInstructions && (
+            <p className="banner" role="status">
+              <span>{mainPath ? "No instructions: this skill does nothing when loaded." : "This skill has no SKILL.md, so it does nothing when loaded."}</span>
+            </p>
+          )}
+          {unreadable && (
+            <p className="banner" role="status">
+              <span>Instructions unreadable: the SKILL.md isn't text, so it can't be shown safely here.</span>
+            </p>
+          )}
           <p className="muted" style={{ fontSize: 13 }}>
             {SOURCE[s.source]}
             {s.sourceUrl && (
@@ -256,7 +285,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {editable && !editing && (
-            <button type="button" className="btn" onClick={() => setEditing({ name: s.name, description: s.description, body: stripFrontmatter(md).trim() })}>
+            <button type="button" className="btn" onClick={() => setEditing({ name: s.name, description: s.description, body })}>
               Edit
             </button>
           )}
@@ -346,7 +375,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
             <textarea id="edit-skill-body" rows={18} value={editing.body} onChange={(e) => setEditing({ ...editing, body: e.target.value })} style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit" }} />
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" className="btn primary" disabled={!editing.name.trim() || !editing.description.trim()} onClick={save}>
+            <button type="button" className="btn primary" disabled={!editing.name.trim() || !editing.description.trim()} onClick={() => save()}>
               Save
             </button>
             <button type="button" className="btn" onClick={() => setEditing(null)}>
@@ -356,7 +385,7 @@ function SkillView({ company, id, onChanged, onClose }: { company: Company; id: 
         </section>
       ) : (
         <section aria-label="SKILL.md">
-          <Markdown text={stripFrontmatter(md)} />
+          <Markdown text={body} />
         </section>
       )}
       {s.files.length > 1 && (
@@ -500,7 +529,7 @@ function PackView({ company, pack, rows, onChanged, onPick, onClose }: { company
   );
 }
 
-type ProposalRow = { id: string; name: string; source: "draft" | "link"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
+type ProposalRow = { id: string; name: string; source: "draft" | "link" | "retro"; status: string; verdict: string | null; reviewRequired: boolean; overridden: boolean; createdAt: string };
 const PROPOSAL_STATUS: Record<string, string> = {
   proposed: "Waiting",
   in_review: "With the Security Reviewer",
@@ -517,12 +546,12 @@ function Proposals({ companyId }: { companyId: string }) {
   const rows = (list.data ?? []).slice(0, 10);
   if (!rows.length) return null;
   return (
-    <section className="card" aria-label="Skills the CEO proposed" style={{ marginBottom: 16 }}>
-      <h2>Proposed by the CEO</h2>
+    <section className="card" aria-label="Skill proposals" style={{ marginBottom: 16 }}>
+      <h2>Skill proposals</h2>
       <ul>
         {rows.map((p) => (
           <li key={p.id}>
-            <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
+            <span className="mono">{p.name}</span> · {p.source === "link" ? "from the internet" : p.source === "retro" ? "from a workflow retro" : "CEO draft"} · {PROPOSAL_STATUS[p.status] ?? p.status}
             {` · security review: ${p.verdict ? p.verdict.replace("_", " ") : "pending"}`}
             {p.overridden ? " · added against the reviewer's advice" : ""}
             {p.status === "awaiting_owner" ? <> · <a href="#/decisions">Decide</a></> : null}
@@ -548,6 +577,11 @@ export function Skills({ company }: { company: Company | undefined }) {
     <li key={s.id}>
       <a href="#/skills" aria-current={s.id === picked && !adding ? "page" : undefined} onClick={(e) => (e.preventDefault(), pick(s.id))}>
         <span className="mono">{s.name}</span>
+        {s.instructionsUnreadable ? (
+          <span className="tag red" title="The SKILL.md isn't text, so its instructions can't be shown.">Instructions unreadable</span>
+        ) : s.hasInstructions === false ? (
+          <span className="tag red" title="No instructions: this skill does nothing when loaded.">No instructions</span>
+        ) : null}
         <small>
           {SOURCE[s.source]}{s.addedByOwner && s.source !== "written" ? " · added by the owner, not security-reviewed" : ""} · {s.agents.length ? s.agents.map((a) => a.name).join(", ") : "nobody yet"}
         </small>

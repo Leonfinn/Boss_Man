@@ -62,7 +62,7 @@ New records:
 
 | Setting | Who approves | Applied through |
 |---|---|---|
-| Playbook (a skill for a role's agents) | CEO | `skills` + `agent_skills`, source `retro` |
+| Playbook (a skill for a role's agents) | CEO nominates; the Security Reviewer checks it and the owner decides | the add-a-skill flow, which installs it (`skills` + `agent_skills`, source `retro`) |
 | Brief lesson | CEO | the existing lesson decision |
 | Agent instructions | Owner | `agent_changes` (undoable) |
 | Review policy for one risk tier | Owner | company `reviewPolicy` |
@@ -72,6 +72,8 @@ New records:
 | Hire (a role is a bottleneck) | Owner | the existing hire decision |
 
 Rules:
+- The Apply on a playbook is a nomination, not an install. It goes to the add-a-skill flow: the Security Reviewer checks it, then the owner decides. Nothing reaches the library or an agent before that.
+- A playbook update never overwrites a newer copy: if the owner edits the skill after the retro proposed the update, Apply (or the owner's Add) refuses and says the playbook changed, so the edit is kept.
 - When the CEO runs the retro (no Product Manager), its playbooks and lessons go to the owner: the CEO never approves its own proposal.
 - Only one live change per agent per setting.
 - At most 3 proposals per retro.
@@ -87,7 +89,8 @@ Not built yet: plan-first (there is no per-company setting for it; it follows th
   - Higher is better for first-time pass rate. Lower is better for every other measure.
   - Keep is recommended if it improved or held, or if either number can't be measured. Revert is recommended if it got worse.
 - Revert puts the saved old value back through the same code the Apply used. If the value has changed again since, Revert is refused and the decision stays open: Boss Man never overwrites a newer change.
-- A playbook that is reverted is taken away from the agents Apply gave it to, and stays in the library. Boss Man has no archive for skills, so "nobody uses it" is the archive.
+- A playbook that is reverted is taken away from the agents Apply gave it to, and stays in the library. Boss Man has no archive for skills, so "nobody uses it" is the archive. If the add-a-skill flow never installed it, Revert says so and leaves everything alone.
+- A playbook's check can come round while the add-a-skill flow still has the nomination. The card then says Revert cancels the pending nomination, and answering it closes the change and the review; nothing ever reached an agent. If the nomination ends without installing, the change is closed as skipped with no Keep/Revert card.
 - A lesson that is reverted is dropped from the brief's Lessons section.
 
 ## Skipped
@@ -137,4 +140,4 @@ Each task gets a relative size, **1, 2, 3, 5 or 8**, set by whoever creates it (
   - It covers the last 90 days, whatever period the page shows.
   - The critical path uses size-and-role times once a pair has 10 finished tickets.
   - Before that it falls back to the role's times, then to the company's.
-- **Retro.** The scorecard digest says where sizes don't match actuals, for example 3s that behave like 5s, or a kind of work that is always undersized. The retro fixes this with a **playbook** for the planners, which the CEO approves.
+- **Retro.** The scorecard digest says where sizes don't match actuals, for example 3s that behave like 5s, or a kind of work that is always undersized. The retro fixes this with a **playbook** for the planners: the CEO approves the nomination, then the add-a-skill flow has the Security Reviewer check it and the owner decide.

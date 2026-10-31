@@ -5,7 +5,8 @@ import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
-import { activity, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
+import { decisionsService } from "../src/services/decisions.js";
+import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
 
 const HOUR = 3_600_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -37,7 +38,7 @@ async function setup() {
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const ticket = async (body: Record<string, unknown>) => (await req("POST", `/api/projects/${project.id}/tickets`, body)).json() as { id: string };
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
-  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number };
+  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
   return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
 }
@@ -171,11 +172,80 @@ describe("stale blockers (R21)", () => {
     await ctx.sweep();
     const [row] = await ctx.queue();
     expect(row!.recommendedOption).toBe("Reassign");
-    expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign" })).statusCode).toBe(422);
+    const noPick = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign" });
+    expect(noPick.statusCode).toBe(422);
+    expect(noPick.body).toContain("Pick who should take this ticket.");
+    expect(noPick.body).not.toContain("assigneeAgentId");
     expect((await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.worker.id })).statusCode).toBe(200);
     const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
     expect(t!.assigneeAgentId).toBe(ctx.worker.id);
     expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, reason: "assigned" })]);
+  });
+
+  it("Let the CEO decide takes the card off the owner's queue and wakes the CEO, who can then reassign it", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    const [stored] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(stored!.options).toContain("Let the CEO decide");
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    expect(r.statusCode).toBe(200);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect(d).toMatchObject({ status: "open", tier: "ceo" });
+    expect((d!.context as { ladder: { rung: string } }).ladder.rung).toBe("ceo");
+    expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.ceo.id, reason: "decision" })]);
+    expect((await ctx.sweep()).staleBlockers.raised).toBe(0); // not raised a second time
+
+    // The CEO's answer carries out the owner's options.
+    const done = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: ctx.ceo.id });
+    expect(done.statusCode).toBe(200);
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.ceo.id);
+  });
+
+  it("won't reassign to an agent from another company", async () => {
+    ctx = await setup();
+    const { domain } = await blockedPair(ctx.worker.id);
+    const other = (await ctx.req("POST", "/api/companies", { name: "Other Co" })).json() as { ceo: { id: string } };
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Reassign", assigneeAgentId: other.ceo.id });
+    expect(r.statusCode).toBe(422);
+    expect(r.body).toContain("Pick someone from the list");
+    const [t] = await ctx.db.select().from(tickets).where(eq(tickets.id, domain.id));
+    expect(t!.assigneeAgentId).toBe(ctx.worker.id);
+  });
+
+  it("a CEO agent can't hand the card back to itself to keep it off the owner's queue", async () => {
+    ctx = await setup();
+    await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    const [before] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    ctx.advance(10 * 60 * 1000);
+    const svc = decisionsService(ctx.db, () => true, ctx.clock);
+    await expect(svc.answer(row!.id, "Let the CEO decide", { settledBy: { agentId: ctx.ceo.id } })).rejects.toThrow("Only the owner");
+    const [after] = await ctx.db.select().from(decisions).where(eq(decisions.id, row!.id));
+    expect((after!.context as { ladder: { since: string } }).ladder.since).toBe((before!.context as { ladder: { since: string } }).ladder.since);
+  });
+
+  it("refuses to hand the card to the CEO when the company has none", async () => {
+    ctx = await setup();
+    await blockedPair(ctx.worker.id);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const [row] = await ctx.queue();
+    await ctx.db.update(agents).set({ role: "worker" }).where(eq(agents.id, ctx.ceo.id));
+    const r = await ctx.req("POST", `/api/decisions/${row!.id}/answer`, { answer: "Let the CEO decide" });
+    expect(r.statusCode).toBe(422);
+    expect(r.body).toContain("no CEO");
+    expect(await ctx.queue()).toHaveLength(1);
   });
 
   it("dropping the dependency frees the waiting ticket", async () => {
@@ -430,5 +500,26 @@ describe("the server ends runs it can't reach", () => {
     ctx.advance(3 * HOUR);
     expect((await ctx.sweep()).lostRuns).toBe(0);
     expect((await row(runId)).endedAt).toBeNull();
+  });
+
+  it("flags a run that has had no ticket for ten minutes to the Scrum Master, saying what woke it (BOS-254)", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    // A ticketless run going for eleven minutes, woken to check a stale card.
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "checking an old card", startedAt: new Date(ctx.clock().getTime() - 11 * 60_000), lastEventAt: new Date(ctx.clock().getTime() - 30_000) });
+    const res = await ctx.sweep();
+    expect(res.longTicketlessRuns.raised).toBe(1);
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(card!.question).toMatch(/CEO has been running for 11 minutes without a ticket .*checking an old card/);
+    // One open card per run, not one per sweep.
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
+  });
+
+  it("leaves a young ticketless run and the owner chat alone", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "wiki upkeep", startedAt: new Date(ctx.clock().getTime() - 5 * 60_000) });
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: null, purpose: "chat", origin: "owner_chat", startedAt: new Date(ctx.clock().getTime() - 30 * 60_000) });
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
   });
 });

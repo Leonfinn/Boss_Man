@@ -323,11 +323,15 @@ export const tickets = pgTable(
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),
     /** Research, wiki, docs or deploy-only work: an empty diff is expected, so review and landing don't insist on a change. */
     noCode: boolean("no_code").notNull().default(false),
+    /** Owner-marked urgent work: it always passes the subscription quota hold (BOS-227). */
+    urgent: boolean("urgent").notNull().default(false),
     /** Bumped by a database trigger whenever state, assignee, title, body, risk or plan-first changes (R81). */
     version: integer("version").notNull().default(1),
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** When an owner action made the state note possibly out of date (BOS-123). */
+    stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
     number: integer("number"),
     /** When system_state last changed; set by a database trigger, so every write path counts (BOS-58). */
@@ -367,6 +371,9 @@ export const decisions = pgTable("decisions", {
   context: jsonb("context").notNull().default({}),
   createdAt: createdAt(),
   answeredAt: timestamp("answered_at", { withTimezone: true }),
+  /** An owner action made this open card possibly out of date (BOS-123); the author is woken to confirm or withdraw it. */
+  staleAt: timestamp("stale_at", { withTimezone: true }),
+  staleReason: text("stale_reason"),
 });
 
 export const engagementStatus = pgEnum("engagement_status", [
@@ -520,7 +527,9 @@ export const runs = pgTable("runs", {
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
-export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama"]);
+export const provider = pgEnum("provider", ["anthropic", "openai", "bedrock", "foundry", "gateway", "openrouter", "ollama", "synthetic"]);
+/** What routine work does when a subscription window passes its hold threshold (BOS-227). */
+export const quotaOverageMode = pgEnum("quota_overage_mode", ["pause", "urgent", "all"]);
 
 export const fundingSources = pgTable("funding_sources", {
   id: id(),
@@ -533,6 +542,16 @@ export const fundingSources = pgTable("funding_sources", {
   cycleAnchor: timestamp("cycle_anchor", { withTimezone: true }),
   /** The credential agents on this source use. */
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Subscription utilisation at which routine work is held (0.8–1, default 0.95). */
+  quotaHoldAt: real("quota_hold_at").notNull().default(0.95),
+  /** Whether extra usage may be spent, and for which work: pause (default), urgent, or all. */
+  quotaOverage: quotaOverageMode("quota_overage").notNull().default("pause"),
+  /** Window names (as the adapter reports them) that never trigger the hold. Empty means all of them can. */
+  quotaDisabledWindows: jsonb("quota_disabled_windows").$type<string[]>().notNull().default([]),
+  /** The owner was told the current hold started; cleared when it lifts. */
+  quotaHeldNotified: boolean("quota_held_notified").notNull().default(false),
+  /** The owner was told credits are in use; cleared when overage stops. */
+  quotaOverageNotified: boolean("quota_overage_notified").notNull().default(false),
   createdAt: createdAt(),
 });
 
@@ -577,6 +596,38 @@ export const quotaSamples = pgTable(
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("quota_samples_source_window_time").on(t.fundingSourceId, t.window, t.observedAt)],
+);
+
+/**
+ * One reading of Synthetic's own quota endpoint (BOS-239), per funding source. The newest row for a
+ * source is the current reading; older ones are the trend inside a period and are pruned after 30 days.
+ */
+export const providerQuotaReadings = pgTable(
+  "provider_quota_readings",
+  {
+    id: id(),
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    used: integer("used").notNull(),
+    limit: integer("limit_limit").notNull(),
+    renewsAt: timestamp("renews_at", { withTimezone: true }),
+    /** When the reading was taken from Synthetic (not when it was read from this table). */
+    takenAt: timestamp("taken_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("provider_quota_readings_source_time").on(t.fundingSourceId, t.takenAt)],
+);
+
+/** A warning the owner already had about a provider's quota, so the same one isn't repeated (BOS-239). */
+export const providerQuotaWarnings = pgTable(
+  "provider_quota_warnings",
+  {
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    /** The period the warning is for, e.g. the renewal time, so a new period warns again. */
+    period: text("period").notNull(),
+    /** 80 or 100. */
+    threshold: integer("threshold").notNull(),
+    warnedAt: timestamp("warned_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.fundingSourceId, t.period, t.threshold] })],
 );
 
 /** "instance" covers every company (R53); its scope_id is the nil UUID. */
@@ -813,6 +864,11 @@ export const workflowChanges = pgTable(
     evidence: jsonb("evidence").$type<string[]>().notNull().default([]),
     approver: text("approver").$type<"ceo" | "owner">().notNull(),
     decisionId: uuid("decision_id").references(() => decisions.id, { onDelete: "set null" }),
+    /** Why the decision went the way it did, and the wiki page (optionally a section, slug#Heading) that explains it (BOS-216). */
+    reason: text("reason"),
+    reasonLink: text("reason_link"),
+    /** Who applied or skipped it. Older changes have none. */
+    decidedBy: text("decided_by").$type<"ceo" | "owner">(),
     status: text("status").$type<"proposed" | "applied" | "skipped" | "kept" | "reverted">().notNull().default("proposed"),
     appliedAt: timestamp("applied_at", { withTimezone: true }),
     checkDueAt: timestamp("check_due_at", { withTimezone: true }),
@@ -1091,12 +1147,20 @@ export const features = pgTable(
     status: featureStatus("status").notNull().default("idea"),
     /** 1 (tiny) to 5 (huge); null until someone sizes it. */
     effort: integer("effort"),
+    /** A person's ranking, 1 (most important) to 5; null until ranked. Separate from the computed priority. */
+    rank: integer("rank"),
+    /** Pinned to the Now / Next / Later roadmap column; null places it from its status and work. */
+    horizon: roadmapHorizon("horizon"),
     /** Driver id to score, 0 to 5. */
     driverScores: jsonb("driver_scores").notNull().default({}),
     milestoneId: uuid("milestone_id").references(() => milestones.id, { onDelete: "set null" }),
     /** Linked to a whole objective instead of one of its milestones. */
     objectiveId: uuid("objective_id").references(() => objectives.id, { onDelete: "set null" }),
     portalVisible: boolean("portal_visible").notNull().default(false),
+    /** A plain-language summary for readers outside the team; null until written. */
+    publicSummary: text("public_summary"),
+    /** Off by default; nothing is published anywhere until a later public roadmap uses it. */
+    showPublicly: boolean("show_publicly").notNull().default(false),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdAt: createdAt(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1270,6 +1334,11 @@ export const activity = pgTable(
     ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "cascade" }),
     kind: text("kind").notNull(),
     summary: text("summary").notNull(),
+    /**
+     * The full record behind a summary that has to be shortened, such as both sides of a skill edit
+     * (BOS-178). Null when the summary says all there is.
+     */
+    detail: jsonb("detail").$type<Record<string, unknown> | null>(),
   },
   (t) => [index("activity_company_at").on(t.companyId, t.at)],
 );
@@ -1383,7 +1452,7 @@ export const skillProposals = pgTable(
     id: id(),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
-    source: text("source").$type<"draft" | "link">().notNull(),
+    source: text("source").$type<"draft" | "link" | "retro">().notNull(),
     sourceUrl: text("source_url"),
     /** For a link: the commit the files were read at. Install re-reads this exact commit, never a branch. */
     pinnedRef: text("pinned_ref"),
@@ -1397,6 +1466,8 @@ export const skillProposals = pgTable(
     proposedByAgentId: uuid("proposed_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     /** Set: this proposal is a new version of that installed skill. */
     replacesSkillId: uuid("replaces_skill_id").references(() => skills.id, { onDelete: "set null" }),
+    /** Fingerprint of the skill this replaces when the proposal was made: install refuses if it was edited since. */
+    replacesBundleHash: text("replaces_bundle_hash"),
     /** Worked out by the system from the files, never taken from the CEO. */
     hasScripts: boolean("has_scripts").notNull(),
     scriptFiles: jsonb("script_files").$type<string[]>().notNull().default([]),

@@ -4,9 +4,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { issueRunToken } from "../src/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
+import { DEFAULT_REVIEW_POLICY } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agentSkills, agents, decisions, skillProposals, skills, tickets } from "../src/db/schema.js";
+import { activity, agentSkills, agents, companies, decisions, skillProposals, skills, tickets } from "../src/db/schema.js";
 import { checkVerdict, hashFiles, numbered, RECONCILE_GRACE_MS, reviewBody, scriptFilesOf } from "../src/services/skill-proposals.js";
 import { conversationLines } from "../src/services/ticket-chat.js";
 import { SKILL_ADD, SKILL_CONDITIONS, SKILL_OVERRIDE, SKILL_REJECT } from "../src/services/decisions.js";
@@ -199,6 +200,38 @@ describe("review", () => {
     await c.db.update(agents).set({ reviewKind: null }).where(eq(agents.id, c.reviewer.id));
     await expect(withScript(c)).rejects.toThrow(/no Security Reviewer/);
     expect(await c.svc.list(c.company.id)).toHaveLength(0);
+  });
+
+  // BOS-220: the owner chose the Security Reviewer in Settings > Reviews, and the agent-page mark was gone.
+  it("sends the review to the agent Settings > Reviews names for security, with no agent-page mark", async () => {
+    const c = (ctx = await setup());
+    await c.db.update(agents).set({ reviewKind: null }).where(eq(agents.id, c.reviewer.id));
+    const setSecurity = (security: string) =>
+      c.db.update(companies).set({ reviewPolicy: { ...DEFAULT_REVIEW_POLICY, high: { ...DEFAULT_REVIEW_POLICY.high, kinds: { security } } } }).where(eq(companies.id, c.company.id));
+    // A cell naming the CEO names nobody here: the CEO proposes skills. The error points to Settings.
+    await setSecurity("ceo");
+    await expect(withScript(c)).rejects.toThrow(/name one in Settings > Reviews/);
+    await setSecurity(c.reviewer.id);
+    const p = await withScript(c);
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(t!.assigneeAgentId).toBe(c.reviewer.id);
+    // The named reviewer can give the verdict, through the tool as well.
+    const asReviewer = await c.mcp(c.reviewer.id);
+    expect(txt(await asReviewer.callTool({ name: "skills", arguments: { action: "proposals" } }))).toContain(p.id);
+    await expect(review(c, p, "recommend")).resolves.toMatchObject({ status: "awaiting_owner" });
+    // Paused, they can't be given a new one.
+    await c.db.update(agents).set({ paused: true }).where(eq(agents.id, c.reviewer.id));
+    await expect(c.svc.propose({ companyId: c.company.id, byAgentId: c.ceo.id, source: "draft", files: [{ path: "SKILL.md", content: b64(md("Other.").replace("tidy", "other")) }], why: "x", agentIds: [c.worker.id] })).rejects.toThrow(/no Security Reviewer available/);
+  });
+
+  it("a Senior Developer security cell sends the review to a senior developer", async () => {
+    const c = (ctx = await setup());
+    await c.db.update(agents).set({ reviewKind: null }).where(eq(agents.id, c.reviewer.id));
+    const [senior] = await c.db.insert(agents).values({ companyId: c.company.id, name: "Sam", role: "worker", agentKind: "claude", template: "senior-dev" }).returning();
+    await c.db.update(companies).set({ reviewPolicy: { ...DEFAULT_REVIEW_POLICY, critical: { ...DEFAULT_REVIEW_POLICY.critical, kinds: { security: "senior-dev" } } } }).where(eq(companies.id, c.company.id));
+    const p = await withScript(c);
+    const [t] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(t!.assigneeAgentId).toBe(senior!.id);
   });
 
   const finding = (o = {}) => ({ file: "run.sh", lineStart: 2, lineEnd: 2, title: "Pipes the internet into a shell", severity: "critical" as const, confidence: "confirmed" as const, behaviour: "Downloads and runs code.", harm: "Anyone can run code as the agent.", fix: "Remove it.", blocks: true, ...o });

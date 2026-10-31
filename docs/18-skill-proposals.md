@@ -10,7 +10,7 @@ The CEO can propose a skill; nothing reaches the library without the owner's dec
 
 **Updates and the old doors (BOS-89).** "Check for updates" (one skill or a pack) no longer writes the library: it makes a proposal like any internet skill. Plain (non-GitHub) links are pinned as `sha256:<hash of the file>` and re-checked at install. Each file shows its sha256 on the review ticket, the decision card and the skill page. A test (`skill-proposals.test.ts`) fails if any code other than `services/skills.ts` writes the skills table, or if the CEO/reviewer code calls anything but `save` and `give` on it.
 
-**Review.** A ticket for the agent marked as the company's security reviewer carries every text file with numbered lines. The verdict (`skills` tool, `review_verdict`) must be for the same bundle hash, and every finding must name a real file and a line range inside it. Format: the wiki page `security/skill-review-standard-bos-87`.
+**Review.** A ticket for the company's security reviewer (an agent Settings > Reviews names for security reviews at any risk level, or one still marked on its agent page; never the CEO or the proposer) carries every text file with numbered lines. The verdict (`skills` tool, `review_verdict`) must be for the same bundle hash, and every finding must name a real file and a line range inside it. Format: the wiki page `security/skill-review-standard-bos-87`.
 
 **Decision.** Decision kind `skill`. "Advise against" offers only "Don't add it" and "Add it anyway, against the advice"; the override is stored on the proposal and logged with who and when. No proposal has a decision until a verdict for its exact files is in (checked again when the owner answers).
 

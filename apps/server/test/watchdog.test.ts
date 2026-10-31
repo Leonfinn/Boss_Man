@@ -428,7 +428,7 @@ describe("the Scrum Master's actions (BOS-58)", () => {
 });
 
 describe("the hourly cap (BOS-58)", () => {
-  it("switches the watchdog off, tells the owner once, and refuses further actions until the owner switches it back on", async () => {
+  it("pauses the watchdog for the hour, tells the owner once, refuses actions in that hour, and resumes by itself after it", async () => {
     await ctx.switchOn({ maxNudgesPerHour: 2 });
     const ts = [];
     for (const title of ["One", "Two", "Three"]) ts.push(await ctx.ticket({ title, stateChangedAt: ctx.ago(130) }));
@@ -438,23 +438,44 @@ describe("the hourly cap (BOS-58)", () => {
     const over = await call({ action: "nudge", ticketId: ts[2]!.id, reason: "third one trips it" });
     expect(textOf(over)).toContain("hourly limit");
     const st = await ctx.watchdog.status(ctx.companyId);
-    expect(st.settings.enabled).toBe(false);
+    // A breach pauses; it does not leave the watchdog switched off.
+    expect(st.settings.enabled).toBe(true);
+    expect(st.pausedUntil).not.toBeNull();
     expect(st.trippedReason).toContain("more than 2 actions");
-    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
+    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("paused itself"))).toHaveLength(1);
     // The trip is the Page-level problem: the owner is paged straight away, once.
     const pages = (await ctx.db.select().from(notifications)).filter((n) => n.level === "page");
-    expect(pages.map((n) => n.title)).toEqual(["The watchdog switched itself off"]);
-    expect(textOf(await call({ action: "nudge", ticketId: ts[2]!.id, reason: "after the trip" }))).toContain("switched off");
-    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("switched itself off"))).toHaveLength(1);
-    // The sweep stays off too.
-    ctx.advance(130);
-    await ctx.db.update(wakes).set({ status: "launched" }).where(eq(wakes.agentId, ctx.sm.id));
+    expect(pages.map((n) => n.title)).toEqual(["The watchdog paused itself for an hour"]);
+    // The cap still holds within the hour: actions and the sweep are refused, and nothing more is sent.
+    expect(textOf(await call({ action: "nudge", ticketId: ts[2]!.id, reason: "after the trip" }))).toContain("paused");
+    expect((await ctx.db.select().from(decisions)).filter((d) => d.question.includes("paused itself"))).toHaveLength(1);
+    const wakesAtTrip = (await ctx.smWakes()).length;
+    const sweptAtTrip = (await ctx.watchdog.status(ctx.companyId)).lastSweepAt ?? new Date(0);
+    ctx.advance(30);
     await ctx.watchdog.run();
-    expect(await ctx.smWakes()).toHaveLength(1);
-    // Switching back on clears the trip.
-    const back = await ctx.switchOn();
-    expect(back.trippedAt).toBeNull();
-    expect(back.settings.enabled).toBe(true);
+    expect(await ctx.smWakes()).toHaveLength(wakesAtTrip);
+    expect((await ctx.watchdog.status(ctx.companyId)).pausedUntil).not.toBeNull();
+    // Once the hour is over the next sweep resumes it with no owner action, and the log is clear again.
+    ctx.advance(31);
+    await ctx.watchdog.run();
+    const after = await ctx.watchdog.status(ctx.companyId);
+    expect(after.trippedAt).toBeNull();
+    expect(after.pausedUntil).toBeNull();
+    expect(after.settings.enabled).toBe(true);
+    expect(after.lastSweepAt!.getTime()).toBeGreaterThan(sweptAtTrip.getTime());
+    expect(textOf(await call({ action: "nudge", ticketId: ts[2]!.id, reason: "next hour works" }))).not.toContain("paused");
+  });
+
+  it("a watchdog the owner switched off during a pause stays off after the hour", async () => {
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    const ts = [await ctx.ticket({ title: "A", stateChangedAt: ctx.ago(130) }), await ctx.ticket({ title: "B", stateChangedAt: ctx.ago(130) })];
+    await ctx.watchdog.run();
+    await call({ action: "nudge", ticketId: ts[0]!.id, reason: "first nudge here" });
+    await call({ action: "nudge", ticketId: ts[1]!.id, reason: "second trips it" });
+    await ctx.watchdog.update(ctx.companyId, { enabled: false });
+    ctx.advance(61);
+    await ctx.watchdog.run();
+    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
   });
 
 
@@ -748,7 +769,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
   });
   const undo = (r: unknown) => ctx.req("POST", `/api/watchdog-actions/${actionId(r)}/undo`, { reason: "Not needed after all." });
 
-  it("a trip on the nudge cap during the sweep ends the sweep: no Scrum Master wake after the watchdog switches itself off", async () => {
+  it("a trip on the nudge cap during the sweep ends the sweep: no Scrum Master wake after the watchdog pauses itself", async () => {
     await ctx.switchOn({ maxNudgesPerHour: 1 });
     const a = await handed({ title: "Twice snoozed" });
     await ctx.switchOn({ maxNudgesPerHour: 1 });
@@ -757,7 +778,7 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, a.id));
     const before = (await ctx.smWakes()).length;
     await ctx.watchdog.run();
-    expect((await ctx.watchdog.status(ctx.companyId)).settings.enabled).toBe(false);
+    expect((await ctx.watchdog.status(ctx.companyId)).pausedUntil).not.toBeNull();
     expect(await ctx.smWakes()).toHaveLength(before);
   });
 
@@ -773,5 +794,101 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     await ctx.db.update(workflowColumns).set({ wipLimit: 1 }).where(eq(workflowColumns.id, col!.id));
     expect((await undo(ask)).statusCode).toBe(200);
     expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+  });
+});
+
+describe("open issues and the timeline (BOS-199)", () => {
+  it("lists the open warnings the badge counts, and settles a finished ticket with a plain note", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Merged one", stateChangedAt: ctx.ago(130) });
+    await ctx.watchdog.run();
+    const res = await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/issues`);
+    expect(res.statusCode).toBe(200);
+    const issues = res.json() as Array<{ ticketId: string; warning: string; holder: string; done: unknown[]; nextText: string }>;
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ ticketId: t.id, holder: "scrum_master" });
+    expect(issues[0]!.warning).toContain("no movement in progress");
+    expect(issues[0]!.nextText).toBe("Checks again");
+    expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(issues.length);
+
+    await ctx.db.update(tickets).set({ systemState: "done", outcome: "completed", mergeCommit: "abc123" }).where(eq(tickets.id, t.id));
+    const after = await ctx.req("GET", `/api/companies/${ctx.companyId}/watchdog/issues`);
+    expect(after.json()).toEqual([]);
+    expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(0);
+    const [flag] = await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id));
+    expect(flag!.status).toBe("closed");
+    const [settled] = await ctx.db.select().from(watchdogActions).where(and(eq(watchdogActions.ticketId, t.id), eq(watchdogActions.kind, "alert_resolved")));
+    expect(settled!.reason).toContain("merged");
+    expect(settled!.reason).toContain("Settled:");
+  });
+
+  it("settles an open alert whose ticket finished, and its warning text has no dangling comma", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Quiet developer", stateChangedAt: ctx.ago(1) });
+    const question = 'Zippy has sent nothing for 5 minutes while working on "Quiet developer". It may be stuck, or busy with a long command.';
+    expect(await ctx.alerts.raise({ companyId: ctx.companyId, question, ticketId: t.id, options: ["Keep waiting", "Cancel run"], recommended: "Keep waiting", from: "scrum_master", duty: true })).not.toBeNull();
+    const before = await ctx.watchdog.issues(ctx.companyId);
+    const issue = before.find((x) => x.ticketId === t.id)!;
+    expect(issue.warning).toBe(question.split(". ")[0] + ".");
+    expect(issue.warning.endsWith(",")).toBe(false);
+    expect(issue.holder).toBe("scrum_master");
+
+    await ctx.db.update(tickets).set({ systemState: "done", outcome: "completed", mergeCommit: "def456" }).where(eq(tickets.id, t.id));
+    const after = await ctx.watchdog.issues(ctx.companyId);
+    expect(after.some((x) => x.ticketId === t.id)).toBe(false);
+    const alert = (await ctx.db.select().from(decisions).where(and(eq(decisions.companyId, ctx.companyId), sql`${decisions.context}->'ladder' is not null`)))[0]!;
+    expect(alert.status).toBe("answered");
+  });
+
+  it("keeps a stuck ticket open when a run or activity happened after the warning", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Still stuck", stateChangedAt: ctx.ago(130) });
+    await ctx.watchdog.run();
+    const flagged = (await ctx.watchdog.issues(ctx.companyId)).find((x) => x.ticketId === t.id);
+    expect(flagged).toBeTruthy();
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, startedAt: ctx.now() });
+    await ctx.db.insert(activity).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, kind: "message", summary: "Woke and kept working", at: ctx.now() });
+    const after = await ctx.watchdog.issues(ctx.companyId);
+    expect(after.some((x) => x.ticketId === t.id)).toBe(true);
+    expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, t.id)))[0]!.status).toBe("open");
+  });
+
+  it("does not auto-answer an owner-rung alert on a live ticket", async () => {
+    const t = await ctx.ticket({ title: "Owner is deciding", stateChangedAt: ctx.ago(1) });
+    const ladder = { rung: "owner", since: ctx.now().toISOString(), minutes: 5, ticketId: t.id, about: [], hops: [] };
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "The deploy is stuck. Keep waiting?", options: ["Keep waiting"], recommendedOption: "Keep waiting", context: { type: "alert", ladder } }).returning();
+    await ctx.db.insert(runs).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, startedAt: ctx.now() });
+    await ctx.db.insert(activity).values({ companyId: ctx.companyId, agentId: ctx.dev.id, ticketId: t.id, kind: "message", summary: "A nudge reached the ticket", at: ctx.now() });
+    const issues = await ctx.watchdog.issues(ctx.companyId);
+    expect(issues.some((x) => x.ticketId === t.id && x.holder === "owner")).toBe(true);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+  });
+
+  it("leaves plan and permission hand-overs on the ladder alone", async () => {
+    const t = await ctx.ticket({ title: "Needs approval", stateChangedAt: ctx.ago(1) });
+    const ladder = { rung: "ceo", since: ctx.now().toISOString(), minutes: 5, ticketId: t.id, about: [], hops: [] };
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "permission", question: "Allow this command?", options: ["Allow"], recommendedOption: "Allow", context: { type: "permission", runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID(), ladder } }).returning();
+    expect(await ctx.watchdog.issues(ctx.companyId)).toEqual([]);
+    await ctx.db.update(tickets).set({ systemState: "done", outcome: "completed" }).where(eq(tickets.id, t.id));
+    expect((await ctx.watchdog.status(ctx.companyId)).openFlags).toBe(0);
+    expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d!.id)))[0]!.status).toBe("open");
+  });
+
+  it("labels each timeline entry with its issue, its open or settled state, and a repeat warning on the same ticket", async () => {
+    const t = await ctx.ticket({ title: "Two warnings", stateChangedAt: ctx.ago(1) });
+    const opened = ctx.now();
+    const [first] = await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: t.id, rule: "stale_in_progress", status: "closed", openedAt: new Date(opened.getTime() - 60_000), closedAt: opened, dueAt: opened }).returning();
+    const [second] = await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: t.id, rule: "review_loop", status: "open", openedAt: opened, dueAt: opened }).returning();
+    await ctx.db.insert(watchdogActions).values([
+      { companyId: ctx.companyId, kind: "nudge", ticketId: t.id, flagId: first!.id, reason: "first warning action", createdAt: new Date(opened.getTime() - 30_000) },
+      { companyId: ctx.companyId, kind: "nudge", ticketId: t.id, flagId: second!.id, reason: "second warning action", createdAt: opened },
+    ]);
+    const rows = await ctx.watchdog.actions(ctx.companyId, { ticketId: t.id });
+    const a = rows.find((r) => r.reason === "first warning action")!;
+    const b = rows.find((r) => r.reason === "second warning action")!;
+    expect(a.issueStatus).toBe("settled");
+    expect(b.issueStatus).toBe("open");
+    expect(a.issueLabel).toMatch(/1st warning on .* today/);
+    expect(b.issueLabel).toMatch(/2nd warning on .* today/);
   });
 });

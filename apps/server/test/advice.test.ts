@@ -191,11 +191,79 @@ describe("ask the CEO for advice", () => {
     expect((await row(c, d.id)).status).toBe("open");
   });
 
-  it("has no ask for a permission request", async () => {
+  it("asks the CEO for advice on a permission request, and shows the advice on the card", async () => {
     const c = (ctx = await setup());
-    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "permission", question: "Run rm?", options: ["Allow once", "Deny"], recommendedOption: "Deny", context: { type: "permission" } }).returning();
-    expect((await c.req("POST", `/api/decisions/${d!.id}/ask-advice`, {})).statusCode).toBe(422);
-    expect((await row(c, d!.id)).context).toEqual({ type: "permission" });
+    const [d] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "permission",
+        question: "Run dd?",
+        options: ["Allow once", "Deny"],
+        recommendedOption: "Deny",
+        tier: "owner",
+        context: { type: "permission", runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID(), explain: { title: "Engineer wants to run a command", summary: "Only reads information", effect: "reads", command: "dd if=/tmp/session.db count=40" } },
+      })
+      .returning();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/ask-advice`, {})).statusCode).toBe(200);
+    const [w] = await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id));
+    expect(w!.note).toContain("dd if=/tmp/session.db count=40");
+    expect(w!.note).toContain("outcome advice");
+    const ceo = await c.mcp(c.ceo.id);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "advice", what: "Copies part of a database file into another file.", needed: "No, this ticket doesn't need it.", recommendation: "deny", why: "It reads data the ticket can get another way." } });
+    expect(textOf(r)).toMatch(/Advice saved/);
+    const after = await row(c, d!.id);
+    expect(after.status).toBe("open");
+    expect(after.context).toMatchObject({ advice: { state: "advised", recommendation: "deny", why: "It reads data the ticket can get another way." } });
+    expect((await c.db.select().from(activity).where(eq(activity.kind, "decision_advised"))).length).toBe(1);
+    // An owner-tier permission request stays the owner's: the CEO can advise, not settle it.
+    expect(isError(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "handled", summary: "I decided this on the owner's behalf.", answer: "Allow once" } }))).toBe(true);
+    expect((await row(c, d!.id)).status).toBe("open");
+  });
+
+  it("settles a permission request the CEO is allowed to settle", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db
+      .insert(decisions)
+      .values({
+        companyId: c.company.id,
+        kind: "permission",
+        question: "Clean up /tmp?",
+        options: ["Allow once", "Deny"],
+        recommendedOption: "Allow once",
+        tier: "ceo",
+        context: { type: "permission", runnerId: randomUUID(), runId: randomUUID(), requestId: randomUUID(), tempCleanup: true, explain: { title: "Engineer wants to run a command", summary: "Deletes temp files", effect: "deletes", command: "rm /tmp/probe" } },
+      })
+      .returning();
+    expect((await c.req("POST", `/api/decisions/${d!.id}/ask-advice`, {})).statusCode).toBe(200);
+    const ceo = await c.mcp(c.ceo.id);
+    expect(textOf(await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, outcome: "handled", summary: "It only deletes its own temp file, so allow it.", answer: "Allow once" } }))).toMatch(/Handled/);
+    expect(await row(c, d!.id)).toMatchObject({ status: "answered", answer: "Allow once" });
+  });
+
+  it("a skill card can't be put to the CEO, since the CEO proposed it (BOS-168)", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db.insert(decisions).values({ companyId: c.company.id, kind: "skill", question: "Add this skill?", options: ["Add", "Reject"], recommendedOption: "Add", raisedByAgentId: c.ceo.id, context: { type: "skill", proposalId: randomUUID() } }).returning();
+    const r = await c.req("POST", `/api/decisions/${d!.id}/ask-advice`, {});
+    expect(r.statusCode).toBe(422);
+    expect((r.json() as { message: string }).message).toMatch(/ask the CEO about it in chat/);
+    expect((await row(c, d!.id)).context).toEqual({ type: "skill", proposalId: expect.any(String) });
+    expect((await c.db.select().from(wakes).where(eq(wakes.agentId, c.ceo.id))).length).toBe(0);
+  });
+
+  it("a skill card is refused a reissue, and the card is left exactly as it was (BOS-168)", async () => {
+    const c = (ctx = await setup());
+    const [d] = await c.db
+      .insert(decisions)
+      .values({ companyId: c.company.id, kind: "skill", question: "Add this skill?", options: ["Add", "Reject"], recommendedOption: "Add", raisedByAgentId: c.ceo.id, context: { type: "skill", proposalId: randomUUID(), advice: { state: "asking", askedAt: new Date().toISOString() } } })
+      .returning();
+    const ceo = await c.mcp(c.ceo.id);
+    const r = await ceo.callTool({ name: "decisions", arguments: { action: "advise", id: d!.id, ...reissue } });
+    expect(isError(r)).toBe(true);
+    expect(textOf(r)).toMatch(/proposed this skill/);
+    expect((await row(c, d!.id)).status).toBe("open");
+    expect((await row(c, d!.id)).question).toBe("Add this skill?");
+    expect((await row(c, d!.id)).options).toEqual(["Add", "Reject"]);
   });
 
   it("a timeout after the CEO has advised changes nothing", async () => {

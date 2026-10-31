@@ -2,6 +2,7 @@
 // Productboard (notes whose highlighted passages are linked to features with an importance,
 // a demand score from those links, criteria scored 0 to 5, and a portal); the scoring below is
 // Boss Man's own.
+import type { Horizon } from "./roadmap.js";
 
 export const IMPORTANCE = ["nice_to_have", "important", "critical"] as const;
 export type Importance = (typeof IMPORTANCE)[number];
@@ -10,6 +11,19 @@ export const IMPORTANCE_LABEL: Record<Importance, string> = { nice_to_have: "Nic
 
 export const FEATURE_STATUSES = ["idea", "considering", "planned", "in_progress", "released", "declined"] as const;
 export type FeatureStatus = (typeof FEATURE_STATUSES)[number];
+
+/**
+ * Where a feature sits on the roadmap's Now / Next / Later columns. A person can pin it;
+ * otherwise it follows its status: work in progress is Now, planned work is Next, and an
+ * idea or one still being considered is Later. Released features sit in their own list.
+ */
+export function featureHorizon(f: { status: FeatureStatus; horizon: Horizon | null }): Horizon | "released" {
+  if (f.status === "released") return "released";
+  if (f.horizon) return f.horizon;
+  if (f.status === "in_progress") return "now";
+  if (f.status === "planned") return "next";
+  return "later";
+}
 
 export const NOTE_SOURCES = ["owner", "chat", "agent", "portal", "email", "import"] as const;
 export type NoteSource = (typeof NOTE_SOURCES)[number];

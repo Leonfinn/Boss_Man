@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, runTokens, wakes } from "../src/db/schema.js";
+import { decisions, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -187,6 +187,125 @@ describe("scheduler", () => {
     expect(low.notBefore?.getTime()).toBe(resets * 1000);
   });
 
+  it("runs an urgent ticket at 96% while routine work is held", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { status: "rejected", rateLimitType: "seven_day", unifiedWindows: { seven_day: { utilization: 0.96, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+    const routine = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Routine work", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1, deferred: 1 });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, urgent.id)))[0]!.systemState).toBe("in_progress");
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, routine.id)))[0]!.systemState).toBe("backlog");
+  });
+
+  it("holds even an urgent ticket under the default pause once the window is at its limit", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, urgent.id)))[0]!.systemState).toBe("backlog");
+  });
+
+  it("lets routine work through windows the owner switched off, and past a raised threshold", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.85, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    // 85% is under the default 95%, so it runs.
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+    // Raise nothing: switch the only window off and add a fresh full reading.
+    await ctx.req("PATCH", `/api/funding-sources/${sub.id}`, { quotaDisabledWindows: ["seven_day"] });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+  });
+
+  it("with extra usage set to urgent only, runs urgent work at 100% but holds routine work", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic", quotaOverage: "urgent" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: ctx.ceo.id })).json();
+    const routine = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Routine work", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1, deferred: 1 });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, urgent.id)))[0]!.systemState).toBe("in_progress");
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, routine.id)))[0]!.systemState).toBe("backlog");
+  });
+
+  it("keeps all work running when the owner allows extra usage for it", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic", quotaOverage: "all" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+  });
+
+  it("releases a quota-held wake when a high-priority note joins it", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2, note: "routine" });
+    await ctx.req("POST", "/api/scheduler/tick");
+    const held = (await ctx.db.select().from(wakes))[0]!;
+    expect(held.status).toBe("deferred");
+    await ctx.scheduler.notify(ctx.ceo.id, { reason: held.reason, note: "Important", priority: 3 });
+    const [released] = await ctx.db.select().from(wakes).where(eq(wakes.id, held.id));
+    expect(released).toMatchObject({ status: "queued", statusReason: null });
+  });
+
+  it("tells the owner once when the hold starts and once when it lifts", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    const meta = (w: number) => ({ "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: w, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.99) });
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(notifications)).filter((n) => /Routine work paused/.test(n.title))).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 5));
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: meta(0.2) });
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(notifications)).filter((n) => /running again/.test(n.title))).toHaveLength(1);
+  });
+
+  it("says once that extra-usage credits are being used", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", "/api/scheduler/tick");
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(notifications)).filter((n) => /credits are now being used/.test(n.title))).toHaveLength(1);
+  });
+
+  it("runs a held ticket now when the owner asks", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Held work", assigneeAgentId: ctx.ceo.id })).json();
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("backlog");
+    expect((await ctx.req("POST", `/api/tickets/${t.id}/run-now`)).json()).toEqual({ released: 1 });
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+  });
+
+  it("marks a ticket urgent only through the owner path and the managers' tool", async () => {
+    ctx = await setup();
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent later" })).json();
+    await ctx.req("PATCH", `/api/tickets/${t.id}`, { urgent: true });
+    const [row] = await ctx.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(row!.urgent).toBe(true);
+  });
+
   it("tells an agent on a ticket to save its state note before ending, but not one with no ticket", async () => {
     ctx = await setup({ instance: 2 });
     const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
@@ -305,5 +424,119 @@ describe("scheduler", () => {
     await ctx.scheduler.wake({ agentId: worker.id, reason: "x" });
     await ctx.scheduler.tick();
     expect(ctx.commands).toHaveLength(2); // the test's instance: 1 would have allowed one
+  });
+
+  it("starts an urgent ticket even when the agent's older wakes are held by the quota hold (BOS-253)", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("PATCH", `/api/agents/${worker.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.96, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+
+    // The agent already has routine wakes held by the quota hold.
+    await ctx.scheduler.wake({ agentId: worker.id, ticketId: null, reason: "check due", note: "old" });
+    await ctx.scheduler.wake({ agentId: worker.id, ticketId: null, reason: "retro", note: "older" });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 2 });
+    const heldRoutine = (await ctx.db.select().from(wakes)).filter((w) => w.status === "deferred");
+    expect(heldRoutine.map((w) => w.reason).sort()).toEqual(["check due", "retro"]);
+
+    // Assigning an urgent ticket gives it its own queued wake, at the high priority.
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: worker.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+    await ctx.scheduler.notify(worker.id, { ticketId: urgent.id, reason: "assigned", note: "The owner assigned this to you." });
+    const own = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id);
+    expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({ status: "queued" });
+
+    // The next pass launches the urgent ticket; the routine wakes stay held.
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+    expect(ctx.commands.map((c) => c.agentId)).toEqual([worker.id]);
+    const after = await ctx.db.select().from(wakes);
+    expect(after.filter((w) => w.ticketId === urgent.id)[0]!.runId).toBeTruthy();
+    expect(after.filter((w) => w.ticketId === null && w.status === "deferred")).toHaveLength(2);
+  });
+
+  it("an urgent ticket's nudge and the owner's message both pass the hold (BOS-253)", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("PATCH", `/api/agents/${worker.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 0.96, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.scheduler.wake({ agentId: worker.id, reason: "retro", note: "older" });
+    await ctx.scheduler.tick();
+
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: worker.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+    // The assignment's wake starts the work; it ends, and the price is still over the hold.
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+    await ctx.endRun(ctx.commands[0]!.runId);
+    await flush();
+
+    // The owner writes on the urgent ticket: the assignee is woken through the hold.
+    await ctx.req("POST", `/api/tickets/${urgent.id}/messages`, { text: "pick this up" });
+    const own = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id && w.status === "queued");
+    expect(own).toHaveLength(1);
+    expect(own[0]).toMatchObject({ status: "queued" });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+    await ctx.endRun(ctx.commands[0]!.runId);
+    await flush();
+
+    // A nudge about the same urgent ticket also starts the agent, not a held wait.
+    const [run] = await ctx.db.select().from(runs).limit(1);
+    const res = await ctx.scheduler.nudge({ runId: run!.id, fromAgentId: ctx.ceo.id, to: worker.id, ticketId: urgent.id, why: "Handle this one now, please." });
+    expect(res).toMatchObject({ ok: true });
+    expect((await ctx.db.select().from(wakes)).find((w) => w.id === (res as { wakeId: string }).wakeId)).toMatchObject({ status: "queued" });
+  });
+
+  it("Run now starts a held ticket whose wake was merged into its agent's other held wake (BOS-253)", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: true });
+    // The agent is already held by its routine work, and the new ticket's wake was merged into that
+    // wake (BOS-252): nothing waiting names the ticket.
+    await ctx.db.insert(wakes).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, reason: "retro", status: "deferred", statusReason: "subscription seven_day window nearly used up", notBefore: new Date(Date.now() + 3_600_000), priority: 2 });
+    const t = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Held work", assigneeAgentId: ctx.ceo.id, state: "ready" })).json();
+    await ctx.db.update(wakes).set({ ticketId: null }).where(eq(wakes.ticketId, t.id));
+    expect((await ctx.db.select().from(wakes)).filter((w) => w.ticketId === t.id)).toHaveLength(0);
+    // The page still offers Run now because its agent is held, and Run now starts this ticket.
+    const page = (await ctx.req("GET", `/api/tickets/${t.id}`)).json();
+    expect(page.quotaHeldUntil).toBeTruthy();
+    expect((await ctx.req("POST", `/api/tickets/${t.id}/run-now`)).json()).toEqual({ released: 1 });
+    await ctx.req("POST", `/api/companies/${ctx.company.id}/pause`, { paused: false });
+    await ctx.req("POST", "/api/scheduler/tick");
+    expect((await ctx.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).toBe("in_progress");
+  });
+
+  it("server status lists an urgent wake that is waiting, with its ticket and why", async () => {
+    ctx = await setup();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix", assigneeAgentId: worker.id })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true });
+    ctx.setOnline(false);
+    await ctx.scheduler.notify(worker.id, { ticketId: urgent.id, reason: "assigned", note: "The owner assigned this to you." });
+    await ctx.scheduler.tick();
+    const status = await ctx.serverStatus.status(ctx.company.id);
+    expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, agent: "Engineer", held: "runner offline" })]);
+  });
+
+  it("holds an urgent ticket assigned after it was marked urgent under the default pause, and shows why (BOS-253)", async () => {
+    ctx = await setup({ agent: 5 });
+    const sub = (await ctx.req("POST", "/api/funding-sources", { name: "Max", kind: "subscription", provider: "anthropic" })).json();
+    const worker = (await ctx.req("POST", `/api/companies/${ctx.company.id}/agents`, { name: "Engineer" })).json();
+    await ctx.req("PATCH", `/api/agents/${worker.id}`, { fundingSourceId: sub.id });
+    await ctx.req("POST", "/api/quota-samples", { fundingSourceId: sub.id, claudeMeta: { "_claude/rateLimit": { overageInUse: true, unifiedWindows: { seven_day: { utilization: 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } } });
+    // The ticket is made urgent before any wake exists, then assigned: the wake is queued at the
+    // usual priority and the quota check still reaches it, so "pause" holds it.
+    const urgent = (await ctx.req("POST", `/api/projects/${ctx.project.id}/tickets`, { title: "Urgent fix" })).json();
+    await ctx.req("PATCH", `/api/tickets/${urgent.id}`, { urgent: true, assigneeAgentId: worker.id });
+    await ctx.scheduler.notify(worker.id, { ticketId: urgent.id, reason: "assigned", note: "The owner assigned this to you." });
+    expect((await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id)[0]).toMatchObject({ status: "queued", priority: 2 });
+    expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    const [held] = (await ctx.db.select().from(wakes)).filter((w) => w.ticketId === urgent.id);
+    expect(held!.statusReason).toBe("subscription seven_day window nearly used up");
+    const status = await ctx.serverStatus.status(ctx.company.id);
+    expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, held: "subscription seven_day window nearly used up" })]);
   });
 });

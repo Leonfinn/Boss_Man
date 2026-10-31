@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { featureHorizon, HORIZONS, type Horizon } from "@boss-man/shared";
 import {
   api,
   FEATURE_STATUS_LABEL,
@@ -20,6 +21,7 @@ import { when } from "./Runs";
 
 export const STATUS_TONE: Record<FeatureStatus, string> = { idea: "", considering: "blue", planned: "blue", in_progress: "amber", released: "green", declined: "red" };
 const EFFORT = ["", "Tiny", "Small", "Medium", "Large", "Huge"];
+const HORIZON_LABEL: Record<Horizon, string> = { now: "Now", next: "Next", later: "Later" };
 
 /** A 0 to 5 score, or unscored. */
 function ScoreSelect({ value, onChange, label }: { value: number | null | undefined; onChange: (v: number | null) => void; label: string }) {
@@ -537,8 +539,14 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   const settings = usePoll((signal) => api<FeedbackSettingsView>(`/api/companies/${companyId}/feedback-settings`, { signal }), 60_000, `fs-page-${companyId}`);
   const tree = usePoll((signal) => api<Tree>(`/api/companies/${companyId}/objectives`, { signal }), 120_000, `tree-f-${companyId}`);
   const [editing, setEditing] = useState<{ title: string; description: string } | null>(null);
+  const [summaryDraft, setSummaryDraft] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const patch = (body: Record<string, unknown>) => void api(`/api/features/${id}`, { method: "PATCH", body }).then(() => (setError(null), data.reload()), (err: Error) => setError(err.message));
+  const saveSummary = (summary: string) =>
+    void api(`/api/features/${id}`, { method: "PATCH", body: { publicSummary: summary.trim() || null } }).then(
+      () => (setError(null), setSummaryDraft(null), data.reload()),
+      (err: Error) => setError(err.message),
+    );
   if (data.error) return <p className="error">{data.error.status === 404 ? "There's no such feature." : data.error.message}</p>;
   const d = data.data;
   if (!d) return null;
@@ -546,6 +554,7 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
   const parents = (list.data?.features ?? []).filter((x) => !x.parentId && x.id !== id);
   const hasChildren = d.subfeatures.length > 0;
   const scored = d.drivers.filter((x) => f.driverScores[x.id] != null && x.weight > 0);
+  const autoColumn = featureHorizon(f);
   return (
     <>
       <header className="page-head">
@@ -692,6 +701,29 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
             <label htmlFor="f-milestone">Objective or milestone</label>
             <GoalSelect id="f-milestone" tree={tree.data ?? []} value={f} onChange={patch} />
           </div>
+          <div className="field">
+            <label htmlFor="f-column">Roadmap column</label>
+            <select id="f-column" value={f.horizon ?? "auto"} onChange={(e) => patch({ horizon: e.target.value === "auto" ? null : e.target.value })}>
+              <option value="auto">Automatic ({autoColumn === "released" ? "Released" : HORIZON_LABEL[autoColumn]})</option>
+              {HORIZONS.map((h) => (
+                <option key={h} value={h}>
+                  {HORIZON_LABEL[h]}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="f-rank">Rank</label>
+            <select id="f-rank" value={f.rank ?? ""} onChange={(e) => patch({ rank: e.target.value === "" ? null : Number(e.target.value) })}>
+              <option value="">Not ranked</option>
+              {[1, 2, 3, 4, 5].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                  {n === 1 ? " (highest)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 14 }}>
           <input type="checkbox" checked={f.portalVisible} onChange={(e) => patch({ portalVisible: e.target.checked })} />
@@ -702,6 +734,30 @@ function FeaturePage({ id, companyId, go }: { id: string; companyId: string; go:
           {scored.map((x) => `; ${x.name} ${f.driverScores[x.id]}/5 at weight ${x.weight}`).join("")}. Value {f.value.toFixed(1)}, × 3 ÷ effort {f.effort ?? 3} = priority {f.priority.toFixed(1)}.
         </p>
         {error && <p className="error">{error}</p>}
+      </section>
+
+      <section className="card" aria-labelledby="f-public-h" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <h2 id="f-public-h" style={{ fontSize: 17, fontWeight: 600 }}>
+          Public roadmap
+        </h2>
+        <p className="muted" style={{ fontSize: 13 }}>
+          A plain-language summary for readers outside the team. Nothing is published by Boss Man yet; these fields are ready for a public roadmap.
+        </p>
+        <div className="field">
+          <label htmlFor="f-public-summary">Public summary</label>
+          <textarea id="f-public-summary" rows={4} maxLength={2000} value={summaryDraft ?? f.publicSummary ?? ""} onChange={(e) => setSummaryDraft(e.target.value)} />
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button type="button" className="btn small" disabled={summaryDraft === null || summaryDraft.trim() === (f.publicSummary ?? "")} onClick={() => saveSummary(summaryDraft ?? "")}>
+            Save summary
+          </button>
+          <label style={{ display: "flex", gap: 6, alignItems: "center", minHeight: 44, fontSize: 14 }}>
+            <input type="checkbox" checked={f.showPublicly} disabled={!(f.publicSummary ?? "").trim()} onChange={(e) => patch({ showPublicly: e.target.checked })} />
+            Show publicly
+          </label>
+          {f.showPublicly && <span className="tag green">On</span>}
+        </div>
+        {!(f.publicSummary ?? "").trim() && <p className="muted" style={{ fontSize: 13 }}>Write and save a public summary before showing it publicly.</p>}
       </section>
 
       <section className="card" aria-labelledby="f-insights-h" style={{ display: "flex", flexDirection: "column", gap: 10 }}>

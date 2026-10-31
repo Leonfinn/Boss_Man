@@ -27,7 +27,9 @@ import { secretGrants, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
-import { maintenanceService } from "./services/maintenance.js";
+import { getHold, maintenanceService } from "./services/maintenance.js";
+import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
+import { serverStatusService } from "./services/server-status.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
@@ -55,6 +57,7 @@ import { dashboardService } from "./services/dashboard.js";
 import { RetroError, retroService } from "./services/retro.js";
 import { workflowService } from "./services/workflow.js";
 import { SkillError, skillsService } from "./services/skills.js";
+import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
@@ -174,16 +177,25 @@ async function serveWeb(app: FastifyInstance, root: string) {
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
   const app = Fastify({ logger: opts.logger ?? false });
+  // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
+  const errorBuffer = createErrorBuffer();
+  const logError = app.log.error.bind(app.log);
+  app.log.error = ((...args: unknown[]) => {
+    const message = logMessage(args);
+    if (message) errorBuffer.push(message, logCompany(args));
+    return logError(...(args as Parameters<typeof logError>));
+  }) as typeof app.log.error;
   await app.register(cookie);
   await app.register(websocket);
 
   const secretsSvc = secretsService(db, master, opts.liveValidator);
-  const funding = fundingService(db);
+  const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
   const notesSvc = notesService(db);
   const agentsSvc = agentsService(db, {
     now: opts.now,
     notify: (n) => notes.notify(n),
+    catalog: (companyId) => models.forCompany(companyId),
     // Tickets the CEO planned for a hire go to them once hired; one already taken or finished is left alone.
     assignPlanned: async (companyId, hired, ticketIds) => {
       for (const id of ticketIds) {
@@ -257,6 +269,7 @@ export async function buildApp(opts: AppOptions) {
     workspaceRoot: opts.workspaceRoot,
     now: opts.now,
     quietHours: async () => (await notes.getSettings()).quietHours,
+    notifyOwner: (n) => notes.notify({ ...n, agentId: null }),
     tickOnWake: opts.tickOnWake,
     log: (m) => app.log.error(m),
     // Loop and runaway alerts go up the alert ladder (BOS-64): Scrum Master, CEO, then the owner.
@@ -287,6 +300,21 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.warn(m),
   });
   decisionsSvc.setMaintenanceHook(maintenance);
+  const serverStatus = serverStatusService(db, {
+    role: () => leader.role(),
+    isConnected: (id) => runners.isConnected(id),
+    deploy: () => selfDeploy.overview(),
+    hold: async () => {
+      const h = await getHold(db);
+      return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
+    },
+    errors: errorBuffer,
+    // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
+    syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
+    commit: process.env.BOSSMAN_COMMIT || "dev",
+    startedAt: new Date(STARTED_AT),
+    now: opts.now,
+  });
   const engagementsSvc = engagementsService(db, { release: (ticketId) => decisionsSvc.release(ticketId), now: opts.now });
   engagementsSvc.setWakeHook((w) => scheduler.wake(w));
   decisionsSvc.setEngagementHook((id, approved) => engagementsSvc.approve(id, approved));
@@ -313,6 +341,7 @@ export async function buildApp(opts: AppOptions) {
   decisionsSvc.setDeployHook((id, approved) => deploysSvc.approve(id, approved));
   decisionsSvc.setSelfDeployHook(selfDeploy);
   decisionsSvc.setAgentHook((ctx, companyId, approved) => agentsSvc.onDecision(ctx, companyId, approved));
+  decisionsSvc.setModelChangeHook((ctx, companyId, config) => agentsSvc.applyModelChange(ctx, companyId, config));
   decisionsSvc.setTeamPlanHook((ctx, companyId, picks) => agentsSvc.hireTeam(companyId, picks.map((i) => ctx.hires[i]!), ctx.byAgentId, (agentId, skill) => skillsSvc.give(companyId, skill, agentId, ctx.byAgentId)));
   const disk = diskService(db, { send: (runnerId, command) => runners.send(runnerId, command), limits: opts.diskLimits, now: opts.now });
   async function quotaWatch(fundingSourceId: string) {
@@ -337,26 +366,34 @@ export async function buildApp(opts: AppOptions) {
       });
     }
   }
+  // Synthetic's own quota is cached on the server and read again at most every 5 minutes (BOS-239).
+  // Every run end asks for a refresh, whatever the agent's provider: it is cheap because the reading
+  // is served from the cache inside the 5-minute window, and a Synthetic run is the case that moved
+  // the plan's counter. It warns the owner once per period at 80% and 100%.
+  async function refreshSyntheticQuota() {
+    const ownerTz = (await notes.getSettings()).quietHours?.timeZone ?? OWNER_TZ;
+    await funding.refreshSynthetic((n) => notes.notify({ companyId: null, agentId: null, ...n }), ownerTz);
+  }
   runners.onEvent((runner, event) => {
     // CEO continuity: a chapter follows its runs' sessions and context use.
-    if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err }, "chapter update failed"));
-    if (event.type === "run.context") void chapters.onContext(event.runId, event.used, event.size).catch((err) => app.log.error({ err }, "chapter update failed"));
-    if (event.type === "run.ended") void chapters.onRunEnded(event.runId).catch((err) => app.log.error({ err }, "chapter close failed"));
+    if (event.type === "run.started") void chapters.onRunStarted(event.runId, event.acpSessionId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
+    if (event.type === "run.context") void chapters.onContext(event.runId, event.used, event.size).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter update failed"));
+    if (event.type === "run.ended") void chapters.onRunEnded(event.runId).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chapter close failed"));
     // The owner chat's answers.
     if (event.type === "run.update" && (event.update as { kind?: string } | null)?.kind === "agent_message") {
-      void chat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "chat reply failed"));
-      void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "PA relay failed"));
-      void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err }, "ticket reply failed"));
+      void chat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat reply failed"));
+      void pa.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA relay failed"));
+      void ticketChat.onAgentMessage(event.runId, String((event.update as { text?: unknown }).text ?? "")).catch((err) => app.log.error({ err, companyId: runner.companyId }, "ticket reply failed"));
     }
-    if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err }, "chat end failed"));
-    if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err }, "PA fail-open failed"));
+    if (event.type === "run.ended") void chat.onRunEnded(event.runId, event.error, !!event.interrupted).catch((err) => app.log.error({ err, companyId: runner.companyId }, "chat end failed"));
+    if (event.type === "run.ended") void pa.onRunEnded(event.runId, event.error).catch((err) => app.log.error({ err, companyId: runner.companyId }, "PA fail-open failed"));
     // A subscription window set to run out before it resets: tell the owner once (R78).
     if (event.type === "run.quota") void quotaWatch(event.fundingSourceId).catch((err) => app.log.error({ err }, "quota forecast failed"));
     // What each agent kind offers, for the model picker (R60).
-    if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err }, "model list failed"));
+    if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err, companyId: runner.companyId }, "model list failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
-      void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err }, "disk report handling failed"));
+      void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "disk report handling failed"));
     }
     if (event.type === "run.ended") {
       // A deploy whose run ended without a report is failed, which also ends its secrets.
@@ -372,7 +409,10 @@ export async function buildApp(opts: AppOptions) {
         })
         .then(() => (event.interrupted ? null : scheduler.afterTicketRun(event.runId)))
         .then(() => scheduler.tick())
-        .catch((err) => app.log.error({ err }, "run-ended handling failed"));
+        .catch((err) => app.log.error({ err, companyId: runner.companyId }, "run-ended handling failed"));
+      // A run ended; ask for a quota refresh. Any provider ends here, but the reading is cached for
+      // 5 minutes so only a refresh after a Synthetic run actually calls Synthetic (BOS-239).
+      void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
   });
   const sweeps = sweepService(db, {
@@ -392,7 +432,7 @@ export async function buildApp(opts: AppOptions) {
   const work = workService(db, {
     // A blocked ticket wakes its assignee when it is freed, not when it is assigned.
     onAssigned: async (t) => (t.systemState === "blocked" ? null : scheduler.notify(t.assigneeAgentId!, { ticketId: t.id, reason: "assigned" })),
-    onDone: (t) => scheduler.onTicketDone(t.id),
+    onDone: (t) => Promise.all([scheduler.onTicketDone(t.id), decisionsSvc.withdrawMergeCardsForTicket(t.id)]),
     onFeature: (id) => feedback.syncFeature(id),
     now: opts.now,
   });
@@ -400,7 +440,7 @@ export async function buildApp(opts: AppOptions) {
   const skillProposals = skillProposalsService(db, skillsSvc, {
     createTicket: (projectId, input) => work.createTicket(projectId, input),
     raiseDecision: (input, tx) => decisionsSvc.raiseSkill(input, tx),
-    withdrawDecision: (id) => decisionsSvc.withdraw(id),
+    withdrawDecision: (id) => decisionsSvc.withdrawSkill(id),
     tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
     closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
     now: opts.now,
@@ -422,7 +462,7 @@ export async function buildApp(opts: AppOptions) {
     log: (m) => app.log.error(m),
   });
   // Workflow retros (docs/19): the leader's timer starts them (main.ts), the retro agent's MCP tools fill them, and decisions apply the changes.
-  const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
+  const retro = retroService(db, { agents: agentsSvc, skills: skillsSvc, skillProposals, watchdog, notify: (agentId, input) => scheduler.notify(agentId, input), now: opts.now, log: (m) => app.log.error(m) });
   decisionsSvc.setRetroHook(retro);
   const alerts = alertLadder(db, { notify: (agentId, input) => scheduler.notify(agentId, input), answer: (id, answer, extra) => decisionsSvc.answer(id, answer, extra), watchdog, nudge: (input) => scheduler.nudge(input), now: opts.now });
   const gitHosts = gitHostService({ fetch: opts.fetch });
@@ -439,17 +479,19 @@ export async function buildApp(opts: AppOptions) {
   review.setWakeHook((agentId, w) => scheduler.notify(agentId, w));
   decisionsSvc.setLoopHooks({
     sendBack: (ticketId, text, reviewer) => review.sendBack(ticketId, text, reviewer),
-    // A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
+    // Answering "Approve and merge" on the sign-off card starts a tracked landing: the ticket page and
+    // Decisions show "Checking and merging" while it runs (including lock retries), rather than inviting
+    // another approval. A merge that can't run now (e.g. the runner is offline) is put back to the owner, not lost.
     land: (ticketId, reviewer) =>
-      review.land(ticketId, reviewer).catch(async (err) => {
+      review.landVisible(ticketId, reviewer).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `You approved "${t.title}", but it couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     // An answer that arrives after the ticket moved on is told to the owner, not thrown back at them.
     landAgain: (ticketId, skipChecks) =>
       review.startLanding(ticketId, "the owner", null, { skipChecks }).catch(async (err) => {
         const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title }).from(tickets).where(eq(tickets.id, ticketId));
-        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message}`, options: ["Got it"], recommended: "Got it" });
+        if (t) await decisionsSvc.raise({ companyId: t.companyId, agentId: null, question: `"${t.title}" couldn't be merged: ${(err as Error).message} Approve it again from the ticket once that's fixed.`, options: ["Got it"], recommended: "Got it", steps: ["Fix what stopped the merge, then open the ticket and approve the merge again."] });
       }),
     stopTicket: async (ticketId) => {
       await db.update(wakes).set({ status: "dropped", statusReason: "work stopped by the owner" }).where(and(eq(wakes.ticketId, ticketId), inArray(wakes.status, ["queued", "deferred"])));
@@ -463,7 +505,7 @@ export async function buildApp(opts: AppOptions) {
       await db.update(wakes).set({ status: "queued", statusReason: null, notBefore: null }).where(and(eq(wakes.ticketId, ticketId), eq(wakes.status, "deferred")));
     },
   });
-  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro }, { onTicketDone: (ticketId, runId) => scheduler.onTicketDone(ticketId, runId), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i) });
+  await mcpRoutes(app, db, { decisions: decisionsSvc, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, review, notes, chapters, work, feedback, ticketChat, wiki, skills: skillsSvc, skillProposals, agents: agentsSvc, pa, images, watchdog, alerts, retro, serverStatus }, { onTicketDone: (ticketId, runId) => Promise.all([scheduler.onTicketDone(ticketId, runId), decisionsSvc.withdrawMergeCardsForTicket(ticketId)]), onTicketReview: (ticketId, agentId, runId) => scheduler.onTicketReview(ticketId, agentId, runId), nudge: (i) => scheduler.nudge(i), wake: (agentId, i) => scheduler.notify(agentId, i), onRunTicket: (ticketId, runId) => work.attachRun(ticketId, runId) });
   // The feedback portal's public API, on this listener too, so the owner can try it here.
   await portalRoutes(app, { feedback, secureCookies: opts.secureCookies ?? true, limits: opts.portalLimits, now: opts.now ? () => opts.now!().getTime() : undefined });
 
@@ -941,6 +983,12 @@ export async function buildApp(opts: AppOptions) {
       monthlyGrantUsd: z.number().nonnegative().optional(),
       cycleAnchor: z.coerce.date().optional(),
       secretId: Uuid.optional(),
+      /** Hold routine work at this share of a subscription window (BOS-227). */
+      quotaHoldAt: z.number().min(0.8).max(1).optional(),
+      /** Whether extra usage may be spent: pause (default), urgent only, or all work. */
+      quotaOverage: z.enum(["pause", "urgent", "all"]).optional(),
+      /** Adapter window names that never trigger the hold. */
+      quotaDisabledWindows: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
     });
     const FundingInput = FundingFields.superRefine((v, ctx) => {
       const problem = fundingComboError(v.kind, v.provider);
@@ -956,6 +1004,9 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : null,
         cycleAnchor: b.cycleAnchor ?? null,
         secretId: b.secretId ?? null,
+        quotaHoldAt: b.quotaHoldAt ?? 0.95,
+        quotaOverage: b.quotaOverage ?? "pause",
+        quotaDisabledWindows: b.quotaDisabledWindows ?? [],
       });
       return reply.code(201).send(row);
     });
@@ -979,6 +1030,9 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : undefined,
         cycleAnchor: b.cycleAnchor,
         secretId: b.secretId,
+        quotaHoldAt: b.quotaHoldAt,
+        quotaOverage: b.quotaOverage,
+        quotaDisabledWindows: b.quotaDisabledWindows,
       });
       models.forget(id);
       return row;
@@ -1069,6 +1123,7 @@ export async function buildApp(opts: AppOptions) {
       customFields: z.record(z.string(), z.unknown()),
       acceptanceCriteria: acceptanceCriteriaSchema,
       noCode: z.boolean(),
+      urgent: z.boolean(),
       risk: z.enum(RISK_TIERS).nullable(),
       size: z.number().refine(isTaskSize, `Size is one of ${SIZE_SCALE}.`).nullable(),
       planFirst: z.boolean(),
@@ -1278,7 +1333,18 @@ export async function buildApp(opts: AppOptions) {
         .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
         .where(eq(tickets.id, id));
       if (!row) return reply.code(404).send({ error: "not_found" });
-      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee };
+      // The ticket's own held wake, or, when its wake was merged into another ticket's, the one
+      // its assignee is held by (BOS-253): the page still offers Run now and says why it's held.
+      const heldBy = (own: boolean) =>
+        db
+          .select({ until: wakes.notBefore, reason: wakes.statusReason })
+          .from(wakes)
+          .where(and(own ? eq(wakes.ticketId, id) : eq(wakes.agentId, row.t.assigneeAgentId!), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+          .limit(1);
+      let [held] = await heldBy(true);
+      const heldByAgent = !held;
+      if (!held && row.t.assigneeAgentId) [held] = await heldBy(false);
+      return { ...row.t, ref: ticketRef(row.prefix, row.t.number), project: row.project, repoUrl: row.repoUrl, defaultBranch: row.defaultBranch, landing: row.landing, verifyCommand: row.verifyCommand, ownerSignoff: ruleFor(await effectivePolicy(db, row.t), row.t.risk).ownerSignoff, assignee: row.assignee, quotaHeldUntil: held?.until?.toISOString() ?? null, quotaHeldReason: held?.reason ?? null, quotaHeldAgent: heldByAgent };
     });
 
     // Images attached to a ticket (screenshots), oldest first; the bytes are served one at a time.
@@ -1382,8 +1448,60 @@ export async function buildApp(opts: AppOptions) {
     });
     owner.put("/api/companies/:id/skills/:skillId", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000) }).parse(req.body);
-      return skillsSvc.write(id, { ...b, replaceId: skillId }).then((s) => ({ id: s.id, name: s.name }), skillErrors(reply));
+      const b = z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1024), body: z.string().max(100_000), confirmEmptyBody: z.boolean().optional() }).parse(req.body);
+      try {
+        // The edit replaces the skill's files: keep the old text so the log says what actually changed.
+        const old = await skillsSvc.get(id, skillId);
+        const oldSkillMd = old.files.find((f) => f.path === "SKILL.md")?.text ?? "";
+        const s = await skillsSvc.write(id, { ...b, replaceId: skillId });
+        const newSkillMd = Buffer.from(s.files.find((f) => f.path === "SKILL.md")?.content ?? "", "base64").toString("utf8");
+        const newBundle = hashFiles(s.files).bundleHash;
+        // An edited skill is new, unreviewed text: log it so an approved skill can never change without a trace.
+        // The summary shows only the region that differs, so a hidden tail or a description change still shows.
+        const differing = (before: string, after: string) => {
+          const min = Math.min(before.length, after.length);
+          let start = 0;
+          while (start < min && before[start] === after[start]) start++;
+          let endBefore = before.length;
+          let endAfter = after.length;
+          while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) {
+            endBefore--;
+            endAfter--;
+          }
+          return { before: before.slice(start, endBefore), after: after.slice(start, endAfter) };
+        };
+        // Keep both ends when it is long: a payload is often added at the end, after harmless opening text.
+        const flat = (text: string, max: number) => {
+          const one = text.replace(/\s+/g, " ").trim();
+          if (one.length <= max) return one;
+          const half = Math.max(1, Math.floor((max - 1) / 2));
+          return `${one.slice(0, half)}…${one.slice(-half)}`;
+        };
+        const diff = differing(oldSkillMd, newSkillMd);
+        const head = `Owner edited the skill ${s.name}${s.name !== old.name ? ` (was ${flat(old.name, 40)})` : ""} from ${old.bundleHash.slice(0, 12)} to ${newBundle.slice(0, 12)}.`;
+        const tail = " Not security-reviewed; full text in detail.";
+        // Leave room for the head and tail, then share what is left between the two differing sides.
+        const room = Math.max(20, 300 - head.length - tail.length - 30);
+        const shown = !diff.before && !diff.after ? "The visible text is unchanged." : `Old: "${flat(diff.before, Math.floor(room / 2))}" New: "${flat(diff.after, Math.floor(room / 2))}".`;
+        await record(db, {
+          companyId: id,
+          kind: "skill.edited_by_owner",
+          summary: `${head} ${shown}${tail}`,
+          // The activity row's summary is capped, so the full old and new content is kept beside it.
+          detail: {
+            skillId,
+            name: { before: old.name, after: s.name },
+            description: { before: old.description, after: s.description },
+            bundleHash: { before: old.bundleHash, after: newBundle },
+            skillMd: { before: oldSkillMd, after: newSkillMd },
+            changedRegion: diff,
+            removedFiles: old.files.filter((f) => f.path !== "SKILL.md").map((f) => f.path),
+          },
+        });
+        return { id: s.id, name: s.name };
+      } catch (err) {
+        return skillErrors(reply)(err);
+      }
     });
     owner.post("/api/companies/:id/skills/:skillId/refresh", async (req, reply) => {
       const { id, skillId } = SkillParams.parse(req.params);
@@ -1552,6 +1670,35 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/tickets/:id/artifacts", async (req) => wiki.artifacts(IdParam.parse(req.params).id, { family: true }));
     owner.delete("/api/artifacts/:id", async (req, reply) => wiki.removeArtifact(IdParam.parse(req.params).id).then(() => reply.code(204).send(), wikiErrors(reply)));
 
+    // A held wake can be run now: it gets high priority, which passes the quota hold, and starts on the next pass.
+    owner.post("/api/tickets/:id/run-now", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [t] = await db.select({ companyId: tickets.companyId, title: tickets.title, assigneeAgentId: tickets.assigneeAgentId, systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, id));
+      if (!t) return reply.code(404).send({ error: "not_found" });
+      const release = { status: "queued" as const, statusReason: null, notBefore: null, priority: sql`greatest(${wakes.priority}, ${DEFAULT_LIMITS.highPriority})` };
+      const released = await db
+        .update(wakes)
+        .set(release)
+        .where(and(eq(wakes.ticketId, id), eq(wakes.status, "deferred"), sql`${wakes.statusReason} like 'subscription %'`))
+        .returning({ id: wakes.id });
+      // The ticket's wake can be merged into another of its assignee's held wakes (BOS-253): with
+      // none of its own, give it one now, so Run now starts this ticket rather than that other work.
+      const canStart = t.assigneeAgentId && (t.systemState === "ready" || t.systemState === "in_progress");
+      if (!released.length && canStart) {
+        const [waiting] = await db
+          .select({ id: wakes.id, priority: wakes.priority })
+          .from(wakes)
+          .where(and(eq(wakes.ticketId, id), inArray(wakes.status, ["queued", "deferred"]), isNull(wakes.runId)))
+          .limit(1);
+        if (waiting) await db.update(wakes).set(release).where(eq(wakes.id, waiting.id));
+        else await scheduler.wake({ agentId: t.assigneeAgentId!, ticketId: id, reason: "woken by owner", priority: DEFAULT_LIMITS.highPriority, note: "The owner ran this ticket now, past the quota hold." });
+        released.push({ id: waiting?.id ?? id });
+      }
+      if (released.length) await scheduler.tick();
+      await record(db, { companyId: t.companyId, ticketId: id, kind: "quota", summary: `Owner ran it now past the quota hold (${released.length} wake${released.length === 1 ? "" : "s"})`, at: new Date() });
+      return { released: released.length };
+    });
+
     owner.patch("/api/tickets/:id", async (req) => {
       const { id } = IdParam.parse(req.params);
       const { costCapUsd, ...fields } = TicketFields.extend({ costCapUsd: z.number().positive().nullable() }).partial().parse(req.body);
@@ -1635,10 +1782,14 @@ export async function buildApp(opts: AppOptions) {
       areaId: Uuid.nullable(),
       parentId: Uuid.nullable(),
       effort: z.number().int().min(1).max(5).nullable(),
+      rank: z.number().int().min(1).max(5).nullable(),
+      horizon: z.enum(HORIZONS).nullable(),
       driverScores: z.record(Uuid, z.number().int().min(0).max(5).nullable()),
       milestoneId: Uuid.nullable(),
       objectiveId: Uuid.nullable(),
       portalVisible: z.boolean(),
+      publicSummary: z.string().trim().max(2000).nullable(),
+      showPublicly: z.boolean(),
     });
     owner.get("/api/companies/:id/feedback-settings", async (req) => {
       const { id } = IdParam.parse(req.params);
@@ -1796,6 +1947,11 @@ export async function buildApp(opts: AppOptions) {
       const q = z.object({ today: DateStr.optional(), closed: z.enum(["1"]).optional() }).parse(req.query);
       return planning.roadmap(q.today ?? dateIn(opts.now?.() ?? new Date(), "UTC"), { includeClosed: !!q.closed });
     });
+    /** Features for the roadmap's Now / Next / Later columns, grouped by objective on the client. */
+    owner.get("/api/roadmap/features", async () => {
+      const cos = await db.select({ id: companies.id, name: companies.name }).from(companies).orderBy(asc(companies.name));
+      return Promise.all(cos.map(async (c) => ({ ...c, features: await feedback.roadmapFeatures(c.id) })));
+    });
     owner.patch("/api/objectives/:id", async (req) => {
       const { id } = IdParam.parse(req.params);
       const b = z.object({ title: z.string().trim().min(1).max(200), priority: z.number().int().min(1).max(5), status: z.enum(OBJECTIVE_STATUSES) }).partial().parse(req.body);
@@ -1814,6 +1970,7 @@ export async function buildApp(opts: AppOptions) {
     owner.get("/api/companies/:id/plan", async (req) => planning.plan(IdParam.parse(req.params).id));
     owner.get("/api/companies/:id/open-tickets", async (req) => planning.openTickets(IdParam.parse(req.params).id));
     owner.get("/api/tickets/:id/links", async (req) => planning.ticketLinks(IdParam.parse(req.params).id));
+    owner.get("/api/tickets/:id/related", async (req) => planning.relatedTickets(IdParam.parse(req.params).id));
     owner.delete("/api/dependencies/:id", async (req, reply) => {
       await planning.removeDependency(IdParam.parse(req.params).id);
       return reply.code(204).send();
@@ -1929,6 +2086,10 @@ export async function buildApp(opts: AppOptions) {
       const b = WatchdogSettings.partial().extend({ scrumMasterAgentId: Uuid.nullable().optional() }).strict().parse(req.body ?? {});
       return watchdog.update(id, b).catch(watchdogErrors(reply));
     });
+    owner.get("/api/companies/:id/watchdog/issues", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      return watchdog.issues(id).catch(watchdogErrors(reply));
+    });
     owner.get("/api/companies/:id/watchdog/flags", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const q = z.object({ status: z.enum(["open", "closed"]).optional(), ticketId: Uuid.optional(), limit: z.coerce.number().int().min(1).max(500).optional() }).parse(req.query);
@@ -2015,11 +2176,21 @@ export async function buildApp(opts: AppOptions) {
 
     owner.post("/api/decisions/:id/answer", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const { answer, assigneeAgentId, note, custom, picks } = z
-        .object({ answer: z.string().trim().min(1).max(4000), assigneeAgentId: Uuid.optional(), note: z.string().trim().max(2000).optional(), custom: z.boolean().optional(), picks: z.array(z.number().int().min(0)).max(20).optional() })
+      const { answer, assigneeAgentId, note, reasonLink, custom, picks, modelConfig } = z
+        .object({
+          answer: z.string().trim().min(1).max(4000),
+          assigneeAgentId: Uuid.optional(),
+          note: z.string().trim().max(2000).optional(),
+          reasonLink: z.string().trim().max(400).optional(),
+          custom: z.boolean().optional(),
+          picks: z.array(z.number().int().min(0)).max(20).optional(),
+          modelConfig: z
+            .object({ harness: z.string().trim().min(1).max(40), provider: z.string().trim().min(1).max(40), model: z.string().trim().min(1).max(200), fundingSourceId: Uuid })
+            .optional(),
+        })
         .parse(req.body);
       try {
-        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, custom, picks, by: await ownerName(req) });
+        const result = await decisionsSvc.answer(id, answer, { assigneeAgentId, note, reasonLink, custom, picks, modelConfig, by: await ownerName(req) });
         return result ?? reply.code(404).send({ error: "not_open" });
       } catch (err) {
         if (err instanceof AnswerError) return reply.code(422).send({ error: "invalid_answer", message: err.message });
@@ -2121,7 +2292,7 @@ export async function buildApp(opts: AppOptions) {
       if ((r as { outcome?: string } | undefined)?.outcome === "landing") reply.code(202);
       return r;
     });
-    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: review.landing(IdParam.parse(req.params).id) }));
+    owner.get("/api/tickets/:id/landing", async (req) => ({ landing: await review.landing(IdParam.parse(req.params).id) }));
     // Try the ticket's pull request again now, rather than waiting for the sync (R59).
     owner.post("/api/tickets/:id/pull-request/merge", async (req, reply) => review.mergePullRequest(IdParam.parse(req.params).id).catch(reviewErrors(reply)));
     owner.post("/api/tickets/:id/git-action", async (req, reply) => {
@@ -2164,5 +2335,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }

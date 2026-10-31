@@ -2,13 +2,14 @@
 // watchdog-rules.ts over the board, with no model and no tokens. It opens and closes flags, and
 // wakes the Scrum Master once with the list of flags that are due. The Scrum Master's few
 // allowed actions run here too, so the hourly cap, the log and undo hold whichever way they're
-// called. Hitting the cap switches the watchdog off and tells the owner.
-import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, ne, or, sql } from "drizzle-orm";
-import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
+// called. Hitting the cap pauses the watchdog until that hour ends, then it resumes by itself, and tells the owner.
+import { and, desc, eq, gt, gte, inArray, isNotNull, isNull, like, lte, ne, or, sql } from "drizzle-orm";
+import { readWatchdogSettings, ticketRef, untrusted, WATCHDOG_ACTION_LABEL, WATCHDOG_NUDGE_KINDS, WATCHDOG_RULE_LABEL, WatchdogSettings, type WatchdogActionKind, type WatchdogRule } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, engagements, reviewRequests, runs, settings, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../db/schema.js";
 import { record } from "./activity.js";
 import { checkAsk } from "./decisions.js";
+import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
 import { activeRows, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
@@ -55,7 +56,7 @@ type Nudge = (input: { runId: string; fromAgentId: string; to: string; ticketId?
 export type WatchdogDeps = {
   notify: Notify;
   nudge: Nudge;
-  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[] }) => Promise<{ id: string }>;
+  raise: (input: { companyId: string; agentId: string | null; question: string; options: string[]; recommended: string; blocksTicketId?: string; triedFirst?: string; steps?: string[]; stillNeeded?: string }) => Promise<{ id: string }>;
   assign: (ticketId: string, agentId: string | null) => Promise<unknown>;
   /** Puts a ticket back in the state it was in (through the normal ticket update, so it is versioned and logged). */
   restoreState: (ticketId: string, state: SnapTicket["state"]) => Promise<unknown>;
@@ -88,6 +89,13 @@ const SUGGEST: Record<WatchdogRule, string> = {
   review_loop: "escalate to the CEO, or raise_decision if only the owner can settle it",
   owner_decision_waiting: "nothing: Boss Man reminds the owner",
 };
+
+/** When a cap pause ends, or null if the watchdog isn't paused by the cap now. A switched-off watchdog is off, not paused. */
+export function watchdogPausedUntil(c: { watchdog: unknown; watchdogTrippedAt: Date | null }, at: Date): Date | null {
+  if (!c.watchdogTrippedAt || !readWatchdogSettings(c.watchdog).enabled) return null;
+  const until = new Date(c.watchdogTrippedAt.getTime() + H);
+  return until > at ? until : null;
+}
 
 export function watchdogService(db: Db, deps: WatchdogDeps) {
   const now = deps.now ?? (() => new Date());
@@ -175,19 +183,32 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
 
   // ---------- Safety ----------
 
-  /** Switches the watchdog off and tells the owner, once per trip. */
+  /**
+   * Pauses the watchdog for an hour from now and tells the owner, once per pause. It stays switched
+   * on: the sweep clears the pause when the hour is up (resumeExpired), with no one pressing Switch on.
+   */
   async function trip(companyId: string, reason: string) {
     const t = now();
     const done = await db
       .update(companies)
-      .set({ watchdog: sql`jsonb_set(${companies.watchdog}, '{enabled}', 'false'::jsonb)`, watchdogTrippedAt: t, watchdogTrippedReason: reason })
-      .where(and(eq(companies.id, companyId), isNull(companies.watchdogTrippedAt)))
+      .set({ watchdogTrippedAt: t, watchdogTrippedReason: reason })
+      .where(and(eq(companies.id, companyId), or(isNull(companies.watchdogTrippedAt), lte(companies.watchdogTrippedAt, new Date(t.getTime() - H)))))
       .returning({ id: companies.id });
     if (!done.length) return;
-    await log({ companyId, kind: "tripped", reason, summary: `The watchdog switched itself off: ${reason}` });
-    await deps.alert(companyId, `The Scrum Master watchdog switched itself off: ${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog. Look at its recent actions first; this usually means something kept tripping the same rule.`);
-    // The Page-level problem: the "Got it" decision above is only a quiet flag, so the owner is also paged once per trip.
-    await deps.notifyOwner({ companyId, level: "page", title: "The watchdog switched itself off", body: `${reason}. Nothing it does will run until you switch it back on in Settings → Watchdog.`, link: "#/settings" });
+    const back = new Date(t.getTime() + H).toISOString().slice(11, 16);
+    await log({ companyId, kind: "tripped", reason, summary: `The watchdog paused itself for an hour (back at about ${back} UTC): ${reason}` });
+    await deps.alert(companyId, `The Scrum Master watchdog paused itself for an hour: ${reason}. It picks up again by itself at about ${back} UTC, so you don't need to do anything. Look at its recent actions if this keeps happening; it usually means something kept tripping the same rule.`);
+    await deps.notifyOwner({ companyId, level: "page", title: "The watchdog paused itself for an hour", body: `${reason}. It resumes by itself at about ${back} UTC.`, link: "#/settings" });
+  }
+
+  /** Ends cap pauses that have run their hour, for watchdogs still switched on. */
+  async function resumeExpired() {
+    const rows = await db
+      .update(companies)
+      .set({ watchdogTrippedAt: null, watchdogTrippedReason: null })
+      .where(and(sql`(${companies.watchdog}->>'enabled')::boolean`, isNotNull(companies.watchdogTrippedAt), lte(companies.watchdogTrippedAt, new Date(now().getTime() - H))))
+      .returning({ id: companies.id });
+    for (const r of rows) await record(db, { companyId: r.id, agentId: null, ticketId: null, kind: "watchdog", summary: "The watchdog's hourly pause is over, so it is running again.", at: now() });
   }
 
   /**
@@ -213,12 +234,14 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     if (!sm || sm.id !== agentId) throw new WatchdogError(403, "Only the company's Scrum Master can take watchdog actions.");
     const c = await company(companyId);
     const s = readWatchdogSettings(c.watchdog);
-    if (!s.enabled || c.watchdogTrippedAt) throw new WatchdogError(409, "The watchdog is switched off, so its actions are too. Only the owner can switch it back on.");
+    if (!s.enabled) throw new WatchdogError(409, "The watchdog is switched off, so its actions are too. Only the owner can switch it back on.");
+    const until = watchdogPausedUntil(c, now());
+    if (until) throw new WatchdogError(409, `The watchdog is paused after reaching its hourly limit. It resumes by itself at ${until.toISOString().slice(11, 16)} UTC.`);
     return { sm, s };
   }
 
   async function capOrFail(companyId: string, s: WatchdogSettings) {
-    if (!(await withinCap(companyId, "nudges", s))) throw new WatchdogError(429, "The watchdog's hourly limit was reached, so it has switched itself off and told the owner. Stop here.");
+    if (!(await withinCap(companyId, "nudges", s))) throw new WatchdogError(429, "The watchdog's hourly limit was reached, so it has paused itself until the hour is up and told the owner. Stop here.");
   }
 
   // ---------- The sweep ----------
@@ -404,7 +427,8 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     for (const f of due.filter((x) => x.rule === "owner_decision_waiting")) {
       const [told] = await db.select({ id: watchdogActions.id }).from(watchdogActions).where(and(eq(watchdogActions.flagId, f.id), eq(watchdogActions.kind, "owner_reminder"))).limit(1);
       await db.update(watchdogFlags).set({ dueAt: later(f), lastFlaggedAt: t }).where(eq(watchdogFlags.id, f.id));
-      if (!told) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
+      // The owner may have acted since this flag opened; don't tell them again that they are holding it up (BOS-123).
+      if (!told && !(await recentOwnerAnswer(db, { companyId: c.id, ticketIds: [f.ticketId], since: f.openedAt, decisionTypes: ["question", "deploy"] }))) reminders.push({ f, info: snap.titles.get(f.ticketId), idle: (f.detail as Trip["detail"]).idleMs ?? 0 });
     }
     if (reminders.length > MAX_OWNER_REMINDERS) {
       const oldest = Math.max(...reminders.map((r) => r.idle));
@@ -601,6 +625,209 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     return rows.length;
   }
 
+
+  // ---------- Open issues (BOS-199) ----------
+  // An "issue" is an open watchdog flag or an open Boss Man alert on the ladder that names a ticket.
+  // Both are warnings the health badge counts, and both settle themselves once their ticket is done
+  // or cancelled. Settling an issue never changes the alert ladder's rungs or timings: it only closes
+  // a warning whose ticket is finished.
+
+  /** Same outer cap as alert-ladder.ts: a card with the CEO reaches the owner by then at the latest. */
+  const CEO_ALERT_OUTER_CAP_MINUTES = 20;
+
+  type LadderLike = { rung: "scrum_master" | "ceo" | "owner"; since: string; minutes?: number; ticketId: string | null; hops: Array<{ to: "scrum_master" | "ceo" | "owner"; at: string; why: string }> };
+  /** An alert on the ladder, not a plan or permission that only borrows the ladder for its hand-over. */
+  const isAlertDecision = sql`${decisions.context}->'ladder' is not null and ${decisions.context}->>'type' <> 'permission'`;
+
+  function firstSentence(text: string) {
+    const line = text.split("\n")[0]!.trim();
+    const m = /^(.*?[.!?])(?:\s|$)/.exec(line);
+    let out = (m ? m[1]! : line).trim();
+    if (out.length > 200) out = `${out.slice(0, 200).replace(/\s+\S*$/, "")}…`;
+    return out;
+  }
+
+  const ordinal = (n: number) => (n === 1 ? "1st" : n === 2 ? "2nd" : n === 3 ? "3rd" : `${n}th`);
+  const dayKey = (d: Date) => d.toISOString().slice(0, 10);
+
+  /** Why an issue's ticket means the warning is over: the ticket is done or was cancelled. */
+  function settledReason(ticket: typeof tickets.$inferSelect | undefined, prefix: string | null) {
+    if (!ticket) return null;
+    const ref = ticketRef(prefix, ticket.number) ?? "The ticket";
+    if (ticket.systemState !== "done") return null;
+    return ticket.outcome === "cancelled" ? `Settled: ${ref} was cancelled` : ticket.mergeCommit ? `Settled: ${ref} merged` : `Settled: ${ref} is done`;
+  }
+
+  /** Closes open flags and ticket alerts whose ticket is finished, with a plain note. */
+  async function settleIssues(companyId: string) {
+    const t = now();
+    const [c] = await db.select({ prefix: companies.ticketPrefix }).from(companies).where(eq(companies.id, companyId));
+    const openFlags = await db
+      .select({ f: watchdogFlags, ticket: tickets })
+      .from(watchdogFlags)
+      .innerJoin(tickets, eq(tickets.id, watchdogFlags.ticketId))
+      .where(and(eq(watchdogFlags.companyId, companyId), eq(watchdogFlags.status, "open")));
+    const openAlerts = await db
+      .select({ d: decisions })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), isAlertDecision));
+    const laddered = openAlerts.map(({ d }) => ({ d, ladder: (d.context as { ladder?: LadderLike }).ladder })).filter((x): x is { d: typeof decisions.$inferSelect; ladder: LadderLike } => !!x.ladder?.ticketId);
+
+    for (const { f, ticket } of openFlags) {
+      const note = settledReason(ticket, c?.prefix ?? null);
+      if (!note) continue;
+      const closed = await db.update(watchdogFlags).set({ status: "closed", closedAt: t }).where(and(eq(watchdogFlags.id, f.id), eq(watchdogFlags.status, "open"))).returning({ id: watchdogFlags.id });
+      if (!closed.length) continue;
+      await log({ companyId, kind: "alert_resolved", ticketId: f.ticketId, flagId: f.id, reason: note, summary: `Boss Man settled the warning: ${note}` });
+    }
+
+    const alertTicketIds = [...new Set(laddered.map((x) => x.ladder.ticketId!))];
+    const alertTickets = alertTicketIds.length ? await db.select().from(tickets).where(inArray(tickets.id, alertTicketIds)) : [];
+    const alertById = new Map(alertTickets.map((x) => [x.id, x]));
+    for (const { d, ladder } of laddered) {
+      const note = settledReason(alertById.get(ladder.ticketId!), c?.prefix ?? null);
+      if (!note) continue;
+      const closed = await db
+        .update(decisions)
+        .set({ status: "answered", answer: d.recommendedOption ?? "Got it", answeredAt: t, dedupeKey: null, context: { ...(d.context as object), ladder: { ...ladder, settledByBossMan: note } } })
+        .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+        .returning({ id: decisions.id });
+      if (!closed.length) continue;
+      await log({ companyId, kind: "alert_resolved", ticketId: ladder.ticketId, reason: note, after: { decisionId: d.id }, summary: `Boss Man settled the warning: ${note}` });
+    }
+  }
+
+  const holderOf = (issue: { rule?: string; escalatedAt?: Date | null; rung?: LadderLike["rung"] }): "scrum_master" | "ceo" | "owner" => {
+    if (issue.rung) return issue.rung;
+    if (issue.rule === "owner_decision_waiting") return "owner";
+    if (issue.escalatedAt) return "ceo";
+    return "scrum_master";
+  };
+
+
+  type DoneItem = { label: string; reason: string; at: string };
+  type OpenIssue = {
+    id: string;
+    source: "flag" | "alert";
+    ticketId: string;
+    ticketRef: string | null;
+    ticketTitle: string;
+    warning: string;
+    rule: string | null;
+    holder: "scrum_master" | "ceo" | "owner";
+    since: string;
+    done: DoneItem[];
+    nextAt: string | null;
+    nextText: string;
+    openedAt: string;
+  };
+
+  /** Every open issue the health badge counts, with who has it, what was done and what happens next. */
+  async function openIssues(companyId: string) {
+    await settleIssues(companyId);
+    const c = await company(companyId);
+    const s = readWatchdogSettings(c.watchdog);
+    const t = now();
+    const flags = await db
+      .select({ f: watchdogFlags, ticket: tickets, assignee: agents.name })
+      .from(watchdogFlags)
+      .innerJoin(tickets, eq(tickets.id, watchdogFlags.ticketId))
+      .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
+      .where(and(eq(watchdogFlags.companyId, companyId), eq(watchdogFlags.status, "open")));
+    const alerts = await db
+      .select({ d: decisions })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, companyId), eq(decisions.status, "open"), isAlertDecision));
+    const laddered = alerts.map(({ d }) => ({ d, ladder: (d.context as { ladder?: LadderLike }).ladder })).filter((x): x is { d: typeof decisions.$inferSelect; ladder: LadderLike & { ticketId: string } } => !!x.ladder?.ticketId);
+    const ticketIds = [...new Set([...flags.map((x) => x.ticket.id), ...laddered.map((x) => x.ladder.ticketId)])];
+    const extraTickets = ticketIds.length ? await db.select().from(tickets).where(and(inArray(tickets.id, ticketIds), eq(tickets.companyId, companyId))) : [];
+    const byId = new Map(extraTickets.map((x) => [x.id, x]));
+    const actions = ticketIds.length ? await db.select().from(watchdogActions).where(and(eq(watchdogActions.companyId, companyId), inArray(watchdogActions.ticketId, ticketIds))).orderBy(desc(watchdogActions.createdAt)) : [];
+
+    const issues: OpenIssue[] = flags.map(({ f, ticket, assignee }) => {
+      const holder = holderOf({ rule: f.rule, escalatedAt: f.escalatedAt });
+      const since = f.lastFlaggedAt ?? f.openedAt;
+      const done = actions
+        .filter((a) => a.flagId === f.id && a.kind !== "sweep_wake")
+        .slice(0, 3)
+        .map((a) => ({ label: (WATCHDOG_ACTION_LABEL as Record<string, string>)[a.kind] ?? "Acted", reason: a.reason, at: a.createdAt.toISOString() }));
+      let nextAt: Date | null;
+      let nextText: string;
+      if (holder === "ceo" && f.escalatedAt) {
+        nextAt = new Date(f.escalatedAt.getTime() + ruleLimitMs(f.rule as WatchdogRule, s));
+        nextText = "Comes back to the Scrum Master";
+      } else if (holder === "owner") {
+        nextAt = f.dueAt > t ? f.dueAt : null;
+        nextText = f.dueAt > t ? "Reminds you again" : "The daily summary carries it until you answer";
+      } else if (f.snoozedUntil && f.snoozedUntil > t) {
+        nextAt = f.snoozedUntil;
+        nextText = "Checks again";
+      } else if (f.dueAt > t) {
+        nextAt = f.dueAt;
+        nextText = "Checks again";
+      } else {
+        nextAt = null;
+        nextText = "Due now: the next check hands it to the Scrum Master";
+      }
+      return {
+        id: f.id,
+        source: "flag" as const,
+        ticketId: ticket.id,
+        ticketRef: ticketRef(c.ticketPrefix, ticket.number),
+        ticketTitle: ticket.title,
+        warning: f.rule === "owner_decision_waiting" ? "Waiting on your decision" : `${assignee ?? "Nobody"} - ${WATCHDOG_RULE_LABEL[f.rule as WatchdogRule]}`,
+        rule: f.rule,
+        holder,
+        since: since.toISOString(),
+        done,
+        nextAt: nextAt?.toISOString() ?? null,
+        nextText,
+        openedAt: f.openedAt.toISOString(),
+      };
+    });
+
+    for (const { d, ladder } of laddered) {
+      const ticket = byId.get(ladder.ticketId);
+      if (!ticket) continue;
+      const holder = holderOf({ rung: ladder.rung });
+      const since = new Date(ladder.hops.at(-1)?.at ?? ladder.since);
+      const hopDone: DoneItem[] = ladder.hops.map((h) => ({ label: `Passed to ${h.to === "owner" ? "the owner" : h.to === "ceo" ? "the CEO" : "the Scrum Master"}`, reason: h.why, at: h.at })).reverse().slice(0, 3);
+      const actionDone: DoneItem[] = actions
+        .filter((a) => (a.after as { decisionId?: string } | null)?.decisionId === d.id)
+        .slice(0, 3)
+        .map((a) => ({ label: (WATCHDOG_ACTION_LABEL as Record<string, string>)[a.kind] ?? "Acted", reason: a.reason, at: a.createdAt.toISOString() }));
+      const minutes = ladder.minutes ?? s.alertMinutes;
+      let nextAt: Date | null;
+      let nextText: string;
+      if (holder === "owner") {
+        nextAt = null;
+        nextText = "Waiting on you";
+      } else if (holder === "ceo") {
+        nextAt = new Date(new Date(ladder.since).getTime() + Math.max(minutes, CEO_ALERT_OUTER_CAP_MINUTES) * 60_000);
+        nextText = "Passes to you at the latest";
+      } else {
+        nextAt = new Date(new Date(ladder.since).getTime() + minutes * 60_000);
+        nextText = "Passes to the CEO";
+      }
+      issues.push({
+        id: d.id,
+        source: "alert" as const,
+        ticketId: ticket.id,
+        ticketRef: ticketRef(c.ticketPrefix, ticket.number),
+        ticketTitle: ticket.title,
+        warning: firstSentence(d.question),
+        rule: null,
+        holder,
+        since: since.toISOString(),
+        done: [...actionDone, ...hopDone].sort((a, b) => b.at.localeCompare(a.at)).slice(0, 3),
+        nextAt: nextAt?.toISOString() ?? null,
+        nextText,
+        openedAt: new Date(d.createdAt).toISOString(),
+      });
+    }
+    return issues.sort((a, b) => a.openedAt.localeCompare(b.openedAt));
+  }
+
   const self = {
     /** One pass over every company with the watchdog on. Safe to call often; overlapping calls are skipped. */
     async run() {
@@ -609,6 +836,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       try {
         const [paused] = await db.select().from(settings).where(eq(settings.key, "paused"));
         if (paused?.value === true || (await getHold(db))) return { skipped: true };
+        await resumeExpired();
         const on = await db.select().from(companies).where(and(sql`(${companies.watchdog}->>'enabled')::boolean`, isNull(companies.watchdogTrippedAt), eq(companies.paused, false)));
         let flagged = 0;
         for (const c of on) {
@@ -627,6 +855,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     },
 
     snapshot,
+    issues: openIssues,
     urgentCheck,
     dailySummary,
     // The alert ladder (BOS-64) checks its Scrum Master actions with the same guard and cap.
@@ -759,16 +988,27 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       return log({ ...base, before: { flagIds: flags.map((x) => x.id) }, after: { wakeIds: [w.id] }, undoable: true, summary: `${sm.name} escalated it to ${boss.name}: ${reason}` });
     },
 
-    async raiseDecision(companyId: string, agentId: string, runId: string, input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string }) {
+    async raiseDecision(
+      companyId: string,
+      agentId: string,
+      runId: string,
+      input: { ticketId: string; question: string; options: string[]; recommended: string; triedFirst: string; ownerMustDo?: boolean; steps?: string[]; reason: string; stillNeeded?: string },
+    ) {
       const reason = oneLine(input.reason);
       const { sm, s } = await actor(companyId, agentId);
       const t = await ticketIn(companyId, input.ticketId);
       if (!input.options.includes(input.recommended)) throw new WatchdogError(422, "The recommended answer must be one of the options.");
       const bad = checkAsk({ triedFirst: input.triedFirst, ownerMustDo: input.ownerMustDo, steps: input.steps });
       if (bad) throw new WatchdogError(422, bad);
+      // Don't ask again what the owner has already answered (BOS-123).
+      if (!input.stillNeeded?.trim()) {
+        const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, t.id));
+        const earlier = await recentOwnerAnswer(db, { companyId, ticketIds: [t.id, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: sm.id, question: input.question });
+        if (earlier) throw new WatchdogError(409, `${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, add stillNeeded saying what changed.`);
+      }
       const f = await handedFlag(companyId, t.id, "raise_decision");
       await capOrFail(companyId, s);
-      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), steps: input.steps?.length ? input.steps : undefined });
+      const d = await deps.raise({ companyId, agentId: sm.id, question: input.question, options: input.options, recommended: input.recommended, blocksTicketId: t.id, triedFirst: input.triedFirst.trim(), steps: input.steps?.length ? input.steps : undefined, stillNeeded: input.stillNeeded?.trim() || undefined });
       return log({ companyId, kind: "raise_decision", ticketId: t.id, flagId: f.id, actorAgentId: sm.id, actorRunId: runId, reason, before: { state: t.systemState }, after: { decisionId: d.id }, undoable: true, summary: `${sm.name} asked the owner a question about it: ${reason}` });
     },
 
@@ -847,14 +1087,15 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
     async status(companyId: string) {
       const c = await company(companyId);
       const sm = await scrumMaster(companyId);
-      const [open] = await db.select({ n: sql<number>`count(*)::int` }).from(watchdogFlags).where(and(eq(watchdogFlags.companyId, companyId), eq(watchdogFlags.status, "open")));
+      const issues = await openIssues(companyId);
       return {
         settings: readWatchdogSettings(c.watchdog),
         scrumMaster: sm ? { id: sm.id, name: sm.name, paused: sm.paused } : null,
         lastSweepAt: c.watchdogLastSweepAt,
         trippedAt: c.watchdogTrippedAt,
+        pausedUntil: watchdogPausedUntil(c, now()),
         trippedReason: c.watchdogTrippedReason,
-        openFlags: open?.n ?? 0,
+        openFlags: issues.length,
       };
     },
 
@@ -911,18 +1152,56 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       const targetIds = [...new Set(rows.map((r) => r.action.targetAgentId).filter((x): x is string => !!x))];
       const targets = new Map(targetIds.length ? (await db.select({ id: agents.id, name: agents.name, role: agents.role, duty: agents.duty }).from(agents).where(inArray(agents.id, targetIds))).map((a) => [a.id, a]) : []);
       const decisionIds = [...new Set(rows.map((r) => (r.action.after as { decisionId?: string } | null)?.decisionId).filter((x): x is string => typeof x === "string"))];
-      const questions = new Map(decisionIds.length ? (await db.select({ id: decisions.id, question: decisions.question }).from(decisions).where(inArray(decisions.id, decisionIds))).map((d) => [d.id, d.question.split("\n")[0]!.slice(0, 200)]) : []);
+      const decisionRows = decisionIds.length ? await db.select({ id: decisions.id, question: decisions.question, status: decisions.status, createdAt: decisions.createdAt, context: decisions.context }).from(decisions).where(inArray(decisions.id, decisionIds)) : [];
+      const decisionById = new Map(decisionRows.map((d) => [d.id, d]));
+      const flagIds = [...new Set(rows.map((r) => r.action.flagId).filter((x): x is string => !!x))];
+      const flagRows = flagIds.length ? await db.select({ id: watchdogFlags.id, status: watchdogFlags.status, openedAt: watchdogFlags.openedAt, ticketId: watchdogFlags.ticketId }).from(watchdogFlags).where(inArray(watchdogFlags.id, flagIds)) : [];
+      const flagById = new Map(flagRows.map((f) => [f.id, f]));
+      // Every warning on the same ticket that day, so a repeat is told apart from the one before it.
+      const issueTicketIds = [...new Set(rows.map((r) => r.action.ticketId).filter((x): x is string => !!x))];
+      const [siblingFlags, siblingAlerts] = issueTicketIds.length
+        ? await Promise.all([
+            db.select({ id: watchdogFlags.id, ticketId: watchdogFlags.ticketId, openedAt: watchdogFlags.openedAt }).from(watchdogFlags).where(and(eq(watchdogFlags.companyId, companyId), inArray(watchdogFlags.ticketId, issueTicketIds))),
+            db.select({ id: decisions.id, createdAt: decisions.createdAt, context: decisions.context }).from(decisions).where(and(eq(decisions.companyId, companyId), isAlertDecision)),
+          ])
+        : [[], []];
+      const siblings = [
+        ...siblingFlags.map((f) => ({ key: `flag:${f.id}`, ticketId: f.ticketId, at: f.openedAt.getTime() })),
+        ...siblingAlerts
+          .map((d) => ({ key: `alert:${d.id}`, ticketId: (d.context as { ladder?: LadderLike }).ladder?.ticketId ?? null, at: d.createdAt.getTime() }))
+          .filter((x): x is { key: string; ticketId: string; at: number } => !!x.ticketId && issueTicketIds.includes(x.ticketId)),
+      ].sort((a, b) => a.at - b.at || a.key.localeCompare(b.key));
+      const ordinalByKey = new Map<string, number>();
+      const dayCount = new Map<string, number>();
+      for (const x of siblings) {
+        const day = `${x.ticketId}|${dayKey(new Date(x.at))}`;
+        const n = (dayCount.get(day) ?? 0) + 1;
+        dayCount.set(day, n);
+        ordinalByKey.set(x.key, n);
+      }
       return rows.map((r) => {
         const t = r.action.targetAgentId ? targets.get(r.action.targetAgentId) : undefined;
         const decisionId = (r.action.after as { decisionId?: string } | null)?.decisionId;
+        const flag = r.action.flagId ? flagById.get(r.action.flagId) : undefined;
+        const decision = decisionId ? decisionById.get(decisionId) : undefined;
+        const issueKey = flag ? `flag:${flag.id}` : decision ? `alert:${decision.id}` : null;
+        const issueAt = flag?.openedAt ?? decision?.createdAt;
+        const issueStatus = flag ? (flag.status === "open" ? "open" : "settled") : decision ? (decision.status === "open" ? "open" : "settled") : null;
+        const ticketRefNow = ticketRef(c?.prefix, r.ticketNumber);
+        const n = issueKey ? ordinalByKey.get(issueKey) : undefined;
+        const sameDay = issueAt ? dayKey(issueAt) === dayKey(now()) : false;
+        const when = issueAt ? issueAt.toLocaleDateString("en-GB", { day: "numeric", month: "short" }) : "";
         return {
           ...r.action,
           actorName: r.actor ?? (r.action.actorAgentId ? null : "Boss Man"),
           targetName: t?.name ?? null,
           targetIsScrumMaster: t?.duty === SCRUM_MASTER_DUTY,
           targetIsCeo: t?.role === "ceo",
-          ticketRef: ticketRef(c?.prefix, r.ticketNumber),
-          warning: (decisionId && questions.get(decisionId)) || null,
+          ticketRef: ticketRefNow,
+          warning: decision ? firstSentence(decision.question) : null,
+          issueKey,
+          issueStatus,
+          issueLabel: n && ticketRefNow ? `${ordinal(n)} warning on ${ticketRefNow} ${sameDay ? "today" : `on ${when}`}` : null,
         };
       });
     },

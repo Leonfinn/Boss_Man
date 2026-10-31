@@ -512,6 +512,69 @@
       "when": 1793211776467,
       "tag": "0072_fluffy_rictor",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1793219880883,
+      "tag": "0073_medical_tyger_tiger",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1793263667922,
+      "tag": "0074_magenta_the_fallen",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1793288306043,
+      "tag": "0075_little_sister_grimm",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1793300000000,
+      "tag": "0077_ambiguous_dormammu",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1793314293572,
+      "tag": "0078_bitter_bloodstrike",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1793337292825,
+      "tag": "0079_rare_wendell_vaughn",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1793337352825,
+      "tag": "0080_synthetic_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1793380000000,
+      "tag": "0081_quota_hold",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1793392781927,
+      "tag": "0082_provider_quota_readings",
+      "breakpoints": true
     }
   ]
 }

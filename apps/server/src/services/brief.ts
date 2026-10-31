@@ -31,7 +31,11 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
     const m = Math.max(0, Math.round((now.getTime() - d.getTime()) / 60_000));
     return m < 60 ? `${m}m` : m < 48 * 60 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
   };
-  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null }) => (t.stateNote && t.stateNoteAt ? ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}` : "");
+  const noteOf = (t: { stateNote: string | null; stateNoteAt: Date | null; stateNoteStaleAt?: Date | null }) => {
+    if (!t.stateNote || !t.stateNoteAt) return "";
+    const stale = t.stateNoteStaleAt != null && (!t.stateNoteAt || t.stateNoteStaleAt > t.stateNoteAt);
+    return ` Note (${age(t.stateNoteAt)} ago): ${one(t.stateNote, 100)}${stale ? " (may be out of date: the owner acted after it, so check before repeating it)" : ""}`;
+  };
   const from = since ?? new Date(now.getTime() - 24 * 3_600_000);
   const notMe = agentId ? sql`${activity.agentId} is distinct from ${agentId}` : undefined;
 
@@ -51,7 +55,7 @@ export async function buildBrief(db: Db, { companyId, agentId, role, since, now,
   /** Other agents' live runs that aren't owner chat: what each is doing, in the same words the dashboard uses (BOS-118). */
   const flightLines = async () => {
     const rows = await db
-      .select({ agent: agents.name, ticket: tickets.title, state: tickets.systemState, ...runOriginQuery("runs") })
+      .select({ agent: agents.name, ticket: tickets.title, state: tickets.systemState, ref: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = "runs"."ticket_id")`, ...runOriginQuery("runs") })
       .from(runs)
       .innerJoin(agents, eq(agents.id, runs.agentId))
       .leftJoin(tickets, eq(tickets.id, runs.ticketId))

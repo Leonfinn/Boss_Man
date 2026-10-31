@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dateIn, layoutPlan, milestoneHorizon, milestoneStatus } from "../src/index.js";
+import { dateIn, featureHorizon, layoutPlan, milestoneHorizon, milestoneStatus } from "../src/index.js";
 
 describe("layoutPlan", () => {
   // design -> api -> ui, api -> docs; vendor (engagement) -> api; done "spec" -> design.
@@ -75,5 +75,21 @@ describe("milestoneHorizon", () => {
   it("lets the owner pin a milestone", () => {
     expect(m({ active: 3, horizon: "later" })).toBe("later");
     expect(m({ horizon: "next" })).toBe("next");
+  });
+});
+
+describe("featureHorizon", () => {
+  it("follows the feature's status until someone pins it", () => {
+    expect(featureHorizon({ status: "in_progress", horizon: null })).toBe("now");
+    expect(featureHorizon({ status: "planned", horizon: null })).toBe("next");
+    expect(featureHorizon({ status: "considering", horizon: null })).toBe("later");
+    expect(featureHorizon({ status: "idea", horizon: null })).toBe("later");
+    expect(featureHorizon({ status: "planned", horizon: "now" })).toBe("now");
+    expect(featureHorizon({ status: "in_progress", horizon: "later" })).toBe("later");
+  });
+
+  it("keeps released features out of the three columns", () => {
+    expect(featureHorizon({ status: "released", horizon: null })).toBe("released");
+    expect(featureHorizon({ status: "released", horizon: "now" })).toBe("released");
   });
 });

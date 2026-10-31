@@ -8,7 +8,7 @@ import { isIP } from "node:net";
 import { and, asc, eq, ilike, inArray, ne, or, sql } from "drizzle-orm";
 import { addonById, missingAddons, type AddonReport } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
-import { scriptFilesOf, sha256 } from "./skill-files.js";
+import { hashFiles, scriptFilesOf, sha256 } from "./skill-files.js";
 import { agentSkills, agents, companies, skillProposals, skills } from "../db/schema.js";
 
 // Per skill, and per agent: a run carries its agent's skills in one message to the runner.
@@ -41,6 +41,13 @@ export function skillName(s: string) {
   );
 }
 
+/** The SKILL.md a written skill is built from: the form's name and description replace any frontmatter in the body. */
+export function skillMarkdown(input: { name: string; description: string; body: string }) {
+  const name = skillName(input.name);
+  const body = input.body.trim().replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(input.description.trim().replace(/\s+/g, " "))}\n---\n\n${body}\n`;
+}
+
 /** The name and description from a SKILL.md's frontmatter, and the text after it. */
 export function parseSkillMd(text: string): { name: string | null; description: string | null; body: string } {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text.replace(/^﻿/, ""));
@@ -68,6 +75,23 @@ export function parseSkillMd(text: string): { name: string | null; description: 
 
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 const unb64 = (s: string) => Buffer.from(s, "base64");
+
+export type SkillInstructions = { path: string | null; body: string | null; empty: boolean; unreadable: boolean };
+
+/**
+ * The instructions an agent loads: the body of SKILL.md, after its frontmatter. A skill whose
+ * SKILL.md has no body does nothing when loaded, so the page marks it instead of showing an
+ * empty editor. The name lookup tolerates a legacy lower-case path; every new skill is SKILL.md.
+ */
+export function skillInstructions(files: SkillFile[]): SkillInstructions {
+  const main = files.find((f) => f.path === "SKILL.md") ?? files.find((f) => f.path.toLowerCase() === "skill.md");
+  if (!main) return { path: null, body: null, empty: true, unreadable: false };
+  const bytes = unb64(main.content);
+  // A NUL byte means the file isn't text: never show (or overwrite) it as an empty body.
+  if (bytes.includes(0)) return { path: main.path, body: null, empty: true, unreadable: true };
+  const body = parseSkillMd(bytes.toString("utf8")).body.trim();
+  return { path: main.path, body, empty: !body, unreadable: false };
+}
 
 /** A safe relative path inside the skill folder, or null. */
 export function cleanPath(p: string) {
@@ -295,9 +319,19 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
             .innerJoin(agents, eq(agents.id, agentSkills.agentId))
             .where(inArray(agentSkills.skillId, rows.map((r) => r.id)))
         : [];
-      // A skill that came through a proposal was reviewed as the owner's rule requires; any other was added by the owner directly.
-      const viaProposal = rows.length ? new Set((await db.select({ id: skillProposals.installedSkillId }).from(skillProposals).where(inArray(skillProposals.installedSkillId, rows.map((r) => r.id)))).map((r) => r.id)) : new Set<string | null>();
-      return rows.map(({ files, ...r }) => ({ ...r, fileCount: files.length, hasScripts: scriptFilesOf(files).length > 0, addedByOwner: !viaProposal.has(r.id), agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) }));
+      // A skill that came through a proposal was reviewed as the owner's rule requires, but only while
+      // its bytes are still the exact bytes that review covered: an edit makes the reviewed mark stale.
+      const installed = rows.length
+        ? await db
+            .select({ skillId: skillProposals.installedSkillId, bundleHash: skillProposals.bundleHash })
+            .from(skillProposals)
+            .where(inArray(skillProposals.installedSkillId, rows.map((r) => r.id)))
+        : [];
+      const reviewed = new Set(installed.filter((p) => p.skillId).map((p) => `${p.skillId}\0${p.bundleHash}`));
+      return rows.map(({ files, ...r }) => {
+        const instructions = skillInstructions(files);
+        return { ...r, fileCount: files.length, hasInstructions: !instructions.empty, instructionsPath: instructions.path, instructionsUnreadable: instructions.unreadable, hasScripts: scriptFilesOf(files).length > 0, addedByOwner: !reviewed.has(`${r.id}\0${hashFiles(files).bundleHash}`), agents: held.filter((h) => h.skillId === r.id).map((h) => ({ id: h.agentId, name: h.agent })) };
+      });
     },
 
     /** Skills of the owner's other companies, to add here instead of importing again. */
@@ -341,7 +375,10 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
       return {
         ...s,
         agents: held,
+        // The same fingerprint the reviewed mark and the log use, so a reader can pin exact bytes.
+        bundleHash: hashFiles(s.files).bundleHash,
         hasScripts: scriptFilesOf(s.files).length > 0,
+        instructions: skillInstructions(s.files),
         files: s.files.map((f) => {
           const bytes = unb64(f.content);
           const text = bytes.includes(0) ? null : bytes.toString("utf8");
@@ -359,11 +396,16 @@ export function skillsService(db: Db, deps: { fetch?: typeof fetch; lookup?: (ho
     },
 
     /** A skill written in Boss Man: its SKILL.md is built from the form. */
-    async write(companyId: string, input: { name: string; description: string; body: string; replaceId?: string | null; /** "retro" marks a playbook a workflow retro made. */ source?: "written" | "retro" }) {
+    async write(companyId: string, input: { name: string; description: string; body: string; replaceId?: string | null; confirmEmptyBody?: boolean; /** "retro" marks a playbook a workflow retro made. */ source?: "written" | "retro" }) {
       const name = skillName(input.name);
-      // A pasted SKILL.md brings its own front matter; the form's name and description replace it.
-      const body = input.body.trim().replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim();
-      const md = `---\nname: ${name}\ndescription: ${JSON.stringify(input.description.trim().replace(/\s+/g, " "))}\n---\n\n${body}\n`;
+      // An empty editor must never quietly wipe real instructions: the page asks first, then
+      // sends confirmEmptyBody, so only an explicit answer replaces a body with nothing.
+      if (input.replaceId && !input.body.trim() && !input.confirmEmptyBody) {
+        const [old] = await db.select({ files: skills.files }).from(skills).where(and(eq(skills.id, input.replaceId), eq(skills.companyId, companyId)));
+        const before = old ? skillInstructions(old.files) : null;
+        if (before?.body || before?.unreadable) throw new SkillError(409, "This skill has instructions. Saving an empty Instructions box would delete them; confirm the change to remove them.");
+      }
+      const md = skillMarkdown(input);
       return save(companyId, { files: [{ path: "SKILL.md", content: b64(md) }], source: input.source ?? "written", name, replaceId: input.replaceId });
     },
 

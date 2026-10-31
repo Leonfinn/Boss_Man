@@ -39,6 +39,10 @@ const REASON_LABEL: Record<string, string> = {
   "watchdog re-wake": "Woken again after an alert",
   "watchdog escalation": "Handed a problem by Boss Man",
   "update pending": "Picking up after a runner update",
+  /** A wake to check a card or note the owner's answer may have made out of date (BOS-254). */
+  "checking an old card": "Checking an old card",
+  /** Wakes started before BOS-254 kept the old reason; they still read as the same thing. */
+  "stale request": "Checking an old card",
 };
 
 /** Reasons nobody wrote down, which get the honest fallback instead of a label. */
@@ -101,6 +105,8 @@ export type RunOrigin = {
   wakeNote?: string | null;
   /** The ticket it was about without being on it (a nudge that named one). */
   runTicketId?: string | null;
+  /** That ticket's reference, e.g. "HOL-12", for the "Working on" headline (BOS-254). */
+  runTicketRef?: string | null;
   endedAt?: string | null;
   /** The old way of telling a chat run; kept for runs started before `origin`. */
   reason?: string | null;

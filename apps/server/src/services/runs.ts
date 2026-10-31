@@ -21,6 +21,8 @@ export function runOriginQuery(alias: string) {
     // A review wake carries its tickets in the note; the card names them from here.
     wakeNote: sql<string | null>`(select w."note" from "wakes" w where w."run_id" = ${table}."id" limit 1)`,
     runTicketId: sql<string | null>`${table}."run_ticket_id"`,
+    /** The ticket's reference (HOL-12), for the "Working on" headline (BOS-254). */
+    runTicketRef: sql<string | null>`(select case when t."number" is null then null else coalesce(nullif(c."ticket_prefix", ''), 'T') || '-' || t."number"::text end from "tickets" t left join "companies" c on c."id" = t."company_id" where t."id" = ${table}."ticket_id")`,
   };
 }
 

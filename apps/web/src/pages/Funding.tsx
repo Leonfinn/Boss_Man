@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { api, usd, type ActiveRun, type BudgetRow, type Company, type FundingSource, type FundingStatus } from "../api";
 import { art } from "../brand";
 import { State } from "../components/State";
@@ -83,6 +84,142 @@ function ByCompany({ s }: { s: FundingStatus }) {
   );
 }
 
+/** "3m ago", "2h ago", "4d ago": how old a cached reading is, in plain words. */
+const ago = (seconds: number | null) => {
+  if (seconds === null) return "";
+  if (seconds < 60) return "just now";
+  if (seconds < 3_600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.round(seconds / 3_600)}h ago`;
+  return `${Math.round(seconds / 86_400)}d ago`;
+};
+
+/** "in 3 days", "in 5 hours": how long until the plan renews. */
+const until = (iso: string) => {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return "";
+  if (ms <= 0) return "now";
+  if (ms < 3_600_000) return `in ${Math.round(ms / 60_000)} min`;
+  if (ms < 86_400_000) return `in ${Math.round(ms / 3_600_000)} hours`;
+  return `in ${Math.round(ms / 86_400_000)} days`;
+};
+
+/** The readings inside this period (the same renewal), oldest first: used counts over time. */
+function Trend({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
+  const rows = q.history.filter((h) => (h.renewsAt ?? "") === (q.renewsAt ?? "")).slice().reverse();
+  if (rows.length < 2) return null;
+  const first = rows[0]!;
+  const last = rows[rows.length - 1]!;
+  const step = last.used - first.used;
+  return (
+    <span className="muted" style={{ fontSize: 12 }}>
+      This period: {rows.length} readings, {first.used.toLocaleString()} → {last.used.toLocaleString()} ({step >= 0 ? "+" : ""}
+      {step.toLocaleString()} since {ago(Math.round((Date.now() - new Date(first.takenAt).getTime()) / 1000))})
+    </span>
+  );
+}
+
+/** The hold controls for a subscription: threshold, extra usage and which windows count (BOS-227). */
+function QuotaSettings({ s }: { s: FundingStatus }) {
+  const [holdAt, setHoldAt] = useState(Math.round((s.source.quotaHoldAt ?? 0.95) * 100));
+  const [overage, setOverage] = useState<"pause" | "urgent" | "all">(s.source.quotaOverage ?? "pause");
+  const [off, setOff] = useState<string[]>(s.source.quotaDisabledWindows ?? []);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const windows = s.windowsSeen ?? s.quota.map((q) => q.window);
+  const save = async () => {
+    setError(null);
+    try {
+      await api(`/api/funding-sources/${s.source.id}`, { method: "PATCH", body: { quotaHoldAt: holdAt / 100, quotaOverage: overage, quotaDisabledWindows: off } });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+  const toggle = (w: string, on: boolean) => setOff((cur) => (on ? cur.filter((x) => x !== w) : [...cur, w]));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+      <span style={{ fontWeight: 600, fontSize: 13 }}>When the subscription is nearly used up</span>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+        <span style={{ flex: 1 }}>Hold routine work at</span>
+        <input aria-label="Hold routine work at this percentage" type="number" min={80} max={100} value={holdAt} onChange={(e) => setHoldAt(Math.max(80, Math.min(100, Number(e.target.value) || 95)))} style={{ width: 70 }} />
+        <span>%</span>
+      </label>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+        <span style={{ flex: 1 }}>I have extra usage</span>
+        <select aria-label="Extra usage" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
+          <option value="pause">Hold everything at the limit (urgent tickets run until then)</option>
+          <option value="urgent">Keep urgent work running past the limit</option>
+          <option value="all">Keep all work running</option>
+        </select>
+      </label>
+      {overage !== "pause" && (
+        <span className="muted" style={{ fontSize: 12 }}>
+          Extra usage is billed by Anthropic. Boss Man can't see the balance, so set a spending limit in your Claude account.
+        </span>
+      )}
+      {windows.length > 0 && (
+        <fieldset style={{ border: 0, margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+          <legend className="muted" style={{ fontSize: 12 }}>
+            Which limits can trigger the hold
+          </legend>
+          {windows.map((w) => {
+            const latest = s.quota.find((q) => q.window === w);
+            return (
+              <label key={w} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                <input type="checkbox" checked={!off.includes(w)} onChange={(e) => toggle(w, e.target.checked)} />
+                <span style={{ flex: 1 }}>
+                  Can trigger the hold: {windowLabel(w).name} <span className="mono">({w})</span>
+                </span>
+                {latest && <span className="mono muted">{pct(latest.utilization)}</span>}
+              </label>
+            );
+          })}
+          <span className="muted" style={{ fontSize: 12 }}>
+            These names come from Claude Code and aren't documented, so Boss Man doesn't guess what each one means.
+          </span>
+        </fieldset>
+      )}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button type="button" className="btn" onClick={() => void save()}>
+          Save
+        </button>
+        {saved && <span className="muted" style={{ fontSize: 12 }}>Saved.</span>}
+        {error && <span className="error" style={{ fontSize: 12 }}>{error}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** Synthetic's own used/limit reading; an unreadable one is unknown, never an error. */
+function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
+  if (q.used === null || q.limit === null)
+    return <span className="muted">Quota unknown: Synthetic's quota service couldn't be reached and there's no earlier reading yet.</span>;
+  const fraction = q.limit > 0 ? q.used / q.limit : 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+        <span>Requests this period</span>
+        <span className="mono" style={{ color: fraction >= 0.8 ? "var(--amber-ink)" : undefined }}>
+          {q.used.toLocaleString()} of {q.limit.toLocaleString()} · {pct(fraction)}
+        </span>
+      </div>
+      <div className={`bar${fraction >= 0.8 ? " warn" : ""}`} aria-hidden="true">
+        <span style={{ width: pct(Math.min(1, fraction)) }} />
+      </div>
+      {q.renewsAt && (
+        <span className="muted" style={{ fontSize: 12 }}>
+          Renews {when(q.renewsAt)} ({until(q.renewsAt)})
+        </span>
+      )}
+      <Trend q={q} />
+      <span className="muted" style={{ fontSize: 12 }}>
+        Checked {ago(q.ageSeconds)}{q.warned.length ? ` · you've been warned at ${q.warned.join("% and ")}%` : ""}
+      </span>
+    </div>
+  );
+}
+
 function SourceCard({ s }: { s: FundingStatus }) {
   const kind = s.source.kind === "api_credit" ? "API credit" : s.source.kind === "subscription" ? "Subscription" : s.source.kind === "api_payg" ? "API, pay as you go" : s.source.kind;
   return (
@@ -107,6 +244,8 @@ function SourceCard({ s }: { s: FundingStatus }) {
             Resets {when(s.credit.cycleEnd)} · {usd(s.credit.spentMicros)} spent this cycle
           </span>
         </>
+      ) : s.providerQuota ? (
+        <ProviderQuotaBlock q={s.providerQuota} />
       ) : s.quota.length ? (
         s.quota.map((q) => {
           const label = windowLabel(q.window);
@@ -144,6 +283,7 @@ function SourceCard({ s }: { s: FundingStatus }) {
           {usd(s.totalSpentMicros)} <small>spent through Boss Man</small>
         </span>
       )}
+      {s.source.kind === "subscription" && <QuotaSettings s={s} />}
       <Daily s={s} />
       <ByCompany s={s} />
       {s.coverage === "boss_man_runs_only" && s.source.kind !== "subscription" && (

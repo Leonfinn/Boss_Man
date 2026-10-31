@@ -1,6 +1,74 @@
 import { describe, expect, it } from "vitest";
 import { evaluatePermission } from "../src/policy.js";
-import { alwaysChoices, explainCommand, explainPermission } from "../src/explain.js";
+import { alwaysChoices, explainCommand, explainPermission, readPush } from "../src/explain.js";
+
+describe("readPush", () => {
+  const ticket = "11111111-2222-4333-8444-555555555555";
+
+  it("names a ticket branch, and other branches plainly", () => {
+    expect(readPush(`git push origin bossman/${ticket}`)).toMatchObject({ kind: "ticket", headline: "Pushes to its ticket branch", ticketId: ticket, warnings: [], dangerous: false });
+    expect(readPush("git push origin feature/login")).toMatchObject({ kind: "branch", headline: "Pushes to feature/login", dangerous: false });
+    expect(readPush("git push --repo=origin feature/login")).toMatchObject({ kind: "branch", headline: "Pushes to feature/login" });
+    expect(readPush(`git push origin HEAD:refs/heads/bossman/${ticket}`)).toMatchObject({ kind: "ticket", ticketId: ticket });
+    expect(readPush("git -C x status")).toBeNull();
+    expect(readPush(`git commit -m "explain git push origin main"`)).toBeNull();
+  });
+
+  it("flags main wherever it is written", () => {
+    for (const c of ["git push origin main", "git push origin HEAD:main", "git push origin HEAD:refs/heads/main"]) {
+      const r = readPush(c);
+      expect(r?.dangerous, c).toBe(true);
+      expect(r?.warnings.join(" "), c).toContain("Pushes to main");
+    }
+  });
+
+  it("flags force, delete, every branch/tag, and more than one branch", () => {
+    for (const c of ["git push --force origin x", "git push -f origin x", "git push --force-with-lease origin x", "git push origin +x"]) {
+      expect(readPush(c)?.warnings.join(" "), c).toContain("Force push");
+      expect(readPush(c)?.dangerous, c).toBe(true);
+    }
+    for (const c of ["git push --delete origin x", "git push -d origin x", "git push origin :x"]) {
+      expect(readPush(c)?.warnings.join(" "), c).toContain("Deletes a branch");
+      expect(readPush(c)?.dangerous, c).toBe(true);
+    }
+    for (const c of ["git push --all origin", "git push --mirror origin", "git push --tags origin"]) {
+      expect(readPush(c)?.dangerous, c).toBe(true);
+    }
+    expect(readPush("git push origin main feature")).toMatchObject({ kind: "many", dangerous: true });
+    expect(readPush("git push origin main feature")?.warnings.join(" ")).toContain("more than one branch");
+  });
+
+  it("flags a push that doesn't name the branch", () => {
+    for (const c of ["git push", "git push origin", "git push origin HEAD"]) {
+      const r = readPush(c);
+      expect(r?.kind, c).toBe("unnamed");
+      expect(r?.warnings.join(" "), c).toContain("Branch not named: may push to main");
+      expect(r?.dangerous, c).toBe(true);
+    }
+  });
+
+  it("never calls a form it can't read safe", () => {
+    for (const c of [
+      "git status && git push origin main",
+      "git push origin main; rm -rf /",
+      "git push origin main | tee /tmp/log",
+      "git push origin main > /tmp/log",
+      "sudo git push origin main",
+      "git push origin $(cat branch)",
+      "git push --receive-pack=evil origin main",
+      "git push 'origin' main",
+      "git push origin main && git push origin main",
+    ]) {
+      expect(readPush(c), c).toMatchObject({ kind: "unreadable", headline: "Couldn't read this push, check the exact command", dangerous: true });
+    }
+  });
+
+  it("does not call a delete of its own ticket branch safe", () => {
+    expect(readPush(`git push origin :bossman/${ticket}`)).toMatchObject({ kind: "branch", headline: "Deletes a branch on the remote", dangerous: true });
+    expect(readPush("git push origin +main")?.dangerous).toBe(true);
+    expect(readPush("git push --mirror origin")?.dangerous).toBe(true);
+  });
+});
 
 describe("explainCommand", () => {
   it("says the owner's memory check only reads", () => {
