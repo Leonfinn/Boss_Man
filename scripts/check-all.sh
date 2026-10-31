@@ -48,12 +48,12 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   }
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
-    rc=0; : >"$began_file"
+    rc=0; : >"$began_file"; attempt_start=$SECONDS
     BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
     if [ "$rc" -eq 0 ]; then record pass 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
-    took=0; began=$(cat "$began_file"); [ -z "$began" ] || took=$(($(date +%s) - began))
+    took=$((SECONDS - attempt_start)); began=$(cat "$began_file"); [ -z "$began" ] || took=$(($(date +%s) - began))
     if [ "$n" -lt "$attempts" ] && [ $((SECONDS - start + took + pause)) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       sleep "$pause"
@@ -101,11 +101,15 @@ if command -v flock >/dev/null; then
   }
   # Prints "<my place> <checks waiting>", dropping queue entries whose process is gone.
   queue_place() {
-    local f pid mine=0 total=0
+    local f base qts qpid mine=0 total=0 now; now=$(date +%s)
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
-      pid=${f##*-}
-      if ! [[ $pid =~ ^[0-9]+$ ]] || ! kill -0 "$((10#$pid))" 2>/dev/null; then rm -f "$f"; continue; fi
+      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is digits only.
+      # Then drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused).
+      base=$(basename "$f")
+      if ! [[ $base =~ ^[01]-[0-9]+-[0-9]+$ ]]; then rm -f "$f"; continue; fi
+      qts=$(cut -d- -f2 <<<"$base"); qpid=${base##*-}
+      if ! kill -0 "$((10#$qpid))" 2>/dev/null || [ $((now - 10#$qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
     done
     echo "$mine $total"

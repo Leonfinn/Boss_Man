@@ -191,26 +191,42 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   );
 }
 
-/** Synthetic's own used/limit reading; an unreadable one is unknown, never an error. */
+/**
+ * Synthetic's own reading; an unreadable one is unknown, never an error. The plan spends its weekly
+ * credits, so that is what the bar shows when Synthetic reports them (BOS-260); the old request
+ * window is shown only when there is nothing weekly, and always labelled as that, never as usage.
+ */
 function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
   if (q.used === null || q.limit === null)
     return <span className="muted">Quota unknown: Synthetic's quota service couldn't be reached and there's no earlier reading yet.</span>;
   const fraction = q.limit > 0 ? q.used / q.limit : 0;
+  const weekly = (q.measure ?? "requests") === "weekly";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-        <span>Requests this period</span>
+        <span>{weekly ? "Weekly credits" : "Requests this period"}</span>
         <span className="mono" style={{ color: fraction >= 0.8 ? "var(--amber-ink)" : undefined }}>
-          {q.used.toLocaleString()} of {q.limit.toLocaleString()} · {pct(fraction)}
+          {weekly ? `${pct(fraction)} used · ${100 - Math.round(fraction * 100)}% left` : `${q.used.toLocaleString()} of ${q.limit.toLocaleString()} · ${pct(fraction)}`}
         </span>
       </div>
       <div className={`bar${fraction >= 0.8 ? " warn" : ""}`} aria-hidden="true">
         <span style={{ width: pct(Math.min(1, fraction)) }} />
       </div>
-      {q.renewsAt && (
+      {weekly ? (
         <span className="muted" style={{ fontSize: 12 }}>
-          Renews {when(q.renewsAt)} ({until(q.renewsAt)})
+          Credits come back 2% at a time. Boss Man started reading weekly credits on 31 Oct; earlier readings in this list were the old request count.
         </span>
+      ) : (
+        <>
+          {q.renewsAt && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              Renews {when(q.renewsAt)} ({until(q.renewsAt)})
+            </span>
+          )}
+          <span className="muted" style={{ fontSize: 12 }}>
+            This is Synthetic's request window, which the weekly plan often doesn't use. Synthetic's API doesn't report weekly credits for this account, so this isn't total usage.
+          </span>
+        </>
       )}
       <Trend q={q} />
       <span className="muted" style={{ fontSize: 12 }}>

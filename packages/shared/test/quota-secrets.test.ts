@@ -65,25 +65,45 @@ describe("parseCodexRateLimits", () => {
 });
 
 describe("parseSyntheticQuota", () => {
-  it("reads used, limit and renewal whether they sit beside or inside subscription", () => {
-    const renewsAt = "2026-11-30T00:00:00.000Z";
-    expect(parseSyntheticQuota({ subscription: { limit: 1000 }, requests: 123, renewsAt })).toEqual({
-      used: 123,
-      limit: 1000,
-      renewsAt: new Date(renewsAt),
-    });
-    expect(parseSyntheticQuota({ subscription: { limit: 50, requests: 7, renewsAt } })).toEqual({
-      used: 7,
-      limit: 50,
-      renewsAt: new Date(renewsAt),
+  // The real /v2/quotas body captured on 31 Oct 2026 (BOS-260), key removed. The request window reads 0
+  // while the plan was heavily used; the weekly credits are the measure it actually spends.
+  const real = {
+    subscription: { limit: 500, requests: 0, renewsAt: "2026-10-31T21:13:27.305Z" },
+    search: { hourly: { limit: 250, requests: 0, renewsAt: "2026-10-31T17:13:27.306Z" } },
+    planWeeklyLimit: { nextRegenAt: "2026-10-31T19:15:30.000Z", percentRemaining: 48.30020605714286, nextRegenPercent: 2 },
+  };
+
+  it("reads the weekly credits from the real response, beside the unused request window", () => {
+    expect(parseSyntheticQuota(real)).toEqual({
+      weekly: { percentRemaining: 48.30020605714286, nextRegenAt: new Date("2026-10-31T19:15:30.000Z"), nextRegenPercent: 2 },
+      requests: { used: 0, limit: 500, renewsAt: new Date("2026-10-31T21:13:27.305Z") },
     });
   });
 
-  it("treats a response without a usable used/limit pair as unknown", () => {
+  it("keeps the request window when only that is sent, so older accounts still read", () => {
+    const renewsAt = "2026-11-30T00:00:00.000Z";
+    expect(parseSyntheticQuota({ subscription: { limit: 1000 }, requests: 123, renewsAt })).toEqual({
+      weekly: null,
+      requests: { used: 123, limit: 1000, renewsAt: new Date(renewsAt) },
+    });
+    expect(parseSyntheticQuota({ subscription: { limit: 50, requests: 7, renewsAt } })).toEqual({
+      weekly: null,
+      requests: { used: 7, limit: 50, renewsAt: new Date(renewsAt) },
+    });
+  });
+
+  it("treats a response with nothing usable as unknown, never 0", () => {
     expect(parseSyntheticQuota(null)).toBeNull();
     expect(parseSyntheticQuota({})).toBeNull();
     expect(parseSyntheticQuota({ subscription: { limit: 0 }, requests: 1 })).toBeNull();
     expect(parseSyntheticQuota({ subscription: { limit: 10 }, requests: "3" })).toBeNull();
+  });
+
+  it("ignores a weekly block it can't trust, and a percent above 100 is not a percentage", () => {
+    expect(parseSyntheticQuota({ planWeeklyLimit: { percentRemaining: "48" } })).toBeNull();
+    expect(parseSyntheticQuota({ planWeeklyLimit: { percentRemaining: 140 } })).toBeNull();
+    // A weekly block missing its regeneration time is still a usable percentage.
+    expect(parseSyntheticQuota({ planWeeklyLimit: { percentRemaining: 0 } })?.weekly).toEqual({ percentRemaining: 0, nextRegenAt: null, nextRegenPercent: null });
   });
 });
 

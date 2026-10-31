@@ -2,7 +2,7 @@
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -232,6 +232,36 @@ export function reviewService(
         return await deps.runners.request<WorkspaceDiff>(runner.id, (requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, ...(range === "last_turn" ? { range } : {}) }));
       } catch (err) {
         throw new ReviewError(409, (err as Error).message);
+      }
+    },
+
+    /**
+     * Whether the ticket's new migration numbers are free (BOS-219). At review time it also looks at
+     * the other open tickets in its project, so the agent hears early. The check that counts, just
+     * before the merge, compares only against the default branch: once one ticket has merged, the
+     * next must not be sent back because a branch it clashes with is still open, or two clashing
+     * tickets would keep bouncing each other. An offline runner or an unreadable branch gives
+     * "couldn't say", which never holds a ticket up.
+     */
+    async migrations(ticketId: string, companyId?: string, withOthers = true): Promise<MigrationsResult> {
+      const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId, companyId);
+      if (!repoUrl || t.noCode) return { needed: null, reason: "This ticket has no code of its own to check." };
+      const others = !withOthers
+        ? []
+        : (
+            await db
+              .select({ branch: tickets.branch })
+              .from(tickets)
+              .where(and(eq(tickets.companyId, t.companyId), eq(tickets.projectId, t.projectId), inArray(tickets.systemState, ["in_progress", "review", "blocked"]), isNotNull(tickets.branch)))
+          )
+            .map((o) => o.branch!)
+            .filter((b) => b && b !== `bossman/${ticketId}`);
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+      if (!runner) return { needed: null, reason: "The company has no runner, so there was nothing to compare." };
+      try {
+        return await deps.runners.request<MigrationsResult>(runner.id, (requestId) => ({ type: "workspace.migrations", requestId, projectId: t.projectId, ticketId, target: defaultBranch, others }));
+      } catch (err) {
+        return { needed: null, reason: `I couldn't check the migration numbers: ${(err as Error).message}` };
       }
     },
 
@@ -645,6 +675,18 @@ export function reviewService(
           const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
           return { outcome: "verify_failed", delivered, detail: v };
         }
+      }
+
+      // Its migrations must not take a number another branch already has (BOS-219): the merge is the
+      // moment it matters, so this is checked again here and, when taken, the ticket goes back with
+      // the number free right now. A check that can't say never blocks the merge.
+      const migrations = await this.migrations(ticketId, undefined, false).catch(() => null);
+      if (migrations?.needed) {
+        const delivered = await sendBack(
+          `The review was approved, but a migration number is already taken: ${migrations.why.join("; ")}. Another branch merged a migration with the same number, so this can't land as it is. Rename it to ${String(migrations.next).padStart(4, "0")} (and any others it moved), set its journal entry's \`when\` later than the newest one already on ${defaultBranch}, run \`node scripts/lint-migrations.mjs\` (which now catches this), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${migrations.others.length ? `\nOther numbers taken: ${migrations.others.join("; ")}.` : ""}`,
+          "migration number taken",
+        );
+        return { outcome: "verify_failed", delivered, detail: migrations };
       }
 
       // A pull request: the host must be known and reachable before anything is pushed (R59).

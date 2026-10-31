@@ -8,8 +8,8 @@ fail() { echo "FAIL: $*"; exit 1; }
 # check-all.sh runs this inside its own child, so drop the markers that would switch the retry loop off
 unset BOSSMAN_CHECK_CHILD BOSSMAN_CHECK_ATTEMPTS BOSSMAN_CHECK_BUDGET_SECONDS BOSSMAN_CHECK_BODY
 export BOSSMAN_CHECK_RETRY_SECONDS=0 BOSSMAN_CHECK_STORE=off
-# check-all.sh sets this for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
-unset BOSSMAN_CHECK_CHILD
+# Also drop the merge gate's and user's settings, which would change what the cases below mean. check-all.sh sets CHILD for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
+unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT
 runs() { grep -c . "$t/count" 2>/dev/null || true; }
 
 # run <expected rc> <expected runs> <label> <stub body> [dir] [command]
@@ -82,7 +82,7 @@ if command -v flock >/dev/null; then
 
   # With a recorded pair, two slots: one busy slot does not stop a second check.
   hold 1 4; holder=$!; sleep 0.3
-  out=$(lock env) || fail "second slot: expected success, got: $out"
+  out=$(lock env CHECK_ALL_SLOTS=2) || fail "second slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "second slot: not acquired"
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
 
@@ -126,6 +126,27 @@ if command -v flock >/dev/null; then
   out=$(lock env) || fail "dead waiter: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "dead waiter blocked the queue: $out"
   wait "$h1" "$h2"
+
+  # Default is one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  hold 1 3; h1=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
+  [ "$rc" = 75 ] || fail "default slots: expected one slot (exit 75), got $rc: $out"
+  wait "$h1"
+
+  # A queue entry older than 2 h is dropped even when its pid is alive (a reused pid of a killed waiter).
+  mkdir -p "$t/lock.queue"; : >"$t/lock.queue/1-1000000000000000000-$$"
+  hold 1 2; h1=$!; sleep 0.3
+  out=$(lock env) || fail "stale waiter: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "stale waiter blocked the queue: $out"
+  wait "$h1"
+  # A hostile queue entry name must be removed, never run.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  hostile="$t/lock.queue/1-a[\$(touch PWNED)]-$$"; : >"$hostile"
+  hold 1 2; h1=$!; sleep 0.3
+  out=$(lock env) || fail "hostile entry: expected success, got: $out"
+  [ ! -e PWNED ] || { rm -f PWNED; fail "hostile queue entry name ran a command"; }
+  [ ! -e "$hostile" ] || fail "hostile queue entry was not removed"
+  wait "$h1"
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi
