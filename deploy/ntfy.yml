@@ -1,0 +1,51 @@
+# ntfy (phone notifications) as an optional add-on. OFF by default: the service is in the "ntfy"
+# profile, so a plain `docker compose up -d` starts nothing from this file.
+# It is its OWN Compose project, never merged with Boss Man's files (see docs/06-install-truenas.md, section 10):
+#   docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
+# Never add this file to COMPOSE_FILE: the required NTFY_* variables below are checked when the
+# file is parsed, so every compose command on the host (including the deployer) would fail.
+#
+# In .env (the address is not a secret; the topic and tokens never go in this file):
+#   NTFY_BASE_URL=https://<nas-name>.<tailnet>.ts.net:8443   # the Tailscale Serve address, https only
+#   NTFY_DATA=/mnt/<pool>/bossman/ntfy                       # folder owned by uid 1000 (cache and users)
+# Optional: NTFY_VERSION (pinned below), NTFY_HOST_PORT (2586), NTFY_CACHE_DURATION (1h),
+#   NTFY_UPSTREAM_BASE_URL (leave unset; iPhone only, see the doc).
+#
+# The port is published on 127.0.0.1 only. Tailscale Serve on the NAS is the only way in:
+#   tailscale serve --bg --https=8443 http://127.0.0.1:2586   (never `tailscale funnel`)
+# Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
+# `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set, so nothing is
+# relayed anywhere. Messages are kept for NTFY_CACHE_DURATION, then dropped.
+
+services:
+  ntfy:
+    profiles: ["ntfy"]
+    image: binwiederhier/ntfy:${NTFY_VERSION:-v2.11.0}
+    command: ["serve"]
+    restart: unless-stopped
+    user: "1000:1000"
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    ports:
+      - "127.0.0.1:${NTFY_HOST_PORT:-2586}:80"
+    volumes:
+      - ${NTFY_DATA:?Set NTFY_DATA in .env to the ntfy data folder}:/var/lib/ntfy
+    environment:
+      NTFY_BASE_URL: ${NTFY_BASE_URL:?Set NTFY_BASE_URL in .env to the https Tailscale Serve address}
+      NTFY_LISTEN_HTTP: ":80"
+      NTFY_BEHIND_PROXY: "true"
+      NTFY_AUTH_FILE: /var/lib/ntfy/user.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_ENABLE_SIGNUP: "false"
+      NTFY_ENABLE_LOGIN: "true"
+      NTFY_WEB_ROOT: disable
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_CACHE_DURATION: ${NTFY_CACHE_DURATION:-1h}
+      NTFY_UPSTREAM_BASE_URL: ${NTFY_UPSTREAM_BASE_URL:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 256m

@@ -798,21 +798,68 @@ If you edited `.env` after the backup, copy those changes back by hand instead o
 
 ## 10. Phone notifications (optional)
 
-Boss Man can push pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44). Boss Man only makes outbound requests to it, so nothing new is exposed at the router.
+Boss Man pushes pages and asks to your phone through your own [ntfy](https://github.com/binwiederhier/ntfy) server (R44), run on the NAS from `deploy/ntfy.yml`. Boss Man only makes outbound requests to it. Nothing is opened at the router and nothing is exposed on your LAN.
 
-What you need, from ntfy's own docs:
-- **A ntfy server** your phone can reach, for example on your tailnet ([install](https://docs.ntfy.sh/install/)). Lock it down with `auth-default-access: "deny-all"` ([access control](https://docs.ntfy.sh/config/#access-control)).
-- **A user and an access token** for Boss Man, made on the ntfy server with `ntfy user add` and `ntfy token add` ([access tokens](https://docs.ntfy.sh/config/#access-tokens)). Give that user write access to one topic, for example `bossman`, with `ntfy access`.
-- **The ntfy app** on your phone, subscribed to that topic on your server. On iPhone, instant delivery from a self-hosted server also needs `upstream-base-url: "https://ntfy.sh"` in the server's config, which forwards a wake-up (not the message) through ntfy.sh ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)).
+How it is set up (all in `deploy/ntfy.yml`):
+- **Off by default,** its own Compose project like Penpot. A normal `docker compose up -d` never starts it.
+- **Tailnet and https only.** The container listens on the NAS's own `127.0.0.1` port 2586. Tailscale Serve publishes it to your tailnet over https on port 8443. Never use Tailscale Funnel for it. Use the same Tailscale certificates as Boss Man's own https address.
+- **Deny-all access.** Nobody can publish or read without a user. There is no sign-up and no web page.
+- **Short memory.** Messages are kept for 1 hour (`NTFY_CACHE_DURATION`), then dropped.
+- **No relay.** No upstream server is set, so nothing leaves your network.
 
-Then, in Boss Man, open **Notifications** and fill in **How you're told**:
-- **ntfy server**, **Topic** and **Access token**. The token is stored encrypted, like other credentials, and never shown again.
-- **Boss Man's address on your phone**, so tapping a notification opens its evidence. This needs to be an address your phone can reach, such as a Tailscale Serve HTTPS name.
-- **Quiet hours**, if you want them, and how many notifications each agent may send per hour.
+Treat the topic name and the passwords as secrets: notifications will carry Approve links. Don't paste them into tickets, chat or this repository.
 
-Choose **Send a test to my phone** to check it. If it fails, the message says what ntfy answered.
+### Your steps
 
-ntfy's docs site wasn't reachable when this was written, so these links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs). Setting up ntfy itself on TrueNAS isn't covered here.
+1. On the NAS, make the data folder and give it to uid 1000 (use your own pool path):
+   ```
+   sudo mkdir -p /mnt/<pool>/bossman/ntfy && sudo chown 1000:1000 /mnt/<pool>/bossman/ntfy
+   ```
+2. Back up `.env`, then add two lines. The address is your NAS's Tailscale name with port 8443:
+   ```
+   NTFY_BASE_URL=https://<nas-name>.<tailnet>.ts.net:8443
+   NTFY_DATA=/mnt/<pool>/bossman/ntfy
+   ```
+3. Start it, and publish it on your tailnet:
+   ```
+   docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
+   sudo tailscale serve --bg --https=8443 http://127.0.0.1:2586
+   tailscale serve status
+   ```
+   The status should list `https://<nas-name>.<tailnet>.ts.net:8443` as **tailnet only**. If it says Funnel, run `sudo tailscale serve --https=8443 off` and stop.
+4. Pick a topic name nobody could guess, such as 20 random letters and digits. It is a password. Make two users, one that can only publish and one that can only read. `ntfy user add` asks for a password, so type a long one each time:
+   ```
+   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add bossman-publish
+   docker exec -it boss-man-ntfy-ntfy-1 ntfy user add phone-read
+   docker exec boss-man-ntfy-ntfy-1 ntfy access bossman-publish <topic> write-only
+   docker exec boss-man-ntfy-ntfy-1 ntfy access phone-read <topic> read-only
+   docker exec boss-man-ntfy-ntfy-1 ntfy token add bossman-publish
+   ```
+   The last command prints the **publish token** (it starts with `tk_`). Copy it now.
+5. In Boss Man, open **Settings > Secrets** and save the publish token as a new secret.
+6. Open **Settings > Notifications** and fill in **ntfy server** with the https address from step 2, **Topic**, and **Access token** (the secret from step 5). Set **Boss Man's address on your phone** to Boss Man's https address.
+7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
+8. In Boss Man, choose **Send a test to my phone**. It should arrive within seconds.
+
+Check that it is locked down: `curl -s -o /dev/null -w '%{http_code}\n' https://<nas-name>.<tailnet>.ts.net:8443/<topic>/json?poll=1` must print `401` or `403`, and from a device that is not on your tailnet the address must not answer at all.
+
+### iPhone
+
+iPhones only get instant delivery from a self-hosted server if the server forwards a wake-up through ntfy.sh. If you use an iPhone, add `NTFY_UPSTREAM_BASE_URL=https://ntfy.sh` to `.env` and run step 3's `docker compose` command again. ntfy sends ntfy.sh only a poll request containing the message ID, never the title, text or buttons ([iOS instant notifications](https://docs.ntfy.sh/config/#ios-instant-notifications)). Android doesn't need this: leave it unset.
+
+### Approve buttons
+
+ntfy action buttons make your phone call Boss Man directly, over Boss Man's https address on your tailnet (the Tailscale Serve address from the HTTPS section). The Approve button (BOS-243) only turns on when a publish token is set and Boss Man's public URL is https.
+
+### Moving off the Home Assistant webhook
+
+Run both for a day. During that time the webhook keeps getting plain alerts only. When the ntfy test and a real alert have both reached your phone, remove the webhook in **Settings > Notifications**.
+
+### Rolling back
+
+`docker compose -p boss-man-ntfy -f deploy/ntfy.yml --profile ntfy down` and `sudo tailscale serve --https=8443 off`. Your messages are only kept for an hour, so there is nothing to restore. The users and tokens live in `NTFY_DATA/user.db`; copy that file if you want to keep them.
+
+ntfy's docs site wasn't reachable when this was written, so the links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs).
 
 ## 10b. HTTPS through Tailscale Serve (tailnet only)
 
