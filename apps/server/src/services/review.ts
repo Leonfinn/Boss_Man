@@ -658,7 +658,14 @@ export function reviewService(
       const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
       for (const command of checks) {
         await touch();
-        const v = await whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
+        const runCheck = () => whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
+        let v = await runCheck();
+        // Killed or out of memory (not timed out, not a real failure): the runner or server was cut off, not the work. Run it once more before bothering the owner.
+        const first = checkNeverFinished(v);
+        if (!v.ok && (first === "killed" || first === "out_of_memory") && !checkWaitedForLock(v)) {
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check ${first === "killed" ? "was killed" : "ran out of memory"} before it finished; running it once more. Nothing to do.` });
+          v = await runCheck();
+        }
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify", passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
         if (!v.ok) {
           // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.

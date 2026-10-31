@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { checkMigrations } from "./migrations.js";
 
 const run = promisify(execFile);
@@ -445,7 +445,7 @@ export class Workspaces {
    * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
-  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS): Promise<VerifyResult> {
+  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS): Promise<VerifyResult> {
     const dir = await this.reopen(spec);
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
@@ -465,8 +465,18 @@ export class Workspaces {
         }
       };
       let tail = "";
+      // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
+      let queued = false;
+      let started = false;
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
+        if (!started && tail.includes(CHECK_STARTED_MARKER)) {
+          started = true;
+          arm(timeoutMs);
+        } else if (!queued && !started && tail.includes(CHECK_QUEUED_MARKER)) {
+          queued = true;
+          arm(queueMaxMs);
+        }
       };
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
@@ -483,11 +493,16 @@ export class Workspaces {
         killGroup("SIGKILL"); // strays left behind by a check that has already exited
         resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started });
       };
-      const timer = setTimeout(() => {
-        timedOut = true;
-        killGroup("SIGTERM");
-        hardKill = setTimeout(() => finish(null), VERIFY_KILL_GRACE_MS);
-      }, timeoutMs);
+      let timer: NodeJS.Timeout;
+      const arm = (ms: number) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          timedOut = true;
+          killGroup("SIGTERM");
+          hardKill = setTimeout(() => finish(null), VERIFY_KILL_GRACE_MS);
+        }, ms);
+      };
+      arm(timeoutMs);
       child.on("error", (err) => {
         tail += String(err.message);
         finish(null);

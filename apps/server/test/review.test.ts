@@ -370,6 +370,16 @@ describe("landing an approved ticket (R46, R47)", () => {
       return c;
     };
 
+    it("is retried once by Boss Man, with no card, when the second try passes", async () => {
+      const c = (ctx = await setup({ answers: { verify: killed } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      let calls = 0;
+      Object.defineProperty(c.answers, "verify", { get: () => (++calls === 1 ? killed : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 }) });
+      expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2);
+      expect(await open(c)).toHaveLength(0);
+    });
+
     it("keeps the ticket in review, asks the owner once, and leaves the agent alone", async () => {
       const c = await stuck();
       const t = (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
@@ -389,7 +399,8 @@ describe("landing an approved ticket (R46, R47)", () => {
       c.answers.verify = { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 };
       expect((await answer(c, (await open(c))[0]!.id, "Run the check again")).statusCode).toBe(200);
       await landed(c);
-      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(2);
+      // Two tries in the first landing (the killed one is retried once by itself), one in the second.
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(3);
       expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]).toMatchObject({ systemState: "done", mergeCommit: "c".repeat(40) });
     });
 

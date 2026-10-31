@@ -73,14 +73,15 @@ node scripts/lint-migrations.mjs
 # The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS (default 1 until a clean side-by-side pair is measured) checks run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait and does not give up (hand-run checks) or gives up
-# after CHECK_ALL_LOCK_WAIT seconds (default 600, merge check only: exit 75, which Boss Man retries).
+# after CHECK_ALL_LOCK_WAIT seconds (default 3 h, merge check only: exit 75, which Boss Man retries).
+# The merge check queues like the rest but goes ahead of waiting hand-run checks; one already running is never interrupted.
 # fd 9 is inherited by pnpm/vitest: if a timed-out check leaves children behind they keep the slot until
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
 if command -v flock >/dev/null; then
   LOCK=${CHECK_ALL_LOCK:-/tmp/bossman-check-all}
   SLOTS=${CHECK_ALL_SLOTS:-1}
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
-  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-600}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
+  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-10800}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
   mkdir -p "$QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
   : >"$qfile"; trap 'rm -f "$qfile"' EXIT
@@ -138,6 +139,7 @@ if command -v flock >/dev/null; then
     echo "check-all: gave up waiting for the heavy-phase lock $LOCK" >&2; exit 75
   fi
   rm -f "$qfile"; trap - EXIT
+  echo "check-all: slot taken, running the checks"
 else
   echo "check-all: flock not found, running without the heavy-phase lock"
 fi
