@@ -127,7 +127,8 @@ if command -v flock >/dev/null; then
   grep -q "lock held" <<<"$out" || fail "dead waiter blocked the queue: $out"
   wait "$h1" "$h2"
 
-  # Default is one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  # No recorded pair means one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  rm -f "$t/proof"
   hold 1 3; h1=$!; sleep 0.3
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
   [ "$rc" = 75 ] || fail "default slots: expected one slot (exit 75), got $rc: $out"
