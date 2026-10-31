@@ -78,7 +78,8 @@ if command -v flock >/dev/null; then
   out=$(lock env CHECK_ALL_PAIR_TRIAL=1) || fail "trial: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "trial: second slot not acquired"
   kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
-$1
+  echo "A=600s B=640s no OOM" >"$t/proof"
+
   # With a recorded pair, two slots: one busy slot does not stop a second check.
   hold 1 4; holder=$!; sleep 0.3
   out=$(lock env) || fail "second slot: expected success, got: $out"
