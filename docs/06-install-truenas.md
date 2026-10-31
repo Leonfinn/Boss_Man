@@ -822,13 +822,8 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    ```
    NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443
    ```
-   Nothing else is needed. ntfy finds the `edge` network from section 10b by its default name (`boss-man_edge`). Only if you changed the Compose project name, or set `NTFY_DATA` or `NTFY_EDGE_NETWORK` yourself, add those lines too.| grep _edge`. It should print one line, such as `boss-man_edge`. Back up `.env`, then add three lines. The address is the same ts.net name as in 10b, with port 8443:
-   ```
-   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443
-   NTFY_DATA=/mnt/<pool>/bossman/ntfy
-   NTFY_EDGE_NETWORK=<the name from the command above>
-   ```
-3. Start it. The Tailscale container already publishes it, because `deploy/tailscale/serve.json` has a port 8443 entry that points at `ntfy`:
+   Nothing else is needed. ntfy finds the `edge` network from section 10b by its default name (`boss-man_edge`). Only if you changed the Compose project name, or set `NTFY_DATA` or `NTFY_EDGE_NETWORK` yourself, add those lines too. `NTFY_DATA` and `NTFY_EDGE_NETWORK` are only for a different data folder or network; `NTFY_EDGE_NETWORK` is the name of that network, which `docker network ls` lists (it ends in `_edge`).
+3. Start it. **This needs BOS-242 (section 10b) merged with an extra port 8443 entry in `deploy/tailscale/serve.json`, `"${TS_CERT_DOMAIN}:8443"` proxying to `http://ntfy:80`, with no Funnel.** Check that the file has it before you go on: `grep -c ':8443' deploy/tailscale/serve.json` must print `1`. If it prints `0`, stop: nothing publishes ntfy yet.
    ```
    docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
    docker exec <tailscale container> tailscale serve status
@@ -845,6 +840,11 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
 5. In Boss Man, open **Settings > Secrets** and save the publish token as a new secret.
 6. Open **Settings > Notifications** and fill in **ntfy server** with the https address from step 2, **Topic**, and **Access token** (the secret from step 5). Set **Boss Man's address on your phone** to Boss Man's https address.
+   **Unproven:** Boss Man's server container is not on your tailnet, so the ts.net name may not be reachable from inside it. Before you send the test, check from the server container (replace the name; ntfy answers this health URL without a login):
+   ```
+   docker compose exec server wget -qO- https://<host-name>.<tailnet>.ts.net:8443/v1/health
+   ```
+   It should print `{"healthy":true}`. If it fails, "Send a test" will fail too: stop and tell me. The fix (the server's `extra_hosts` pointing the ts.net name at the Tailscale container on `edge`, so the server keeps talking https) belongs in BOS-242's `deploy/tailscale.yml`, and it is not tested yet.
 7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
 8. In Boss Man, choose **Send a test to my phone**. It should arrive within seconds.
 
@@ -868,7 +868,7 @@ The same steps work on plain Linux Docker, a Proxmox VM and a Proxmox container 
 
 ### Rolling back
 
-`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down`. Port 8443 then answers with an error until you start it again; to remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Your messages are only kept for an hour, so there is nothing to restore. The users and tokens live in `NTFY_DATA/user.db`; copy that file if you want to keep them.
+`docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy down`. Port 8443 then answers with an error until you start it again; to remove it for good, delete the 8443 entry from `deploy/tailscale/serve.json`. Your messages are only kept for an hour and are not worth restoring. The users and tokens live in `NTFY_DATA/user.db`; copy that file first if you want to keep them.
 
 ntfy's docs site wasn't reachable when this was written, so the links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs).
 

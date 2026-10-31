@@ -10,7 +10,10 @@
 # Optional, with defaults that match BOS-242:
 #   NTFY_DATA=<folder>          # default $BOSSMAN_DATA/ntfy (BOSSMAN_DATA default /srv/boss-man/data); owned by uid 1000.
 #                               # Holds users, tokens and cache: include it in your backup and copy it when you move host.
-#   NTFY_EDGE_NETWORK=<name>    # default ${COMPOSE_PROJECT_NAME:-boss-man}_edge, the "edge" network of deploy/tailscale.yml
+#   NTFY_EDGE_NETWORK=<name>    # default boss-man_edge, the "edge" network of deploy/tailscale.yml (the -p name of THIS file does not change it).
+#                               # Set it only if Boss Man runs under another Compose project name: <project>_edge.
+#   NTFY_EDGE_IP=<address>      # default 172.30.0.6, ntfy fixed address on edge. Must sit inside BOSSMAN_EDGE_SUBNET and never be
+#                               # BOSSMAN_EDGE_IP (the one address whose forwarded headers the server trusts) or the gateway (.1).
 # Optional: NTFY_VERSION (pinned below), NTFY_CACHE_DURATION (1h),
 #   NTFY_UPSTREAM_BASE_URL (leave unset; iPhone only, see the doc).
 #
@@ -53,9 +56,11 @@ services:
     networks:
       edge:
         aliases: [ntfy]
+        # Fixed so Docker can never hand ntfy the Tailscale container address (BOSSMAN_EDGE_IP) if that container is recreated.
+        ipv4_address: ${NTFY_EDGE_IP:-172.30.0.6}
     mem_limit: 256m
 
 networks:
   edge:
     external: true
-    name: ${NTFY_EDGE_NETWORK:-${COMPOSE_PROJECT_NAME:-boss-man}_edge}
+    name: ${NTFY_EDGE_NETWORK:-boss-man_edge}
