@@ -45,6 +45,7 @@ async function setup() {
     if (c.type === "workspace.diff") ok(DIFF);
     if (c.type === "workspace.verify") ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 });
     if (c.type === "workspace.merge") ok({ status: "merged", commit: "c".repeat(40) });
+    if (c.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
     return true;
   });
   let seq = 0;

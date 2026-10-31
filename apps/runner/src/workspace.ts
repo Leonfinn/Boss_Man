@@ -14,7 +14,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { checkMigrations } from "./migrations.js";
 
 const run = promisify(execFile);
 const VERIFY_KILL_GRACE_MS = 2000;
@@ -424,6 +425,20 @@ export class Workspaces {
       if (typeof e.code !== "number") throw err;
       return { code: e.code, stdout: String(e.stdout ?? "").trim(), stderr: String(e.stderr ?? "").trim() };
     }
+  }
+
+  /**
+   * Says whether the ticket's new migration numbers are free (BOS-219), against the default branch
+   * and the other open branches. Read-only on the bare clone: nothing is checked out or run, and a
+   * branch it can't read gives "couldn't say" rather than stopping the ticket.
+   */
+  async migrations(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, others: string[], secrets: Record<string, string | undefined> = {}): Promise<MigrationsResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(repo)) return { needed: null, reason: "This runner has no copy of the repository yet, so there was nothing to compare." };
+      return checkMigrations((args) => this.gitCode(args, { cwd: repo, env: auth }), repo, { branch: branchFor(spec.ticketId), target, others });
+    });
   }
 
   /**

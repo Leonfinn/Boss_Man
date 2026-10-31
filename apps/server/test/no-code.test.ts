@@ -36,6 +36,7 @@ async function setup() {
     if (c.type === "workspace.diff")
       queueMicrotask(() => built.runners.resolveReply(diff.failing ? { requestId: c.requestId, ok: false, error: "no workspace or branch" } : { requestId: c.requestId, ok: true, data: diff.current }));
     if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "merged", commit: "c".repeat(40) } }));
+    if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { needed: false, reason: "No other branch uses this ticket's migration numbers." } }));
     return true;
   });
   const ticket = async (projectId: string, patch: Partial<typeof tickets.$inferInsert> = {}) =>

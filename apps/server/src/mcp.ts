@@ -1872,10 +1872,20 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
-      return text(`Ticket ${ticketId} is now ${state}.${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      // The check that counts is at the merge, but telling the agent now saves it waiting hours to
+      // find out its migration number is taken (BOS-219). It never holds the move up.
+      const warn = state === "review" ? await migrationWarning(review, ticketId, scope.companyId) : "";
+      return text(`Ticket ${ticketId} is now ${state}.${warn}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
+}
+
+/** A short note for the agent, when the ticket's new migrations take a number another branch already has (BOS-219). */
+async function migrationWarning(review: Services["review"], ticketId: string, companyId: string): Promise<string> {
+  const m = await review.migrations(ticketId, companyId).catch(() => null);
+  if (!m?.needed) return "";
+  return `\n\nHeads up (BOS-219): a migration number is already taken: ${m.why.join("; ")}. Rename it to ${String(m.next).padStart(4, "0")} (and any others it moved) before this merges, set its journal entry's "when" later than the newest one already on the default branch, run the checks, and move the ticket back to review. The merge will send it back if it still clashes.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
 }
 
 /** True when something open holds the ticket: an unanswered decision, an unfinished blocker ticket or an engagement. */
