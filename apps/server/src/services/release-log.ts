@@ -7,6 +7,7 @@ import { and, asc, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agents, decisions, projects, settings, tickets, wakes } from "../db/schema.js";
 import { nameRunnerSetupTickets, raiseOwnerSetup, withdrawOwnerSetup } from "./decisions.js";
+import type { NotifyInput } from "./notifications.js";
 
 /** The Release Manager's wake reason. */
 export const RELEASE_REASON = "live release";
@@ -74,6 +75,8 @@ export const releaseLogService = (
     createTicket: (projectId: string, input: { title: string; body: string; assigneeAgentId: string; state: "ready"; noCode: true; risk: "trivial" }) => Promise<{ id: string; title: string }>;
     /** Queues the wake on that ticket (scheduler.notify). */
     notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<{ status?: string; statusReason?: string | null } & Record<string, unknown>>;
+    /** Tells the owner when a setup card Boss Man closes itself leaves its notice (BOS-740). */
+    notifyOwner?: (n: NotifyInput) => Promise<unknown>;
     log?: (msg: string) => void;
   },
 ) => {
@@ -240,7 +243,7 @@ export const releaseLogService = (
       const stillLive = covered.filter((x) => live.some((l) => l.id === x.id));
       const whose = stillLive[0] ?? covered[0];
       if (!whose) continue;
-      const gone = await withdrawOwnerSetup(db, cardId, covered.map((x) => x.id), `Switched back: "${whose.title}" isn't running any more. You'll get this card again if it goes live once more.`);
+      const gone = await withdrawOwnerSetup(db, cardId, covered.map((x) => x.id), `Switched back: "${whose.title}" isn't running any more. You'll get this card again if it goes live once more.`, deps.notifyOwner ? { notify: deps.notifyOwner } : undefined);
       if (!gone) continue;
       withdrew++;
       for (const t of live) if (covered.some((x) => x.id === t.id)) t.decisionId = null;

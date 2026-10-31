@@ -3,7 +3,8 @@
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
 import { createPermissionLog, type PermissionLog } from "./permission-log.js";
-import type { ClosedNotice } from "./closed-notice.js";
+import { leaveClosedNotice, switchedBackNotice, type ClosedNotice } from "./closed-notice.js";
+import type { NotifyInput } from "./notifications.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -593,19 +594,26 @@ export async function nameRunnerSetupTickets(db: Db, companyId: string, commit: 
  * because one card can cover several tickets (BOS-741): every ticket in `ticketIds` that points at it has
  * its pointer cleared, so none keeps a stale card for a card that is gone. Frees the key so the next
  * go-live raises it again with its steps. Returns null when the card is already answered or withdrawn.
+ *
+ * BOS-740: it leaves the same closed-card notice as BOS-739's hand-apply cards (why it closed, what's
+ * live, that the owner can stop, and anything to undo), so the card doesn't just vanish from Decisions.
  */
-export async function withdrawOwnerSetup(db: Db, cardId: string, ticketIds: string[], note: string) {
+export async function withdrawOwnerSetup(db: Db, cardId: string, ticketIds: string[], note: string, deps?: { notify?: (n: NotifyInput) => Promise<unknown>; now?: () => Date }) {
   const [open] = await db.select().from(decisions).where(and(eq(decisions.id, cardId), eq(decisions.status, "open")));
   if (!open) return null;
-  const withdrawal: Withdrawal = { by: "system", note, at: new Date().toISOString() };
+  const now = deps?.now?.() ?? new Date();
+  const withdrawal: Withdrawal = { by: "system", note, at: now.toISOString() };
+  // The whole context goes back as the closed notice reads it: the steps the card showed stay readable with it.
+  const closedNotice = switchedBackNotice({ steps: (open.context as { steps?: string[] }).steps, now });
   const [row] = await db
     .update(decisions)
-    .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(open.context as object), withdrawn: withdrawal } })
+    .set({ status: "withdrawn", answeredAt: now, dedupeKey: null, context: { ...(open.context as object), withdrawn: withdrawal, closedNotice } })
     .where(and(eq(decisions.id, open.id), eq(decisions.status, "open")))
     .returning({ id: decisions.id, companyId: decisions.companyId });
   if (row) {
     if (ticketIds.length) await db.update(tickets).set({ ownerSetupDecisionId: null }).where(inArray(tickets.id, ticketIds));
-    await record(db, { companyId: row.companyId, ticketId: ticketIds[0] ?? (open.context as { ticketId?: string }).ticketId ?? null, kind: "decision_withdrawn", summary: note, at: new Date() });
+    await record(db, { companyId: row.companyId, ticketId: ticketIds[0] ?? (open.context as { ticketId?: string }).ticketId ?? null, kind: "decision_withdrawn", summary: note, at: now });
+    if (deps?.notify) await leaveClosedNotice(db, row.id, closedNotice, { notify: deps.notify, now: deps.now });
   }
   return row ?? null;
 }
@@ -2536,14 +2544,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         .where(and(eq(decisions.status, "answered"), sql`${decisions.context}->'settled' is not null`, sql`${decisions.answeredAt} > ${since.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
-      // Cards the CEO cleared as stale or duplicates (BOS-149), with the reason they gave. Kept for
-      // 30 days so the owner can still trace a withdrawal after a day.
+      // Cards the CEO cleared as stale or duplicates (BOS-149), with the reason they gave, and every card
+      // Boss Man closed by itself (BOS-740: the add-on setup card, a switched-back setup card, a hand-apply
+      // card that went live). Kept for 30 days so the owner can still trace a withdrawal after a day.
       const withdrawnSince = new Date(now().getTime() - 30 * 24 * 3_600_000);
       const withdrawn = await db
         .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context })
         .from(decisions)
-        // Plus an add-on setup card Boss Man closed once the add-on worked (BOS-522): the owner set it up, so they see it's done.
-        .where(and(eq(decisions.status, "withdrawn"), sql`(${decisions.context}->'withdrawn'->>'by' = 'ceo' or (${decisions.context}->'withdrawn'->>'by' = 'system' and ${decisions.context}->>'setsUp' is not null))`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
+        .where(and(eq(decisions.status, "withdrawn"), sql`${decisions.context}->'withdrawn'->>'by' in ('ceo', 'system')`, sql`(${decisions.context}->'withdrawn'->>'at')::timestamptz > ${withdrawnSince.toISOString()}::timestamptz`))
         .orderBy(desc(decisions.answeredAt))
         .limit(50);
       // Alerts the Scrum Master settled from the watchdog tool: alert_resolved records who and why (BOS-119).
@@ -2586,7 +2594,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }),
         ...withdrawn.map((r) => {
           const w = (r.context as { withdrawn: Withdrawal }).withdrawn;
-          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), withdrawn: { by: w.name ?? (w.by === "system" ? "Boss Man" : "the CEO"), note: w.note } };
+          const closed = (r.context as { closedNotice?: { text?: string } }).closedNotice;
+          return { id: r.id, companyId: r.companyId, question: r.question.split("\n")[0]!.slice(0, 300), about: aboutOf(r), withdrawn: { by: w.name ?? (w.by === "system" ? "Boss Man" : "the CEO"), note: w.note, ...(closed?.text ? { notice: closed.text } : {}) } };
         }),
         ...fromAlerts,
       ];

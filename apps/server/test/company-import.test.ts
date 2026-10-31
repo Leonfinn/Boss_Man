@@ -89,6 +89,28 @@ describe("company import (docs/11, step 2)", () => {
     expect(decisions).toContain("Holiday Hours Copy was imported");
   });
 
+  // BOS-763: standing rules travel as plain text and the checklist lists them.
+  it("carries standing rules through export and import as plain text", async () => {
+    const { req } = await setup();
+    const { company } = (await req("POST", "/api/companies", { name: "Rules Co" })).json() as { company: { id: string } };
+    expect((await req("PUT", `/api/companies/${company.id}/standing-rules`, { text: "Never write a token to a file." })).statusCode).toBe(200);
+    const zipOf = async () => Buffer.from((await req("GET", `/api/companies/${company.id}/export`)).rawPayload);
+    const files = unzipSync(new Uint8Array(await zipOf()));
+    expect(JSON.parse(strFromU8(files["company.json"]!)).standingRules).toBe("Never write a token to a file.");
+
+    const res = await req("POST", "/api/companies/import", { zip: (await zipOf()).toString("base64"), name: "Rules Copy" });
+    expect(res.statusCode).toBe(201);
+    const { companyId, checklist } = res.json() as { companyId: string; checklist: string[] };
+    expect(checklist.some((x) => x.includes("Never write a token to a file."))).toBe(true);
+    const copy = (await req("GET", `/api/companies/${companyId}/standing-rules`)).json();
+    expect(copy.text).toBe("Never write a token to a file.");
+
+    // Too long, or holding a credential: left out with a warning, import still works.
+    const bad = { ...files, "company.json": strToU8(JSON.stringify({ ...JSON.parse(strFromU8(files["company.json"]!)), standingRules: "x".repeat(2001) })) };
+    const pre = (await req("POST", "/api/companies/import/preview", { zip: Buffer.from(zipSync(bad)).toString("base64") })).json();
+    expect(pre.warnings.join(" ")).toContain("standing rules");
+  });
+
   // BOS-198: lists of reviewers survive the trip, and an older package's "marked" cells name its marked agent.
   it("remaps reviewer lists and an older package's marked reviewers", async () => {
     const { req } = await setup();

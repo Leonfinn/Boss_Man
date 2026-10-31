@@ -583,6 +583,25 @@ describe("more attempts the CEO must fail (BOS-149 adversarial round 6)", () => 
     expect((await row(d.id)).status).toBe("open");
   });
 
+  it("lists every card Boss Man closed by itself, with its reason (BOS-740)", async () => {
+    const c = (ctx = await setup());
+    const now = new Date();
+    const insert = (over: Record<string, unknown>) => c.db.insert(decisions).values({ companyId: c.company.id, kind: "question", tier: "owner", question: "A card", options: ["Done"], recommendedOption: "Done", status: "withdrawn", answeredAt: now, context: { type: "owner_setup", steps: ["Settings → Funding → Add account"] } as never, ...over } as never).returning();
+    // A setup card switched back by Boss Man, a hand-apply card closed as live, an old one past 30 days, and one the CEO cleared.
+    const [switchedBack] = await insert({ question: "Switch-back setup", context: { type: "owner_setup", steps: ["Settings → Funding → Add account"], withdrawn: { by: "system", note: "Switched back: not running any more.", at: now.toISOString() }, closedNotice: { why: "switched-back", text: "Switched back.", at: now.toISOString(), until: now.toISOString() } } });
+    const [live] = await insert({ question: "Hand-apply card", context: { type: "self_deploy", commit: "b".repeat(40), handSteps: ["Apply it."], withdrawn: { by: "system", note: "The update is live already.", at: now.toISOString() }, closedNotice: { why: "live", text: "It's live.", at: now.toISOString(), until: now.toISOString() } } });
+    await insert({ question: "Long gone", context: { type: "owner_setup", withdrawn: { by: "system", note: "Old.", at: new Date(now.getTime() - 40 * 24 * 3_600_000).toISOString() } } });
+    const [byCeo] = await insert({ question: "Ceo cleared", context: { type: "owner_setup", withdrawn: { by: "ceo", name: "CEO", note: "Stale.", at: now.toISOString() } } });
+    const advised = (await c.req("GET", "/api/decisions/advised")).json() as Array<{ id: string; withdrawn?: { by: string; note: string } }>;
+    const ids = advised.map((a) => a.id);
+    expect(ids).toContain(switchedBack!.id);
+    expect(ids).toContain(live!.id);
+    expect(ids).toContain(byCeo!.id);
+    expect(ids).not.toContain(await c.db.select({ id: decisions.id }).from(decisions).where(eq(decisions.question, "Long gone")).then((r) => r[0]!.id));
+    expect(advised.find((a) => a.id === switchedBack!.id)!.withdrawn).toMatchObject({ by: "Boss Man", note: "Switched back: not running any more." });
+    expect(advised.find((a) => a.id === live!.id)!.withdrawn).toMatchObject({ by: "Boss Man", note: "The update is live already." });
+  });
+
   it("does not merge a ticket whose owner sign-off is still open", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket("Waiting for sign-off");

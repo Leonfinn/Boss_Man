@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { and, asc, eq, gt, inArray, isNotNull, isNull, like, lt, max, sql } from "drizzle-orm";
 import { z } from "zod";
-import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
+import { AddonReport, isInfiniteModel, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -222,6 +222,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       case "run.cost": {
         if (event.costMicrosDelta === 0) return [];
         const [run] = await tx.select().from(runs).where(eq(runs.id, event.runId));
+        // Infinite mode (BOS-279) doesn't spend the plan's credits, so its runs add nothing to any usage or budget
+        // reading. The adapter's figure for a free model is a list-price guess, not money spent.
+        if (isInfiniteModel(run?.model) || isInfiniteModel(event.model)) return [];
         const [eng] = run?.engagementId ? await tx.select().from(engagements).where(eq(engagements.id, run.engagementId)) : [];
         const base = {
           fundingSourceId: event.fundingSourceId,
