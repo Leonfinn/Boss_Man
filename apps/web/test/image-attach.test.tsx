@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ImagePreviews, useImageAttach, withImage } from "../src/components/ImageAttach";
+import { ImagePreviews, attachmentName, useImageAttach, withAttachments } from "../src/components/ImageAttach";
 import { linked } from "../src/pages/Chat";
 
 afterEach(() => {
@@ -11,51 +11,95 @@ afterEach(() => {
 });
 
 const ID = "11111111-2222-3333-4444-555555555555";
+const FILE_ID = "99999999-8888-7777-6666-555555555555";
 
-function Box() {
-  const [text, setText] = useState("Look:");
-  const img = useImageAttach("c1", (md) => setText((t) => withImage(t, md)), "t1");
+function upload(png = "image.png", id = ID) {
+  const fetch = vi.fn(async () => new Response(JSON.stringify({ markdown: `![${png}](/api/ticket-images/${id})` }), { status: 201, headers: { "content-type": "application/json" } }));
+  vi.stubGlobal("fetch", fetch);
+  const file = new File([new Uint8Array([137, 80, 78, 71])], png, { type: "image/png" });
+  fireEvent.paste(screen.getByLabelText("text"), { clipboardData: { files: [file], getData: () => "" } });
+  return fetch;
+}
+
+/** A composer like Chat's: typed text, attachments kept apart from it, sent with the links on the end. */
+function Box({ saved = "Look:" }: { saved?: string }) {
+  const [text, setText] = useState(saved);
+  const [sent, setSent] = useState<string[]>([]);
+  const img = useImageAttach("c1", "t1");
   return (
     <>
       <textarea aria-label="text" value={text} onChange={(e) => setText(e.target.value)} onPaste={img.onPaste} />
-      <ImagePreviews text={text} onChange={setText} />
+      <ImagePreviews attached={img.attached} onRemove={img.remove} />
       {img.button}
       {img.error && <p role="alert">{img.error}</p>}
+      <button
+        type="button"
+        disabled={!text.trim() && !img.attached.length}
+        onClick={() => {
+          setSent([withAttachments(text, img.attached).trim()]);
+          setText("");
+          img.clear();
+        }}
+      >
+        Send
+      </button>
+      <p aria-label="sent">{sent.join("\n")}</p>
     </>
   );
 }
 
 describe("pasting images", () => {
-  it("uploads a pasted screenshot and puts its Markdown in the text", async () => {
-    const fetch = vi.fn(async () => new Response(JSON.stringify({ id: ID, markdown: `![image.png](/api/ticket-images/${ID})` }), { status: 201, headers: { "content-type": "application/json" } }));
-    vi.stubGlobal("fetch", fetch);
+  it("uploads a pasted screenshot, shows it below the box and leaves the text alone", async () => {
     render(<Box />);
-    const file = new File([new Uint8Array([137, 80, 78, 71])], "image.png", { type: "image/png" });
-    fireEvent.paste(screen.getByLabelText("text"), { clipboardData: { files: [file], getData: () => "" } });
-    await waitFor(() => expect((screen.getByLabelText("text") as HTMLTextAreaElement).value).toBe(`Look:\n![image.png](/api/ticket-images/${ID})\n`));
+    const fetch = upload();
+    await waitFor(() => expect(screen.getByRole("img", { name: "image.png" })).toBeTruthy());
+    expect((screen.getByLabelText("text") as HTMLTextAreaElement).value).toBe("Look:");
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("/api/companies/c1/images");
     expect(JSON.parse(String(init.body))).toMatchObject({ name: "image.png", ticketId: "t1", data: "iVBORw==" });
     expect(screen.getByRole("button", { name: "Attach file" })).toBeTruthy();
+    expect(screen.queryByText(/Leave it there/)).toBeNull();
   });
 
-  it("shows a thumbnail of each attached image under the box, and Remove takes it out of the text", () => {
+  it("puts a link for each attachment in the sent message, in the order attached", async () => {
     render(<Box />);
-    const box = screen.getByLabelText("text") as HTMLTextAreaElement;
-    fireEvent.change(box, { target: { value: `Look:\n![bug.png](/api/ticket-images/${ID})\nThanks` } });
-    expect(screen.getByRole("img", { name: "bug.png" }).getAttribute("src")).toBe(`/api/ticket-images/${ID}`);
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
-    expect(box.value).toBe("Look:\nThanks");
+    upload();
+    await waitFor(() => expect(screen.getByRole("img", { name: "image.png" })).toBeTruthy());
+    upload("second.png", FILE_ID);
+    await waitFor(() => expect(screen.getByRole("img", { name: "second.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByLabelText("sent").textContent).toBe(`Look:\n![image.png](/api/ticket-images/${ID})\n![second.png](/api/ticket-images/${FILE_ID})`);
     expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  it("drops a removed attachment from the sent message, and still sends attachment-only messages", async () => {
+    render(<Box />);
+    upload();
+    await waitFor(() => expect(screen.getByRole("img", { name: "image.png" })).toBeTruthy());
+    fireEvent.change(screen.getByLabelText("text"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(screen.queryByRole("img")).toBeNull();
+    expect((screen.getByRole("button", { name: "Send" }) as HTMLButtonElement).disabled).toBe(true);
+    upload("keep.png", FILE_ID);
+    await waitFor(() => expect(screen.getByRole("img", { name: "keep.png" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByLabelText("sent").textContent).toBe(`![keep.png](/api/ticket-images/${FILE_ID})`);
+  });
+
+  it("keeps a restored draft's attachments and sends them as written", () => {
+    const saved = `Look:\n![draft.png](/api/ticket-images/${ID})`;
+    render(<Box saved={saved} />);
+    expect(screen.getByLabelText("text").textContent).toBe(saved);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(screen.getByLabelText("sent").textContent).toBe(saved);
   });
 
   it("shows an attached file by name with Remove, and as a download link in a message", () => {
     render(<Box />);
     const box = screen.getByLabelText("text") as HTMLTextAreaElement;
-    fireEvent.change(box, { target: { value: `Spec:\n[📎 spec.pdf](/api/ticket-images/${ID})\n` } });
-    expect(screen.getByText("📎 spec.pdf")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
-    expect(box.value).toBe("Spec:\n");
+    expect(attachmentName(`[📎 spec.pdf](/api/ticket-images/${ID})`)).toBe("📎 spec.pdf");
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(box.value).toBe("");
     cleanup();
     render(<p>{linked(`See [📎 spec.pdf](/api/ticket-images/${ID}).`)}</p>);
     const link = screen.getByRole("link", { name: "📎 spec.pdf" });
