@@ -168,7 +168,12 @@ export function reachesPrivateNetwork(info: PermissionInfo): boolean {
 export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string } {
   // Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
   if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD };
+  // Boss Man's own tools are checked per call by the server (role and company), so a broad company
+  // rule that routes requests to the CEO or the owner must not catch them (BOS-292): that sent every
+  // board-tool call to a card. A company rule can still deny one.
+  const ownTool = isBossmanTool(info.title);
   for (const rule of [...rules, ...DEFAULT_POLICY]) {
+    if (ownTool && rule.outcome !== "deny" && rule.outcome !== "allow" && rules.includes(rule)) continue;
     if (matches(rule.match, info)) return { outcome: rule.outcome, rule: rule.name };
   }
   return { outcome: "owner", rule: "No rule matched" };

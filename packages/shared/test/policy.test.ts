@@ -610,3 +610,25 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
     expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
   });
 });
+
+describe("company rules and Boss Man's own tools (BOS-292)", () => {
+  // The live company rule that caught every request from about 01:00 UTC on 1 Nov.
+  const toCeo = [{ name: "All agent permission requests go to the CEO first", match: { kinds: ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"] }, outcome: "ceo" as const }];
+  const tool = (title: string) => ({ title, kind: "other", rawInput: {} });
+
+  it("a catch-all company rule that routes to the CEO doesn't catch Boss Man's own tools", () => {
+    for (const t of ["mcp__bossman__ticket_reply", "mcp__bossman__decisions", "mcp__bossman__set_ticket_state", "mcp__bossman__wiki"]) {
+      expect(evaluatePermission(tool(t), toCeo), t).toEqual({ outcome: "allow", rule: "Boss Man's own tools" });
+    }
+  });
+
+  it("the same company rule still catches other tools and commands", () => {
+    expect(evaluatePermission(tool("mcp__other__thing"), toCeo).outcome).toBe("ceo");
+    expect(evaluatePermission({ title: "git status", kind: "execute", rawInput: { command: "git status" } }, toCeo).outcome).toBe("ceo");
+  });
+
+  it("a company rule can still deny a Boss Man tool", () => {
+    const deny = [{ name: "No wiki writes", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "deny" as const }];
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), deny)).toEqual({ outcome: "deny", rule: "No wiki writes" });
+  });
+});
