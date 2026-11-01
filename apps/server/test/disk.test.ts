@@ -1,10 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { companies, decisions, runners, tickets } from "../src/db/schema.js";
+import { activity, companies, decisions, runners, tickets } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -74,7 +74,7 @@ describe("workspace clean-up and disk caps (R54)", () => {
     const alerts = await c.db.select().from(decisions).where(eq(decisions.kind, "question"));
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.question).toBe(
-      `App Co's workspaces use 10.5 GB, over its 10.0 GB disk cap. The biggest ticket workspaces are "Video pipeline" (9.0 GB), "Typo fix" (0.5 GB). Worktrees of tickets done more than 7 days ago are removed automatically; finish or cancel tickets, or raise the cap.`,
+      `App Co's workspaces use 10.5 GB, over its 10.0 GB disk cap. The biggest ticket workspaces are "Video pipeline" (9.0 GB), "Typo fix" (0.5 GB). This is a warning: nothing is stopped by it. To raise it, open Settings → Reviews and CEO → Workspace disk and set "Disk cap (GB)" higher than its current 10.0 GB; it takes effect at the next hourly clean-up. Otherwise, finish or cancel tickets; worktrees of tickets done more than 7 days ago are removed automatically.`,
     );
 
     c.advance(DAY);
@@ -86,6 +86,25 @@ describe("workspace clean-up and disk caps (R54)", () => {
     c.advance(DAY);
     await c.report([{ ticketId: big.id, bytes: 9 * GB }], 2 * GB);
     expect(await c.db.select().from(decisions).where(eq(decisions.kind, "question"))).toHaveLength(2);
+  });
+
+  it("records who changed the company's disk cap, and resetting it to the server default", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/companies/${c.company.id}`, { diskCapGb: 60 });
+    await c.req("PATCH", `/api/companies/${c.company.id}`, { diskCapGb: null });
+    const rows = await c.db.select().from(activity).where(and(eq(activity.companyId, c.company.id), eq(activity.kind, "settings")));
+    expect(rows.map((r) => r.summary)).toEqual(["Owner set the workspace disk cap to 60.0 GB", "Owner reset the workspace disk cap to the server default (20 GB)"]);
+    expect((await c.db.select().from(companies).where(eq(companies.id, c.company.id)))[0]!.diskCapBytes).toBeNull();
+  });
+
+  it("names where to raise the cap on the card, and says nothing is stopped", async () => {
+    const c = (ctx = await setup());
+    const big = await c.ticket("Video pipeline");
+    await c.report([{ ticketId: big.id, bytes: 21 * GB }], 0);
+    const [alert] = await c.db.select().from(decisions).where(eq(decisions.kind, "question"));
+    expect(alert!.question).toContain("Settings → Reviews and CEO → Workspace disk");
+    expect(alert!.question).toContain('"Disk cap (GB)" higher than its current 10.0 GB');
+    expect(alert!.question).toContain("This is a warning: nothing is stopped by it.");
   });
 
   it("never releases another company's ticket on a runner's say-so", async () => {

@@ -684,7 +684,13 @@ export async function buildApp(opts: AppOptions) {
       const { diskCapGb, ...rest } = b;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
-      return c ?? reply.code(404).send({ error: "not_found" });
+      if (!c) return reply.code(404).send({ error: "not_found" });
+      // The disk cap is the owner's own setting (BOS-274): keep a record of who changed it and to what.
+      if (diskCapGb !== undefined) {
+        const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+        await record(db, { companyId: id, kind: "settings", summary: diskCapGb === null ? "Owner reset the workspace disk cap to the server default (20 GB)" : `Owner set the workspace disk cap to ${gb(Math.round(diskCapGb * 1024 ** 3))}`, detail: { diskCapGb } });
+      }
+      return c;
     });
 
     owner.get("/api/companies", async () => {
