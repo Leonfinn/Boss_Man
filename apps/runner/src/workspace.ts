@@ -467,13 +467,13 @@ export class Workspaces {
       let tail = "";
       // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
       let queued = false;
-      let started = false;
+      let slotTaken = false;
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
-        if (!started && tail.includes(CHECK_STARTED_MARKER)) {
-          started = true;
+        if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
+          slotTaken = true;
           arm(timeoutMs);
-        } else if (!queued && !started && tail.includes(CHECK_QUEUED_MARKER)) {
+        } else if (!queued && !slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
           queued = true;
           arm(queueMaxMs);
         }
