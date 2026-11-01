@@ -83,6 +83,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     runId: Uuid,
     agentId: Uuid,
     agentKind: z.string(),
+    /** The agent's display name now, for the git author of any commit the run makes (BOS-265); an older runner ignores it and uses "Boss Man". */
+    agentName: z.string().min(1).max(200).optional(),
     model: z.string().nullable(),
     /** The agent's thinking level (THINKING_LEVELS); an older runner ignores it. */
     thinking: z.string().optional(),

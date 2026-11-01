@@ -697,7 +697,7 @@ export class SessionManager {
         // A reviewer's run checkpoints nothing: its copy isn't the ticket's worktree.
         if (!cmd.workspace || cmd.workspace.review || !this.opts.workspaces) return;
         try {
-          const c = await this.opts.workspaces.checkpoint(cmd.workspace, `${label} (run ${cmd.runId})`);
+          const c = await this.opts.workspaces.checkpoint(cmd.workspace, `${label} (run ${cmd.runId})`, cmd.agentName);
           if (c && label !== "before the run") emit({ type: "run.update", runId: cmd.runId, update: { kind: "checkpoint", turn: c.turn, files: c.files } });
         } catch (err) {
           emit({ type: "runner.log", level: "warn", message: `Couldn't record a checkpoint for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err).slice(0, 300)}` });
