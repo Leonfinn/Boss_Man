@@ -42,8 +42,18 @@ export const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
 export const TEMP_CLEANUP_RULE = "Temp-file cleanup goes to the CEO first";
 export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to the CEO first";
 
+// Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
+// Codex mcp.bossman.wiki or "Tool: bossman/wiki", OpenCode bossman_wiki, other adapters "bossman: wiki". Matched case-insensitively.
+export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2})?bossman(?:__|_|\.|:\s*|/|\s+-\s+)\S`;
+const BOSSMAN_TOOL = new RegExp(BOSSMAN_TOOL_PATTERN, "i");
+
+/** True when a tool title names a tool of Boss Man's own server, in any harness's spelling. */
+export function isBossmanTool(title: string | null | undefined): boolean {
+  return BOSSMAN_TOOL.test(title ?? "");
+}
+
 export const DEFAULT_POLICY: PolicyRuleSpec[] = [
-  { name: "Boss Man's own tools", match: { titlePattern: String.raw`^(mcp__bossman__|mcp\.bossman\.)` }, outcome: "allow" },
+  { name: "Boss Man's own tools", match: { titlePattern: BOSSMAN_TOOL_PATTERN }, outcome: "allow" },
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
   { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
   // The same for plain relative paths in the agent's checkout; the server sends it to the owner when the run has no checkout (BOS-120).
@@ -144,7 +154,7 @@ const LAN_GUARD = "Fetching from your home network or this machine is blocked";
 
 /** True when a fetch, or a call to an outside tool server, aims at a private address. Unparseable addresses count as private. */
 export function reachesPrivateNetwork(info: PermissionInfo): boolean {
-  const outside = /^mcp__(?!bossman__)/.test(info.title ?? "") || info.kind === "fetch";
+  const outside = (/^mcp__/.test(info.title ?? "") && !isBossmanTool(info.title)) || info.kind === "fetch";
   if (!outside) return false;
   return urlsIn(info.rawInput).some((u) => {
     try {

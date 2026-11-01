@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, evaluatePermission, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -24,6 +24,19 @@ describe("evaluatePermission defaults", () => {
   it("allows Boss Man's own MCP tools for Claude and Codex naming", () => {
     expect(evaluatePermission({ title: "mcp__bossman__create_ticket", kind: "other", rawInput: {} }, []).outcome).toBe("allow");
     expect(evaluatePermission({ title: "mcp.bossman.create_ticket", kind: "execute", rawInput: {} }, []).outcome).toBe("allow");
+  });
+
+  it("allows Boss Man's own tools in each harness's spelling (BOS-292)", () => {
+    for (const title of ["bossman_set_ticket_state", "Tool: bossman/wiki", "bossman: decisions", "Bossman - wiki", "mcp:bossman:wiki", " mcp__Bossman__wiki"]) {
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("allow");
+      expect(isBossmanTool(title), title).toBe(true);
+    }
+  });
+
+  it("still asks about other tools, including lookalike server names (BOS-292)", () => {
+    for (const title of ["mcp__other__wiki", "bossmanager_x", "mcp__bossman2__x", "mcp__other__bossman__x", "Tool: other/bossman_x", "bossman", null]) {
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, String(title)).toBe("owner");
+    }
   });
 
   it("sends destructive commands to the owner", () => {
