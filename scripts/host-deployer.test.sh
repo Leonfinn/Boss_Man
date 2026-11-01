@@ -71,6 +71,9 @@ host
 [[ $(jget "$D/outbox/available.json" tip) == "$c1" && $(jget "$D/outbox/available.json" deployed) == "$base" ]] || fail "available.json tip/deployed"
 has "$D/outbox/available.json" '"runnerChanged": false'
 has "$D/outbox/available.json" '"infraPaths": []'
+has "$D/outbox/available.json" "\"srcDir\": \"$(cd "$T/src" && pwd)\""
+has "$D/outbox/available.json" "\"deployerDir\": \"$(cd "$D" && pwd)\""
+has "$D/outbox/available.json" '"bluegreen": false, "liveColour": ""'
 has "$D/outbox/available.json" 'change apps/server/a'
 [[ ! -e $D/outbox/status.json ]] || fail "status written with no request"
 # 1b. Between refreshes the offer is left alone, unless the server asks for a look now (inbox/check).
@@ -138,11 +141,11 @@ has "$D/outbox/status.json" "deployment files (docker-compose.yml)"
 [[ $(calls) == 1 ]] || fail "infra change was deployed"
 infra_re="$(grep -o "^INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^INFRA='//; s/'\$//")"
 not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_INFRA='//; s/'\$//")"
-for p in deploy/x.yml scripts/deploy.sh apps/server/Dockerfile .env.example; do
+for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh apps/server/Dockerfile .env.example; do
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
 # CI files and the Penpot add-on don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml; do
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh; do
   if echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
@@ -302,6 +305,8 @@ reset_world blue "$cur"
 bgreq "$b1"; bg --dry-run
 has "$T/out" "would run: a blue/green swap to ${b1:0:8}"
 rm -f "$D/inbox/request.json"
+touch "$D/inbox/check"; bg
+has "$D/outbox/available.json" '"bluegreen": true, "liveColour": "blue"'
 unset COMPOSE_FILE
 bgreq "$b1"; bg --dry-run; has "$T/out" "would run: scripts/deploy.sh --yes --no-runner --commit ${b1:0:8}"; rm -f "$D/inbox/request.json"
 printf "COMPOSE_FILE='docker-compose.yml:deploy/truenas-bluegreen.yml'\n" >"$T/src/.env.tmp"; mv "$T/src/.env.tmp" "$T/src/.env"
