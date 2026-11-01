@@ -31,7 +31,7 @@ import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
 import { selfDeployService } from "./services/self-deploy.js";
-import { sweepService, type SweepLimits } from "./services/sweeps.js";
+import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
 import { EngagementError, engagementsService } from "./services/engagements.js";
@@ -227,7 +227,7 @@ export async function buildApp(opts: AppOptions) {
   });
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader() });
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), log: (m) => app.log.warn(m) });
-  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId));
+  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m));
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   // Phone Approve (BOS-243): the decision push asks it for an Approve button; a tap answers through decisionsSvc.
   const phoneApprove = phoneApproveService(db, {
@@ -425,6 +425,15 @@ export async function buildApp(opts: AppOptions) {
       // 5 minutes so only a refresh after a Synthetic run actually calls Synthetic (BOS-239).
       void refreshSyntheticQuota().catch((err) => app.log.warn({ err }, "synthetic quota refresh failed"));
     }
+  });
+  // A "has sent nothing" alert for a run closes the moment the run ends or speaks again (BOS-217),
+  // so the CEO and the owner are never asked about a run that has already moved on. Awaited before
+  // the event is acknowledged, so nothing reads an alert the run has left behind.
+  runners.onEventSync(async (runner, event) => {
+    if (!("runId" in event) || event.type === "run.started") return;
+    await closeStallAlertForRun(db, event.runId, opts.now)
+      .then((closed) => (closed ? notes.syncDecisions() : null))
+      .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing a stall alert failed"));
   });
   const sweeps = sweepService(db, {
     expireAdvice: () => decisionsSvc.expireAdvice(),
@@ -715,7 +724,13 @@ export async function buildApp(opts: AppOptions) {
       const { diskCapGb, ...rest } = b;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
-      return c ?? reply.code(404).send({ error: "not_found" });
+      if (!c) return reply.code(404).send({ error: "not_found" });
+      // The disk cap is the owner's own setting (BOS-274): keep a record of who changed it and to what.
+      if (diskCapGb !== undefined) {
+        const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+        await record(db, { companyId: id, kind: "settings", summary: diskCapGb === null ? "Owner reset the workspace disk cap to the server default (20 GB)" : `Owner set the workspace disk cap to ${gb(Math.round(diskCapGb * 1024 ** 3))}`, detail: { diskCapGb } });
+      }
+      return c;
     });
 
     owner.get("/api/companies", async () => {
@@ -1896,7 +1911,8 @@ export async function buildApp(opts: AppOptions) {
       if (!type) return reply.code(415).send({ error: "bad_type", message: "The picture must be a PNG, JPEG or WebP image." });
       const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, id));
       if (!a) return reply.code(404).send({ error: "not_found", message: "No such agent." });
-      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type } });
+      // An upload replaces any picture the CEO copied from a ticket image (BOS-265).
+      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type, imageId: null } });
       const [row] = await db.update(agents).set({ avatarAt: new Date() }).where(eq(agents.id, id)).returning({ avatarAt: agents.avatarAt });
       return row;
     });

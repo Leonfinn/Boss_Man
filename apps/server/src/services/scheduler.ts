@@ -412,9 +412,18 @@ export function schedulerService(
     return lines;
   }
 
-  /** What a watcher's report would be about, as one string to compare with the last report's (R85). */
+  /**
+   * What a watcher's report would be about, as one string to compare with the last report's (R85).
+   * Only the ticket's own work counts: a ticket watch and a review of it are not the ticket
+   * moving, or each report would cause the next (BOS-268).
+   */
   async function watchFacts(x: typeof tickets.$inferSelect) {
-    const [last] = await db.select({ id: runs.id, endedAt: runs.endedAt, outcome: runs.outcome }).from(runs).where(eq(runs.ticketId, x.id)).orderBy(desc(runs.startedAt)).limit(1);
+    const [last] = await db
+      .select({ id: runs.id, endedAt: runs.endedAt, outcome: runs.outcome })
+      .from(runs)
+      .where(and(eq(runs.ticketId, x.id), sql`${runs.origin} is distinct from ${WATCH_REASON}`, sql`${runs.origin} is distinct from ${REVIEW_REASON}`))
+      .orderBy(desc(runs.startedAt))
+      .limit(1);
     const deps = await db
       .select({ ticket: tickets.systemState, decision: decisions.status, engagement: engagements.status })
       .from(ticketDependencies)
@@ -667,13 +676,34 @@ export function schedulerService(
     return null;
   }
 
+  /** The tickets a review wake's note lists, in the order it lists them. */
+  const reviewTicketsOf = (note: string | null | undefined) => [...(note ?? "").matchAll(/^- ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) /gm)].map((m) => m[1]!);
+
+  /**
+   * The one ticket a wake is about when it isn't formally on one (BOS-268): a review wake that
+   * lists a single ticket, or any other wake whose note names exactly one existing ticket. A wake
+   * that lists none (owner chat, housekeeping) or several (a reviewer covering several tickets,
+   * the watchdog's list) keeps no ticket, so its card can't point at the wrong one. A tree wake
+   * keeps its own reason and gets its ticket from the tree instead. A nudge is left to
+   * `ticketNamedIn`, whose fallback link already covers it.
+   */
+  async function wakeTicket(w: typeof wakes.$inferSelect): Promise<string | null> {
+    if (w.ticketId) return null;
+    // A tree wake starts in the folder of a named ticket, which it must not: it keeps to its reason.
+    if (w.reason === CHAT_REASON || w.reason === TREE_REASON) return null;
+    const ids = w.reason === REVIEW_REASON ? reviewTicketsOf(w.note) : [...new Set(w.note?.match(NOTE_TICKET_IDS) ?? [])];
+    if (ids.length !== 1) return null;
+    const [t] = await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.id, ids[0]!), eq(tickets.companyId, w.companyId)));
+    return t?.id ?? null;
+  }
+
   /** A review wake's first ticket, when its project has a repo: the reviewer gets its own copy of that ticket's work. */
-  async function reviewCopy(w: typeof wakes.$inferSelect) {
-    if (w.reason !== REVIEW_REASON || w.ticketId) return null;
+  async function reviewCopy(w: typeof wakes.$inferSelect, onTicket?: string | null) {
+    if (w.reason !== REVIEW_REASON || (w.ticketId && w.ticketId !== onTicket)) return null;
     // An older runner would ignore the review flag and put the reviewer in the author's own worktree.
     const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, w.companyId));
     if (!runner || !deps.runners.can(runner.id, "review-copy")) return null;
-    const id = w.note?.match(/^- ([0-9a-f-]{36}) /m)?.[1];
+    const id = onTicket ?? reviewTicketsOf(w.note)[0];
     if (!id) return null;
     const [t] = await db
       .select({ ticketId: tickets.id, title: tickets.title, projectId: tickets.projectId, repoUrl: projects.repoUrl, baseRef: projects.defaultBranch })
@@ -698,31 +728,36 @@ export function schedulerService(
       .where(and(eq(wakes.id, w.id), isNull(wakes.runId), inArray(wakes.status, ["queued", "deferred"])))
       .returning({ id: wakes.id });
     if (!claimed.length) return { ok: false, claimed: true };
-    // An agent starting on a waiting ticket moves it to in progress, so the board shows what is being worked on; first, so the prompt quotes the bumped version (R81).
-    // A ticket that still waits on unfinished work is not started (BOS-254); the prompt tells the agent.
+    // The owner chat runs with board tools only, in its own folder, outside the CEO's chapters.
+    const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
+    // A wake about exactly one ticket starts the run on it (BOS-268), so the Runs list and the
+    // agent's card never say "no ticket" while a reviewer works on one.
+    const onTicket = await wakeTicket(w);
+    const runTicketId = onTicket ?? w.ticketId;
+    // Starting work is for a wake with a ticket of its own; a reviewer was handed a ticket in
+    // review, so neither starting nor the start check applies to it.
     const startedIt = w.ticketId ? await startTicket(w.ticketId) : false;
     const notStarted = w.ticketId && !startedIt ? await startRefusalFor(w.ticketId) : null;
     // Work on a provider ticket for an engagement is charged back to the requester (R26).
-    const [ticket] = w.ticketId
+    const [ticket] = runTicketId
       ? await db
           .select({ engagementId: tickets.engagementId, projectId: tickets.projectId, repoUrl: projects.repoUrl, defaultBranch: projects.defaultBranch, planFirst: tickets.planFirst, planApprovedAt: tickets.planApprovedAt })
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
-          .where(eq(tickets.id, w.ticketId))
+          .where(eq(tickets.id, runTicketId))
       : [];
-    // The owner chat runs with board tools only, in its own folder, outside the CEO's chapters.
-    const chat = w.reason === CHAT_REASON && deps.chat ? deps.chat : null;
-    const copy = await reviewCopy(w);
+    const copy = await reviewCopy(w, onTicket);
     const briefAt = now();
     const wakePrompt = chat ? await chat.prompt(w.companyId, w.agentId) : await prompt(w, agent, company.name, briefAt, notStarted);
     // A CEO's run belongs to its current chapter (CEO continuity).
     const chapter = !chat && agent.role === "ceo" && deps.chapters ? await deps.chapters.forLaunch(agent, runId, wakePrompt) : null;
     // Why the run started is kept on it, so a run with no ticket still says what it was for
-    // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake lists
-    // several, and picking one of them would point the card at the wrong ticket.
+    // (BOS-118). Only a nudge names a ticket the run is not formally on: a review wake that
+    // lists several starts on none (BOS-268), and picking one of them would point the card at
+    // the wrong ticket.
     const origin = w.reason;
-    const aboutTicket = w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: w.ticketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
+    const aboutTicket = onTicket ? null : w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
@@ -745,6 +780,8 @@ export function schedulerService(
       runId,
       agentId: agent.id,
       agentKind: agent.agentKind,
+      // The name now, not the one the agent was hired under: a rename shows in their commits (BOS-265).
+      agentName: agent.name,
       model: agent.model,
       ...(agent.thinking ? { thinking: agent.thinking } : {}),
       fundingSourceId: agent.fundingSourceId,
@@ -754,7 +791,7 @@ export function schedulerService(
       // A ticket in a project with a repo works in its own worktree and branch (R38).
       // A plan-first ticket starts in plan mode until its plan is approved (R40).
       ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
-      ...(ticket?.repoUrl && w.ticketId ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
+      ...(ticket?.repoUrl && w.ticketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
       prompt: chapter?.prompt ?? wakePrompt,
       mcpToken,

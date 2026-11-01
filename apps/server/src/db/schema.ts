@@ -1588,4 +1588,6 @@ export const agentAvatars = pgTable("agent_avatars", {
   agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   bytes: bytea("bytes").notNull(),
   type: text("type").notNull(),
+  /** The ticket image the CEO picked (BOS-265): copies are shared by it, so agents sharing a picture keep one copy. Null for one the owner uploaded. */
+  imageId: uuid("image_id").references(() => ticketImages.id, { onDelete: "set null" }),
 });

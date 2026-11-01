@@ -13,6 +13,8 @@ export type SummaryInput = {
   actions: Record<string, number>;
   /** Problems still open, and who each waits on. */
   open: Array<{ ref: string; title: string; rule: WatchdogRule; waitingOn: string; openedAt: Date }>;
+  /** Record-only mode (BOS-166): the actions below were rehearsals, so they are reported as not sent. */
+  recordOnly?: boolean;
   /** Open owner decisions that hold tickets back. */
   decisions: Array<{ question: string; blocks: string[]; askedAt: Date }>;
 };
@@ -32,10 +34,20 @@ const ACTION_WORDS: Record<string, string> = {
   raise_decision: "owner decisions raised",
 };
 
-/** Null on a day nothing happened: no new problems, no actions, nothing cleared. */
+/** Rehearsal entries (BOS-166), counted apart from real actions and always marked as not sent. */
+const RECORD_WORDS: Record<string, string> = {
+  record_sweep_wake: "Scrum Master wakes",
+  record_owner_reminder: "owner reminders",
+  record_auto_escalate: "escalations to the CEO",
+  record_urgent_page: "pages to you about a decision",
+  record_alert_skip: "Boss Man alerts passed up the ladder",
+};
+
+/** Null on a day nothing happened: no new problems, no actions, nothing cleared. Record-only runs always report. */
 export function buildSummary(i: SummaryInput): Summary | null {
   const acted = Object.entries(i.actions).filter(([k, n]) => n > 0 && ACTION_WORDS[k]);
-  if (!i.caught && !i.fixed && !acted.length) return null;
+  const recorded = Object.entries(i.actions).filter(([k, n]) => n > 0 && RECORD_WORDS[k]);
+  if (!i.caught && !i.fixed && !acted.length && !recorded.length && !i.recordOnly) return null;
 
   // Owner decisions are the owner's to answer, not "stuck" work, so they stay out of the headline.
   const stuck = i.open.filter((o) => o.rule !== "owner_decision_waiting").sort((a, b) => a.openedAt.getTime() - b.openedAt.getTime());
@@ -43,8 +55,10 @@ export function buildSummary(i: SummaryInput): Summary | null {
   const headline = stuck.length ? `${stuck.length} ticket${stuck.length === 1 ? " is" : "s are"} stuck past the limit; the oldest is ${oldest!.ref}, for ${age(i.now.getTime() - oldest!.openedAt.getTime())}.` : "No tickets are stuck past their limit.";
 
   const lines = [headline, ""];
+  if (i.recordOnly) lines.push("Record only: the watchdog is rehearsing. Everything below was written down, and nothing was sent to anyone.");
   lines.push(`Caught ${i.caught} problem${i.caught === 1 ? "" : "s"}; ${i.fixed} cleared since.`);
   if (acted.length) lines.push(`Actions: ${acted.map(([k, n]) => `${n} ${ACTION_WORDS[k]}`).join(", ")}.`);
+  if (recorded.length) lines.push(`Would have done (not sent): ${recorded.map(([k, n]) => `${n} ${RECORD_WORDS[k]}`).join(", ")}.`);
   if (stuck.length) {
     lines.push("", "Still open:");
     for (const o of stuck.slice(0, 10)) lines.push(`- ${o.ref} "${o.title}": ${WATCHDOG_RULE_LABEL[o.rule]}; waiting on ${o.waitingOn}`);
