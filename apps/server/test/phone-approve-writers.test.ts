@@ -109,7 +109,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/app.ts": { counts: { raise: 8 }, why: "alerts.raise (tier ceo, ladder) and decisionsSvc.raise with agentId null (merge failed, import checklist)" },
   "src/mcp.ts": { counts: { raise: 1 }, why: "raise_decision: the one eligible path, when plain and with an approveSummary" },
   "src/services/watchdog.ts": { counts: { raise: 1 }, why: "the Scrum Master's raise_decision always blocks its ticket (ticketId, blocker)" },
-  "src/services/agents.ts": { counts: { insert: 4 }, why: "kind approval: hire, model_change, instructions, team_plan" },
+  "src/services/agents.ts": { counts: { insert: 5 }, why: "kind approval: hire, model_change, instructions, team_plan, rename" },
   "src/services/alert-ladder.ts": { counts: { insert: 1 }, why: "tier ceo with a ladder key" },
   "src/services/decisions.ts": {
     counts: { insert: 11, question: 7, todo: 2 },
@@ -123,7 +123,7 @@ const WRITERS: Record<string, { counts: Record<string, number>; why: string }> =
   "src/services/maintenance.ts": { counts: { insert: 1 }, why: "kind approval: maintenance" },
   "src/services/policy-rules.ts": { counts: { insert: 1, question: 1 }, why: "type rule_proposal" },
   "src/services/retro.ts": { counts: { insert: 3, question: 1 }, why: "type lesson (and approvals: workflow_change, workflow_check)" },
-  "src/services/review.ts": { counts: { insert: 3, question: 2 }, why: "check_stuck (no agent), lesson (tier ceo), risk_review (kind approval)" },
+  "src/services/review.ts": { counts: { insert: 4, question: 3 }, why: "check_stuck (no agent), lesson (tier ceo), risk_review (kind approval), carried (type carried, ticketId, blocker, one option)" },
   "src/services/runners.ts": { counts: { insert: 1 }, why: "kind budget" },
   "src/services/scheduler.ts": { counts: { insert: 3 }, why: "kind budget: budget_limit, project_cap, ticket_cap" },
   "src/services/self-deploy.ts": { counts: { insert: 1 }, why: "kind approval: self_deploy" },
