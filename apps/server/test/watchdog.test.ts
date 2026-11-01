@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { activity, agents, companies, decisions, notifications, runs, ticketDependencies, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
+import { activity, agents, companies, decisions, notifications, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 import { WATCHDOG_ESCALATE_REASON, WATCHDOG_REASON } from "../src/services/watchdog.js";
 
@@ -178,6 +178,49 @@ describe("the watchdog sweep (BOS-58)", () => {
     expect(await ctx.smWakes()).toHaveLength(0);
     const [f] = await ctx.db.select().from(watchdogFlags);
     expect(f).toMatchObject({ rule: "owner_decision_waiting", status: "open" });
+  });
+
+  it("rule 2: only an answer to the card being waited on stops the reminder, not another card or a message on the same ticket (BOS-175)", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Penpot export", systemState: "blocked", stateChangedAt: ctx.ago(600) });
+    const [waiting] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Add the secrets?", options: ["Done", "Not yet"], recommendedOption: "Done", createdAt: ctx.ago(479) }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: waiting!.id });
+    // At the hour mark the flag opens, holding the card it is waiting on.
+    await ctx.watchdog.run();
+    ctx.advance(2);
+    await ctx.watchdog.run();
+    const [flag] = await ctx.db.select().from(watchdogFlags);
+    expect(flag).toMatchObject({ rule: "owner_decision_waiting", status: "open" });
+    expect((flag!.detail as { decisionId?: string }).decisionId).toBe(waiting!.id);
+
+    // The owner answers a different question on the same ticket, and writes to the ticket.
+    const other = await ctx.db
+      .insert(decisions)
+      .values({ companyId: ctx.companyId, kind: "question", question: "Which logo?", options: ["A", "B"], recommendedOption: "A", context: { type: "question", ticketId: t.id, triedFirst: "Read the brand guide" }, raisedByAgentId: ctx.dev.id, createdAt: ctx.ago(1) })
+      .returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: other[0]!.id });
+    await ctx.decisions.answer(other[0]!.id, "A");
+    await ctx.db.insert(ticketMessages).values({ companyId: ctx.companyId, ticketId: t.id, author: "owner", text: "Still thinking about the secrets.", delivery: "woken" });
+
+    // The flag's reminder is due a day after it opened: the next sweep must still send it, because
+    // neither the other card's answer nor the message settles the card being waited on.
+    ctx.advance(24 * 60);
+    await ctx.watchdog.run();
+    const told = () => ctx.db.select().from(notifications).where(sql`${notifications.title} like '%waited%for your decision'`);
+    expect(await told()).toHaveLength(1);
+    expect(await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "owner_reminder"))).toHaveLength(1);
+  });
+
+  it("rule 2: does not remind the owner about a card they have answered (BOS-175)", async () => {
+    await ctx.switchOn();
+    const t = await ctx.ticket({ title: "Penpot export", systemState: "blocked", stateChangedAt: ctx.ago(600) });
+    const [waiting] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Add the secrets?", options: ["Done", "Not yet"], recommendedOption: "Done", createdAt: ctx.ago(479) }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: waiting!.id });
+    await ctx.watchdog.run();
+    await ctx.decisions.answer(waiting!.id, "Done");
+    ctx.advance(2);
+    await ctx.watchdog.run();
+    expect(await ctx.db.select().from(notifications).where(sql`${notifications.title} like '%waited%for your decision'`)).toHaveLength(0);
   });
 
   it("rule 3: stays quiet until 'blocked until' plus 2 h", async () => {

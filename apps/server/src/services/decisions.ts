@@ -538,7 +538,7 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
   return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
 }
 
-export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false) {
+export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}) {
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -1237,6 +1237,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       wake = hook;
     },
 
+
     /** How "Cancel run" stops a run: the runs service, which ends the run itself when the runner can't. */
     setCancelHook(hook: (runId: string) => Promise<{ endedHere?: boolean }>) {
       cancelRun = hook;
@@ -1802,9 +1803,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
       // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
+      // The answer is already saved, so this can't be allowed to stop it reaching the asker or
+      // releasing the tickets it blocked (BOS-175): a failure is logged, not thrown.
       if (ctx.type !== "permission") {
-        const about = await decisionTicketIds(db, d);
-        if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+        try {
+          const about = await decisionTicketIds(db, d);
+          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+        } catch (err) {
+          log(`answering decision ${id} was saved, but marking related cards out of date failed: ${(err as Error).message}`);
+        }
       }
 
       let delivered: boolean | null = null;
