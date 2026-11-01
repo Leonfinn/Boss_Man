@@ -211,10 +211,10 @@ export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
 export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
 /**
  * How long an approved ticket can go without any activity before its merge is treated as stopped:
- * longer than the server waits for a merge check, so a check still running is never mistaken for one
- * that died. The unmerged-approvals sweep and the merge card's stale marker both use it.
+ * longer than a check runs, so a check still running is never mistaken for one that died. A check waiting
+ * in the queue beats every minute (whileActive), so it can wait for hours without tripping this. The unmerged-approvals sweep and the merge card's stale marker both use it.
  */
-export const MERGE_MISSED_AFTER_MS = VERIFY_ASK_TIMEOUT_MS + 5 * 60_000;
+export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 
 /** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };
