@@ -51,9 +51,10 @@ async function setup() {
     if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
     if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
     else if (c.type === "workspace.merge") void (faults.holdMerge ?? Promise.resolve()).then(() => ok({ status: "merged", commit: "c".repeat(40) }));
+    if (c.type === "workspace.carried") ok({ carried: [] });
     if (c.type === "workspace.migrations") ok({ needed: false, reason: "No other branch uses this ticket's migration numbers." });
     return true;
-  });
+  }, ["carried-check"]);
   let seq = 0;
   const emit = (event: RunnerEvent) => built.runners.ingest(runner!, { seq: ++seq, at: new Date().toISOString(), event });
   const ticket = async (fields: Record<string, unknown> = {}) => {

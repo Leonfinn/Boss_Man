@@ -170,3 +170,72 @@ describe("verify before done (R47)", () => {
     await expect(ws.verify({ ...spec, ticketId: "00000000-0000-4000-8000-000000000000" }, "true")).rejects.toThrow("no workspace or branch");
   });
 });
+
+describe("the commits a branch carries from other open tickets (BOS-130)", () => {
+  /** Another ticket's branch, made and committed on the same runner, then pushed aside. */
+  const otherTicket = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const ids2 = { other: otherTicket };
+
+  it("says which other branches' unmerged commits this branch has, and only those", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    // A second ticket's branch on the same workspace, with a commit main doesn't have.
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    // A third ticket's branch, never touched by this one.
+    const third = await ws.ensure({ ...spec, ticketId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" });
+    writeFileSync(path.join(third.path, "third.txt"), "unrelated\n");
+    git(third.path, "add", ".");
+    git(third.path, "commit", "-qm", "third ticket's work");
+
+    const branches = [
+      { ticketId: ids2.other, branch: `bossman/${ids2.other}` },
+      { ticketId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", branch: "bossman/cccccccc-cccc-4ccc-8ccc-cccccccccccc" },
+      { ticketId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", branch: "bossman/dddddddd-dddd-4ddd-8ddd-dddddddddddd" },
+    ];
+    // This ticket's own branch is never reported; a branch on neither side is skipped.
+    expect(await ws.carried(spec, "main", branches)).toEqual({ carried: [] });
+    expect(git(path.join((ws as { root: string }).root, "repos", `${ids.project}.git`), "show", `refs/heads/bossman/${ids.t}:feature.txt`)).toBe("new");
+
+    // This ticket merges the other in, as a developer would to stay up to date.
+    git(w.path, "merge", "--no-edit", `bossman/${ids2.other}`);
+    expect(await ws.carried(spec, "main", branches)).toEqual({ carried: [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }] });
+    // Nothing merges with the guard in place: the branch is exactly as it was.
+    expect(git(w.path, "status", "--porcelain")).toBe("");
+  });
+
+  it("finds nothing once the carried branch has itself merged to the target", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    await ws.merge({ projectId: spec.projectId, ticketId: ids2.other }, "main", "Merge the other ticket");
+    git(w.path, "merge", "--no-edit", `bossman/${ids2.other}`);
+    expect(await ws.carried(spec, "main", [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }])).toEqual({ carried: [] });
+  });
+});
+
+describe("a ticket with no branch on this runner (BOS-130)", () => {
+  it("has nothing to compare, so nothing is reported as carried", async () => {
+    const o = origin();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    await ws.ensure({ projectId: ids.project, ticketId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", repoUrl: o.url, baseRef: "main" });
+    expect(await ws.carried({ projectId: ids.project, ticketId: ids.t }, "main", [{ ticketId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", branch: "bossman/eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }])).toEqual({ carried: [] });
+  });
+
+  it("says so when git can't answer, rather than reporting the branch clean", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const w = await ws.ensure({ ...spec, ticketId: other });
+    writeFileSync(path.join(w.path, "other.txt"), "their work\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "other ticket's work");
+    // No such target on origin: rev-list can't run, so the gate mustn't look clean.
+    await expect(ws.carried(spec, "no-such-target", [{ ticketId: other, branch: `bossman/${other}` }])).rejects.toThrow(/rev-list/);
+  });
+});

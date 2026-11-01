@@ -24,7 +24,7 @@ const DIFF: WorkspaceDiff = {
   truncated: false,
 };
 
-type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; migrations?: unknown };
+type Answers = { verify?: unknown; merge?: unknown; diff?: unknown; carried?: unknown; migrations?: unknown };
 
 async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean } = {}) {
   const held: Array<() => void> = [];
@@ -51,9 +51,13 @@ async function setup(opts: { online?: boolean; answers?: Answers; hold?: boolean
         else queueMicrotask(reply);
       }
       if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.merge }));
+      if (c.type === "workspace.carried") {
+        const a = answers.carried as { error?: string } | undefined;
+        queueMicrotask(() => built.runners.resolveReply(a?.error ? { requestId: c.requestId, ok: false, error: a.error } : { requestId: c.requestId, ok: true, data: a ?? { carried: [] } }));
+      }
       if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: answers.migrations }));
       return true;
-    });
+    }, ["carried-check"]);
   }
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
   await db.update(tickets).set({ branch: `bossman/${ticket.id}` }).where(eq(tickets.id, ticket.id));
@@ -443,3 +447,95 @@ describe("landing an approved ticket (R46, R47)", () => {
   });
 });
 
+
+describe("a branch that carries another open ticket's work (BOS-130)", () => {
+  /** An open ticket in the same project, with a branch of its own: what this ticket's branch might carry. */
+  async function otherTicket(c: Awaited<ReturnType<typeof setup>>, title: string, risk?: "high" | "critical" | "low") {
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title, assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${t.id}`, ...(risk ? { risk } : {}) }).where(eq(tickets.id, t.id));
+    return { id: t.id, branch: `bossman/${t.id}`, title };
+  }
+  const state = async (c: Awaited<ReturnType<typeof setup>>) => (await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!;
+
+  it("refuses to merge, names the ticket that must merge first, and runs no check", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 10 } } }));
+    const other = await otherTicket(c, "Permission gate");
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    const r = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(r).toMatchObject({ verdict: "approved", outcome: "carried" });
+    expect(r.message).toContain('"Permission gate"');
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.verify");
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
+    expect(await state(c)).toMatchObject({ systemState: "review", mergeCommit: null });
+    // The agent is told which ticket must go first; it hears again only when it is next approved.
+    const w = (await c.db.select().from(wakes)).find((x) => x.reason === "carried work");
+    expect(w!.note).toContain('carries unmerged work from "Permission gate"');
+    expect(w!.note).toContain("must merge first");
+    expect((await state(c)).pullRequestNote).toContain('"Permission gate"');
+    // The ticket page and the owner hear why in plain words.
+    expect(landingText({ outcome: "carried", detail: { carried: [{ title: "Permission gate" }] } }, { branch: "main", assignee: "Engineer" })).toBe(
+      'Approved, but not merged: its branch also carries unapproved work from "Permission gate". That ticket must merge first; the ticket stays in review.',
+    );
+  });
+
+  it("tells the owner when a carried ticket needs their sign-off, and still refuses", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Permission gate", "high");
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    const r = (await approveAndWait(c.req, c.ticket.id)).json();
+    // The carried ticket is unmerged, so there's nothing to approve-and-merge: the landing refuses,
+    // and the owner hears that the high-risk ticket must merge first.
+    expect(r).toMatchObject({ outcome: "carried" });
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(d).toMatchObject({ tier: "owner", options: ["Got it"] });
+    expect(d!.question).toContain('"Permission gate"');
+    expect(d!.question).toContain("before \"Add rate limiting\" can land");
+    expect(d!.question).toContain("high risk");
+    // Nothing ran or merged, and the ticket stays in review, held by that decision.
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.verify");
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
+    expect(await state(c)).toMatchObject({ systemState: "review" });
+    expect(c.sent.find((x) => x.type === "workspace.carried")).toMatchObject({ target: "main", branches: [{ ticketId: other.id, branch: other.branch }] });
+  });
+
+  it("doesn't ask the owner again for a low-risk carried ticket: the agent is told and the ticket waits", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "A small fix", "low");
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
+    expect(await c.db.select().from(decisions)).toHaveLength(0);
+    expect(await state(c)).toMatchObject({ systemState: "review" });
+  });
+
+  it("merges when the other ticket is done, so its work is on the target already", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Permission gate");
+    await c.db.update(tickets).set({ systemState: "done", outcome: "completed" }).where(eq(tickets.id, other.id));
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    // A done ticket is no longer a candidate at all, so the runner is never asked about it.
+    expect(c.sent.find((x) => x.type === "workspace.carried")).toBeUndefined();
+  });
+
+  it("asks about every other open ticket's branch, never its own", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Permission gate");
+    await approveAndWait(c.req, c.ticket.id);
+    const asked = c.sent.find((x): x is Extract<RunnerCommand, { type: "workspace.carried" }> => x.type === "workspace.carried");
+    expect(asked!.branches).toEqual([{ ticketId: other.id, branch: other.branch }]);
+  });
+
+  it("refuses rather than merging when the runner can't answer the check", async () => {
+    const c = (ctx = await setup({ answers: { carried: { error: "git rev-list failed" } } }));
+    const other = await otherTicket(c, "Permission gate");
+    const r = (await approveAndWait(c.req, c.ticket.id)).json();
+    expect(r).toMatchObject({ verdict: "approved", outcome: "carried" });
+    expect(r.message).toContain("git rev-list failed");
+    expect(c.sent.map((x) => x.type)).not.toContain("workspace.merge");
+    expect(await state(c)).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.pullRequestNote).toContain("git rev-list failed");
+    const w = (await c.db.select().from(wakes)).find((x) => x.reason === "carried check failed");
+    expect(w!.note).toContain("git rev-list failed");
+  });
+});

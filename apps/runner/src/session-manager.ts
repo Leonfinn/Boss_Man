@@ -293,6 +293,21 @@ export class SessionManager {
         );
         return;
       }
+      case "workspace.carried": {
+        const reply = this.opts.reply ?? (() => {});
+        const ws = this.opts.workspaces;
+        if (!ws) {
+          reply(command.requestId, { ok: false, error: "This runner has no workspace directory configured." });
+          return;
+        }
+        (this.opts.resolveCompanyEnv?.("merge") ?? Promise.resolve({}))
+          .then((secrets) => ws.carried({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.branches, secrets))
+          .then(
+            (data) => reply(command.requestId, { ok: true, data }),
+            (err) => reply(command.requestId, { ok: false, error: String((err as Error)?.message ?? err).slice(0, 1000) }),
+          );
+        return;
+      }
       case "workspace.verify":
       case "workspace.merge":
       case "workspace.push":
@@ -697,7 +712,7 @@ export class SessionManager {
         // A reviewer's run checkpoints nothing: its copy isn't the ticket's worktree.
         if (!cmd.workspace || cmd.workspace.review || !this.opts.workspaces) return;
         try {
-          const c = await this.opts.workspaces.checkpoint(cmd.workspace, `${label} (run ${cmd.runId})`);
+          const c = await this.opts.workspaces.checkpoint(cmd.workspace, `${label} (run ${cmd.runId})`, cmd.agentName);
           if (c && label !== "before the run") emit({ type: "run.update", runId: cmd.runId, update: { kind: "checkpoint", turn: c.turn, files: c.files } });
         } catch (err) {
           emit({ type: "runner.log", level: "warn", message: `Couldn't record a checkpoint for ticket ${cmd.workspace.ticketId}: ${String((err as Error)?.message ?? err).slice(0, 300)}` });

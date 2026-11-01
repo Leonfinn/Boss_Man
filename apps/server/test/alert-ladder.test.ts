@@ -30,7 +30,7 @@ async function setup() {
   const project = (await req("POST", `/api/companies/${companyId}/projects`, { name: "Site" })).json() as { id: string };
   const [ticket] = await db.insert(tickets).values({ companyId, projectId: project.id, title: "Export the designs", systemState: "in_progress", assigneeAgentId: dev.id }).returning();
   const advance = (minutes: number) => (clock = new Date(clock.getTime() + minutes * 60_000));
-  const switchOn = async () => expect((await req("PATCH", `/api/companies/${companyId}/watchdog`, { scrumMasterAgentId: sm.id, enabled: true })).statusCode).toBe(200);
+  const switchOn = async (settings: Record<string, unknown> = {}) => expect((await req("PATCH", `/api/companies/${companyId}/watchdog`, { scrumMasterAgentId: sm.id, enabled: true, ...settings })).statusCode).toBe(200);
   await db.delete(wakes);
   return { ...built, db, close, base, req, companyId, sm, dev, qa, ceo: ceo!, ticket: ticket!, advance, switchOn, now: () => clock };
 }
@@ -232,6 +232,25 @@ describe("the alert ladder (BOS-64)", () => {
       for (let i = 0; i < 4; i++) await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "sweep_wake", targetAgentId: ctx.sm.id, reason: "x", createdAt: new Date() });
       const d = await wakeChain();
       expect(d).toMatchObject({ tier: "ceo", forAgentId: null });
+    });
+
+    it("record only: Boss Man's own alerts skip the Scrum Master and still climb to the owner (BOS-166)", async () => {
+      await ctx.switchOn({ recordOnly: true });
+      const d = await wakeChain();
+      // The Scrum Master isn't woken: the alert goes straight to the CEO, who is told.
+      expect(d).toMatchObject({ tier: "ceo", forAgentId: null });
+      expect((await ladderOf(d.id)).ladder.hops.map((h) => h.to)).toEqual(["ceo"]);
+      expect((await ladderOf(d.id)).ladder.hops[0]!.why).toMatch(/record-only mode/);
+      expect((await alertWakes()).map((w) => w.agentId)).toEqual([ctx.ceo.id]);
+      // And the rehearsal says what it would have done, without sending anything.
+      const [skip] = await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "record_alert_skip"));
+      expect(skip).toMatchObject({ ticketId: ctx.ticket.id, reason: expect.stringContaining("record-only mode") });
+      expect((skip!.after as { recorded?: boolean }).recorded).toBe(true);
+      // Past the limits it still climbs to the owner, so a runaway on rehearsal day is never lost.
+      ctx.advance(31);
+      expect((await ctx.alerts.sweep()).moved).toBe(1);
+      expect((await ctx.db.select().from(decisions).where(eq(decisions.id, d.id)))[0]).toMatchObject({ tier: "owner", status: "open" });
+      expect(await ownerNotified(d.id)).toHaveLength(1);
     });
 
   });

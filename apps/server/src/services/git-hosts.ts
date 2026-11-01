@@ -10,6 +10,8 @@ export type PullRequest = { number: number; url: string; merged: boolean; closed
 /** What a commit's checks say (R86). GitHub's older commit statuses (not Actions check runs) aren't read. */
 export type CommitChecks = { state: "passed" | "failed" | "pending" | "none"; failing: string[] };
 export type MergeAttempt = { merged: true; commit: string | null } | { merged: false; note: string };
+/** A pull request and the commits that made it: the host lists them in order, oldest first. */
+export type PullRequestCommits = { pull: PullRequest; commits: string[] };
 
 export class GitHostError extends Error {
   constructor(
@@ -140,6 +142,37 @@ export function gitHostService(opts: { fetch?: typeof fetch } = {}) {
       const sha = c?.sha ?? c?.id;
       if (!res.ok || typeof sha !== "string" || !sha) throw new GitHostError(res.status, `Couldn't read branch ${branch}: ${messageOf(res.json, res.status)}`);
       return sha;
+    },
+
+    /**
+     * A pull request with its commits, oldest first (BOS-130). With a headSha, the commits are
+     * read only up to that one, so a branch pushed to since still answers for the reviewed work.
+     */
+    async getWithCommits(cfg: GitHostConfig, token: string, number: number, headSha: string | null): Promise<PullRequestCommits> {
+      const pull = await this.get(cfg, token, number);
+      // The host pages at 100: read up to ten pages, stopping as soon as the reviewed head is in.
+      const commits: string[] = [];
+      for (let page = 0; page < 10; page++) {
+        const res = await call(cfg, token, "GET", `/pulls/${number}/commits?per_page=100&page=${page + 1}`);
+        if (!res.ok || !Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't read the commits of pull request ${number}: ${messageOf(res.json, res.status)}`);
+        for (const c of res.json) {
+          const sha = typeof c.sha === "string" ? c.sha.slice(0, 40) : null;
+          if (sha) commits.push(sha);
+          if (headSha && c.sha === headSha) return { pull, commits };
+        }
+        if (res.json.length < 100) break;
+      }
+      return { pull, commits };
+    },
+
+    /** The commits one commit adds over another (oldest first), from the host's compare (BOS-130). */
+    async compare(cfg: GitHostConfig, token: string, from: string, to: string): Promise<string[]> {
+      const res = await call(cfg, token, "GET", `/compare/${encodeURIComponent(from)}...${encodeURIComponent(to)}?per_page=250`);
+      if (!res.ok || !res.json || Array.isArray(res.json)) throw new GitHostError(res.status, `Couldn't compare ${from.slice(0, 8)} with ${to.slice(0, 8)}: ${messageOf(res.json, res.status)}`);
+      // GitHub's compare: commits[].sha. Gitea's own compare endpoint isn't in its REST API, so
+      // this only answers for GitHub; elsewhere it fails and the check is left to the runner.
+      const rows = Array.isArray(res.json.commits) ? (res.json.commits as Array<Record<string, unknown>>) : [];
+      return rows.map((c) => (typeof c.sha === "string" ? c.sha.slice(0, 40) : "")).filter(Boolean);
     },
 
     async get(cfg: GitHostConfig, token: string, number: number): Promise<PullRequest> {

@@ -1,7 +1,7 @@
 import { api } from "../api";
 import { usePoll } from "../hooks";
 
-export type WatchdogHealthData = { settings: { enabled: boolean }; lastSweepAt: string | null; trippedAt: string | null; pausedUntil?: string | null; trippedReason: string | null; openFlags: number };
+export type WatchdogHealthData = { settings: { enabled: boolean; recordOnly?: boolean }; lastSweepAt: string | null; trippedAt: string | null; pausedUntil?: string | null; trippedReason: string | null; openFlags: number };
 
 const mins = (ms: number) => Math.max(0, Math.round(ms / 60_000));
 
@@ -13,6 +13,8 @@ export function healthLine(h: WatchdogHealthData, now = Date.now()): { text: str
   const ago = h.lastSweepAt ? mins(now - new Date(h.lastSweepAt).getTime()) : null;
   const check = ago === null ? "no check yet" : ago < 1 ? "last check just now" : `last check ${ago} min ago`;
   const handled = h.openFlags === 0 ? "no open issues" : `${h.openFlags} issue${h.openFlags === 1 ? "" : "s"} being handled`;
+  // Record only (BOS-166): it is watching, but it reaches nobody, so the line says so.
+  if (h.settings.recordOnly) return { text: `Watchdog: record only (not acting) · ${check} · ${handled}`, tone: ago !== null && ago > 15 ? "amber" : "" };
   return { text: `Watchdog: ${check} · ${handled}`, tone: ago !== null && ago > 15 ? "amber" : "green" };
 }
 

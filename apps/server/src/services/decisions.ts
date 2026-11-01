@@ -142,6 +142,8 @@ export type DecisionContext =
   /** The CEO's proposals for the team (R62), applied when the owner approves. */
   | { type: "hire"; proposal: HireProposal; byAgentId: string }
   | { type: "instructions"; agentId: string; instructions: string; byAgentId: string }
+  /** A display-name change for an agent (BOS-265); only the name moves, never the id. */
+  | { type: "rename"; agentId: string; newName: string; before: string; byAgentId: string }
   | { type: "team_plan"; projectId: string | null; covered: string; hires: TeamHire[]; byAgentId: string }
   /** A model-setup change for an existing agent (BOS-128): the owner approves, edits or rejects it. */
   | { type: "model_change"; agentId: string; before: AgentModelConfig; proposed: AgentModelConfig; byAgentId: string; runningRunId?: string | null; applied?: { at: string; afterRunId: string | null; config?: AgentModelConfig } }
@@ -239,6 +241,7 @@ const OWNER_ONLY_ANSWER_TYPES = new Set([
   "maintenance",
   "hire",
   "instructions",
+  "rename",
   "model_change",
   "team_plan",
   "risk_review",
@@ -502,7 +505,7 @@ export type RetroHook = {
   checked(changeId: string, answer: string): Promise<unknown>;
   lessonAnswered(decisionId: string, answer: string, note?: string): Promise<unknown>;
 };
-type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" }>, companyId: string, approved: boolean) => Promise<unknown>;
+type AgentDecisionHook = (ctx: Extract<DecisionContext, { type: "hire" | "instructions" | "rename" }>, companyId: string, approved: boolean) => Promise<unknown>;
 type ModelChangeHook = (ctx: Extract<DecisionContext, { type: "model_change" }>, companyId: string, config: AgentModelConfig) => Promise<{ afterRunId: string | null }>;
 
 /**
@@ -535,7 +538,7 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
   return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
 }
 
-export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false) {
+export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}) {
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -1234,6 +1237,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       wake = hook;
     },
 
+
     /** How "Cancel run" stops a run: the runs service, which ends the run itself when the runner can't. */
     setCancelHook(hook: (runId: string) => Promise<{ endedHere?: boolean }>) {
       cancelRun = hook;
@@ -1799,9 +1803,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
       // A permission click allowed a command; it isn't the owner doing the thing the note asked about.
+      // The answer is already saved, so this can't be allowed to stop it reaching the asker or
+      // releasing the tickets it blocked (BOS-175): a failure is logged, not thrown.
       if (ctx.type !== "permission") {
-        const about = await decisionTicketIds(db, d);
-        if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+        try {
+          const about = await decisionTicketIds(db, d);
+          if (about.length) await ownerActed(db, { companyId: d.companyId, ticketIds: about, reason: `${extra.by === "ceo" ? "the CEO settled" : "the owner answered"} "${d.question.slice(0, 80)}"`, wake, now: now(), skipAgents: [d.raisedByAgentId] });
+        } catch (err) {
+          log(`answering decision ${id} was saved, but marking related cards out of date failed: ${(err as Error).message}`);
+        }
       }
 
       let delivered: boolean | null = null;
@@ -1920,7 +1930,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           await db.update(decisions).set({ status: "open", answer: null, answeredAt: null, context: d.context as object }).where(eq(decisions.id, id));
           throw err;
         }
-      } else if (ctx.type === "hire" || ctx.type === "instructions") {
+      } else if (ctx.type === "hire" || ctx.type === "instructions" || ctx.type === "rename") {
         try {
           await onAgentDecision?.(ctx, d.companyId, answer === "Hire" || answer === "Apply the change");
         } catch (err) {

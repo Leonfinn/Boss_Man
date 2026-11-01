@@ -507,7 +507,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // Don't ask again what the owner has already answered (BOS-123). A fresh reason lets it through.
       if (blocksTicketId) {
         const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, blocksTicketId));
-        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: scope.agentId, question });
+        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question });
         if (earlier && !stillNeeded?.trim()) {
           return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
         }
@@ -727,7 +727,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const asks = /\b(need(s)? you|your (approval|decision|answer|sign-?off)|waiting (on|for) you|blocked on you|over to you)\b/i.test(`${input.title} ${input.body ?? ""}`);
         if (asks && !input.stillNeeded?.trim()) {
           const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
-          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: scope.agentId, question: `${input.title} ${input.body ?? ""}` });
+          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: `${input.title} ${input.body ?? ""}` });
           if (earlier) return fail(`${quotedAnswer(earlier)}. Check the live state before telling the owner they must act; if it really still needs them, pass stillNeeded saying what changed.`);
         }
       }
@@ -1591,6 +1591,67 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       try {
         const r = await team.proposeInstructions(who.id, ceo, instructions, reason);
         return text("applied" in r ? `${who.name}'s instructions are updated from their next run.` : `The change is waiting for the owner's approval (decision ${r.decisionId}).`);
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  // Renaming and picturing an agent (BOS-265): display changes only, so the id still ties every
+  // ticket, run, note and history row to them. Both are logged, notified and undoable on the
+  // Agents page, and a rename waits for the owner when they approve instruction changes too.
+  server.registerTool(
+    "rename_agent",
+    {
+      description:
+        "Rename an agent (CEO only), in chat and in your ticket runs: agent (a name or id), newName, and reason. Only the display name changes: their id, tickets, runs, notes and history stay with them. Refuses a name another agent in this company already uses, an empty name, or one over 80 characters; the CEO itself can't be renamed this way. Say why; the owner is told, gets a feed note, can undo it on the Agents page, and when they've asked to approve instruction changes the rename waits in Decisions. The reply lists other agents whose instructions or title still say the old name, so you can fix those with update_instructions.",
+      // No trim or min here: an empty or blank name gets the service's plain refusal, not a schema error.
+      inputSchema: { agent: z.string().trim().min(1).max(80), newName: z.string().max(200), reason: z.string().trim().min(1).max(2000) },
+    },
+    async ({ agent, newName, reason }) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can rename an agent.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), or(sql`lower(${agents.name}) = lower(${agent})`, sql`${agents.id}::text = ${agent}`)));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      try {
+        const r = await team.rename(scope.companyId, ceo, who.id, newName, reason);
+        const name = "applied" in r ? newName.trim() : who.name;
+        const lines = ["applied" in r ? `${who.name} is now ${name}. Their tickets, runs, notes and history stay with them.` : `The rename of ${who.name} to ${newName.trim()} is waiting for the owner's approval (decision ${r.decisionId}).`];
+        // Only once it lands: the old name is what colleagues quote, not the new one.
+        if ("applied" in r) {
+          const others = await team.colleaguesMentioning(scope.companyId, who.id, r.before);
+          lines.push(
+            others.length
+              ? `These still say ${r.before} in their instructions or title; update them with update_instructions:\n${others.map((o) => `- ${o.name} (${o.where})`).join("\n")}`
+              : `No other agent's instructions or title mention ${r.before}. Settings and the review policy store agent ids, so nothing there breaks.`,
+          );
+          lines.push(`New commits by ${name} carry their current name from their next run; the runner needs the latest update for that to show (the server sends it with each run).`);
+        }
+        return text(lines.join("\n\n"));
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_agent_picture",
+    {
+      description:
+        "Set an agent's picture (CEO only), in chat and in your ticket runs, from an image already attached to one of your company's tickets (such as one the Graphics Designer made and attached with attach_image; any ticket read lists its image ids). Pass imageId, or clear to go back to the built-in portrait, and say why. PNG, JPEG or WebP only, 256 KB or smaller; another company's image or a document is refused. It shows on the Agents page, the board and the runs list, is logged, and the owner gets a feed note and can undo it on the Agents page.",
+      inputSchema: { agent: z.string().trim().min(1).max(80), imageId: z.string().uuid().optional(), clear: z.boolean().optional(), reason: z.string().trim().max(2000).optional() },
+    },
+    async ({ agent, imageId, clear, reason }) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can set an agent's picture.");
+      if (!imageId && !clear) return fail("Give an imageId (an image on one of your tickets) or set clear to go back to the default picture.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), or(sql`lower(${agents.name}) = lower(${agent})`, sql`${agents.id}::text = ${agent}`)));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      try {
+        const r = await team.setPicture(scope.companyId, ceo, who.id, { imageId: imageId ?? null, clear: !!clear }, reason);
+        return text(clear ? `${who.name}'s picture is back to the default.` : `${who.name} now has that picture. It shows on the Agents page, the board and the runs list.`);
       } catch (err) {
         if (err instanceof AgentError) return fail(err.message);
         throw err;
