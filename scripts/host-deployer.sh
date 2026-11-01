@@ -112,7 +112,7 @@ finish() { # result message [backup]: record the outcome, tell the owner, stop
   exit 0
 }
 
-# The newest commit on main as the remote says it, read with the deploy key. Empty if unreachable.
+# The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an older install's deploy key). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
 
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
