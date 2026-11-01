@@ -441,6 +441,8 @@ describe("proposing a change", () => {
   it("watchdog limits are replayed over 14 days first, and applied through the watchdog", async () => {
     const { c, p } = await ready();
     expect(isError(await p({ lever: "watchdog", target: "watchdog", change: { enabled: true } }))).toBe(true);
+    // Record only silences the watchdog, so it is the owner's alone, like enabled (BOS-166).
+    expect(isError(await p({ lever: "watchdog", target: "watchdog", change: { recordOnly: true } }))).toBe(true);
     expect(isError(await p({ lever: "watchdog", target: "watchdog", change: { reviewHours: 0 } }))).toBe(true);
     await p({ lever: "watchdog", target: "watchdog", change: { reviewHours: 6, inProgressHours: 4 }, metric: "watchdogFlags" });
     const { id, ch } = await decisionOf(c, "watchdog");

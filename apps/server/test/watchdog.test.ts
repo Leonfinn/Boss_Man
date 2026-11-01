@@ -7,6 +7,7 @@ import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agents, companies, decisions, notifications, runs, ticketDependencies, ticketMessages, ticketReviews, tickets, wakes, watchdogActions, watchdogFlags } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
+import { readWatchdogSettings } from "@boss-man/shared";
 import { WATCHDOG_ESCALATE_REASON, WATCHDOG_REASON } from "../src/services/watchdog.js";
 
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -522,6 +523,16 @@ describe("the hourly cap (BOS-58)", () => {
   });
 
 
+  it("a log row without an \"after\" still counts toward the cap (BOS-166 hardening)", async () => {
+    await ctx.switchOn({ maxNudgesPerHour: 1 });
+    const ts = [await ctx.ticket({ title: "A", stateChangedAt: ctx.ago(130) })];
+    // A real action written without the optional before/after columns must still be seen as spent.
+    await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "nudge", targetAgentId: ctx.dev.id, ticketId: ts[0]!.id, reason: "no detail" });
+    const s = readWatchdogSettings((await ctx.db.select().from(companies).where(eq(companies.id, ctx.companyId)))[0]!.watchdog);
+    await expect(ctx.watchdog.capOrFail(ctx.companyId, s)).rejects.toThrow(/hourly limit/);
+    expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).not.toBeNull();
+  });
+
   it("caps Scrum Master wakes per hour too", async () => {
     await ctx.switchOn({ maxSmRunsPerHour: 1, unassignedMinutes: 1 });
     await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
@@ -816,7 +827,8 @@ describe("hardening from the adversarial review (BOS-74, BOS-75)", () => {
     await ctx.switchOn({ maxNudgesPerHour: 1 });
     const a = await handed({ title: "Twice snoozed" });
     await ctx.switchOn({ maxNudgesPerHour: 1 });
-    await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "nudge", ticketId: a.id, reason: "used the hour's allowance" });
+    // An action that genuinely reached someone: a nudge that never delivered (no `delivered`) isn't counted, so neither is this one.
+    await ctx.db.insert(watchdogActions).values({ companyId: ctx.companyId, kind: "nudge", ticketId: a.id, reason: "used the hour's allowance", after: { delivered: true } });
     await ctx.ticket({ title: "Another due one", stateChangedAt: ctx.ago(130) });
     await ctx.db.update(watchdogFlags).set({ snoozeCount: 2, dueAt: ctx.now() }).where(eq(watchdogFlags.ticketId, a.id));
     const before = (await ctx.smWakes()).length;
@@ -933,5 +945,150 @@ describe("open issues and the timeline (BOS-199)", () => {
     expect(b.issueStatus).toBe("open");
     expect(a.issueLabel).toMatch(/1st warning on .* today/);
     expect(b.issueLabel).toMatch(/2nd warning on .* today/);
+  });
+});
+
+describe("record-only mode (BOS-166)", () => {
+  const records = () => ctx.db.select().from(watchdogActions).where(inArray(watchdogActions.kind, ["record_sweep_wake", "record_owner_reminder", "record_auto_escalate", "record_urgent_page"]));
+  const ownerNotes = () => ctx.db.select().from(notifications);
+
+  it("opens and closes flags and writes one 'would have' row per hand-off, and reaches nobody", async () => {
+    await ctx.switchOn({ recordOnly: true });
+    const loose = await ctx.ticket({ title: "Design the filter bar", assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
+    const quiet = await ctx.ticket({ title: "Fix login", stateChangedAt: ctx.ago(130) });
+    await ctx.watchdog.run();
+    // No wake for the Scrum Master, no owner notice, no run.
+    expect(await ctx.smWakes()).toHaveLength(0);
+    expect(await ownerNotes()).toHaveLength(0);
+    expect(await ctx.db.select().from(runs)).toHaveLength(0);
+    // The flags are real, and one rehearsal row names both problems.
+    const flags = await ctx.db.select().from(watchdogFlags);
+    expect(flags.map((f) => f.ticketId).sort()).toEqual([loose.id, quiet.id].sort());
+    const rows = await records();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind).toBe("record_sweep_wake");
+    expect(rows[0]!.after).toMatchObject({ recorded: true });
+    const said = async (id: string) => (await ctx.db.select().from(activity).where(and(eq(activity.companyId, ctx.companyId), eq(activity.kind, "watchdog")))).find((a) => a.summary.includes(id));
+    expect((await ctx.db.select().from(activity).where(eq(activity.kind, "watchdog"))).some((a) => a.summary.includes("would have woken") && a.summary.includes("2 problems") && a.summary.includes("Nothing was sent"))).toBe(true);
+    expect(rows[0]!.targetAgentId).toBe(ctx.sm.id);
+    // Read back by the activity view with its "not sent" mark.
+    const listed = await ctx.watchdog.actions(ctx.companyId, { limit: 20 });
+    expect(listed.filter((a) => a.recorded)).toHaveLength(1);
+    // Its one entry didn't spend the one-a-hand-off rule for a real action later.
+    ctx.advance(16);
+    await ctx.watchdog.run();
+    expect(await records()).toHaveLength(2);
+
+    // A rehearsal that clears closes its flag and hands nothing on.
+    await ctx.db.update(tickets).set({ assigneeAgentId: ctx.dev.id }).where(eq(tickets.id, loose.id));
+    await ctx.watchdog.run();
+    expect((await ctx.db.select().from(watchdogFlags).where(eq(watchdogFlags.ticketId, loose.id)))[0]!.status).toBe("closed");
+    expect(await ctx.smWakes()).toHaveLength(0);
+  });
+
+  it("records the owner reminder, the auto-escalation and the page it would have sent, and spends nothing", async () => {
+    await ctx.switchOn({ recordOnly: true, maxNudgesPerHour: 1, maxSmRunsPerHour: 1 });
+    // An owner decision holding a ticket: the reminder it would have sent.
+    const waiting = await ctx.ticket({ title: "Penpot export", systemState: "blocked", stateChangedAt: ctx.ago(600) });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Add the secrets?", options: ["Done", "Not yet"], recommendedOption: "Done", createdAt: ctx.ago(479) }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: waiting.id, blockerDecisionId: d!.id });
+    // A decision holding several tickets: the urgent page.
+    // One decision holding three tickets (a decision counts the tickets it blocks).
+    const [big] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Pick a layout?", options: ["A", "B"], recommendedOption: "A", createdAt: ctx.ago(5) }).returning();
+    for (let i = 0; i < 3; i++) {
+      const t = await ctx.ticket({ title: `Held ${i}`, systemState: "blocked", stateChangedAt: ctx.ago(5) });
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: big!.id });
+    }
+    // A flag snoozed twice: the auto-escalation to the CEO.
+    const snoozed = await ctx.ticket({ title: "Twice snoozed", stateChangedAt: ctx.ago(600) });
+    await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: snoozed.id, rule: "stale_in_progress", dueAt: ctx.now(), snoozeCount: 2, detail: { idleMs: 600 * 60_000 } });
+    ctx.advance(2);
+    await ctx.watchdog.run();
+    ctx.advance(2);
+    await ctx.watchdog.run();
+    expect(await ownerNotes()).toHaveLength(0);
+    expect(await ctx.smWakes()).toHaveLength(0);
+    const kinds = (await records()).map((r) => r.kind);
+    expect(kinds).toContain("record_auto_escalate");
+    expect(kinds).toContain("record_urgent_page");
+    expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).toBeNull();
+    // The card is free: nothing was sent, so the one action per hour it allowed is still there when it goes live.
+    await ctx.watchdog.update(ctx.companyId, { recordOnly: false });
+    await ctx.watchdog.capOrFail(ctx.companyId, readWatchdogSettings((await ctx.db.select().from(companies).where(eq(companies.id, ctx.companyId)))[0]!.watchdog));
+    expect((await ctx.watchdog.status(ctx.companyId)).trippedAt).toBeNull();
+  });
+
+  it("the daily summary reports the rehearsals as not sent", async () => {
+    await ctx.switchOn({ recordOnly: true });
+    await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
+    await ctx.watchdog.run();
+    expect(await ctx.watchdog.dailySummary(ctx.companyId, true)).toBe(false);
+    expect(await ownerNotes()).toHaveLength(0);
+    const [row] = await ctx.db.select().from(watchdogActions).where(eq(watchdogActions.kind, "daily_summary"));
+    expect((await ctx.db.select().from(activity).where(eq(activity.kind, "watchdog"))).some((a) => a.summary.includes("instead of sending it"))).toBe(true);
+    expect(row!.after).toMatchObject({ body: expect.stringContaining("Would have done (not sent): 1 Scrum Master wakes") });
+    expect((row!.after as { body: string }).body).toContain("Record only: the watchdog is rehearsing");
+  });
+
+  it("records the owner reminder once per flag, not on every due cycle", async () => {
+    await ctx.switchOn({ recordOnly: true, ownerDecisionHours: 1 });
+    const waiting = await ctx.ticket({ title: "Penpot export", systemState: "blocked", stateChangedAt: ctx.ago(600) });
+    const [d] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Add the secrets?", options: ["Done", "Not yet"], recommendedOption: "Done", createdAt: ctx.ago(119) }).returning();
+    await ctx.db.insert(ticketDependencies).values({ blockedTicketId: waiting.id, blockerDecisionId: d!.id });
+    await ctx.watchdog.run();
+    // Live mode reminds once per flag for all time; the flag's next due cycle must not record another.
+    for (let i = 0; i < 3; i++) {
+      await ctx.db.update(watchdogFlags).set({ dueAt: ctx.ago(1) }).where(eq(watchdogFlags.status, "open"));
+      ctx.advance(2);
+      await ctx.watchdog.run();
+    }
+    expect((await records()).filter((r) => r.kind === "record_owner_reminder")).toHaveLength(1);
+    expect(await ownerNotes()).toHaveLength(0);
+  });
+
+  it("records the page it would have sent once per decision, not on every sweep", async () => {
+    await ctx.switchOn({ recordOnly: true });
+    const [big] = await ctx.db.insert(decisions).values({ companyId: ctx.companyId, kind: "question", question: "Pick a layout?", options: ["A", "B"], recommendedOption: "A", createdAt: ctx.ago(5) }).returning();
+    for (let i = 0; i < 3; i++) {
+      const t = await ctx.ticket({ title: `Held ${i}`, systemState: "blocked", stateChangedAt: ctx.ago(5) });
+      await ctx.db.insert(ticketDependencies).values({ blockedTicketId: t.id, blockerDecisionId: big!.id });
+    }
+    await ctx.watchdog.run();
+    await ctx.watchdog.run();
+    await ctx.watchdog.run();
+    // A decision holding 3+ tickets is paged once, so a rehearsal records it once however often it sweeps.
+    expect((await records()).filter((r) => r.kind === "record_urgent_page")).toHaveLength(1);
+    expect(await ownerNotes()).toHaveLength(0);
+  });
+
+  it("switches to full action on the next sweep when record-only is turned off, and its caps are unchanged", async () => {
+    await ctx.switchOn({ recordOnly: true });
+    await ctx.ticket({ assigneeAgentId: null, stateChangedAt: ctx.ago(60) });
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(0);
+    await ctx.watchdog.update(ctx.companyId, { recordOnly: false });
+    // The rehearsal put the flag back on its normal schedule; let that pass, then it wakes for real.
+    ctx.advance(16);
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(1);
+    expect((await records()).length).toBe(1);
+    // The normal off switch still stops it.
+    await ctx.watchdog.update(ctx.companyId, { enabled: false });
+    await ctx.db.update(watchdogFlags).set({ dueAt: ctx.ago(600) }).where(eq(watchdogFlags.status, "open"));
+    ctx.advance(21);
+    await ctx.watchdog.run();
+    expect(await ctx.smWakes()).toHaveLength(1);
+  });
+
+  it("refuses Scrum Master actions, keeps the alert ladder still, and says so", async () => {
+    await ctx.switchOn({ recordOnly: true });
+    expect(await ctx.watchdog.recordOnly(ctx.companyId)).toBe(true);
+    const [f] = await ctx.db.insert(watchdogFlags).values({ companyId: ctx.companyId, ticketId: (await ctx.ticket({ stateChangedAt: ctx.ago(600) })).id, rule: "stale_in_progress", dueAt: ctx.now(), lastFlaggedAt: ctx.now(), detail: { idleMs: 600 * 60_000 } }).returning();
+    const r = await call({ action: "snooze", flagId: f!.id, hours: 2, reason: "Rehearsing." });
+    expect(isError(r)).toBe(true);
+    expect(textOf(r)).toContain("record-only mode");
+    // The owner's switch turns it back off like any other setting.
+    await ctx.watchdog.update(ctx.companyId, { recordOnly: false });
+    expect(await ctx.watchdog.recordOnly(ctx.companyId)).toBe(false);
   });
 });
