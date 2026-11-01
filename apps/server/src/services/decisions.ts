@@ -6,7 +6,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
-  isBossmanTool,
+  isBossmanCall,
   ruleFor,
   rankDecision,
   ticketRef,
@@ -965,7 +965,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [asking] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
       const { outcome, rule } =
         asking?.purpose === "chat"
-          ? isBossmanTool(event.title)
+          ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
           : evaluatePermission(info, await rulesFor(runner.companyId));

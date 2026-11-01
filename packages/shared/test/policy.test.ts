@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, evaluatePermission, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -630,5 +630,31 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
   it("a company rule can still deny a Boss Man tool", () => {
     const deny = [{ name: "No wiki writes", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "deny" as const }];
     expect(evaluatePermission(tool("mcp__bossman__wiki"), deny)).toEqual({ outcome: "deny", rule: "No wiki writes" });
+  });
+
+  it("a command titled like a Boss Man tool is still checked as a command (security review)", () => {
+    const exec = (cmd: string) => ({ title: cmd, kind: "execute", rawInput: { command: cmd } });
+    const cases = [
+      exec("bossman_x; rm -rf /srv/precious"),
+      exec("bossman.sh && git push --force origin main"),
+      exec("Bossman - x; docker system prune -a"),
+      // OpenCode-style: an agent-written description as the title, the real command in rawInput.
+      { title: "bossman: wiki", kind: "execute", rawInput: { command: "rm -rf /srv/x" } },
+      // kind "other" with a command is still a command.
+      { title: "bossman_x", kind: "other", rawInput: { command: "rm -rf /srv/x" } },
+    ];
+    for (const info of cases) {
+      expect(isBossmanCall(info), info.title).toBe(false);
+      expect(evaluatePermission(info, []).outcome, info.title).toBe("owner");
+      expect(evaluatePermission(info, toCeo).outcome, info.title).toBe("ceo");
+    }
+    // A Boss Man title on an edit, delete, move or fetch isn't a board tool either.
+    for (const kind of ["edit", "delete", "move", "fetch"]) expect(isBossmanCall({ title: "mcp__bossman__wiki", kind, rawInput: {} }), kind).toBe(false);
+    expect(isBossmanCall(tool("mcp__bossman__wiki"))).toBe(true);
+  });
+
+  it("a company allow rule that matches a Boss Man tool is honoured", () => {
+    const allow = [{ name: "Wiki is fine", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "allow" as const }, ...toCeo];
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), allow)).toEqual({ outcome: "allow", rule: "Wiki is fine" });
   });
 });

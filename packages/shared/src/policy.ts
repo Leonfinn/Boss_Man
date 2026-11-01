@@ -27,6 +27,8 @@ export type PolicyMatch = {
   tempCleanupOnly?: boolean;
   /** Only matches a shell command written as one string whose deletes include plain relative paths in the working copy, the rest as tempCleanupOnly (BOS-120, cleanupScope in explain.ts). */
   workingCopyOnly?: boolean;
+  /** Only matches a call to one of Boss Man's own tools that isn't a command (isBossmanCall). Built-in rule only. */
+  bossmanCall?: boolean;
 };
 
 export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: PolicyOutcome };
@@ -52,8 +54,19 @@ export function isBossmanTool(title: string | null | undefined): boolean {
   return BOSSMAN_TOOL.test(title ?? "");
 }
 
+// Kinds a Boss Man tool call never has. Some harnesses title a shell request with the command itself or an
+// agent-written description, so a title alone could pass "bossman_x; rm -rf …" off as a board tool (BOS-292 security review).
+const NOT_A_BOSSMAN_CALL = ["execute", "edit", "delete", "move", "fetch"];
+
+/** True for a call to Boss Man's own server: its title names one, and it carries no command and no file, shell or fetch kind. */
+export function isBossmanCall(info: PermissionInfo): boolean {
+  if (commandOf(info.rawInput) != null) return false;
+  if (info.kind && NOT_A_BOSSMAN_CALL.includes(info.kind)) return false;
+  return isBossmanTool(info.title);
+}
+
 export const DEFAULT_POLICY: PolicyRuleSpec[] = [
-  { name: "Boss Man's own tools", match: { titlePattern: BOSSMAN_TOOL_PATTERN }, outcome: "allow" },
+  { name: "Boss Man's own tools", match: { bossmanCall: true }, outcome: "allow" },
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
   { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
   // The same for plain relative paths in the agent's checkout; the server sends it to the owner when the run has no checkout (BOS-120).
@@ -125,7 +138,8 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly);
+  if (rule.bossmanCall && !isBossmanCall(info)) return false;
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.bossmanCall);
 }
 
 /** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
@@ -154,7 +168,7 @@ const LAN_GUARD = "Fetching from your home network or this machine is blocked";
 
 /** True when a fetch, or a call to an outside tool server, aims at a private address. Unparseable addresses count as private. */
 export function reachesPrivateNetwork(info: PermissionInfo): boolean {
-  const outside = (/^mcp__/.test(info.title ?? "") && !isBossmanTool(info.title)) || info.kind === "fetch";
+  const outside = (/^mcp__/.test(info.title ?? "") && !isBossmanCall(info)) || info.kind === "fetch";
   if (!outside) return false;
   return urlsIn(info.rawInput).some((u) => {
     try {
@@ -171,7 +185,7 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
   // Boss Man's own tools are checked per call by the server (role and company), so a broad company
   // rule that routes requests to the CEO or the owner must not catch them (BOS-292): that sent every
   // board-tool call to a card. A company rule can still deny one.
-  const ownTool = isBossmanTool(info.title);
+  const ownTool = isBossmanCall(info);
   for (const rule of [...rules, ...DEFAULT_POLICY]) {
     if (ownTool && rule.outcome !== "deny" && rule.outcome !== "allow" && rules.includes(rule)) continue;
     if (matches(rule.match, info)) return { outcome: rule.outcome, rule: rule.name };
