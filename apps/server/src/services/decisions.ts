@@ -6,6 +6,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
+  isBossmanCall,
   ruleFor,
   rankDecision,
   ticketRef,
@@ -163,7 +164,6 @@ export const REASSIGN = "Reassign";
 export const DROP = "Drop dependency";
 /** On a stale-blocker card: hand it to the company's CEO to settle. */
 export const LET_CEO_DECIDE = "Let the CEO decide";
-const BOSSMAN_TOOL = /^(mcp__bossman__|mcp\.bossman\.)/;
 export const KEEP_WAITING = "Keep waiting";
 export const CANCEL_RUN = "Cancel run";
 export const RAISE_BUDGET = "Raise it by half";
@@ -965,7 +965,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [asking] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
       const { outcome, rule } =
         asking?.purpose === "chat"
-          ? BOSSMAN_TOOL.test(event.title ?? "")
+          ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
           : evaluatePermission(info, await rulesFor(runner.companyId));
