@@ -30,8 +30,8 @@ Now: this table is a snapshot from 16 Oct. Everything in it has since been built
 | **S3** Credit tracking (S). **Answered 2026-10-16: not available on an individual account.** A workspace API key gets `authentication_error: The Admin API requires an Admin API key or an organization-scoped API key`, and the Admin keys page returns 404. v1 uses the fallback | With a Console organisation and admin key, does `cost_report` show the spend made with the API key, and how quickly? | Spend appears within a few minutes, matching runs | Estimate from run `total_cost_usd` and label it as an estimate |
 
 ### Follow-ups from S2
-- Write a minimal seccomp profile that allows user namespaces, for Codex's sandbox in runner containers. Kandev's syscall list is the starting point (see 02-architecture). Verify it with our own probe.
-- Check whether codex-acp 2.2.2's `agent-full-access` mode still sends approvals to the client. If it does, the container could act as the sandbox.
+- ~~Write a minimal seccomp profile that allows user namespaces, for Codex's sandbox.~~ Superseded by DR-004: agents run inside a Landlock fence instead, which needs no seccomp change (BOS-315, BOS-321).
+- ~~Check whether codex-acp 2.2.2's `agent-full-access` mode still sends approvals to the client.~~ It doesn't: the mode's approval policy is `never` (codex-acp 2.2.2 source), so Codex stays in `workspace-write` (BOS-321).
 - Confirm whether `usage_update.cost` is cumulative across a session's turns. Spike S2 ran only one turn per session.
 - Measure how long Boss Man's HTTP MCP server takes to start on the first turn under Claude Code.
 - Propose a `codex-acp` mode upstream with full access but approvals routed to the user. With it, the container could be the sandbox.
