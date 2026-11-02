@@ -53,13 +53,14 @@ afterEach(async () => {
   await ctx.close();
 });
 
-async function agent() {
-  const token = await issueRunToken(ctx.db, { companyId: ctx.co.company.id, agentId: ctx.dev.id, runId: randomUUID() });
+async function agentAs(agentId: string) {
+  const token = await issueRunToken(ctx.db, { companyId: ctx.co.company.id, agentId, runId: randomUUID() });
   const c = new Client({ name: "test", version: "0" });
   await c.connect(new StreamableHTTPClientTransport(new URL(`http://${ctx.base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
   clients.push(c);
   return c;
 }
+const agent = () => agentAs(ctx.dev.id);
 const textOf = (r: unknown) => ((r as { content: Array<{ text: string }> }).content[0]?.text ?? "");
 const row = async (id: string) => (await ctx.db.select().from(tickets).where(eq(tickets.id, id)))[0]!;
 const toReview = async (id: string) => textOf(await (await agent()).callTool({ name: "set_ticket_state", arguments: { ticketId: id, state: "review", summary: "Built it." } }));
@@ -211,6 +212,20 @@ describe("a no-code ticket in review", () => {
     ctx.diff.current = REAL; // no code wins even when the branch has a real diff
     expect(await toDone(t.id)).toContain("is now done");
     expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed", stateNote: "QA check passed." });
+  });
+
+  // Rex (BOS-304 review): the old code let a manager close any no-code ticket; the assignee rule
+  // must not take that away, even when the branch holds a real diff the manager may not merge.
+  it("a manager who is not the assignee can still close it, even with a real diff on the branch", async () => {
+    const [boss] = await ctx.db
+      .insert(agents)
+      .values({ companyId: ctx.co.company.id, name: "Boss", role: "manager", agentKind: "claude" })
+      .returning();
+    const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
+    ctx.diff.current = REAL;
+    const out = textOf(await (await agentAs(boss!.id)).callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "done", summary: "Closed by the manager." } }));
+    expect(out).toContain("is now done");
+    expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
   });
 
   it("someone else still can't close it, and a code ticket still has to go through review", async () => {

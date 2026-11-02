@@ -1851,13 +1851,14 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
         // A ticket whose branch is already merged but stayed in review (e.g. waiting on the owner's yes) can be closed by a manager.
         const merged = !!t?.mergeCommit && (await managerIn(db, scope));
-        // A no-code ticket never has a branch to merge, so whoever it is assigned to closes it once the
-        // work is done (BOS-304): the CEO no longer has to move each research, wiki or docs task by hand.
+        // A no-code ticket never has a branch to merge, so its own assignee closes it once the work is
+        // done (BOS-304): the CEO no longer has to move each research, wiki or docs task by hand.
         const ownNoCode = !!t?.noCode && !!scope.agentId && t.assignee === scope.agentId;
         // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
         if (t?.repoUrl && outcome !== "cancelled" && !merged && !ownNoCode) {
-          // A code ticket has something to merge; only "nothing changed" or a manager can skip review.
-          const nothingOwn = await review.needsChanges(ticketId, scope.companyId).catch(() => false);
+          // No code at all means nothing to merge for anyone; otherwise only "nothing changed" can skip review.
+          // A manager may still close either, as before, whatever the branch holds.
+          const nothingOwn = !!t?.noCode || (await review.needsChanges(ticketId, scope.companyId).catch(() => false));
           if (!nothingOwn) return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
           if (!(await managerIn(db, scope))) return fail("This ticket has no changes of its own, so it can't be merged. If its change shipped on another ticket, ask your CEO or manager to close it (set_ticket_state done, naming that ticket in the summary).");
         }

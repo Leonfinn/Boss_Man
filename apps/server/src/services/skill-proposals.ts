@@ -322,7 +322,15 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
       await record(db, { companyId, ticketId: p.reviewTicketId, agentId: reviewerId, kind: "skill.reviewed", summary: verdictNote });
       // The verdict ends the review, so this task closes itself (BOS-304): neither the reviewer nor
       // the CEO should have to move it to done by hand. It is no code, so there is nothing to merge.
-      if (p.reviewTicketId) await deps.closeReviewDone?.(p.reviewTicketId, verdictNote);
+      // The verdict is already saved; a failed close must not turn a good verdict into an error the
+      // reviewer would retry (which would hit "isn't waiting"). It is logged instead.
+      if (p.reviewTicketId) {
+        try {
+          await deps.closeReviewDone?.(p.reviewTicketId, verdictNote);
+        } catch (e) {
+          await record(db, { companyId, ticketId: p.reviewTicketId, agentId: null, kind: "skill.review_close_failed", summary: `The verdict was saved, but its review task was not closed: ${(e as Error).message}` });
+        }
+      }
       return this.toOwner(row);
     },
 
