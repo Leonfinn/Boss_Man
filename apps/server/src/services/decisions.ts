@@ -108,7 +108,7 @@ export type DeployUpdate = {
 };
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -968,6 +968,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return subject ? (await openSibling(d, subject)) !== null : false;
   }
 
+  /** The id of a card already answered Allow for this same tool call (same run, same call id, same title), if any. */
+  async function allowedSameToolCall(event: PermissionEvent): Promise<string | null> {
+    const rows = await db
+      .select({ id: decisions.id, context: decisions.context })
+      .from(decisions)
+      .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), eq(decisions.answer, ALLOW), sql`${decisions.context}->>'runId' = ${event.runId}`, sql`${decisions.context}->>'toolCallId' = ${event.toolCallId}`));
+    return rows.find((r) => (r.context as { toolTitle?: string | null }).toolTitle === event.title)?.id ?? null;
+  }
+
   return {
     /** Called for every permission request a runner reports. */
     async onPermissionRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
@@ -985,6 +994,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
           : evaluatePermission(info, await rulesFor(runner.companyId));
+      // OpenCode asks twice for one shell command that reaches outside the checkout: first for the folder, then for the command. If the owner or CEO has already allowed this tool call, the second ask is not a new question. The rules still apply first, so a denial stands.
+      if (outcome !== "allow" && outcome !== "deny" && event.toolCallId) {
+        const earlier = await allowedSameToolCall(event);
+        if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+      }
       if (outcome === "allow" || outcome === "deny") {
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event
@@ -1051,7 +1065,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Standing rules are the owner's call, never an agent's.
       const always = tier === "owner" ? alwaysChoices(info, explain) : [];
-      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, explain, ...(always.length ? { always } : {}) };
+      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, ...(event.toolCallId ? { toolCallId: event.toolCallId, toolTitle: event.title } : {}), explain, ...(always.length ? { always } : {}) };
       // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
       const stored = { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) };
       const [row] = await db

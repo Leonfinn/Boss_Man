@@ -518,6 +518,7 @@ export class SessionManager {
         kind: req.toolCall.kind ?? null,
         rawInput,
         optionKinds: req.options.map((o) => o.kind),
+        ...(id ? { toolCallId: id.slice(0, 200) } : {}),
         ...(detail ? { detail } : {}),
       });
       return verdict;

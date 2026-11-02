@@ -29,6 +29,8 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     optionKinds: z.array(z.string()),
     /** Text the agent attached to the request, e.g. the plan when it asks to leave plan mode (R40). */
     detail: z.string().max(20_000).optional(),
+    /** The agent's id for the tool call, so two requests for one call (OpenCode asks for a folder, then the command) can be told apart from a repeat. */
+    toolCallId: z.string().max(200).optional(),
   }),
   z.object({
     type: z.literal("run.cost"),
