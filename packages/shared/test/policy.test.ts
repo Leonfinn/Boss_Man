@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, looksLikeBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, UNKNOWN_TOOL_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -37,16 +37,16 @@ describe("evaluatePermission defaults", () => {
     }
   });
 
-  it("still asks about other tools, including lookalike server names (BOS-292)", () => {
+  it("sends other tools, including lookalike server names, to the CEO first (BOS-292, BOS-295)", () => {
     for (const title of ["mcp__other__wiki", "bossmanager_x", "mcp__bossman2__x", "mcp__other__bossman__x", "Tool: other/bossman_x", "bossman", null]) {
-      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, String(title)).toBe("owner");
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, String(title)).toBe("ceo");
     }
   });
 
   it("does not take another server named bossman_… for Boss Man's own (BOS-301)", () => {
     for (const title of ["mcp__bossman_crawl__fetch", "mcp_bossman_crawl_fetch", "mcp.bossman_crawl.fetch"]) {
       expect(isBossmanTool(title), title).toBe(false);
-      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("owner");
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("ceo");
     }
     const lookalike = { title: "mcp__bossman_crawl__fetch", kind: "other", rawInput: { url: "http://192.168.68.1" } };
     expect(evaluatePermission(lookalike, [{ name: "Allow every bossman tool", match: { titlePattern: "^mcp__bossman" }, outcome: "allow" }]).outcome).toBe("deny");
@@ -73,7 +73,27 @@ describe("evaluatePermission defaults", () => {
     const other = (command: string) => ({ title: command, kind: "other", rawInput: { command } });
     expect(evaluatePermission(other("cd /tmp/opencode/bm && git grep -n brief"), [])).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
     expect(evaluatePermission(other("git push origin main"), []).outcome).toBe("owner");
-    expect(evaluatePermission({ title: "mcp__scrapling__get", kind: "other", rawInput: { url: "https://example.com" } }, []).outcome).toBe("owner");
+    expect(evaluatePermission({ title: "mcp__scrapling__get", kind: "other", rawInput: { url: "https://example.com" } }, []).outcome).toBe("ceo");
+  });
+
+  it("sends an unrecognised tool, and a lookalike of a Boss Man tool, to the CEO first (BOS-295)", () => {
+    for (const info of [
+      { title: "mcp__frobnicator__run", kind: "other", rawInput: { x: 1 } },
+      { title: "mcp__bossrnan__wiki", kind: "other", rawInput: {} },
+      { title: "mcp__bossmann__wiki", kind: null, rawInput: {} },
+      { title: "Mystery", kind: null, rawInput: null },
+    ]) expect(evaluatePermission(info, [])).toMatchObject({ outcome: "ceo", rule: UNKNOWN_TOOL_RULE });
+    expect(looksLikeBossmanTool("mcp__bossrnan__wiki")).toBe(true);
+    expect(looksLikeBossmanTool("mcp__bossman__wiki")).toBe(false);
+    expect(looksLikeBossmanTool("mcp__scrapling__get")).toBe(false);
+    // Delete and move, and a lookalike carrying a command, keep their routes.
+    expect(evaluatePermission({ title: "Move", kind: "move", rawInput: {} }, []).outcome).toBe("owner");
+    expect(evaluatePermission({ title: "git push origin main", kind: "other", rawInput: { command: "git push origin main" } }, []).outcome).toBe("owner");
+  });
+
+  it("applies an owner rule to an unrecognised tool before the default (BOS-295)", () => {
+    const rule = { name: "Allow frobnicator", match: { titlePattern: "^mcp__frobnicator__" }, outcome: "allow" as const };
+    expect(evaluatePermission({ title: "mcp__frobnicator__run", kind: "other", rawInput: {} }, [rule])).toMatchObject({ outcome: "allow", rule: "Allow frobnicator" });
   });
 
   it("falls through to the owner for unknown kinds", () => {
