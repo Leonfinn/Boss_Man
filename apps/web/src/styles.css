@@ -793,3 +793,6 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 /* The thumbnail inside the button keeps the old inline look; the enlarged copy is never capped. */
 .md-zoom > img { display: block; max-width: min(100%, 360px); max-height: 260px; border-radius: 6px; border: 1px solid var(--line); }
 .lightbox-scroll img { border: 0; }
+/* The controls sit on their own strip above the picture, so they never float over the diagram. */
+.lightbox-bar { padding: 2px 0 4px; }
+.lightbox-panel { background: rgb(0 0 0 / 0.35); border-radius: 12px; }
