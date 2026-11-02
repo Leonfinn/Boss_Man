@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { and, eq, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
 import { z } from "zod";
-import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -193,6 +193,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       for (const h of syncHooks) await h(ended, { type: "run.ended", runId, stopReason: null, error: null });
       for (const l of listeners) l(ended, { type: "run.ended", runId, stopReason: null, error: null });
       return true;
+    },
+
+    /** Keeps the runner's latest fence self-test (BOS-321). */
+    async recordSandbox(runnerId: string, report: SandboxReport, at: Date) {
+      await db.update(runners).set({ sandbox: report, sandboxCheckedAt: at }).where(eq(runners.id, runnerId));
     },
 
     async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>) {
