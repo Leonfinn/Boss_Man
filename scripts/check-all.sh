@@ -88,30 +88,43 @@ if command -v flock >/dev/null; then
   fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
   if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-10800}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
-  mkdir -p "$QDIR"
+  # An unreachable lock folder (for example outside a fenced session's grant) fails at once with a clear message,
+  # never a silent wait: a slot file that cannot be opened would otherwise read as "busy" forever.
+  lock_unusable() { echo "check-all: cannot use the check lock folder: $1 (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
+  mkdir -p "$QDIR" 2>/dev/null || lock_unusable "cannot create $QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
-  : >"$qfile"; trap 'rm -f "$qfile"' EXIT
+  { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
+  trap 'rm -f "$qfile"' EXIT
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
-      exec 9>"$LOCK.slot.$k"
+      { exec 9>"$LOCK.slot.$k"; } 2>/dev/null || lock_unusable "cannot open $LOCK.slot.$k"
       if flock -n 9; then return 0; fi
     done
     exec 9>&-
     return 1
   }
   # Prints "<my place> <checks waiting>", dropping queue entries whose process is gone.
+  # Agents can write this folder, so it is read defensively: no subprocess per entry (5000 planted entries
+  # took 13.6 s a pass with them), and only the first CHECK_ALL_QUEUE_SCAN entries in serving order count.
+  # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
-    local f base qts qpid mine=0 total=0 now; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now; now=$(date +%s)
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
-      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is digits only.
-      # Then drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused).
-      base=$(basename "$f")
-      if ! [[ $base =~ ^[01]-[0-9]+-[0-9]+$ ]]; then rm -f "$f"; continue; fi
-      qts=$(cut -d- -f2 <<<"$base"); qpid=${base##*-}
-      if ! kill -0 "$((10#$qpid))" 2>/dev/null || [ $((now - 10#$qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
+      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is
+      # digits only, and short enough not to overflow. Then drop entries whose process is gone, older than 2 h
+      # (a killed waiter whose pid was reused), or dated more than a minute ahead (planted to jump the queue).
+      # "Gone" is read from /proc, not kill -0: a fenced agent may not signal other sessions (BOS-321).
+      base=${f##*/}
+      if ! [[ $base =~ ^[01]-([0-9]{1,19})-([0-9]{1,9})$ ]]; then rm -f "$f"; continue; fi
+      qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
+      if [ ! -d "/proc/$qpid" ] || [ $((now - qts)) -gt 7200 ] || [ $((qts - now)) -gt 60 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
+      if [ "$total" -ge "$scan" ]; then
+        [ "$mine" -gt 0 ] || mine=$((scan + 1))
+        break
+      fi
     done
     echo "$mine $total"
   }
