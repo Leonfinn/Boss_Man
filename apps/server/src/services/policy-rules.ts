@@ -3,7 +3,7 @@
 // the CEO or the owner. The order is PERMISSION_TABLE in shared/policy.ts (BOS-307): guards, company deny and allow rules, built-in allows, then company routing rules (CEO/owner) only for requests that would ask. Within the company rules, company ones come before
 // rules for every company; the first match in a row decides.
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { DEFAULT_POLICY, PERMISSION_TABLE, decidePermission, ruleProblems, type PermissionInfo, type PolicyMatch, type PolicyOutcome, type PolicyRuleSpec } from "@boss-man/shared";
+import { DEFAULT_POLICY, PERMISSION_TABLE, decidePermission, ruleProblems, shadowedRoutingRules, type PermissionInfo, type PolicyMatch, type PolicyOutcome, type PolicyRuleSpec } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { decisions, policyRules } from "../db/schema.js";
 
@@ -42,9 +42,13 @@ export function policyRulesService(db: Db) {
 
   return {
     async list(companyId: string | null) {
+      const company = companyId ? (await rowsFor(companyId)).map(view) : [];
+      const global = (await rowsFor(null)).map(view);
       return {
-        company: companyId ? (await rowsFor(companyId)).map(view) : [],
-        global: (await rowsFor(null)).map(view),
+        company,
+        global,
+        /** Routing rules the built-in allows now cover (BOS-307): they no longer fire for harmless requests. */
+        shadowedIds: shadowedRoutingRules([...company, ...global].map((r) => ({ ...r, name: r.id }))).map((r) => r.id),
         defaults: DEFAULT_POLICY,
         table: PERMISSION_TABLE,
       };

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -716,5 +716,21 @@ describe("the ordered permission table (BOS-307)", () => {
 
   it("the test screen and the live path give the same answer", () => {
     for (const [, info] of cases) expect(evaluatePermission(info, catchAll("ceo"))).toEqual({ outcome: "allow", rule: decidePermission(info, catchAll("ceo")).rule });
+  });
+
+  it("row 5 vs row 7: the owner's order between an allow and an ask rule is kept (Freddy, Jane round 1)", () => {
+    const ask = { name: "ask first", match: { titlePattern: "^mcp__x__delete" }, outcome: "owner" as const };
+    const allowAll = { name: "allow every x tool", match: { titlePattern: "^mcp__x__" }, outcome: "allow" as const };
+    const req = { title: "mcp__x__delete_all", kind: "other", rawInput: null };
+    expect(decidePermission(req, [ask, allowAll])).toMatchObject({ outcome: "owner", row: 7 });
+    expect(decidePermission(req, [allowAll, ask])).toMatchObject({ outcome: "allow", row: 5 });
+    expect(decidePermission({ title: "mcp__x__list", kind: "other", rawInput: null }, [ask, allowAll])).toMatchObject({ outcome: "allow", row: 5 });
+  });
+
+  it("shadowedRoutingRules lists routing rules the built-in allows cover", () => {
+    const ssh = { name: "ask before ssh", match: { kinds: ["execute"], commandPattern: "ssh" }, outcome: "owner" as const };
+    const del = { name: "ask before delete", match: { kinds: ["delete"] }, outcome: "owner" as const };
+    const byTitle = { name: "t", match: { titlePattern: "x" }, outcome: "ceo" as const };
+    expect(shadowedRoutingRules([ssh, del, byTitle, ...broadAllow]).map((r) => r.name)).toEqual(["ask before ssh"]);
   });
 });
