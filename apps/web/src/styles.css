@@ -211,9 +211,35 @@ p { margin: 0; }
 .avatar { width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; background: var(--accent-dark); color: #fff; flex: none; }
 
 /* ---------- Funding ---------- */
-.grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-.big { font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1; }
+.grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 16px; }
+.card.source-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.source-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 8px; }
+.source-head h2 { font-size: 15px; font-weight: 600; }
+.source-head .muted { font-size: 12px; }
+/* A label above its control, and a control that wraps its extra parts rather than overflowing the card. */
+.field-stack { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.field-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.field-inline input { min-height: 36px; padding: 4px 8px; border: 1px solid var(--line-strong); border-radius: 6px; }
+select.fill { width: 100%; min-width: 0; min-height: 36px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 6px; font-size: 13px; }
+.window-hold { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 8px; align-items: start; font-size: 13px; }
+.window-hold input { margin-top: 3px; }
+.window-hold .pct { white-space: nowrap; }
+.by-company { font-size: 13px; }
+.by-company ul { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.by-company li { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+/* The figures keep their width; the name takes what is left, and only drops to its own line when it can't fit in one. */
+.by-company li > span:first-child { flex: 1 1 12ch; min-width: 0; }
+.by-company li > span:last-child { flex: none; }
+.nowrap { white-space: nowrap; }
+.big { font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1.15; }
 .big small { font-family: var(--sans); font-size: 15px; font-weight: 500; color: var(--muted); }
+@media (max-width: 640px) {
+  .card.source-card { padding: 14px 14px; }
+  /* A checkbox and its text on the first row, the percentage under it rather than squeezed beside it. */
+  .window-hold { grid-template-columns: auto minmax(0, 1fr); }
+  .window-hold .pct { grid-column: 2; }
+  .by-company li > span:first-child { flex-basis: 100%; }
+}
 /* Visually hidden text in a scrolling table is placed inside it, not against the page, so it can't widen the page. */
 .table-wrap { position: relative; overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 600px; }
