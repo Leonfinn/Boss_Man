@@ -303,6 +303,8 @@ export async function buildApp(opts: AppOptions) {
   const serverStatus = serverStatusService(db, {
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
+    isSettling: (id, at) => runners.isSettling(id, at),
+    connectedSince: (id) => runners.connectedSince(id),
     deploy: () => selfDeploy.overview(),
     hold: async () => {
       const h = await getHold(db);
@@ -430,6 +432,7 @@ export async function buildApp(opts: AppOptions) {
     now: opts.now,
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
+    runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
     endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.

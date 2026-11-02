@@ -16,6 +16,10 @@ export type ServerStatusDeps = {
   role: () => string;
   /** Whether this company's runner has an open socket right now (runnersService.isConnected). */
   isConnected: (runnerId: string) => boolean;
+  /** Whether the runner connected in the last few minutes (runnersService.isSettling). */
+  isSettling?: (runnerId: string, at: Date) => boolean;
+  /** When the runner's current connection opened (runnersService.connectedSince). */
+  connectedSince?: (runnerId: string) => Date | null;
   /** What the host deployer last reported (selfDeployService.overview). */
   deploy: () => Promise<{ enabled: boolean; status: unknown; available: unknown; pending: boolean }>;
   /** The runner-update hold, if one is on (maintenance). */
@@ -125,7 +129,13 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         maintenance: await deps.hold(),
         migration: await latestMigration(db),
         runner: runner
-          ? { connected: deps.isConnected(runner.id), lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null }
+          ? {
+              connected: deps.isConnected(runner.id),
+              connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
+              // Mid-swap: an update hold is on and the runner is away, or it only just came back and is
+              // starting its queued runs. "Never started" alerts wait while this is true.
+              swapping: (!deps.isConnected(runner.id) && !!(await deps.hold())) || (deps.isConnected(runner.id) && !!deps.isSettling?.(runner.id, at)), lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+            }
           : null,
         wakes: {
           waiting: waiting.map((w) => ({ id: w.id, agent: w.agent, reason: w.reason, ticketId: w.ticketId, urgent: !!w.ticketUrgent, held: w.statusReason, waitingSeconds: ageSeconds(w.createdAt, at) })),

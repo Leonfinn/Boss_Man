@@ -14,7 +14,7 @@ import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, Se
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { addonList, checkAddons } from "./addons.js";
-import { gitAuthEnv, type Workspaces } from "./workspace.js";
+import { gitAuthEnv, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -34,6 +34,10 @@ export type SessionManagerOptions = {
   stateFile?: string;
   /** Git worktrees per ticket (R38). Without it, runs use the cwd they're given. */
   workspaces?: Workspaces;
+  /** How long a run keeps retrying when only the repo lock timed out (default 30 minutes). */
+  lockRetryMs?: number;
+  /** The pause between those retries (default 5-10 seconds, random so queued runs don't move in step). */
+  lockRetryDelayMs?: number;
   /** The company's granted secrets outside a run, e.g. a GIT_TOKEN for pushing a merge. */
   resolveCompanyEnv?: (purpose: "merge" | "check") => Promise<Record<string, string>>;
   /** Where each run's skills are written for the agent to load (R71). */
@@ -432,9 +436,25 @@ export class SessionManager {
       }
       try {
         const spec = cmd.workspace;
-        if (spec.review) cmd = { ...cmd, cwd: (await this.opts.workspaces.ensureReview(spec, secrets)).path };
+        const workspaces = this.opts.workspaces;
+        // Many runs start together after a restart and the repo lock is shared with merge checks, so a
+        // wait that only timed out on the lock is tried again (BOS-331) until the run is cancelled or
+        // the limit is up; any other failure ends the run at once.
+        const giveUpAt = Date.now() + (this.opts.lockRetryMs ?? 30 * 60_000);
+        const withLockRetry = async <T>(prepare: () => Promise<T>): Promise<T> => {
+          for (let attempt = 1; ; attempt++) {
+            try {
+              return await prepare();
+            } catch (err) {
+              if (!(err instanceof RepoLockTimeout) || Date.now() >= giveUpAt || this.cancelledEarly.has(cmd.runId)) throw err;
+              if (attempt === 1) emit({ type: "runner.log", level: "info", message: `Run ${cmd.runId} is waiting for the repo lock before it can start; trying again until it frees.` });
+              await new Promise((r) => setTimeout(r, this.opts.lockRetryDelayMs ?? 5_000 + Math.random() * 5_000));
+            }
+          }
+        };
+        if (spec.review) cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
         else {
-          const ws = await this.opts.workspaces.ensure(spec, secrets);
+          const ws = await withLockRetry(() => workspaces.ensure(spec, secrets));
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
         }

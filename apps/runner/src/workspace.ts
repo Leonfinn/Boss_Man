@@ -58,6 +58,14 @@ export async function diskUsage(target: string): Promise<number> {
   return total;
 }
 
+/** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
+export class RepoLockTimeout extends Error {
+  constructor(projectId: string) {
+    super(`Timed out waiting for the lock on ${projectId}.`);
+    this.name = "RepoLockTimeout";
+  }
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -103,7 +111,7 @@ export class Workspaces {
         } catch {
           const age = Date.now() - (statSync(lockDir, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
           if (age > 10 * 60_000) rmSync(lockDir, { recursive: true, force: true });
-          else if (i > 600) throw new Error(`Timed out waiting for the lock on ${projectId}.`);
+          else if (i > 600) throw new RepoLockTimeout(projectId);
           else await new Promise((r) => setTimeout(r, 100));
         }
       }
