@@ -205,10 +205,24 @@ describe("a no-code ticket in review", () => {
     expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed" });
   });
 
-  it("a worker is still told to ask the CEO or a manager", async () => {
+  // BOS-304: no-code work has nothing to merge, so its own assignee closes it instead of the CEO doing it by hand.
+  it("its assignee closes it as done, without needing a manager", async () => {
     const t = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
-    expect(await toDone(t.id)).toMatch(/ask your CEO or manager/);
-    expect((await row(t.id)).systemState).toBe("review");
+    ctx.diff.current = REAL; // no code wins even when the branch has a real diff
+    expect(await toDone(t.id)).toContain("is now done");
+    expect(await row(t.id)).toMatchObject({ systemState: "done", outcome: "completed", stateNote: "QA check passed." });
+  });
+
+  it("someone else still can't close it, and a code ticket still has to go through review", async () => {
+    const theirs = await ctx.ticket(ctx.withRepo.id, { noCode: true, systemState: "review" });
+    await ctx.db.update(tickets).set({ assigneeAgentId: null, createdByAgentId: null }).where(eq(tickets.id, theirs.id));
+    expect(await toDone(theirs.id)).toMatch(/isn't yours/);
+    expect((await row(theirs.id)).systemState).toBe("review");
+    // A ticket with code is not closed by its assignee: it goes to review and merge as before.
+    const code = await ctx.ticket(ctx.withRepo.id);
+    ctx.diff.current = REAL;
+    expect(await toDone(code.id)).toMatch(/move the ticket to "review" instead/);
+    expect((await row(code.id)).systemState).toBe("in_progress");
   });
 
   it("gets a review requested when it moves to review", async () => {
