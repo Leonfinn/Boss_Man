@@ -1,6 +1,8 @@
 # Boss Man: before you hand work in
 
-Run `scripts/check-all.sh` from the repo root and fix anything it reports before you move a ticket to review. It runs everything CI's `check` job does that works without Docker: the script tests and lints, `pnpm typecheck`, `pnpm test`, `pnpm build`, ShellCheck (`scripts/check-shell.sh`, where info-level findings fail too) and the shell scripts' tests (`scripts/test-shell.sh`).
+Inside an agent session `scripts/check-all.sh` refuses to run (exit 2): the full check runs at the merge gate, and a hand run fills its one-slot queue. Run `scripts/check-quick.sh` for your branch instead; set `CHECK_ALL_FORCE=1` only if the CEO asked for a full run. Humans and the merge gate are unaffected.
+
+The full check, `scripts/check-all.sh`, runs everything CI's `check` job does that works without Docker: the script tests and lints, `pnpm typecheck`, `pnpm test`, `pnpm build`, ShellCheck (`scripts/check-shell.sh`, where info-level findings fail too) and the shell scripts' tests (`scripts/test-shell.sh`).
 
 Boss Man runs the same script before it merges approved work, so anything it reports would block the merge anyway.
 
