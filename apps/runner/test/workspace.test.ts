@@ -69,6 +69,28 @@ describe("git workspaces (R38)", () => {
     expect(ws.savedPatch(ids.a)).toBeNull();
   });
 
+  it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const specA = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    await ws.ensure(specA);
+    const evil = mkdtempSync(path.join(tmpdir(), "bm-evil-"));
+    const marker = path.join(evil, "ran");
+    mkdirSync(path.join(evil, "hooks"));
+    for (const hook of ["post-checkout", "reference-transaction"]) {
+      writeFileSync(path.join(evil, "hooks", hook), `#!/bin/sh\necho ${hook} >> ${marker}\n`, { mode: 0o755 });
+    }
+    writeFileSync(path.join(evil, "fsmonitor"), `#!/bin/sh\necho fsmonitor >> ${marker}\n`, { mode: 0o755 });
+    git(ws.repoDir(ids.project), "config", "core.hooksPath", path.join(evil, "hooks"));
+    git(ws.repoDir(ids.project), "config", "core.fsmonitor", path.join(evil, "fsmonitor"));
+
+    const specB = { ...specA, ticketId: ids.b };
+    const b = await ws.ensure(specB);
+    writeFileSync(path.join(b.path, "x.txt"), "x\n");
+    await ws.release(specB);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("serialises concurrent creation on one repo", async () => {
     const r = remote();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
