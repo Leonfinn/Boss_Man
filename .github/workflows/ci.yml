@@ -139,6 +139,23 @@ jobs:
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config -q
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "BOSSMAN_TRUSTED_PROXIES: 172.30.0.2"
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "ipv4_address: 172.30.0.3"
+      - name: Blue/green Tailscale overlay puts Caddy on edge as "server" (docs/20-https-tailscale.md)
+        run: |
+          export POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer
+          F="-f docker-compose.yml -f deploy/truenas-bluegreen.yml -f deploy/tailscale.yml -f deploy/tailscale-bluegreen.yml"
+          docker compose $F --profile runners config -q
+          docker compose $F --profile runners config --format json > merged-bgts.json
+          node -e '
+            const c = JSON.parse(require("fs").readFileSync("merged-bgts.json", "utf8")); const ok = (v, m) => { if (!v) { console.error(m); process.exit(1); } };
+            const p = c.services.proxy;
+            ok(p.networks.edge.aliases.includes("server") && p.networks.edge.ipv4_address === "172.30.0.3", "proxy must be on edge as server at the pinned address");
+            ok(p.networks.front.ipv4_address === "172.30.0.18", "proxy keeps its front address");
+            ok(p.environment.BOSSMAN_CADDY_TRUSTED_PROXIES === "172.30.0.2/32", "Caddy must trust only the Tailscale container");
+            ok(Object.keys(c.services.tailscale.depends_on).join() === "proxy", "tailscale must wait for proxy only");
+            for (const s of ["server-blue", "server-green"]) ok(!c.services[s].networks.edge, s + " must not join edge");
+          '
+          ! grep -q 3101 deploy/tailscale/serve.json
+          ! grep -q AllowFunnel deploy/tailscale/serve.json
       - name: Self-deploy override mounts the two folders and no Docker socket
         run: |
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-deployer.yml --profile runners config > merged-deployer.yml
