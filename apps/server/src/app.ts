@@ -458,6 +458,7 @@ export async function buildApp(opts: AppOptions) {
     withdrawDecision: (id) => decisionsSvc.withdrawSkill(id),
     tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
     closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
+    closeReviewDone: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote }),
     now: opts.now,
   });
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
