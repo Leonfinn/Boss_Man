@@ -248,6 +248,10 @@ describe("review", () => {
     expect((await c.svc.get(c.company.id, p.id)).status).toBe("in_review");
     const done = await c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, v);
     expect(done).toMatchObject({ status: "awaiting_owner", verdict: "advise_against", reviewedBundleHash: p.bundleHash });
+    // BOS-304: the verdict ends the review, so the review task closes itself as done, with the verdict as its note.
+    const [closed] = await c.db.select().from(tickets).where(eq(tickets.id, p.reviewTicketId!));
+    expect(closed).toMatchObject({ systemState: "done", outcome: "completed" });
+    expect(closed!.stateNote).toMatch(/Security review of tidy: advise against \(1 finding\)\./);
     await expect(c.svc.recordVerdict(c.company.id, c.reviewer.id, p.id, v)).rejects.toThrow(/isn't waiting/);
     const log = await c.db.select().from(activity);
     expect(log.map((l) => l.kind)).toEqual(expect.arrayContaining(["skill.proposed", "skill.review_requested", "skill.reviewed"]));
