@@ -20,7 +20,11 @@ const reach = {
   wroteOutside: attempt(() => writeFileSync(env.REACH_OUTSIDE, "changed")),
   readSecret: attempt(() => readFileSync(env.REACH_SECRET)),
   readSharedClaude: attempt(() => readFileSync(env.REACH_SHARED_CLAUDE)),
-  env: Object.fromEntries(["HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CACHE_HOME", "npm_config_store_dir", "CHECK_ALL_LOCK", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"].map((k) => [k, env[k] ?? null])),
+  // check-all.sh's shared state: the queue must be writable to take part; the results and pair proof must not be.
+  wroteQueue: attempt(() => writeFileSync(path.join(path.dirname(env.CHECK_ALL_LOCK), "probe"), "")),
+  wroteStore: attempt(() => writeFileSync(path.join(env.BOSSMAN_CHECK_STORE, "forged.json"), '{"status":"pass"}')),
+  wroteProof: attempt(() => writeFileSync(env.CHECK_ALL_PAIR_PROOF, "forged")),
+  env: Object.fromEntries(["HOME", "TMPDIR", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CACHE_HOME", "npm_config_store_dir", "CHECK_ALL_LOCK", "BOSSMAN_CHECK_STORE", "CHECK_ALL_PAIR_PROOF", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0"].map((k) => [k, env[k] ?? null])),
 };
 writeFileSync(path.join(process.cwd(), "reach.json"), JSON.stringify(reach));
 

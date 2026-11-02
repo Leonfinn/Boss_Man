@@ -139,7 +139,7 @@ describe("verify before done (R47)", () => {
     const ws = new Workspaces(root, process.env, path.join(root, ".bossman-coord"));
     await ws.ensure(spec);
     const res = await ws.verify(spec, 'echo "lock=$CHECK_ALL_LOCK store=$BOSSMAN_CHECK_STORE"');
-    expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "check-all")} store=${path.join(root, ".bossman-coord", "check-results")}`);
+    expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "queue", "check-all")} store=${path.join(root, ".bossman-coord", "gate", "check-results")}`);
   });
 
   it("kills the whole process group on timeout, including grandchildren that ignore SIGTERM", async () => {

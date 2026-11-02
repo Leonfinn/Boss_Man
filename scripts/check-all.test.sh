@@ -149,6 +149,29 @@ if command -v flock >/dev/null; then
   [ ! -e "$hostile" ] || fail "hostile queue entry was not removed"
   wait "$h1"
 
+  # Agents can write the queue folder (BOS-321 review). A merge-priority entry dated an hour ahead, with a live pid,
+  # must not keep its place: a negative age used to pass the 2-hour prune and keep every hand-run check behind it.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  future="$t/lock.queue/0-$(($(date +%s) + 3600))000000000-$$"; : >"$future"
+  hold 1 2; h1=$!; sleep 0.3
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=6) || rc=$?
+  [ "$rc" = 0 ] || fail "future-dated entry: a hand-run check expected to get in ahead of it, got $rc: $out"
+  [ ! -e "$future" ] || fail "future-dated queue entry was not removed"
+  wait "$h1"
+
+  # A flood of live-looking entries must not stall the queue: one pass over 5000 used to take 13.6 s.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  now_ns=$(date +%s%N)
+  for ((i = 0; i < 5000; i++)); do : >"$t/lock.queue/1-$((now_ns + i))-$$"; done
+  began=$SECONDS
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=5) || rc=$?
+  if [ "$rc" != 0 ] || ! grep -q "lock held" <<<"$out"; then fail "flooded queue: merge check didn't get in, got $rc: $out"; fi
+  [ $((SECONDS - began)) -le 3 ] || fail "flooded queue: took $((SECONDS - began)) s to get a free slot"
+  # A hand-run check behind the flood sees a place past the scan, and waits.
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=2) || rc=$?
+  grep -q "place 201 of 200" <<<"$out" || fail "flooded queue: hand-run check's place: $out"
+  rm -rf "$t/lock.queue"
+
   # A check inside an agent's fence (BOS-321) keeps another session's place: it can't signal that session
   # (Landlock ABI 6 scoping), so a kill -0 test would wrongly drop the entry as dead and jump the queue.
   fence="$here/../apps/runner/src/fence/landlock.pl"

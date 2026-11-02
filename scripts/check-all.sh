@@ -100,18 +100,26 @@ if command -v flock >/dev/null; then
     return 1
   }
   # Prints "<my place> <checks waiting>", dropping queue entries whose process is gone.
+  # Agents can write this folder, so it is read defensively: no subprocess per entry (5000 planted entries
+  # took 13.6 s a pass with them), and only the first CHECK_ALL_QUEUE_SCAN entries in serving order count.
+  # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
-    local f base qts qpid mine=0 total=0 now; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now; now=$(date +%s)
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
-      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is digits only.
-      # Then drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused).
+      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is
+      # digits only, and short enough not to overflow. Then drop entries whose process is gone, older than 2 h
+      # (a killed waiter whose pid was reused), or dated more than a minute ahead (planted to jump the queue).
       # "Gone" is read from /proc, not kill -0: a fenced agent may not signal other sessions (BOS-321).
-      base=$(basename "$f")
-      if ! [[ $base =~ ^[01]-[0-9]+-[0-9]+$ ]]; then rm -f "$f"; continue; fi
-      qts=$(cut -d- -f2 <<<"$base"); qpid=${base##*-}
-      if [ ! -d "/proc/$((10#$qpid))" ] || [ $((now - 10#$qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
+      base=${f##*/}
+      if ! [[ $base =~ ^[01]-([0-9]{1,19})-([0-9]{1,9})$ ]]; then rm -f "$f"; continue; fi
+      qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
+      if [ ! -d "/proc/$qpid" ] || [ $((now - qts)) -gt 7200 ] || [ $((qts - now)) -gt 60 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
+      if [ "$total" -ge "$scan" ]; then
+        [ "$mine" -gt 0 ] || mine=$((scan + 1))
+        break
+      fi
     done
     echo "$mine $total"
   }

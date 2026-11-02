@@ -16,7 +16,7 @@ const level = levelFor(probeLandlock().abi).level;
 const live = level !== "unavailable";
 const FAKE_REACH = path.join(import.meta.dirname, "fake-reach.mjs");
 
-type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; env: Record<string, string | null> };
+type Reach = { wroteInside: boolean; wroteTmp: boolean; wroteOutside: boolean; readSecret: boolean; readSharedClaude: boolean; wroteQueue: boolean; wroteStore: boolean; wroteProof: boolean; env: Record<string, string | null> };
 
 /** One run of the reach-probing adapter; `fence` is what the run asks for, `runnerLevel` what the runner can do. */
 async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel }) {
@@ -74,12 +74,23 @@ describe.skipIf(!live)("a fenced run", () => {
       CLAUDE_CONFIG_DIR: path.join(r.home, ".claude"),
       CODEX_HOME: path.join(r.home, ".codex"),
       XDG_CACHE_HOME: path.join(r.home, ".cache"),
-      CHECK_ALL_LOCK: path.join(r.coordDir, "check-all"),
+      CHECK_ALL_LOCK: path.join(r.coordDir, "queue", "check-all"),
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "gc.auto",
     });
     expect(r.reach.env.npm_config_store_dir).toMatch(/\.pnpm-store$/);
     expect(existsSync(path.join(r.home, "tmp", r.runId))).toBe(false);
+  });
+
+  it("can join check-all's queue but can't forge its stored results or pair proof (BOS-321 review)", async () => {
+    const r = await reachRun({ fence: true, runnerLevel: level });
+    expect(r.reach.env).toMatchObject({
+      BOSSMAN_CHECK_STORE: path.join(r.coordDir, "gate", "check-results"),
+      CHECK_ALL_PAIR_PROOF: path.join(r.coordDir, "gate", "check-pair-passed"),
+    });
+    expect(r.reach).toMatchObject({ wroteQueue: true, wroteStore: false, wroteProof: false });
+    expect(existsSync(path.join(r.coordDir, "gate", "check-pair-passed"))).toBe(false);
+    expect(existsSync(path.join(r.coordDir, "gate", "check-results", "forged.json"))).toBe(false);
   });
 });
 
@@ -90,7 +101,7 @@ describe("a run that isn't asked to be fenced", () => {
     expect(r.reach).toMatchObject({ wroteInside: true, wroteOutside: true, readSharedClaude: true });
     expect(r.reach.env).toMatchObject({ HOME: r.sharedHome, TMPDIR: null, CLAUDE_CONFIG_DIR: path.join(r.sharedHome, ".claude"), CODEX_HOME: null, npm_config_store_dir: null, GIT_CONFIG_COUNT: null });
     // The check queue's folder is the one change every session gets, so fenced and unfenced checks take turns.
-    expect(r.reach.env.CHECK_ALL_LOCK).toBe(path.join(r.coordDir, "check-all"));
+    expect(r.reach.env.CHECK_ALL_LOCK).toBe(path.join(r.coordDir, "queue", "check-all"));
     expect(r.events.find((e) => e.type === "run.started")).not.toHaveProperty("fenced");
   });
 

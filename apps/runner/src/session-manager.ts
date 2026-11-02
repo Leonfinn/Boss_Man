@@ -14,7 +14,7 @@ import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, Se
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { addonList, checkAddons } from "./addons.js";
-import { addGitConfig, checkQueueEnv, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
+import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { gitAuthEnv, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
@@ -457,9 +457,11 @@ export class SessionManager {
       env.npm_config_store_dir = fence.pnpmStore;
       readWrite.push(fence.pnpmStore);
     }
+    const readOnlyExtra: string[] = [];
     if (this.opts.coordDir) {
-      mkdirSync(this.opts.coordDir, { recursive: true });
-      readWrite.push(this.opts.coordDir);
+      const grant = checkQueueGrant(this.opts.coordDir);
+      readWrite.push(grant.readWrite);
+      readOnlyExtra.push(grant.readOnly);
     }
     let repo: { bare: string; admin: string | null } | undefined;
     if (cmd.workspace && this.opts.workspaces) {
@@ -493,6 +495,7 @@ export class SessionManager {
       base.NPM_CONFIG_PREFIX,
       base.PLAYWRIGHT_BROWSERS_PATH,
       ...(base.NODE_PATH ?? "").split(":"),
+      ...readOnlyExtra,
     ].filter((p): p is string => !!p);
     const rules = fenceProfile({ cwd: cmd.cwd, home, tmp, repo, readOnly, readWrite });
     return { command: fencedCommand(rules, bin, args), tmp };

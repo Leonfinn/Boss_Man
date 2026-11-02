@@ -131,15 +131,30 @@ export function repoGrant(bare: string, cwd: string): { bare: string; admin: str
 }
 
 /**
- * Where scripts/check-all.sh keeps its queue, slot locks and results: one folder that fenced
- * sessions, unfenced ones and the merge check all share, so checks still take turns. Its
- * defaults (/tmp, /var/tmp) are outside every fence.
+ * Where scripts/check-all.sh keeps its state, shared by fenced sessions, unfenced ones and the
+ * merge check so checks still take turns (its defaults in /tmp and /var/tmp are outside every
+ * fence). queue/ holds the slot locks and queue entries, which a session must write to take part.
+ * gate/ holds the stored results and the side-by-side pair proof, which sessions may only read:
+ * a forged proof would run two checks at once before a pair was measured (BOS-321 review).
  */
-export const checkQueueEnv = (dir: string) => ({
-  CHECK_ALL_LOCK: path.join(dir, "check-all"),
-  BOSSMAN_CHECK_STORE: path.join(dir, "check-results"),
-  CHECK_ALL_PAIR_PROOF: path.join(dir, "check-pair-passed"),
-});
+export const checkQueueDirs = (dir: string) => ({ queue: path.join(dir, "queue"), gate: path.join(dir, "gate") });
+
+export const checkQueueEnv = (dir: string) => {
+  const { queue, gate } = checkQueueDirs(dir);
+  return {
+    CHECK_ALL_LOCK: path.join(queue, "check-all"),
+    BOSSMAN_CHECK_STORE: path.join(gate, "check-results"),
+    CHECK_ALL_PAIR_PROOF: path.join(gate, "check-pair-passed"),
+  };
+};
+
+/** Makes the check folders and returns the session's grant: the queue read-write, the gate read-only. */
+export function checkQueueGrant(dir: string): { readWrite: string; readOnly: string } {
+  const { queue, gate } = checkQueueDirs(dir);
+  mkdirSync(queue, { recursive: true });
+  mkdirSync(path.join(gate, "check-results"), { recursive: true });
+  return { readWrite: queue, readOnly: gate };
+}
 
 /** Claude Code's folder name for a project: its path with everything but letters and digits as "-". */
 export const claudeProjectSlug = (p: string) => path.resolve(p).replace(/[^a-zA-Z0-9]/g, "-");
