@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, evaluatePermission, isBossmanCall, isBossmanTool, reachesPrivateNetwork, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -37,6 +37,17 @@ describe("evaluatePermission defaults", () => {
     for (const title of ["mcp__other__wiki", "bossmanager_x", "mcp__bossman2__x", "mcp__other__bossman__x", "Tool: other/bossman_x", "bossman", null]) {
       expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, String(title)).toBe("owner");
     }
+  });
+
+  it("does not take another server named bossman_… for Boss Man's own (BOS-301)", () => {
+    for (const title of ["mcp__bossman_crawl__fetch", "mcp_bossman_crawl_fetch", "mcp.bossman_crawl.fetch"]) {
+      expect(isBossmanTool(title), title).toBe(false);
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("owner");
+    }
+    const fetchTool = { title: "mcp__bossman_crawl__fetch", kind: "other", rawInput: { url: "http://192.168.68.1" } };
+    expect(reachesPrivateNetwork(fetchTool)).toBe(true);
+    expect(evaluatePermission(fetchTool, [{ name: "all", match: { kinds: ["other"] }, outcome: "allow" }]).outcome).toBe("deny");
+    for (const title of ["mcp__bossman__wiki", "mcp.bossman.wiki", "bossman_wiki", "Tool: bossman/wiki"]) expect(isBossmanTool(title), title).toBe(true);
   });
 
   it("sends destructive commands to the owner", () => {
