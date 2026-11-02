@@ -214,6 +214,26 @@ describe.skipIf(!live)("fence, live", () => {
     expect(existsSync(path.join(r.bare, "hooks", "post-checkout"))).toBe(false);
   });
 
+  // Freddy's probe on BOS-315. Landlock checks the path, not the inode, so a hardlink made before
+  // the fence (by an unfenced session, into a worktree or agent home kept between runs) still
+  // writes through to the file outside. This pins that known gap; a fenced agent can't make one.
+  it("can't make a hardlink to a file outside it; one made before the fence still writes through", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-fence-"));
+    const inside = path.join(root, "in");
+    const outside = path.join(root, "out");
+    mkdirSync(inside);
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, "f"), "x");
+
+    const made = fenced(inside, `ln "${path.join(outside, "f")}" "${path.join(inside, "new")}" && echo LINKED`);
+    expect(made.stdout).not.toContain("LINKED");
+    expect(existsSync(path.join(inside, "new"))).toBe(false);
+
+    execFileSync("ln", [path.join(outside, "f"), path.join(inside, "old")]);
+    fenced(inside, `printf y > "${path.join(inside, "old")}"`);
+    expect(readFileSync(path.join(outside, "f"), "utf8")).toBe("y");
+  });
+
   it("reports this host in the self-test, with a working probe", () => {
     const report = sandboxSelfTest();
     expect(report.landlockAbi).toBe(abi);
