@@ -6,6 +6,7 @@ import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
 import { pictureType } from "./company-import.js";
+import { shrinkPicture } from "./picture-shrink.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
 import type { ModelChoice } from "./models.js";
 
@@ -380,11 +381,14 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       // The bytes decide, never the stored type or a name.
       const type = pictureType(img.bytes);
       if (!type) throw new AgentError(422, `${img.size} bytes that aren't a PNG, JPEG or WebP image. Pick a picture, not a document.`);
-      if (img.bytes.length > AVATAR_MAX_BYTES) throw new AgentError(413, `That picture is ${Math.round(img.bytes.length / 1024)} KB; a picture can be at most ${AVATAR_MAX_BYTES / 1024} KB. Pick a smaller one.`);
+      // An oversized picture is shrunk to fit the cap rather than refused (BOS-320).
+      const picture = await shrinkPicture(img.bytes, AVATAR_MAX_BYTES);
+      if (!picture) throw new AgentError(413, `That picture is ${Math.round(img.bytes.length / 1024)} KB and can not be shrunk to fit; a picture can be at most ${AVATAR_MAX_BYTES / 1024} KB. Pick a smaller one.`);
+      const kept = picture.bytes;
       await db
         .insert(agentAvatars)
-        .values({ agentId, bytes: img.bytes, type, imageId: img.id })
-        .onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes: img.bytes, type, imageId: img.id } });
+        .values({ agentId, bytes: kept, type: picture.type, imageId: img.id })
+        .onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes: kept, type: picture.type, imageId: img.id } });
       const [after] = await db.update(agents).set({ avatarAt: now() }).where(eq(agents.id, agentId)).returning();
       await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture was set from a ticket image${why ? `: ${why}` : ""}` });
       await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO set ${a.name}'s picture`, body: `${why ? `${why}\n` : ""}It shows on the Agents page, the board and the runs list. You can undo it there.`, link: "#/agents" });

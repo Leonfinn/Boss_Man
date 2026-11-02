@@ -7,11 +7,32 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, agentAvatars, agents, decisions, notifications, ticketImages } from "../src/db/schema.js";
+import { pictureType } from "../src/services/company-import.js";
+import { loadPictures } from "../src/services/picture-shrink.js";
 import { issueRunToken } from "../src/mcp.js";
 
-// A 1x1 PNG, and a bar of extra bytes so a "too large" picture can be built from it.
+// A 1x1 PNG, and the same PNG with its IDAT corrupted, so a "damaged picture" can be built from it.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
-const bigPng = () => Buffer.concat([PNG, Buffer.alloc(300 * 1024, 1)]);
+const damagedPng = (size: number) => {
+  const out = Buffer.concat([PNG, Buffer.alloc(size, 1)]);
+  out.writeUInt32BE(0, out.length - 4);
+  return out;
+};
+// A 1200x900 PNG of noise: too large for the cap, but a real picture the server can shrink.
+const pictures = loadPictures();
+const bigPhoto = async () => {
+  const encode = (await pictures).encode["image/png"]!;
+  const width = 1200;
+  const height = 900;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = (i * 31 + (i >> 9)) % 256;
+    data[i + 1] = (i * 17) % 256;
+    data[i + 2] = (i * 7) % 256;
+    data[i + 3] = 255;
+  }
+  return Buffer.from(await encode({ data, width, height }));
+};
 const notAPicture = Buffer.from("%PDF-1.4 fake\n");
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -189,18 +210,39 @@ describe("the CEO sets an agent's picture (BOS-265)", () => {
     await client.close();
   });
 
-  it("refuses another company's image, a document, and a picture over the limit", async () => {
+  it("shrinks a picture over the limit to fit, and keeps the ticket image exactly as it was", async () => {
+    const c = (ctx = await setup());
+    const photo = await bigPhoto();
+    expect(photo.length).toBeGreaterThan(256 * 1024);
+    const big = await upload(c, photo, c.ticket.id);
+    const client = await c.mcp(c.ceo.id);
+    const r = await client.callTool({ name: "set_agent_picture", arguments: { agent: "Engineer - Developer", imageId: big.id, reason: "A real face." } });
+    expect(textOf(r)).toBe("Engineer - Developer now has that picture. It shows on the Agents page, the board and the runs list.");
+    const [kept] = await c.db.select().from(agentAvatars).where(eq(agentAvatars.agentId, c.engineer.id));
+    expect(kept!.type).toBe("image/png");
+    expect(kept!.bytes.length).toBeLessThanOrEqual(256 * 1024);
+    expect(kept!.bytes.length).toBeLessThan(photo.length);
+    const avatar = await c.req("GET", `/api/agents/${c.engineer.id}/avatar`);
+    expect(avatar.statusCode).toBe(200);
+    expect(pictureType(kept!.bytes)).toBe("image/png");
+    // The ticket keeps the original at full size: the shrink is only for the avatar copy.
+    const stored = (await c.db.select().from(ticketImages).where(eq(ticketImages.id, big.id)))[0]!;
+    expect(stored.bytes.length).toBe(photo.length);
+    await client.close();
+  });
+
+  it("refuses another company's image, a document, and a picture that can not be shrunk", async () => {
     const c = (ctx = await setup());
     const theirs = await upload(c, PNG, null, c.other.id);
     const doc = await upload(c, notAPicture, c.ticket.id);
-    const big = await upload(c, bigPng(), c.ticket.id);
+    const damaged = await upload(c, damagedPng(300 * 1024), c.ticket.id);
     const client = await c.mcp(c.ceo.id);
     const call = (args: Record<string, unknown>) => client.callTool({ name: "set_agent_picture", arguments: { agent: "Engineer - Developer", reason: "Try it.", ...args } });
     const other = await call({ imageId: theirs.id });
     expect(other).toMatchObject({ isError: true });
     expect(textOf(other)).toMatch(/No image with that id on a ticket in this company/);
     expect(textOf(await call({ imageId: doc.id }))).toMatch(/aren't a PNG, JPEG or WebP image/);
-    expect(textOf(await call({ imageId: big.id }))).toMatch(/at most 256 KB/);
+    expect(textOf(await call({ imageId: damaged.id }))).toMatch(/at most 256 KB/);
     expect(await c.db.select().from(agentAvatars)).toEqual([]);
     // And a non-CEO isn't allowed at all.
     const worker = await c.mcp(c.engineer.id);
