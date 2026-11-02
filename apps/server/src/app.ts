@@ -61,6 +61,7 @@ import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
+import { getStandingRules, setStandingRules, standingRulesError, STANDING_RULES_MAX } from "./services/standing-rules.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
@@ -737,6 +738,27 @@ export async function buildApp(opts: AppOptions) {
       if (typeof p === "string") return reply.code(400).send({ error: "invalid_review_policy", message: p });
       const [c] = await db.update(companies).set({ reviewPolicy: p }).where(eq(companies.id, id)).returning({ policy: companies.reviewPolicy });
       return c ? c.policy : reply.code(404).send({ error: "not_found" });
+    });
+    // Standing rules (BOS-353): the owner or the CEO sets a short block every agent reads at the start of every run.
+    owner.get("/api/companies/:id/standing-rules", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+      if (!c) return reply.code(404).send({ error: "not_found" });
+      return { ...(await getStandingRules(db, id)), max: STANDING_RULES_MAX };
+    });
+    owner.put("/api/companies/:id/standing-rules", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = z.object({ text: z.string() }).parse(req.body);
+      const problem = standingRulesError(b.text.replace(/\r\n/g, "\n").trim());
+      if (problem) return reply.code(400).send({ error: "invalid_standing_rules", message: problem });
+      try {
+        const saved = await setStandingRules(db, id, { text: b.text, by: "the owner" });
+        await record(db, { companyId: id, kind: "settings", summary: saved.text ? "Owner updated the standing rules" : "Owner cleared the standing rules" });
+        return { ...saved, max: STANDING_RULES_MAX };
+      } catch (err) {
+        if (err instanceof Error && err.name === "StandingRulesError") return reply.code(400).send({ error: "invalid_standing_rules", message: err.message });
+        throw err;
+      }
     });
     /** The project's own policy, or null when it uses the company's. */
     owner.get("/api/projects/:id/review-policy", async (req, reply) => {

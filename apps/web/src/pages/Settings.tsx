@@ -1370,6 +1370,43 @@ function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: ()
   );
 }
 
+/** Standing rules (BOS-353): what every agent reads at the start of every run. Read-only here; the CEO sets them, and agents cannot. */
+function StandingRules({ company }: { company: Company }) {
+  const [rules, setRules] = useState<{ text: string; by: string | null; at: string | null; max: number } | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void api<{ text: string; by: string | null; at: string | null; max: number }>(`/api/companies/${company.id}/standing-rules`)
+      .then((r) => live && setRules(r))
+      .catch(() => live && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [company.id]);
+  return (
+    <Section id="standing-rules-h" title="Standing rules">
+      <p className="muted" style={{ fontSize: 14 }}>
+        The rules every agent reads at the start of every run. Your CEO sets them, and only the CEO or you can change them. They are capped at {rules?.max ?? 2000} characters.
+      </p>
+      {failed ? (
+        <p className="muted">Couldn't load the standing rules.</p>
+      ) : !rules ? (
+        <p className="muted">Loading…</p>
+      ) : rules.text ? (
+        <>
+          <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "inherit", fontSize: 14, padding: 12, background: "var(--panel, #f6f6f6)", borderRadius: 6 }}>{rules.text}</pre>
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            Last changed by {rules.by ?? "someone"}
+            {rules.at ? ` on ${when(rules.at)}` : ""}.
+          </p>
+        </>
+      ) : (
+        <p className="muted">No standing rules are set yet.</p>
+      )}
+    </Section>
+  );
+}
+
 /** The company's hourly nudge limit (BOS-73). */
 function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
@@ -2019,6 +2056,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <NudgeCap company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
+            <StandingRules company={company} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />
             <Chapters company={company} />
