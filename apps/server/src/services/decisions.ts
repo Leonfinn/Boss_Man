@@ -545,7 +545,7 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
   return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
 }
 
-export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}) {
+export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}, workspaceRoot?: string) {
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -1061,7 +1061,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // The rules judge (BOS-337) only picks which button is suggested. The policy above already decided who answers; nothing here answers a card.
       const [company] = await db.select({ mode: companies.permissionJudge }).from(companies).where(eq(companies.id, runner.companyId));
       const judgeMode = company?.mode ?? "advise";
-      const reading = judgeMode === "off" ? null : judgePermission(`${explain.title}. ${explain.summary}`, commandOf(info.rawInput), run?.ticketId ?? undefined);
+      const reading = judgeMode === "off" ? null : judgePermission(`${explain.title}. ${explain.summary}`, commandOf(info.rawInput), run?.ticketId ?? undefined, workspaceRoot && (run?.ticketId ?? run?.agentId) ? `${workspaceRoot}/${run?.ticketId ?? run?.agentId}`.replace(/[^A-Za-z0-9]/g, "-") : undefined);
       const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel } : undefined;
       const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, explain, ...(judge ? { judge } : {}), ...(always.length ? { always } : {}) };
       // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.

@@ -39,11 +39,13 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  * @param command the shell command, or null for a tool call without one
  * @param ownFolder id of the ticket folder the asking agent works in, when the caller knows it;
  *   otherwise it is read from a leading `cd` or the most-named folder in the command.
+ * @param ownProject name of the agent's own folder under `.claude/projects/`; only its `memory/` sub-folder
+ *   may be written. Without it every `.claude` path is treated as shared.
  */
-export function judgePermission(question: string, command: string | null, ownFolder?: string): JudgeReading {
-  if (!command) return judgeWithoutCommand(question, ownFolder);
+export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string): JudgeReading {
+  if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
-  const c = command.replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
+  const c = withoutOwnMemory(command, ownProject).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
   const own = ownFolder ?? LEADING_CD.exec(c)?.[1] ?? [...ids].sort((a, b) => ids.filter((x) => x === b).length - ids.filter((x) => x === a).length)[0];
 
@@ -53,9 +55,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (/\b(npm|pnpm|yarn)\s+publish\b|\bdocker\s+(push|restart|stop|kill|rm|compose|run)\b|\bsystemctl\b|\bservice\s+\w+\s+(restart|stop)|\bgh\s+pr\s+merge\b|\bdeploy(\.sh)?\b[^\n]*\b(prod|production)\b|\bcrontab\b/.test(c)) return result("outward");
   if (/os\.system\([^)]*git\s+push|execSync\([^)]*git\s+push/.test(c)) return result("outward");
   // Secrets.
-  if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/\.aws\/|(^|[\s/"'=<>])\.env(\.\w+)?(?=$|[\s"';|&)])|\/environ\b|\bprintenv\b|(^|[;&|(]\s*)(set|export\s+-p|declare\s+-[px])\s*($|[|;&>)])|process\.env\b|os\.environ\b|\/api\/secrets\b/.test(c)) return result("secret");
+  if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/\.aws\/|(^|[\s/"'=<>])\.env(\.\w+)?(?=$|[\s"';|&)])|\/environ\b|\bprintenv\b|(^|[;&|(]\s*)(set|export\s+-p|declare\s+-[px])\s*($|[|;&>)])|process\.env\b|os\.environ\b|\/api\/secrets\b|\.config\/(gh|gcloud|hub)\b|\.docker\/config\.json|\.npmrc\b|\.pgpass\b|\.kube\/config|\.git\/config\b[^\n]*\btoken/.test(c)) return result("secret");
+  // Packing up a home folder or sending a file out as an upload.
+  if (/\b(tar|zip|7z|cpio)\b[^|\n]*(\s|=)(~|\$HOME|\/home\/[\w.-]+)\/?(\s|$|\|)[^\n]*\|\s*(curl|wget|nc|ncat|socat)\b|\b(curl|wget)\b[^\n]*(\s-T\s|--upload-file|--data-binary\s+@|-d\s+@|-F\s+\S*@)/.test(c)) return result("secret");
   if (/(^|[;&|(]\s*|\s)env\s*($|[|;&>)])/.test(c) && !/env\s*\|\s*cut\s+-d\s*=?\s*['"]?=['"]?\s+-f\s*1/.test(c)) return result("secret");
-  if (/\$\{?\w*(TOKEN|SECRET|PASSWORD|API_KEY)\w*\}?/.test(c)) return result("secret");
+  if (/\$\{?\w*(TOKEN|SECRET|PASSWORD|API_KEY|DATABASE_URL|CREDENTIAL|PRIVATE_KEY)\w*\}?/.test(c)) return result("secret");
   // Other agents and shared things.
   // Only a process this session started (`kill $!`, `kill %1`) may be stopped; any other pid, name or pattern could be another agent's check.
   if (/\b(pkill|killall)\b|\bkill\b(?!\s+(-\w+\s+)*(\$!|%\d))/.test(c)) return result("kills");
@@ -102,6 +106,16 @@ export function judgePermission(question: string, command: string | null, ownFol
   return result("ok");
 }
 
+/**
+ * Hides the agent's own memory folder (`.claude/projects/<own project>/memory/...`) from the "shared folder" row.
+ * A path that climbs out with `..` is not hidden.
+ */
+function withoutOwnMemory(command: string, ownProject?: string): string {
+  if (!ownProject || !/^[\w.-]+$/.test(ownProject) || ownProject.includes("..")) return command;
+  const own = ownProject.replace(/[.]/g, "\\.");
+  return command.replace(new RegExp(`(?:~|\\$HOME|\\/home\\/[\\w.-]+|\\/root)\\/\\.claude\\/projects\\/${own}\\/memory\\/[\\w@+./-]*`, "g"), (m) => (m.includes("..") ? m : "MEMORY_PATH"));
+}
+
 /** Resolves `.` and `..` segments so a path can't climb out of the folder it starts in. */
 function normalizePath(p: string): string {
   const out: string[] = [];
@@ -114,7 +128,7 @@ function normalizePath(p: string): string {
 }
 
 /** A tool call with no command: judged from the card's text, and unknown tools can't be vouched for. */
-function judgeWithoutCommand(question: string, ownFolder?: string): JudgeReading {
+function judgeWithoutCommand(question: string, ownFolder?: string, ownProject?: string): JudgeReading {
   if (/\(no name given\)|Change \(no name|Fetch \(no name/.test(question)) return result("noTarget");
   const tool = /Uses the tool "([^"]+)"/.exec(question)?.[1];
   if (tool && !/^mcp__\w+__\w+$/.test(tool)) return result("noTarget");
@@ -131,7 +145,9 @@ function judgeWithoutCommand(question: string, ownFolder?: string): JudgeReading
   const paths = [...question.matchAll(/(\/[\w.@+/-]+)/g)].map((m) => normalizePath(m[1]!.replace(/[.,]+$/, "")));
   if (change && paths.some((p) => /\/\.git\/hooks\b/.test(p))) return result("others");
   if (change && paths.some((p) => WORKSPACE_PATH.test(p) && ownFolder && !p.includes(`/${ownFolder}/`) && !p.endsWith(`/${ownFolder}`))) return result("others");
-  if (change && paths.some((p) => !/^\/tmp\//.test(p) && !WORKSPACE_PATH.test(p))) return result("outside");
+  const ownMemory = ownProject && /^[\w.-]+$/.test(ownProject) && !ownProject.includes("..") ? new RegExp(`^(?:\\/home\\/[\\w.-]+|\\/root)\\/\\.claude\\/projects\\/${ownProject.replace(/[.]/g, "\\.")}\\/memory\\/.+`) : null;
+  if (change && paths.some((p) => /\/\.claude\b/.test(p) && !ownMemory?.test(p))) return result("others");
+  if (change && paths.some((p) => !/^\/tmp\//.test(p) && !WORKSPACE_PATH.test(p) && !ownMemory?.test(p))) return result("outside");
   return result("ok");
 }
 

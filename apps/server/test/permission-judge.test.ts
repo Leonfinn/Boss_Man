@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
@@ -18,7 +18,8 @@ const logged: string[] = [];
 
 async function setup() {
   const { db, close } = await openPglite();
-  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => new Date(), logger: { level: "error", stream: { write: (m: string) => void logged.push(m) } } });
+  const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: () => new Date() });
+  vi.spyOn(built.app.log, "error").mockImplementation(((m: unknown) => void logged.push(String(m))) as never);
   await built.app.listen({ host: "127.0.0.1", port: 0 });
   const s = await built.app.inject({ method: "POST", url: "/api/setup", payload: { username: "leon", password: "correct horse battery" } });
   const cookie = `bm_session=${s.cookies.find((c) => c.name === "bm_session")!.value}`;
