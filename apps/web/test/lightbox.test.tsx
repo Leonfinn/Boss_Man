@@ -41,13 +41,25 @@ describe("a picture in a wiki page (BOS-330)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("closes when the backdrop is clicked but not when the picture is", () => {
+  it("closes when the dimmed backdrop is clicked, but not when the picture or the bar is", () => {
     render(<Markdown text={picture} wikiCompanyId="c1" />);
     fireEvent.click(screen.getByRole("button", { name: "Enlarge: Architecture overview" }));
     const dialog = screen.getByRole("dialog");
-    fireEvent.click(dialog.querySelector(".lightbox-panel")!);
+    // Clicking the picture itself keeps it open.
+    fireEvent.click(dialog.querySelector(".lightbox-scroll img")!);
     expect(screen.getByRole("dialog")).toBeTruthy();
-    fireEvent.click(dialog);
+    // Clicking the empty area beside the picture closes it.
+    fireEvent.click(dialog.querySelector(".lightbox-scroll")!);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // Clicking the panel's padding (a real margin of backdrop the user can reach) closes it too.
+    fireEvent.click(screen.getByRole("button", { name: "Enlarge: Architecture overview" }));
+    fireEvent.click(screen.getByRole("dialog").querySelector(".lightbox-panel")!);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // The bar and the overlay behind the panel close it; the bar itself does not.
+    fireEvent.click(screen.getByRole("button", { name: "Enlarge: Architecture overview" }));
+    fireEvent.click(screen.getByRole("dialog").querySelector(".lightbox-bar")!);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    fireEvent.click(screen.getByRole("dialog"));
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
@@ -59,5 +71,16 @@ describe("a picture in a wiki page (BOS-330)", () => {
     expect(screen.getByRole("dialog").querySelector(".lightbox-scroll img")?.className).toBe("fit");
     fireEvent.click(screen.getByRole("button", { name: "Actual size" }));
     expect(screen.getByRole("dialog").querySelector(".lightbox-scroll img")?.className).toBe("natural");
+  });
+});
+
+describe("a picture inside a link (BOS-330 review)", () => {
+  it("stays a plain image inside the anchor, so no button sits inside a link", () => {
+    render(<Markdown text={"[![Diagram](/api/ticket-images/11111111-2222-3333-4444-555555555555)](https://example.com)"} />);
+    const link = screen.getByRole("link");
+    expect(link.getAttribute("href")).toBe("https://example.com");
+    expect(link.querySelector("img")).toBeTruthy();
+    expect(link.querySelector("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Enlarge/ })).toBeNull();
   });
 });

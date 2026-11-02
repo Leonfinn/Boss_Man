@@ -2,13 +2,18 @@
 // dims the page, the picture keeps its own proportions, and it scrolls inside the overlay when it is
 // taller than the window, so a 1080px wide diagram stays readable at its natural width. Escape, the X
 // and the backdrop close it; focus moves in on open and goes back to the picture on close.
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 
 export function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
   const panel = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   // Natural width by default (readable diagrams); "fit" shows the whole picture in the window.
   const [fit, setFit] = useState(false);
+  // Close only when the click lands on the dimmed overlay itself or the empty area beside the picture,
+  // not on the picture, the bar or the caption. The panel fills the window, so its own padding is that area.
+  const missTarget = useCallback((e: MouseEvent) => {
+    if (e.target === e.currentTarget) onClose();
+  }, [onClose]);
 
   useEffect(() => {
     // Remember what had focus so it can be given back when the overlay closes.
@@ -23,7 +28,6 @@ export function Lightbox({ src, alt, onClose }: { src: string; alt: string; onCl
       if (e.key !== "Tab" || !panel.current) return;
       // Keep Tab inside the overlay while it is open.
       const items = [...panel.current.querySelectorAll<HTMLElement>("button, [href]")].filter((el) => !el.hasAttribute("disabled"));
-      if (!items.length) return;
       const first = items[0];
       const last = items[items.length - 1];
       if (!first || !last) return;
@@ -46,8 +50,8 @@ export function Lightbox({ src, alt, onClose }: { src: string; alt: string; onCl
   }, [onClose]);
 
   return (
-    <div className="lightbox" role="dialog" aria-modal="true" aria-label={alt || "Enlarged picture"} onClick={onClose}>
-      <div ref={panel} className="lightbox-panel" onClick={(e) => e.stopPropagation()}>
+    <div className="lightbox" role="dialog" aria-modal="true" aria-label={alt || "Enlarged picture"} onClick={missTarget}>
+      <div ref={panel} className="lightbox-panel" onClick={missTarget}>
         <div className="lightbox-bar">
           <button type="button" className="btn small lightbox-size" onClick={() => setFit((f) => !f)} aria-pressed={fit} title={fit ? "Show at actual size, scrolling if needed" : "Fit the whole picture to the window"}>
             {fit ? "Actual size" : "Fit to window"}
@@ -56,7 +60,7 @@ export function Lightbox({ src, alt, onClose }: { src: string; alt: string; onCl
             ✕
           </button>
         </div>
-        <div className="lightbox-scroll">
+        <div className="lightbox-scroll" onClick={missTarget}>
           <img src={src} alt={alt} className={fit ? "fit" : "natural"} />
         </div>
         {alt && <p className="lightbox-caption">{alt}</p>}
@@ -68,12 +72,14 @@ export function Lightbox({ src, alt, onClose }: { src: string; alt: string; onCl
 /** Wraps a Markdown picture so a click opens it in the overlay, with the picture's own alt text as its caption. */
 export function EnlargeableImage({ src, alt, children }: { src?: string; alt?: string; children?: ReactNode }) {
   const [open, setOpen] = useState(false);
+  // A stable close so the overlay's effect (focus, scroll lock) doesn't re-run on every parent render.
+  const close = useCallback(() => setOpen(false), []);
   return (
     <>
       <button type="button" className="md-zoom" onClick={() => setOpen(true)} title="Click to enlarge" aria-label={alt ? `Enlarge: ${alt}` : "Enlarge picture"}>
         {children ?? <img src={src} alt={alt ?? ""} />}
       </button>
-      {open && <Lightbox src={src ?? ""} alt={alt ?? ""} onClose={() => setOpen(false)} />}
+      {open && <Lightbox src={src ?? ""} alt={alt ?? ""} onClose={close} />}
     </>
   );
 }
