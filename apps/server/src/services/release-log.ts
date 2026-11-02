@@ -41,8 +41,8 @@ const TO_LIVE: Record<string, ReleaseHow> = {
 export const releaseLogService = (
   db: Db,
   deps: {
-    /** Creates the ticket on the company's board (work.createTicket). */
-    createTicket: (projectId: string, input: { title: string; body: string; assigneeAgentId: string; state: "ready"; noCode: true; risk: "trivial" }) => Promise<{ id: string }>;
+    /** Creates the ticket on the company's board (work.createTicket), returning the full row. */
+    createTicket: (projectId: string, input: { title: string; body: string; assigneeAgentId: string; state: "ready"; noCode: true; risk: "trivial" }) => Promise<{ id: string; title: string }>;
     /** Queues the wake on that ticket (scheduler.notify). */
     notify: (agentId: string, input: { ticketId: string; reason: string; note: string; priority?: number }) => Promise<{ status?: string; statusReason?: string | null } & Record<string, unknown>>;
     log?: (msg: string) => void;
@@ -116,6 +116,9 @@ export const releaseLogService = (
         .orderBy(desc(tickets.createdAt));
       ticket = open.find((t) => t.title === title) ?? null;
     }
+    // A wake already waiting for this ticket is the one that will run: don't stack a second.
+    // Creating the ticket queues its own "assigned" wake, which is reused rather than doubled.
+    const note = `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record it in the Releases/Release log, then finish this ticket.`;
     if (!ticket) {
       const projectId = await releasesProjectId(companyId);
       if (!projectId) return false;
@@ -130,17 +133,19 @@ export const releaseLogService = (
       ].join("\n");
       ticket = await deps.createTicket(projectId, { title, body, assigneeAgentId: rm.id, state: "ready", noCode: true, risk: "trivial" });
     }
-    // A wake already waiting for this ticket is the one that will run: don't stack a second.
-    const [waiting] = await db
+    const waitingAll = await db
       .select({ id: wakes.id, reason: wakes.reason })
       .from(wakes)
-      .where(and(eq(wakes.ticketId, ticket.id), eq(wakes.agentId, rm.id), inArray(wakes.status, ["queued", "deferred"])))
-      .limit(1);
-    const note = `The live commit changed from ${short(from)} to ${short(to)}: it went live by ${HOW_WORDS[how]}. Record it in the Releases/Release log, then finish this ticket.`;
-    if (waiting) {
-      // Creating the ticket queued its own "assigned" wake: make that one carry the release news.
-      if (waiting.reason !== "assigned") return false;
-      await db.update(wakes).set({ reason: RELEASE_REASON, note }).where(eq(wakes.id, waiting.id));
+      .where(and(eq(wakes.ticketId, ticket.id), eq(wakes.agentId, rm.id), inArray(wakes.status, ["queued", "deferred"])));
+    const already = waitingAll.find((w) => w.reason === RELEASE_REASON);
+    if (already) {
+      // A release wake is already waiting: the "assigned" one it was created with is redundant.
+      for (const w of waitingAll) if (w.reason === "assigned") await db.delete(wakes).where(eq(wakes.id, w.id));
+      return false;
+    }
+    const assigned = waitingAll.find((w) => w.reason === "assigned");
+    if (assigned) {
+      await db.update(wakes).set({ reason: RELEASE_REASON, note }).where(eq(wakes.id, assigned.id));
       return true;
     }
     const w = await deps.notify(rm.id, {
