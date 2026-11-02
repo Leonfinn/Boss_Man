@@ -157,6 +157,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;
 
+/** Harness name to exact version, e.g. { "claude-code": "2.1.0" }. */
+export const HarnessVersions = z.record(z.string().max(40), z.string().max(60));
+export type HarnessVersions = z.infer<typeof HarnessVersions>;
+
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
   /**
@@ -168,6 +172,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
+    harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
