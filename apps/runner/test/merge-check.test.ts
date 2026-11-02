@@ -101,7 +101,11 @@ describe("two branches that each pass alone (F6)", () => {
     const r = await promise;
     expect(r.status).toBe("merged");
     expect(execFileSync("wc", ["-l", counter], { encoding: "utf8" }).trim().startsWith("1 ")).toBe(true);
-    expect(o.mainSha()).toBe((r as { commit: string }).commit);
+    const m = r as { commit: string; checked: { sha: string; tree: string } };
+    expect(o.mainSha()).toBe(m.commit);
+    // The record names the commit the check ran on, not the new one built on the moved main.
+    expect(m.checked.sha).not.toBe(m.commit);
+    expect(git(ws.repoDir(ids.project), "rev-parse", `${m.checked.sha}^{tree}`)).toBe(m.checked.tree);
     expect(git(o.url, "show", "main:b.txt")).toBe("b");
   });
 

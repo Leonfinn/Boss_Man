@@ -10,7 +10,7 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -554,13 +554,17 @@ export class Workspaces {
     const auth = gitAuthEnv(secrets);
     const repo = this.repoDir(spec.projectId);
     const branch = `refs/heads/${branchFor(spec.ticketId)}`;
-    const dir = this.mergeCheckDir(spec.ticketId);
-    let checkedTree: string | null = null;
+    const base = this.mergeCheckDir(spec.ticketId);
+    // A leftover from a run that died is cleared once, up front. Each round then gets its own folder, so a stray
+    // process from an earlier round can never write into the tree a later round checks.
+    rmSync(base, { recursive: true, force: true });
+    let dir = base;
+    let checked: { commit: string; tree: string; targetSha: string; branchSha: string } | null = null;
     let checkedMs = 0;
     let checks = 0;
     for (let round = 0; round < 8; round++) {
       // Build the merge commit under the lock; push it at once if its tree is already checked.
-      const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string }> => {
+      const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string; targetSha: string; branchSha: string }> => {
         const ticketDir = this.ticketDir(spec.ticketId);
         if (existsSync(path.join(ticketDir, ".git"))) {
           const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
@@ -569,23 +573,26 @@ export class Workspaces {
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
-        if (tried.tree !== checkedTree) {
-          // A leftover from a run that died is cleared before its folder is reused.
-          rmSync(dir, { recursive: true, force: true });
+        if (!checked || tried.tree !== checked.tree) {
+          dir = path.join(base, `${round}-${Date.now().toString(36)}`);
           await this.git(["worktree", "prune"], { cwd: repo });
-          mkdirSync(path.dirname(dir), { recursive: true });
+          mkdirSync(base, { recursive: true });
           await this.git(["worktree", "add", "--quiet", "--detach", dir, commit], { cwd: repo });
-          return { status: "check", commit, tree: tried.tree };
+          return { status: "check", commit, tree: tried.tree, targetSha: tried.targetSha, branchSha: tried.branchSha };
         }
-        const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
-        if (pushed.code === 0) return { status: "merged", commit, checked: { sha: commit, tree: tried.tree, ms: checkedMs } };
+        // Same parents as the checked commit: push that very commit. Otherwise the same tree on new parents;
+        // the record still names the commit the check really ran on.
+        const same = checked.targetSha === tried.targetSha && checked.branchSha === tried.branchSha;
+        const toPush = same ? checked.commit : commit;
+        const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
+        if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs } };
         // Rejected: the target moved again. Build once more; the tree decides whether it is checked again.
-        return { status: "check", commit: "", tree: "" };
+        return { status: "check", commit: "", tree: "", targetSha: "", branchSha: "" };
       });
       if (built.status !== "check") return built;
       if (!built.commit) continue;
       if (checks >= 3) {
-        await this.dropMergeCheck(spec.projectId, dir);
+        await this.dropMergeCheck(spec.projectId, dir, base);
         return { status: "main_moved" };
       }
       checks++;
@@ -596,18 +603,20 @@ export class Workspaces {
           if (!result.ok) return { status: "check_failed", command, result };
         }
       } finally {
-        await this.dropMergeCheck(spec.projectId, dir);
+        await this.dropMergeCheck(spec.projectId, dir, base);
       }
-      checkedTree = built.tree;
+      checked = { commit: built.commit, tree: built.tree, targetSha: built.targetSha, branchSha: built.branchSha };
     }
-    throw new Error(`Couldn't push the merge to ${target}: it kept moving.`);
+    // Main kept moving: nothing was pushed, so the caller retries like a lock wait.
+    return { status: "main_moved" };
   }
 
-  private async dropMergeCheck(projectId: string, dir: string) {
+  private async dropMergeCheck(projectId: string, dir: string, base: string) {
     const repo = this.repoDir(projectId);
     await this.withRepoLock(projectId, async () => {
       await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
       rmSync(dir, { recursive: true, force: true });
+      try { rmdirSync(base); } catch { /* not empty or already gone */ }
       await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
     });
   }
