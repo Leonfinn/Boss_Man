@@ -20,7 +20,12 @@ mkdirSync(dataDir, { recursive: true });
 const journal = new Journal(path.join(dataDir, "journal.jsonl"));
 const log = (m: string) => console.log(`[runner] ${m}`);
 
-const workspaces = new Workspaces(env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces");
+const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
+// check-all.sh's queue, slot locks and results: one folder that every session, fenced or not, and
+// the merge check share, so checks still take turns (BOS-321).
+const coordDir = path.join(workspacesRoot, ".bossman-coord");
+mkdirSync(coordDir, { recursive: true });
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
 let connection: RunnerConnection;
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
@@ -34,6 +39,7 @@ const sessions = new SessionManager({
   workspaces,
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
+  coordDir,
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

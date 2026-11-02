@@ -106,10 +106,11 @@ if command -v flock >/dev/null; then
       [ -e "$f" ] || continue
       # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is digits only.
       # Then drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused).
+      # "Gone" is read from /proc, not kill -0: a fenced agent may not signal other sessions (BOS-321).
       base=$(basename "$f")
       if ! [[ $base =~ ^[01]-[0-9]+-[0-9]+$ ]]; then rm -f "$f"; continue; fi
       qts=$(cut -d- -f2 <<<"$base"); qpid=${base##*-}
-      if ! kill -0 "$((10#$qpid))" 2>/dev/null || [ $((now - 10#$qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
+      if [ ! -d "/proc/$((10#$qpid))" ] || [ $((now - 10#$qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
     done
     echo "$mine $total"

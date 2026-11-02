@@ -148,6 +148,25 @@ if command -v flock >/dev/null; then
   [ ! -e PWNED ] || { rm -f PWNED; fail "hostile queue entry name ran a command"; }
   [ ! -e "$hostile" ] || fail "hostile queue entry was not removed"
   wait "$h1"
+
+  # A check inside an agent's fence (BOS-321) keeps another session's place: it can't signal that session
+  # (Landlock ABI 6 scoping), so a kill -0 test would wrongly drop the entry as dead and jump the queue.
+  fence="$here/../apps/runner/src/fence/landlock.pl"
+  if command -v perl >/dev/null && [ "$(perl "$fence" --probe | sed -n 's/.*"abi":\([0-9]*\).*/\1/p')" -ge 6 ]; then
+    rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+    sleep 10 & waiter=$!
+    : >"$t/lock.queue/0-$(date +%s%N)-$waiter"
+    hold 1 3; h1=$!; sleep 0.3
+    rc=0
+    out=$(perl "$fence" --ro / --rw "$t" --rwfile /dev/null -- bash -c 'cd "$1" && TMPDIR="$3" PATH="$2:$PATH" CHECK_ALL_LOCK="$3/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$3/proof" BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2 ./scripts/check-all.sh 2>&1' \
+      _ "$here/.." "$t/bin" "$t") || rc=$?
+    [ "$rc" = 75 ] || fail "fenced check: expected to wait behind the other session (exit 75), got $rc: $out"
+    grep -q "place 2 of 2" <<<"$out" || fail "fenced check: the other session's place was dropped: $out"
+    compgen -G "$t/lock.queue/0-*-$waiter" >/dev/null || fail "fenced check removed a live session's queue entry"
+    kill "$waiter" "$h1" 2>/dev/null || true; wait "$waiter" "$h1" 2>/dev/null || true
+  else
+    echo "check-all.test.sh: Landlock ABI 6 missing, fenced queue case skipped"
+  fi
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi

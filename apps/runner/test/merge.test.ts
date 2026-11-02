@@ -129,6 +129,19 @@ describe("verify before done (R47)", () => {
     expect(await ws.verify(spec, "sleep 5", 200)).toMatchObject({ ok: false, timedOut: true });
   });
 
+  it("shares check-all's queue folder with the agents' checks, when the runner has one (BOS-321)", async () => {
+    const o = origin();
+    const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const plain = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    await plain.ensure(spec);
+    expect((await plain.verify(spec, 'echo "lock=${CHECK_ALL_LOCK:-unset}"')).output).toContain("lock=unset");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root, process.env, path.join(root, ".bossman-coord"));
+    await ws.ensure(spec);
+    const res = await ws.verify(spec, 'echo "lock=$CHECK_ALL_LOCK store=$BOSSMAN_CHECK_STORE"');
+    expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "check-all")} store=${path.join(root, ".bossman-coord", "check-results")}`);
+  });
+
   it("kills the whole process group on timeout, including grandchildren that ignore SIGTERM", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
