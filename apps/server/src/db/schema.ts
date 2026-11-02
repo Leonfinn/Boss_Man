@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -159,6 +159,9 @@ export const runners = pgTable("runners", {
   diskCheckedAt: timestamp("disk_checked_at", { withTimezone: true }),
   /** The runner's last report on its add-ons (docs/12); null until it reports one. */
   addons: jsonb("addons").$type<AddonReport[]>(),
+  /** What the runner can fence agents with, from its start-up self-test (BOS-321); null until it reports. */
+  sandbox: jsonb("sandbox").$type<SandboxReport>(),
+  sandboxCheckedAt: timestamp("sandbox_checked_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 
@@ -286,6 +289,8 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
+    checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
     pullRequestUrl: text("pull_request_url"),
     pullRequestNumber: integer("pull_request_number"),
