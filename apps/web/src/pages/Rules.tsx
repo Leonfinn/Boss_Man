@@ -139,7 +139,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         </div>
       </header>
       <p className="muted" style={{ fontSize: 14 }}>
-        Order of checking: a company's own rules, then rules for every company, then the built-in defaults. "Ask the CEO" puts it in the CEO's queue; "Ask me" puts it in yours.
+        Order of checking: network and safety guards, then your deny rules, then your allow rules (they cannot lift a safety guard), then the built-in allows, then your "Ask the CEO" and "Ask me" rules, which apply only to requests that would otherwise ask. "Ask the CEO" puts it in the CEO's queue; "Ask me" puts it in yours.
       </p>
       {error && (
         <p className="error" role="alert">
