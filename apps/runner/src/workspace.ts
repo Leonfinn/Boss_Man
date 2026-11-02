@@ -58,6 +58,36 @@ export async function diskUsage(target: string): Promise<number> {
   return total;
 }
 
+/**
+ * Settings for every git call the runner makes itself. A repo's own config can name a hook folder
+ * or a filesystem monitor, and both run programs, so a shared repo could otherwise run code inside
+ * the daemon. GIT_CONFIG_* sits above the repo's config file, so it wins.
+ */
+export const SAFE_GIT_ENV = {
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "core.hooksPath",
+  GIT_CONFIG_VALUE_0: "/dev/null",
+  GIT_CONFIG_KEY_1: "core.fsmonitor",
+  GIT_CONFIG_VALUE_1: "false",
+  GIT_CONFIG_NOSYSTEM: "1",
+} as const;
+
+/**
+ * SAFE_GIT_ENV plus the caller's own env. GIT_CONFIG_* entries are numbered, so a caller's entries
+ * (the auth header from gitAuthEnv) are renumbered after ours instead of overwriting them.
+ */
+export function safeGitEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const own = Number(SAFE_GIT_ENV.GIT_CONFIG_COUNT);
+  const n = Number(extra.GIT_CONFIG_COUNT) || 0;
+  const env: Record<string, string> = { ...extra, ...SAFE_GIT_ENV };
+  for (let i = 0; i < n; i++) {
+    env[`GIT_CONFIG_KEY_${own + i}`] = extra[`GIT_CONFIG_KEY_${i}`] ?? "";
+    env[`GIT_CONFIG_VALUE_${own + i}`] = extra[`GIT_CONFIG_VALUE_${i}`] ?? "";
+  }
+  env.GIT_CONFIG_COUNT = String(own + n);
+  return env;
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -82,7 +112,7 @@ export class Workspaces {
   }
 
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...opts.env };
+    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(opts.env) };
     const { stdout } = await run("git", args, { cwd: opts.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
   }
@@ -296,7 +326,7 @@ export class Workspaces {
     } else {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(repo)) throw new Error("This runner has no copy of that project's repo.");
-      const { stdout } = await run("git", ["show", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME } as NodeJS.ProcessEnv }).catch(() => {
+      const { stdout } = await run("git", ["show", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, ...SAFE_GIT_ENV } as NodeJS.ProcessEnv }).catch(() => {
         throw new Error(`There's no ${rel} on that ticket's branch.`);
       });
       data = stdout as unknown as Buffer;
