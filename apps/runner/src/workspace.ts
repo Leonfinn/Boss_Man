@@ -72,6 +72,22 @@ export const SAFE_GIT_ENV = {
   GIT_CONFIG_NOSYSTEM: "1",
 } as const;
 
+/**
+ * SAFE_GIT_ENV plus the caller's own env. GIT_CONFIG_* entries are numbered, so a caller's entries
+ * (the auth header from gitAuthEnv) are renumbered after ours instead of overwriting them.
+ */
+export function safeGitEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const own = Number(SAFE_GIT_ENV.GIT_CONFIG_COUNT);
+  const n = Number(extra.GIT_CONFIG_COUNT) || 0;
+  const env: Record<string, string> = { ...extra, ...SAFE_GIT_ENV };
+  for (let i = 0; i < n; i++) {
+    env[`GIT_CONFIG_KEY_${own + i}`] = extra[`GIT_CONFIG_KEY_${i}`] ?? "";
+    env[`GIT_CONFIG_VALUE_${own + i}`] = extra[`GIT_CONFIG_VALUE_${i}`] ?? "";
+  }
+  env.GIT_CONFIG_COUNT = String(own + n);
+  return env;
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -96,7 +112,7 @@ export class Workspaces {
   }
 
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...SAFE_GIT_ENV, ...opts.env };
+    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(opts.env) };
     const { stdout } = await run("git", args, { cwd: opts.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
   }
