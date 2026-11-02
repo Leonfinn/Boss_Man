@@ -227,10 +227,10 @@ export function decidePermission(info: PermissionInfo, rules: PolicyRuleSpec[]):
   return { outcome: "owner", rule: "No rule matched", row: 8 };
 }
 
-/** Routing rules the built-in allows cover: they only fire for guarded requests now (BOS-307). Judged from the tool kinds alone, so a rule with no kinds is never listed. */
+/** Routing rules the built-in allows cover: they only fire for guarded requests now (BOS-307). Judged from the tool kinds alone: listed when it names no kinds, or when any kind it names is a built-in allow. */
 export function shadowedRoutingRules<T extends PolicyRuleSpec>(rules: T[]): T[] {
   const covered = new Set(BUILTIN_ALLOWS.flatMap((r) => r.match.kinds ?? []));
-  return rules.filter((r) => (r.outcome === "ceo" || r.outcome === "owner") && !!r.match.kinds?.length && r.match.kinds.every((k) => covered.has(k)));
+  return rules.filter((r) => (r.outcome === "ceo" || r.outcome === "owner") && (!r.match.kinds?.length || r.match.kinds.some((k) => covered.has(k))));
 }
 
 export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string } {

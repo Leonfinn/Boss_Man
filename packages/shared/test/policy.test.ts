@@ -731,6 +731,8 @@ describe("the ordered permission table (BOS-307)", () => {
     const ssh = { name: "ask before ssh", match: { kinds: ["execute"], commandPattern: "ssh" }, outcome: "owner" as const };
     const del = { name: "ask before delete", match: { kinds: ["delete"] }, outcome: "owner" as const };
     const byTitle = { name: "t", match: { titlePattern: "x" }, outcome: "ceo" as const };
-    expect(shadowedRoutingRules([ssh, del, byTitle, ...broadAllow]).map((r) => r.name)).toEqual(["ask before ssh"]);
+    const cmdOnly = { name: "c", match: { commandPattern: "ssh" }, outcome: "owner" as const };
+    const mixed = { name: "m", match: { kinds: ["execute", "delete"] }, outcome: "owner" as const };
+    expect(shadowedRoutingRules([ssh, del, byTitle, cmdOnly, mixed, ...broadAllow]).map((r) => r.name)).toEqual(["ask before ssh", "t", "c", "m"]);
   });
 });
