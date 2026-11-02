@@ -478,6 +478,19 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     expect(recommendedVerdict(exec("find /tmp/x -name '*.log' -delete"))).toBe("allow");
   });
 
+  it("does not suggest Allow for find from a dot-only /tmp root or a package runner (BOS-165 security round 3)", () => {
+    for (const c of [
+      "find /tmp/.. -delete",
+      "find /tmp/. -delete",
+      "find /tmp/.. -name '*' -delete",
+      "rm -rf /tmp/a && pnpm dlx rimraf /home/node",
+      "rm -rf /tmp/a && npm exec -- rimraf /home/node",
+      "rm -rf /tmp/a && yarn dlx rimraf /home/node",
+    ]) expect(recommendedVerdict(exec(c)), c).not.toBe("allow");
+    expect(recommendedVerdict(exec("find /tmp/x -name '*.log' -delete"))).toBe("allow");
+    expect(recommendedVerdict(exec("find /tmp/x.y -name '*.log' -delete"))).toBe("allow");
+  });
+
   it("gives no /tmp note to a command that sets a variable (security round 11)", () => {
     for (const c of [
       "export PATH=/tmp/x && ls /tmp",

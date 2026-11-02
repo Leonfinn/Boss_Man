@@ -43,6 +43,8 @@ const GIT_NETWORK = new Set(["fetch", "pull", "clone", "ls-remote", "submodule"]
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 const PKG = new Set(["npm", "pnpm", "yarn"]);
 const PKG_INSTALL = new Set(["install", "i", "add", "ci", "remove", "uninstall"]);
+/** Package-manager subcommands that run any program on any folder, so they are not the project's own scripts. */
+const PKG_RUNNERS = new Set(["dlx", "exec", "x", "create", "init", "link", "unlink", "publish", "config", "set", "cache", "store"]);
 
 /** Paths the owner will recognise, in friendly words. */
 const FRIENDLY: Array<[RegExp, string]> = [
@@ -477,7 +479,7 @@ export function writesBeyondTmp(command: string): boolean {
     const p = explainSegment(seg);
     // An install or a package-manager run (pnpm build) is exempt: its writes are the project's
     // own folders (node_modules, dist), not a named target it could aim at /home.
-    if (p.install || PKG.has(p.program ?? "")) continue;
+    if (p.install || (PKG.has(p.program ?? "") && !PKG_RUNNERS.has(seg.trim().split(/\s+/)[1] ?? ""))) continue;
     if (!p.safe) return true;
     const targets = [...p.targets, ...(p.writes ?? [])];
     if ((p.effect === "changes" || p.effect === "deletes") && !targets.length) return true;
