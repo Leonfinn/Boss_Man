@@ -6,6 +6,16 @@ set -euo pipefail
 self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "$self")/.."
 
+# Only the merge gate runs the full check. Inside an agent session (Claude Code sets CLAUDECODE; the runner's own
+# sessions may set BOSSMAN_AGENT_SESSION) a hand run is refused, because it fills the one-slot queue for hours.
+# The merge gate (BOSSMAN_MERGE_CHECK, which also runs with a bare environment) and humans are unaffected;
+# CHECK_ALL_FORCE=1 overrides, for when the CEO asked for a full run.
+if [ -z "${BOSSMAN_CHECK_CHILD:-}" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_ALL_FORCE:-}" ] \
+  && { [ -n "${CLAUDECODE:-}" ] || [ -n "${BOSSMAN_AGENT_SESSION:-}" ]; }; then
+  echo "Full check runs at the merge gate. Run scripts/check-quick.sh for your branch instead, or set CHECK_ALL_FORCE=1 if the CEO asked you to." >&2
+  exit 2
+fi
+
 # Where finished runs are kept (result + full log), keyed by the git tree of the checked-out files, so a check that
 # already passed on identical content is not run again. /var/tmp survives between runs; "off" switches the store off.
 STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
@@ -73,7 +83,8 @@ node scripts/lint-migrations.mjs
 # The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait and does not give up (hand-run checks) or gives up
-# after CHECK_ALL_LOCK_WAIT seconds (default 600, merge check only: exit 75, which Boss Man retries).
+# after CHECK_ALL_LOCK_WAIT seconds (default 3 h, merge check only: exit 75, which Boss Man retries).
+# The merge check queues like the rest but goes ahead of waiting hand-run checks; one already running is never interrupted.
 # fd 9 is inherited by pnpm/vitest: if a timed-out check leaves children behind they keep the slot until
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
 if command -v flock >/dev/null; then
@@ -86,31 +97,44 @@ if command -v flock >/dev/null; then
   elif [ "${CHECK_ALL_SLOTS:-1}" -gt 1 ]; then echo "check-all: CHECK_ALL_SLOTS=$CHECK_ALL_SLOTS ignored, no passed side-by-side pair recorded in $PROOF; running one at a time"
   fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
-  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-600}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
-  mkdir -p "$QDIR"
+  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-10800}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
+  # An unreachable lock folder (for example outside a fenced session's grant) fails at once with a clear message,
+  # never a silent wait: a slot file that cannot be opened would otherwise read as "busy" forever.
+  lock_unusable() { echo "check-all: cannot use the check lock folder: $1 (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
+  mkdir -p "$QDIR" 2>/dev/null || lock_unusable "cannot create $QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
-  : >"$qfile"; trap 'rm -f "$qfile"' EXIT
+  { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
+  trap 'rm -f "$qfile"' EXIT
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
-      exec 9>"$LOCK.slot.$k"
+      { exec 9>"$LOCK.slot.$k"; } 2>/dev/null || lock_unusable "cannot open $LOCK.slot.$k"
       if flock -n 9; then return 0; fi
     done
     exec 9>&-
     return 1
   }
   # Prints "<my place> <checks waiting>", dropping queue entries whose process is gone.
+  # Agents can write this folder, so it is read defensively: no subprocess per entry (5000 planted entries
+  # took 13.6 s a pass with them), and only the first CHECK_ALL_QUEUE_SCAN entries in serving order count.
+  # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
-    local f base qts qpid mine=0 total=0 now; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now; now=$(date +%s)
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
-      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is digits only.
-      # Then drop entries whose process is gone, or older than 2 h (a killed waiter whose pid was reused).
-      base=$(basename "$f")
-      if ! [[ $base =~ ^[01]-[0-9]+-[0-9]+$ ]]; then rm -f "$f"; continue; fi
-      qts=$(cut -d- -f2 <<<"$base"); qpid=${base##*-}
-      if ! kill -0 "$((10#$qpid))" 2>/dev/null || [ $((now - 10#$qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
+      # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is
+      # digits only, and short enough not to overflow. Then drop entries whose process is gone, older than 2 h
+      # (a killed waiter whose pid was reused), or dated more than a minute ahead (planted to jump the queue).
+      # "Gone" is read from /proc, not kill -0: a fenced agent may not signal other sessions (BOS-321).
+      base=${f##*/}
+      if ! [[ $base =~ ^[01]-([0-9]{1,19})-([0-9]{1,9})$ ]]; then rm -f "$f"; continue; fi
+      qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
+      if [ ! -d "/proc/$qpid" ] || [ $((now - qts)) -gt 7200 ] || [ $((qts - now)) -gt 60 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
+      if [ "$total" -ge "$scan" ]; then
+        [ "$mine" -gt 0 ] || mine=$((scan + 1))
+        break
+      fi
     done
     echo "$mine $total"
   }
@@ -144,6 +168,7 @@ if command -v flock >/dev/null; then
     echo "check-all: gave up waiting for the heavy-phase lock $LOCK" >&2; exit 75
   fi
   rm -f "$qfile"; trap - EXIT
+  echo "check-all: slot taken, running the checks"
 else
   echo "check-all: flock not found, running without the heavy-phase lock"
 fi

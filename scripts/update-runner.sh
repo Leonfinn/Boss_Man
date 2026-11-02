@@ -68,7 +68,7 @@ move_runners() {
   request_drain
 }
 
-NOW=0 ROLLBACK=0 version=latest
+NOW=0 ROLLBACK=0 version=
 for a in "$@"; do
   case $a in
     --now) NOW=1 ;;
@@ -92,9 +92,9 @@ stamp="$(date -u +%Y%m%d%H%M)"
 # The network guard the launcher starts beside every runner (BOS-324); a runner is not started without it.
 docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
 
-echo "Building $IMAGE:candidate with Claude Code $version${addons:+ and add-ons: $addons}..."
+echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned in the Dockerfile)}${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
-  --build-arg CLAUDE_CODE_VERSION="$version" \
+  ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .

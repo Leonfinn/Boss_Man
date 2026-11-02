@@ -136,6 +136,11 @@ jobs:
           grep -q "/mnt/tank/apps/boss-man/data/postgres:/var/lib/postgresql/data\|source: /mnt/tank/apps/boss-man/data/postgres" merged.yml
           grep -q "source: /mnt/tank/apps/boss-man/data/app-co/workspaces" merged.yml
           test "$(grep -c 'target: /home/node/workspaces' merged.yml)" = 1
+      - name: Tailscale override merges into a valid compose file (docs/20-https-tailscale.md)
+        run: |
+          POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config -q
+          POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "BOSSMAN_TRUSTED_PROXIES: 172.30.0.2"
+          POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "ipv4_address: 172.30.0.3"
       - name: Self-deploy override mounts the two folders and no Docker socket
         run: |
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-deployer.yml --profile runners config > merged-deployer.yml
