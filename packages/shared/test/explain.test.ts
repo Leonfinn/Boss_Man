@@ -129,6 +129,12 @@ describe("explainPermission", () => {
     expect(explainPermission({ title: "edit", kind: "edit", rawInput: {} }, "A").summary).toBe("Change (no name given).");
   });
 
+  it("shows OpenCode's external_directory request as a folder outside the checkout (BOS-318)", () => {
+    expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: { filepath: "/tmp/opencode/shots/a.png", parentDir: "/tmp/opencode/shots" } }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
+    expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: {} }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
+    expect(explainPermission({ title: "/tmp/x", kind: "other", rawInput: {} }, "A").effect).toBe("unknown");
+  });
+
   it("titles commands and keeps only a short single-line reason", () => {
     const r = explainPermission({ title: "x", kind: "execute", rawInput: { command: "ls", description: `Look\naround ${"a".repeat(300)}` } }, "Wiki Maintainer");
     expect(r.title).toBe("Wiki Maintainer wants to run a command");

@@ -673,6 +673,9 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
     return { title: `${agent} wants to run a command`, ...x, command, reason, ...(x.effect === "reads" ? {} : { alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." }) };
   }
   const t = TOOL[info.kind ?? ""];
+  // OpenCode's external_directory request (a folder outside the checkout): its title is the folder path, its input {filepath, parentDir}. Effect stays "unknown" so no rule is loosened by the wording.
+  const outside = t ? null : text(info.rawInput, "parentDir") ?? (info.title?.startsWith("/") ? info.title : null);
+  if (outside) return { title: `${agent} wants to access a folder outside its checkout`, summary: `Access folder outside checkout: ${outside}.`, effect: "unknown", reason };
   const target = text(info.rawInput, "file_path", "filePath", "filepath", "path", "url") ?? patchFiles(info.rawInput) ?? (info.kind === "search" ? text(info.rawInput, "pattern", "query") : null);
   if (!t) return { title: `${agent} wants to use a tool`, summary: `Uses the tool "${info.title ?? "unnamed"}", which Boss Man doesn't recognise.`, effect: "unknown", reason };
   const noun = t.verb === "Fetch" || /^\d+ files: /.test(target ?? "") ? "" : t.verb === "Search" ? " for" : " the file";
