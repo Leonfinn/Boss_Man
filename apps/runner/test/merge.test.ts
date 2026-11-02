@@ -142,6 +142,17 @@ describe("verify before done (R47)", () => {
     expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "queue", "check-all")} store=${path.join(root, ".bossman-coord", "gate", "check-results")}`);
   });
 
+  it("counts the timeout from when a queued check starts, not from when it was queued", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    // Queued for 600 ms (timeout 400 ms) then running 100 ms: passes. The queue has its own, longer limit.
+    const waited = await ws.verify(spec, "echo 'check-all: waiting for a free check slot (place 2 of 2)'; sleep 0.6; echo 'check-all: slot taken, running the checks'; sleep 0.1", 400, 5000);
+    expect(waited).toMatchObject({ ok: true, timedOut: false });
+    expect(await ws.verify(spec, "echo 'check-all: waiting for a free check slot (place 2 of 2)'; sleep 5", 400, 300)).toMatchObject({ ok: false, timedOut: true });
+    // Once running, the normal timeout applies.
+    expect(await ws.verify(spec, "echo 'check-all: waiting for a free check slot'; echo 'check-all: slot taken, running the checks'; sleep 5", 300, 5000)).toMatchObject({ ok: false, timedOut: true });
+  });
+
   it("kills the whole process group on timeout, including grandchildren that ignore SIGTERM", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");

@@ -106,6 +106,13 @@ if command -v flock >/dev/null; then
   grep -q "lock held" <<<"$out" || fail "hand-run wait: lock not acquired: $out"
   wait "$h1" "$h2"
 
+  # A merge check with no CHECK_ALL_LOCK_WAIT set waits its turn (the default is hours, not 10 minutes) and announces when its checks begin.
+  hold 1 3; h1=$!; sleep 0.3
+  out=$(lock env BOSSMAN_MERGE_CHECK=1) || fail "merge wait: expected success, got: $out"
+  grep -q "waiting for a free check slot" <<<"$out" || fail "merge wait: no queue message: $out"
+  grep -q "slot taken, running the checks" <<<"$out" || fail "merge wait: no start marker: $out"
+  wait "$h1"
+
   # Queue order: a merge check that arrives later goes ahead of a hand-run check; hand-run checks keep their order.
   hold 1 3; h1=$!; hold 2 3; h2=$!; sleep 0.3
   ( lock env >"$t/hand1.out"; date +%s%N >"$t/hand1.at" ) & hand1=$!

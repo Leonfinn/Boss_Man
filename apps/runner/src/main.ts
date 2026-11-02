@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { sandboxSelfTest } from "./fence.js";
+import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
@@ -60,6 +61,7 @@ connection = new RunnerConnection({
   journal,
   runnerVersion: "0.0.0",
   imageVersion: env.BOSSMAN_IMAGE_VERSION ?? null,
+  harnessVersions: await harnessVersions(),
   log,
   onCommand: (command) => sessions.handle(command),
   pendingPermissions: () => sessions.pendingPermissions(),

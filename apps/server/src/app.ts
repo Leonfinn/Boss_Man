@@ -87,8 +87,13 @@ export type AppOptions = {
   db: Db;
   master: MasterKey;
   liveValidator?: LiveValidator;
-  /** Mark cookies Secure. Turn off only for plain-HTTP local development. */
-  secureCookies?: boolean;
+  /**
+   * Mark cookies Secure: true always (default), false never (plain-HTTP development), or "auto" to
+   * decide per request from req.protocol, which is https only behind a trusted proxy (BOS-242).
+   */
+  secureCookies?: boolean | "auto";
+  /** Exact addresses of the proxies whose X-Forwarded-* headers are believed (BOS-242). Never "true". */
+  trustedProxies?: string[];
   logger?: boolean;
   /** Quiet time before a wiki page is embedded after a write. Default 30s. */
   semanticDebounceMs?: number;
@@ -176,7 +181,8 @@ async function serveWeb(app: FastifyInstance, root: string) {
 
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
-  const app = Fastify({ logger: opts.logger ?? false });
+  // Trust only the exact proxy addresses given (the Tailscale Serve hop), never every hop.
+  const app = Fastify({ logger: opts.logger ?? false, trustProxy: opts.trustedProxies?.length ? opts.trustedProxies : false });
   // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
   const errorBuffer = createErrorBuffer();
   const logError = app.log.error.bind(app.log);
@@ -536,7 +542,10 @@ export async function buildApp(opts: AppOptions) {
     return reply.code(500).send({ error: "internal_error" });
   });
 
-  async function startSession(reply: FastifyReply, ownerId: string) {
+  /** Secure flag for one request: see AppOptions.secureCookies. */
+  const cookieSecure = (req: FastifyRequest) => (opts.secureCookies === "auto" ? req.protocol === "https" : opts.secureCookies ?? true);
+
+  async function startSession(req: FastifyRequest, reply: FastifyReply, ownerId: string) {
     const token = newSessionToken();
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 86_400_000);
     await db.insert(sessions).values({ tokenHash: hashToken(token), ownerId, expiresAt });
@@ -544,7 +553,7 @@ export async function buildApp(opts: AppOptions) {
       path: "/",
       httpOnly: true,
       sameSite: "strict",
-      secure: opts.secureCookies ?? true,
+      secure: cookieSecure(req),
       expires: expiresAt,
     });
   }
@@ -594,7 +603,7 @@ export async function buildApp(opts: AppOptions) {
     const [row] = await db.select({ n: count() }).from(owners);
     if ((row?.n ?? 0) > 0) return reply.code(409).send({ error: "already_set_up" });
     const [owner] = await db.insert(owners).values({ username: body.username, passwordHash: await hashPassword(body.password) }).returning();
-    await startSession(reply, owner!.id);
+    await startSession(req, reply, owner!.id);
     return reply.code(201).send({ username: owner!.username });
   });
 
@@ -615,7 +624,7 @@ export async function buildApp(opts: AppOptions) {
       return reply.code(401).send({ error: "wrong_username_or_password" });
     }
     logins.succeeded(req.ip, body.username);
-    await startSession(reply, owner.id);
+    await startSession(req, reply, owner.id);
     return { username: owner.username };
   });
 

@@ -200,8 +200,9 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       await db.update(runners).set({ sandbox: report, sandboxCheckedAt: at }).where(eq(runners.id, runnerId));
     },
 
-    async touch(runner: Runner, imageVersion: string | null) {
-      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion }).where(eq(runners.id, runner.id));
+    async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>) {
+      // An older runner sends none: keep what we last knew rather than blanking it.
+      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
     },
 
     connect(runnerId: string, send: CommandSender, feats: string[] = []) {

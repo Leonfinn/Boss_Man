@@ -61,6 +61,17 @@ describe("runner protocol (R31)", () => {
     expect(status).toBe(401);
   });
 
+  it("stores the harness versions from hello and shows them per runner in server status (BOS-305)", async () => {
+    const journal = new Journal(path.join(mkdtempSync(path.join(tmpdir(), "bm-runner-")), "j.jsonl"));
+    const harnessVersions = { "claude-code": "2.1.316", opencode: "1.19.3" };
+    const conn = new RunnerConnection({ url: ctx.url, token: ctx.reg.token, journal, runnerVersion: "test", heartbeatMs: HEARTBEAT, harnessVersions, onCommand: () => {} });
+    conn.start();
+    await waitFor(async () => conn.isLive, Boolean);
+    const status = await waitFor(() => ctx.built.serverStatus.status(ctx.companyId), (s) => !!s.runner?.harnessVersions);
+    expect(status.runner?.harnessVersions).toEqual(harnessVersions);
+    conn.stop();
+  });
+
   it("delivers every event exactly once across a dropped connection", async () => {
     const { conn, journal } = runner();
     conn.start();
