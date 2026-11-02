@@ -1,5 +1,5 @@
 {
-  "id": "f21c0498-f28f-47d0-b0db-7ad40c1c4a80",
+  "id": "3402136c-b0b8-4f0f-ae07-b92bbea730fc",
   "prevId": "9ebe906c-4191-49d8-918d-beb29c3eb2be",
   "version": "7",
   "dialect": "postgresql",
@@ -1247,7 +1247,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2}'::jsonb"
+          "default": "'{\"enabled\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -5492,6 +5492,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "sandbox": {
+          "name": "sandbox",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sandbox_checked_at": {
+          "name": "sandbox_checked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5664,18 +5676,6 @@
         },
         "cancel_requested_at": {
           "name": "cancel_requested_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_post_at": {
-          "name": "last_post_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "silent_steered_at": {
-          "name": "silent_steered_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -7696,12 +7696,6 @@
         },
         "state_note_at": {
           "name": "state_note_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "last_post_at": {
-          "name": "last_post_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
