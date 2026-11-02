@@ -73,6 +73,8 @@ check_guard() {
   blocked "http://192.168.1.1/" || return 1
   blocked "http://169.254.169.254/" || return 1
   blocked "http://[fd00::1]/" || return 1
+  # DNS still works through the resolvers the host uses (a private one too): a public name resolves and answers.
+  docker exec "$runner" curl -s -m 20 -o /dev/null https://api.github.com/ || return 1
 }
 check_guard
 echo "Network guard: server reachable; database, gateway and private ranges blocked."
@@ -85,6 +87,34 @@ for _ in $(seq 30); do
 done
 [[ "${restored:-0}" == 1 ]] || { echo "The guard didn't come back after the runner restarted" >&2; docker compose logs launcher 2>&1 | tail -30; exit 1; }
 echo "Network guard: back in place after a restart."
+
+# A connection opened while no guard is up (the launcher is stopped and the runner has a new namespace) must be
+# cut off when the guard arrives, not kept alive. The client opens db:5432, then writes a byte every half second;
+# the database closing it (end or reset) would mean the connection survived; the guard's reject is another error.
+docker compose stop launcher >/dev/null
+docker restart "$runner" >/dev/null
+for _ in $(seq 30); do docker exec "$runner" true 2>/dev/null && break; sleep 1; done
+docker exec "$runner" rm -f /tmp/guard-conn
+docker exec -d "$runner" node -e '
+const fs = require("node:fs");
+const s = require("node:net").connect(5432, "db");
+const done = (what) => { fs.writeFileSync("/tmp/guard-conn", what); process.exit(0); };
+s.on("connect", () => { fs.writeFileSync("/tmp/guard-conn-open", "1"); });
+s.on("error", (e) => done("error " + e.code));
+s.on("end", () => done("end"));
+setInterval(() => { try { s.write("x"); } catch (e) { done("error " + e.code); } }, 500);
+'
+for _ in $(seq 20); do docker exec "$runner" test -e /tmp/guard-conn-open 2>/dev/null && break; sleep 1; done
+docker exec "$runner" test -e /tmp/guard-conn-open || { echo "Couldn't open a connection to the database before the guard was up" >&2; exit 1; }
+docker exec "$runner" rm -f /tmp/guard-conn
+docker compose start launcher >/dev/null
+for _ in $(seq 40); do docker exec "$runner" test -s /tmp/guard-conn 2>/dev/null && break; sleep 2; done
+ended="$(docker exec "$runner" cat /tmp/guard-conn 2>/dev/null || true)"
+echo "Connection opened before the guard: $ended"
+[[ -n "$ended" && "$ended" != "end" && "$ended" != "error ECONNRESET" && "$ended" != "error EPIPE" ]] || { echo "A connection opened before the guard survived it: '$ended'" >&2; exit 1; }
+for _ in $(seq 30); do check_guard 2>/dev/null && ok=1 && break; sleep 3; done
+[[ "${ok:-0}" == 1 ]]
+echo "Network guard: a connection opened before it was up is cut off."
 
 # The launcher publishes no ports.
 [[ -z "$(docker compose port launcher 3105 2>/dev/null || true)" ]]

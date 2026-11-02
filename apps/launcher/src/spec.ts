@@ -30,11 +30,37 @@ export type LauncherConfig = {
   memoryBytes: number;
   /** BOSSMAN_RUNNER_PIDS: process/thread ceiling per runner. */
   pidsLimit: number;
+  /** BOSSMAN_NETGUARD: "auto" (default) guards every runner, and lets a host that can't run the guard go without; "enforce" refuses runners there; "off" never guards. */
+  guardMode?: GuardMode;
+  /** BOSSMAN_NETGUARD_ALLOW: extra host:port entries every runner may reach on the private networks. */
+  guardAllow?: string[];
+  /** How long to wait for a new guard to load its rules (default 20 s). */
+  guardReadyMs?: number;
 };
+
+export type GuardMode = "auto" | "enforce" | "off";
+/** The exit code netguard.sh uses when the host can't load nftables rules. */
+export const NETGUARD_UNAVAILABLE_EXIT = 3;
+const ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
+
+export function parseGuardMode(v: string | undefined): GuardMode {
+  const m = (v ?? "auto").trim().toLowerCase();
+  if (m !== "auto" && m !== "enforce" && m !== "off") throw new Error(`BOSSMAN_NETGUARD should be auto, enforce or off, not ${v}`);
+  return m;
+}
+
+/** host:port entries, space or comma separated; anything else is an error, because it would silently not open the port. */
+export function parseAllow(v: string | string[] | undefined): string[] {
+  const list = Array.isArray(v) ? v : (v ?? "").split(/[\s,]+/).filter(Boolean);
+  for (const e of list) if (!ALLOW_ENTRY.test(e) || Number(e.slice(e.lastIndexOf(":") + 1)) > 65535) throw new Error(`Not a host:port: ${e}`);
+  return [...new Set(list)];
+}
 
 export const containerName = (slug: string) => `boss-man-runner-${slug}`;
 export const netguardName = (slug: string) => `boss-man-netguard-${slug}`;
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
+/** Where the launcher keeps a company's tool-server allow list; only the guard (read-only) mounts it, never the runner. */
+export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "netguard");
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
@@ -99,9 +125,12 @@ export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string
   if (!/^[A-Za-z0-9_.-]{1,64}$/.test(runnerId)) throw new Error("bad runner id");
   return {
     Image: NETGUARD_IMAGE,
-    Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`],
+    Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
+    // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
+    Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
     Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug },
     HostConfig: {
+      Binds: [`${netguardDir(cfg, slug)}:/etc/netguard:ro`],
       NetworkMode: `container:${runnerId}`,
       CapDrop: ["ALL"],
       CapAdd: ["NET_ADMIN"],

@@ -81,6 +81,8 @@ done
 if ((ROLLBACK)); then
   docker image inspect "$IMAGE:previous" >/dev/null 2>&1 || { echo "No previous image to roll back to." >&2; exit 1; }
   docker tag "$IMAGE:previous" "$IMAGE:current"
+  # A runner is not started without its network guard (BOS-324); build it if this host has lost it.
+  docker image inspect boss-man-netguard:current >/dev/null 2>&1 || docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
   move_runners
   echo "The previous runner image is now current."
   exit 0

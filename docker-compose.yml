@@ -122,6 +122,8 @@ services:
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
       BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
+      BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
+      BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
     # Docker's socket, through the socket's own group rather than root.
     group_add: ["${BOSSMAN_DOCKER_GID:-999}"]
