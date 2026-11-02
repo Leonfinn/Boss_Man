@@ -68,6 +68,20 @@ if command -v flock >/dev/null; then
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
+  # An unusable lock folder (outside a fenced session's grant, or a planted non-file slot) fails at once with a
+  # clear message instead of waiting forever as if the slot were busy (BOS-321, Freddy's hazard 2).
+  mkdir -p "$t/ro" "$t/bad.slot.1"; chmod 555 "$t/ro"
+  if [ ! -w "$t/ro" ]; then
+    rc=0; out=$(lock env CHECK_ALL_LOCK="$t/ro/lock" timeout 20) || rc=$?
+    [ "$rc" = 2 ] || fail "unwritable lock folder: expected exit 2, got $rc: $out"
+    grep -q "cannot use the check lock folder" <<<"$out" || fail "unwritable lock folder: no clear message: $out"
+  fi
+  chmod 755 "$t/ro"
+  rc=0; out=$(lock env CHECK_ALL_LOCK="$t/bad" timeout 20) || rc=$?
+  [ "$rc" = 2 ] || fail "unopenable slot: expected exit 2 at once, got $rc: $out"
+  grep -q "cannot open $t/bad.slot.1" <<<"$out" || fail "unopenable slot: no clear message: $out"
+  [ -z "$(ls "$t/bad.queue" 2>/dev/null)" ] || fail "unopenable slot: queue entry left behind"
+
   # One slot until a side-by-side pair has passed: a busy slot makes a second check wait, and CHECK_ALL_SLOTS=2 alone is ignored.
   hold 1 3; holder=$!; sleep 0.3
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1 CHECK_ALL_SLOTS=2) || rc=$?
@@ -155,6 +169,48 @@ if command -v flock >/dev/null; then
   [ ! -e PWNED ] || { rm -f PWNED; fail "hostile queue entry name ran a command"; }
   [ ! -e "$hostile" ] || fail "hostile queue entry was not removed"
   wait "$h1"
+
+  # Agents can write the queue folder (BOS-321 review). A merge-priority entry dated an hour ahead, with a live pid,
+  # must not keep its place: a negative age used to pass the 2-hour prune and keep every hand-run check behind it.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  future="$t/lock.queue/0-$(($(date +%s) + 3600))000000000-$$"; : >"$future"
+  hold 1 2; h1=$!; sleep 0.3
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=6) || rc=$?
+  [ "$rc" = 0 ] || fail "future-dated entry: a hand-run check expected to get in ahead of it, got $rc: $out"
+  [ ! -e "$future" ] || fail "future-dated queue entry was not removed"
+  wait "$h1"
+
+  # A flood of live-looking entries must not stall the queue: one pass over 5000 used to take 13.6 s.
+  rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+  now_ns=$(date +%s%N)
+  for ((i = 0; i < 5000; i++)); do : >"$t/lock.queue/1-$((now_ns + i))-$$"; done
+  began=$SECONDS
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=5) || rc=$?
+  if [ "$rc" != 0 ] || ! grep -q "lock held" <<<"$out"; then fail "flooded queue: merge check didn't get in, got $rc: $out"; fi
+  [ $((SECONDS - began)) -le 3 ] || fail "flooded queue: took $((SECONDS - began)) s to get a free slot"
+  # A hand-run check behind the flood sees a place past the scan, and waits.
+  rc=0; out=$(lock env CHECK_ALL_LOCK_WAIT=2) || rc=$?
+  grep -q "place 201 of 200" <<<"$out" || fail "flooded queue: hand-run check's place: $out"
+  rm -rf "$t/lock.queue"
+
+  # A check inside an agent's fence (BOS-321) keeps another session's place: it can't signal that session
+  # (Landlock ABI 6 scoping), so a kill -0 test would wrongly drop the entry as dead and jump the queue.
+  fence="$here/../apps/runner/src/fence/landlock.pl"
+  if command -v perl >/dev/null && [ "$(perl "$fence" --probe | sed -n 's/.*"abi":\([0-9]*\).*/\1/p')" -ge 6 ]; then
+    rm -rf "$t/lock.queue"; mkdir -p "$t/lock.queue"
+    sleep 10 & waiter=$!
+    : >"$t/lock.queue/0-$(date +%s%N)-$waiter"
+    hold 1 3; h1=$!; sleep 0.3
+    rc=0
+    out=$(perl "$fence" --ro / --rw "$t" --rwfile /dev/null -- bash -c 'cd "$1" && TMPDIR="$3" PATH="$2:$PATH" CHECK_ALL_LOCK="$3/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$3/proof" BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2 ./scripts/check-all.sh 2>&1' \
+      _ "$here/.." "$t/bin" "$t") || rc=$?
+    [ "$rc" = 75 ] || fail "fenced check: expected to wait behind the other session (exit 75), got $rc: $out"
+    grep -q "place 2 of 2" <<<"$out" || fail "fenced check: the other session's place was dropped: $out"
+    compgen -G "$t/lock.queue/0-*-$waiter" >/dev/null || fail "fenced check removed a live session's queue entry"
+    kill "$waiter" "$h1" 2>/dev/null || true; wait "$waiter" "$h1" 2>/dev/null || true
+  else
+    echo "check-all.test.sh: Landlock ABI 6 missing, fenced queue case skipped"
+  fi
 else
   echo "check-all.test.sh: flock missing, slot cases skipped"
 fi
