@@ -485,10 +485,18 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .wiki-list li a[aria-current="page"] { background: var(--ground); font-weight: 600; }
 .wiki-list li small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .wiki-editor textarea { width: 100%; min-height: 420px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 14px; background: var(--field); color: var(--ink); }
-@media (max-width: 760px) {
+/* The page list is a drawer below the tablet mark (the same 1180px the chat uses): the page gets the full width, a Menu button opens the list over it, and tapping the dimmed page closes it. */
+@media (max-width: 1180px) {
   .wiki { grid-template-columns: minmax(0, 1fr); }
-  .wiki-list, .wiki-list:hover, .wiki-list:focus-within { position: static; width: auto; max-height: none; box-shadow: none; }
+  .wiki-menu-toggle { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 14px; }
+  .wiki-scrim { position: fixed; inset: 0; z-index: 24; background: rgb(0 0 0 / 0.45); }
+  .wiki-list.wiki-drawer, .wiki-list.wiki-drawer:hover, .wiki-list.wiki-drawer:focus-within { display: none; }
+  .wiki-list.wiki-drawer.open, .wiki-list.wiki-drawer.open:hover, .wiki-list.wiki-drawer.open:focus-within {
+    display: flex; position: fixed; z-index: 25; top: 0; bottom: 0; left: 0; width: min(88vw, 380px); max-height: none; overflow-y: auto; border-radius: 0;
+    box-shadow: 8px 0 28px rgb(0 0 0 / 0.45);
+  }
 }
+@media (min-width: 1181px) { .wiki-menu-toggle, .wiki-scrim { display: none; } }
 button.link { background: none; border: 0; padding: 0; color: var(--link); text-decoration: underline; font: inherit; cursor: pointer; }
 .wiki-list details > summary { cursor: pointer; padding: 6px 10px; border-radius: 6px; font-weight: 500; }
 .wiki-list details > summary:hover { background: var(--ground); }
