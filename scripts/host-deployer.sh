@@ -282,7 +282,11 @@ verify_live() { # commit seconds: on failure VERIFY_WHY says which check failed 
   local body=""
   VERIFY_WHY=""
   wait_ready proxy leader "$1" "$2" || { VERIFY_WHY="the server did not answer as the leader at ${1:0:8} through the proxy within ${2}s (last answer: $(probe proxy 3100 /api/ready 2>&1 | head -c 300 || true))"; return 1; }
-  body="$(probe proxy 3101 /portal.html 2>&1 >/dev/null)" || { VERIFY_WHY="the portal page did not load through the proxy (${body:0:300})"; return 1; }
+  local end=$((SECONDS + $2))
+  until body="$(probe proxy 3101 /portal.html 2>&1 >/dev/null)"; do
+    if ((SECONDS >= end)); then VERIFY_WHY="the portal page did not load through the proxy within ${2}s (${body:0:300})"; return 1; fi
+    sleep "$BG_POLL_SECONDS"
+  done
 }
 
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
