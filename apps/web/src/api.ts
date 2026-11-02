@@ -10,7 +10,7 @@ export class ApiError extends Error {
 
 /** What a failed request means in plain words, for when the server sent no message of its own. */
 export function plainStatus(status: number, error?: unknown): string {
-  if (status === 502 || status === 503 || status === 504) return "Boss Man is restarting or switching versions for a moment, so your click was not received. Nothing was changed; try again in a few seconds.";
+  if (status === 502 || status === 503 || status === 504) return "Boss Man is restarting or switching versions for a moment, so your click may not have gone through. Wait a few seconds and look at the page: if the card is still there, press the button again.";
   if (status === 404 && error === "not_open") return "This card was already closed, so there is nothing more to do here.";
   if (status === 401) return "You have been signed out. Sign in again, then repeat that.";
   return typeof error === "string" && error ? error : `Something went wrong (code ${status}). Nothing needs doing from you; try again, and tell the CEO if it keeps happening.`;

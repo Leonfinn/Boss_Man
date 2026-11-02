@@ -11,7 +11,7 @@ describe("plain error messages (BOS-342)", () => {
     const e = await failure();
     expect(e.status).toBe(503);
     expect(e.message).not.toMatch(/HTTP/);
-    expect(e.message).toMatch(/try again in a few seconds/);
+    expect(e.message).toMatch(/press the button again/);
   });
 
   it("copes with a proxy's HTML error page", async () => {
