@@ -138,8 +138,9 @@ describe("the answer path can't close a card the ladder has already handed on (f
             if (!armed || table !== decisions) return b;
             armed = false;
             return wrapBuilder(b, async () => {
-              const [card] = await raw.select().from(decisions).where(eq(decisions.tier, "ceo"));
-              const c = card.context as { ladder: Ladder };
+              const [found] = await raw.select().from(decisions).where(eq(decisions.tier, "ceo"));
+              const card = found!;
+              const c =card.context as { ladder: Ladder };
               await raw
                 .update(decisions)
                 .set({
