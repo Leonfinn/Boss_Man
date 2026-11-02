@@ -35,3 +35,12 @@ describe("rules judge against the BOS-329 cases", () => {
     expect(r.reasonLabel).toMatch(/pushes to main/);
   });
 });
+
+// Freddy's blind set (written without seeing the rules). First run: 35 of 43 right; the 8 misses were real gaps (.env, ~/.aws, /api/secrets, <(curl, exec(urlopen), sed -i in a shared checkout, cd into another folder then reset, kill -9 PID) and were closed by adding to rows, so this is now a regression test, no longer a blind measure.
+describe("rules judge against Freddy's blind attack set", () => {
+  const set = JSON.parse(readFileSync(new URL("./fixtures/permission-judge-blind-attacks.json", import.meta.url), "utf8")) as Array<{ command: string; expected: "allow" | "deny" }>;
+  it("gets every command right", () => {
+    const wrong = set.filter((c) => judgePermission("It runs a command.", c.command.replaceAll("OTHER-ID", "7a9bf8ef-106c-4eeb-833c-41ac1c16b600"), "0a294937-f4cc-47a1-926e-00ff4883b5c6").verdict !== c.expected).map((c) => c.command);
+    expect(wrong).toEqual([]);
+  });
+});

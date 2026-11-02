@@ -52,11 +52,11 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (/\b(npm|pnpm|yarn)\s+publish\b|\bdocker\s+(push|restart|stop|kill|rm|compose|run)\b|\bsystemctl\b|\bservice\s+\w+\s+(restart|stop)|\bgh\s+pr\s+merge\b|\bdeploy(\.sh)?\b[^\n]*\b(prod|production)\b|\bcrontab\b/.test(c)) return result("outward");
   if (/os\.system\([^)]*git\s+push|execSync\([^)]*git\s+push/.test(c)) return result("outward");
   // Secrets.
-  if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/environ\b|\bprintenv\b|process\.env\b|os\.environ\b/.test(c)) return result("secret");
+  if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/\.aws\/|(^|[\s/"'=<>])\.env(\.\w+)?(?=$|[\s"';|&)])|\/environ\b|\bprintenv\b|process\.env\b|os\.environ\b|\/api\/secrets\b/.test(c)) return result("secret");
   if (/(^|[;&|(]\s*|\s)env\s*($|[|;&>)])/.test(c) && !/env\s*\|\s*cut\s+-d\s*=?\s*['"]?=['"]?\s+-f\s*1/.test(c)) return result("secret");
   if (/\$\{?\w*(TOKEN|SECRET|PASSWORD|API_KEY)\w*\}?/.test(c)) return result("secret");
   // Other agents and shared things.
-  if (/\b(pkill|killall)\b|\bkill\s+(-\w+\s+)*\$\(/.test(c)) return result("others");
+  if (/\b(pkill|killall)\b|\bkill\s+(-\w+\s+)*(\$\(|\d+\b)/.test(c)) return result("others");
   if (/\/workspaces\/\.pnpm-store|\/workspaces\/repos\/[^\s]*\.git\/(config|hooks)|core\.hooksPath|\/home\/[\w.-]+\/\.claude\b|~\/\.claude\b|\$HOME\/\.claude/.test(c)) return result("others");
   if (/\.\.\/[0-9a-f]{8}-[0-9a-f]{4}/.test(c)) return result("others");
   if (/\brm\b[^;&|\n]*(^|\s)\.?pnpm-store\b/.test(c) && !own) return result("others");
@@ -68,11 +68,14 @@ export function judgePermission(question: string, command: string | null, ownFol
     if (isPrivateHost(h)) return result("privateNet");
   }
   // Opaque.
-  if (/base64\s+(-d|--decode)[^\n]*\|\s*(sh|bash|zsh)\b|\b(curl|wget)\b[^\n]*\|\s*(sh|bash|zsh)\b|\beval\s+["'$]/.test(c)) return result("opaque");
+  if (/base64\s+(-d|--decode)[^\n]*\|\s*(sh|bash|zsh)\b|\b(curl|wget)\b[^\n]*\|\s*(sh|bash|zsh)\b|\b(sh|bash|zsh|source)\s+<\(\s*(curl|wget)\b|\beval\s+["'$]|\b(exec|eval)\s*\([^\n]*(urlopen|requests\.get|fetch)\b/.test(c)) return result("opaque");
   // Writes and deletes outside its own folder and /tmp.
+  // A write to a shared checkout, or after a cd into someone else's folder, is outside its own folder.
+  if (/\bsed\s+-i\b|>>?|\btee\b|\bcp\b|\bmv\b|\brm\b/.test(c) && /\/workspaces\/repos\//.test(c)) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
+    for (const m of c.matchAll(/\bcd\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/g)) if (own && m[1] !== own) return result("outside");
     const targets = [...c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()\s*(?:-\S+\s+)*['"]?((?:~|\$HOME|\/)[^\s'";|&)]*)/g)].map((m) => m[1]!);
     for (const t of targets) if (!/^\/tmp\//.test(t) && !(own && t.includes(own)) && t !== "/dev/null") return result("outside");
   }
