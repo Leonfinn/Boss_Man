@@ -129,6 +129,13 @@ describe("explainPermission", () => {
     expect(explainPermission({ title: "edit", kind: "edit", rawInput: {} }, "A").summary).toBe("Change (no name given).");
   });
 
+  it("keeps the tool name when an mcp tool is given a parentDir argument (BOS-318)", () => {
+    const e = explainPermission({ title: "mcp__github__delete_repository", kind: "other", rawInput: { owner: "o", repo: "r", parentDir: "/tmp/screens" } }, "A");
+    expect(e.summary).toContain("mcp__github__delete_repository");
+    expect(e.summary).not.toContain("folder outside");
+    expect(explainPermission({ title: "/etc", kind: "other", rawInput: { parentDir: "/tmp/x" } }, "A").summary).not.toContain("folder outside");
+  });
+
   it("shows OpenCode's external_directory request as a folder outside the checkout (BOS-318)", () => {
     expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: { filepath: "/tmp/opencode/shots/a.png", parentDir: "/tmp/opencode/shots" } }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
     expect(explainPermission({ title: "/tmp/opencode/shots", kind: "other", rawInput: {} }, "A").summary).toBe("Access folder outside checkout: /tmp/opencode/shots.");
