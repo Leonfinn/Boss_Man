@@ -2,6 +2,7 @@
 // agents raise, engagement offers, stale blockers and stalled runs. Answering one resumes
 // whatever was waiting on it. The open queue is ranked by an explainable score (R20).
 import { randomUUID } from "node:crypto";
+import { createPermissionLog, type PermissionLog } from "./permission-log.js";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
@@ -539,6 +540,8 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
 }
 
 export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}) {
+  // The record of permission decisions (BOS-306); app.ts swaps in one that writes log lines.
+  let permLog: PermissionLog = createPermissionLog();
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -962,14 +965,18 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       const info: PermissionInfo = { title: event.title, kind: event.kind, rawInput: event.rawInput };
       // The owner chat may use Boss Man's own (board) tools and nothing else.
-      const [asking] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
-      const { outcome, rule } =
+      const [asking] = await db.select({ purpose: runs.purpose, agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+      const { outcome, rule, position } =
         asking?.purpose === "chat"
           ? isBossmanCall(info)
-            ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
-            : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
+            ? { outcome: "allow" as const, rule: "The owner chat's board tools", position: 0 }
+            : { outcome: "deny" as const, rule: "The owner chat has board tools only", position: 0 }
           : evaluatePermission(info, await rulesFor(runner.companyId));
+      // tier is where a card ended up (the CEO's own requests, or a paused CEO, go to the owner); outcome is what the rule said.
+      const record = (decisionId: string | null, tier: string = outcome) =>
+        permLog.decision({ companyId: runner.companyId, runId: event.runId, agentId: asking?.agentId ?? null, ticketId: asking?.ticketId ?? null, title: event.title, kind: event.kind, rule, position, outcome, tier, decisionId });
       if (outcome === "allow" || outcome === "deny") {
+        record(null);
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event
         // won't be applied again when it's resent, so keep the verdict as an answered row that
@@ -1084,6 +1091,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ].join("\n").slice(0, 4000),
         });
       } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
+      record(row?.id ?? null, tier);
       return { outcome, rule, decisionId: row?.id ?? null };
     },
 
@@ -1179,6 +1187,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setSelfDeployHook(hook: SelfDeployHook) {
       selfDeploy = hook;
+    },
+
+    setPermissionLog(l: PermissionLog) {
+      permLog = l;
+    },
+
+    /** A runner reported a tool call that failed with "User refused permission" (BOS-306): log it with the run, agent and ticket. */
+    async onRefusedCall(runner: { companyId: string }, runId: string, title: string | null) {
+      const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(and(eq(runs.id, runId), eq(runs.companyId, runner.companyId)));
+      permLog.refusedCall({ companyId: runner.companyId, runId, agentId: run?.agentId ?? null, ticketId: run?.ticketId ?? null, title });
     },
 
     setMaintenanceHook(hook: MaintenanceHook) {
@@ -1829,6 +1847,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           });
         }
         delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: allowed ? "allow" : "deny" });
+        const [asked] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, ctx.runId));
+        permLog.answer({ companyId: d.companyId, runId: ctx.runId, agentId: asked?.agentId ?? null, ticketId: asked?.ticketId ?? null, decisionId: id, answeredBy: extra.settledBy ? "ceo" : "owner", answer });
         if (!delivered) {
           // Never fail silently (R22): flag it, and re-send when the runner reconnects.
           await db.update(decisions).set({ context: { ...ctx, delivered: false } }).where(eq(decisions.id, id));
