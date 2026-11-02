@@ -68,7 +68,7 @@ move_runners() {
   request_drain
 }
 
-NOW=0 ROLLBACK=0 version=latest
+NOW=0 ROLLBACK=0 version=
 for a in "$@"; do
   case $a in
     --now) NOW=1 ;;
@@ -87,9 +87,9 @@ if ((ROLLBACK)); then
 fi
 
 stamp="$(date -u +%Y%m%d%H%M)"
-echo "Building $IMAGE:candidate with Claude Code $version${addons:+ and add-ons: $addons}..."
+echo "Building $IMAGE:candidate with Claude Code ${version:-(the version pinned in the Dockerfile)}${addons:+ and add-ons: $addons}..."
 docker build --pull -f apps/runner/Dockerfile \
-  --build-arg CLAUDE_CODE_VERSION="$version" \
+  ${version:+--build-arg CLAUDE_CODE_VERSION="$version"} \
   --build-arg BOSSMAN_IMAGE_VERSION="$stamp" \
   --build-arg RUNNER_ADDONS="$addons" \
   -t "$IMAGE:candidate" .

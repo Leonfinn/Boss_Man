@@ -70,17 +70,24 @@ if [ -n "${BOSSMAN_CHECK_BODY:-}" ]; then bash -c "$BOSSMAN_CHECK_BODY"; exit; f
 pnpm install --frozen-lockfile --prefer-offline >/dev/null
 node --test scripts/*.test.mjs
 node scripts/lint-migrations.mjs
-# The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS (default 1 until a clean side-by-side pair is measured) checks run them at once;
+# The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
 # A waiter prints its place and an estimated wait and does not give up (hand-run checks) or gives up
-# after CHECK_ALL_LOCK_WAIT seconds (default 600, merge check only: exit 75, which Boss Man retries).
+# after CHECK_ALL_LOCK_WAIT seconds (default 3 h, merge check only: exit 75, which Boss Man retries).
+# The merge check queues like the rest but goes ahead of waiting hand-run checks; one already running is never interrupted.
 # fd 9 is inherited by pnpm/vitest: if a timed-out check leaves children behind they keep the slot until
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
 if command -v flock >/dev/null; then
   LOCK=${CHECK_ALL_LOCK:-/tmp/bossman-check-all}
-  SLOTS=${CHECK_ALL_SLOTS:-1}
+  # One check at a time until a measured side-by-side pair has passed: that run writes the proof file below
+  # (see the Build and test note). CHECK_ALL_PAIR_TRIAL=1 lets the two measuring runs use more slots.
+  PROOF=${CHECK_ALL_PAIR_PROOF:-/var/tmp/bossman-check-pair-passed}
+  SLOTS=1
+  if [ -s "$PROOF" ] || [ -n "${CHECK_ALL_PAIR_TRIAL:-}" ]; then SLOTS=${CHECK_ALL_SLOTS:-2}
+  elif [ "${CHECK_ALL_SLOTS:-1}" -gt 1 ]; then echo "check-all: CHECK_ALL_SLOTS=$CHECK_ALL_SLOTS ignored, no passed side-by-side pair recorded in $PROOF; running one at a time"
+  fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
-  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-600}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
+  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-10800}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
   mkdir -p "$QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
   : >"$qfile"; trap 'rm -f "$qfile"' EXIT
@@ -103,7 +110,7 @@ if command -v flock >/dev/null; then
       base=$(basename "$f")
       if ! [[ $base =~ ^[01]-[0-9]+-[0-9]+$ ]]; then rm -f "$f"; continue; fi
       qts=$(cut -d- -f2 <<<"$base"); qpid=${base##*-}
-      if ! kill -0 "$qpid" 2>/dev/null || [ $((now - qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
+      if ! kill -0 "$((10#$qpid))" 2>/dev/null || [ $((now - 10#$qts / 1000000000)) -gt 7200 ]; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
     done
     echo "$mine $total"
@@ -115,7 +122,7 @@ if command -v flock >/dev/null; then
       while read -r f; do
         grep -q '"status":"pass"' "$f" || continue
         d=$(sed -n 's/.*"duration_seconds":\([0-9]*\).*/\1/p' "$f")
-        if [ -n "$d" ] && [ "$d" -gt 0 ]; then sum=$((sum + d)); n=$((n + 1)); fi
+        if [ -n "$d" ] && [ "$((10#$d))" -gt 0 ]; then sum=$((sum + 10#$d)); n=$((n + 1)); fi
       done < <(find "$BOSSMAN_CHECK_STORE" -maxdepth 1 -name '*.json' -printf '%T@ %p\n' | sort -rn | head -n 10 | cut -d' ' -f2-)
     fi
     if [ "$n" -gt 0 ]; then echo $((sum / n)); else echo 600; fi
@@ -138,6 +145,7 @@ if command -v flock >/dev/null; then
     echo "check-all: gave up waiting for the heavy-phase lock $LOCK" >&2; exit 75
   fi
   rm -f "$qfile"; trap - EXIT
+  echo "check-all: slot taken, running the checks"
 else
   echo "check-all: flock not found, running without the heavy-phase lock"
 fi

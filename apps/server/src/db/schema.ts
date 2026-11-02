@@ -104,7 +104,7 @@ export const agents = pgTable(
     duty: text("duty"),
     /**
      * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
-     * migration 0084 moved every use into the review policy, and it is read only for a leftover
+     * migration 0086 moved every use into the review policy, and it is read only for a leftover
      * "marked" cell. Kept one release so a rollback has it; drop it after.
      */
     reviewKind: text("review_kind"),
@@ -151,6 +151,8 @@ export const runners = pgTable("runners", {
   companyId: uuid("company_id").notNull().unique().references(() => companies.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull(),
   imageVersion: text("image_version"),
+  /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
+  harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),

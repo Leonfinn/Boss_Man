@@ -75,6 +75,8 @@ export const WATCH_REASON = "ticket watch";
 export const MISSED_REASON = "missed work";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
+/** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
+export const DECISION_REASON = "decision";
 /** Tickets moved to review, gathered into one CEO run (R85). */
 export { REVIEW_REASON };
 /** The owner isn't a developer: replies lead in plain words, the technical report folds away under "Details:". */
@@ -902,7 +904,10 @@ export function schedulerService(
       // Runs with no ticket (decisions, triage, chasing) cost as much as ticket work but are easy
       // to set off in a loop, so each agent gets a few an hour. The owner's own chat and wakes
       // always go through (R68).
-      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== WATCHDOG_REASON && input.reason !== RETRO_REASON) {
+      // The "decision" reason is the CEO's cards (permission requests, alerts, raised decisions):
+      // dropping one past the cap made the card skip the CEO and land on the owner (BOS-272), so it
+      // is never capped either; the alert ladder caps CEO alert hops on its own clock.
+      if (!base.ticketId && !fromOwner(input) && input.reason !== WATCH_REASON && input.reason !== TREE_REASON && input.reason !== REVIEW_REASON && input.reason !== ANSWER_REASON && input.reason !== DECISION_REASON && input.reason !== WATCHDOG_REASON && input.reason !== RETRO_REASON) {
         const since = new Date(now().getTime() - 3_600_000);
         const [recent] = await db
           .select({ n: sql<number>`count(*)::int` })
@@ -918,6 +923,7 @@ export function schedulerService(
               sql`${wakes.reason} <> ${TREE_REASON}`,
               sql`${wakes.reason} <> ${REVIEW_REASON}`,
               sql`${wakes.reason} <> ${ANSWER_REASON}`,
+              sql`${wakes.reason} <> ${DECISION_REASON}`,
               sql`${wakes.reason} <> ${WATCHDOG_REASON}`,
               sql`${wakes.reason} <> ${RETRO_REASON}`,
             ),

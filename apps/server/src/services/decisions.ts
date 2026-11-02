@@ -6,6 +6,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   effectiveDueDate,
   evaluatePermission,
+  isBossmanCall,
   ruleFor,
   rankDecision,
   ticketRef,
@@ -163,7 +164,6 @@ export const REASSIGN = "Reassign";
 export const DROP = "Drop dependency";
 /** On a stale-blocker card: hand it to the company's CEO to settle. */
 export const LET_CEO_DECIDE = "Let the CEO decide";
-const BOSSMAN_TOOL = /^(mcp__bossman__|mcp\.bossman\.)/;
 export const KEEP_WAITING = "Keep waiting";
 export const CANCEL_RUN = "Cancel run";
 export const RAISE_BUDGET = "Raise it by half";
@@ -792,6 +792,27 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /**
+   * Wakes the CEO about a card on the ladder, tied to the card's ticket so it can't hit the
+   * ticketless-wake limit (BOS-159). If the wake is dropped anyway, the card goes straight to the
+   * owner: a request must never sit at a rung nobody was woken for while the runner counts down.
+   */
+  async function wakeLadderCeo(companyId: string, row: { id: string }, ctx: { ladder: Ladder } & Record<string, unknown>, ceoId: string, note: string) {
+    if (!wake) return;
+    // High priority, like an alert: the agent is waiting, and the runner gives up at 10 minutes.
+    const w = (await wake({ agentId: ceoId, ticketId: ctx.ladder.ticketId, reason: "decision", priority: 3, note })) as { status?: string; statusReason?: string | null } | null;
+    if (w?.status !== "dropped") return;
+    const at = now().toISOString();
+    const why = `the CEO's wake was dropped (${w.statusReason ?? "no reason given"})`;
+    const ladder: Ladder = { ...ctx.ladder, rung: "owner", since: at, hops: [...ctx.ladder.hops, { to: "owner", at, why }] };
+    const moved = await db
+      .update(decisions)
+      .set({ tier: "owner", forAgentId: null, context: { ...(ctx as object), triedFirst: `Boss Man tried the CEO first: ${why}.`, ladder } })
+      .where(and(eq(decisions.id, row.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (moved.length) await record(db, { companyId, ticketId: ctx.ladder.ticketId, kind: "watchdog", summary: `Card sent to the owner at once: the CEO's wake was dropped (${w.statusReason ?? "no reason given"}).`, at: now() });
+  }
+
+  /**
    * The owner hands a stale-blocker card to the company's CEO: it moves to the CEO's rung of the alert
    * ladder (off the owner's queue, listed under "Being handled by the team"), the CEO is woken, and it
    * climbs back to the owner if the CEO doesn't settle it in time.
@@ -861,18 +882,13 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       })
       .onConflictDoNothing()
       .returning({ id: decisions.id, question: decisions.question });
-    if (row && ladder && ceoId && wake)
-      await wake({
-        agentId: ceoId,
-        reason: "decision",
-        priority: 3,
-        note: [
+    if (row && ladder && ceoId)
+      await wakeLadderCeo(runner.companyId, row, { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, plan: true, ticketId: t?.id ?? null, planText: plan, ladder }, ceoId, [
           `A plan is waiting for you (decision ${row.id}): ${row.question}`,
           "Approve it to let the agent start building, or send it back with what to change.",
           "Answer with the decisions tool (action answer). If only the owner can settle it, escalate it to them (action escalate).",
           `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
-        ].join("\n").slice(0, 4000),
-      });
+        ].join("\n").slice(0, 4000));
     else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question, forAgentId ?? undefined);
     return { outcome: tier, rule: "Plans are approved before work starts", decisionId: row?.id ?? null };
   }
@@ -965,7 +981,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const [asking] = await db.select({ purpose: runs.purpose }).from(runs).where(eq(runs.id, event.runId));
       const { outcome, rule } =
         asking?.purpose === "chat"
-          ? BOSSMAN_TOOL.test(event.title ?? "")
+          ? isBossmanCall(info)
             ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
           : evaluatePermission(info, await rulesFor(runner.companyId));
@@ -1036,13 +1052,17 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Standing rules are the owner's call, never an agent's.
       const always = tier === "owner" ? alwaysChoices(info, explain) : [];
       const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, explain, ...(always.length ? { always } : {}) };
+      // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
+      const stored = { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) };
       const [row] = await db
         .insert(decisions)
         .values({
           companyId: runner.companyId,
           kind: "permission",
-          // Which checkout and which files, on every card the CEO or the owner sees (BOS-120).
-          question: `${explain.title}. ${explain.summary}${workingCopy ? ` In ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 400)}.` : ""}`,
+          // Which checkout the run started in and which files, on every card the CEO or the owner sees
+          // (BOS-120). Boss Man only knows where the shell STARTED (BOS-159): a shell keeps its folder
+          // between commands, so the card never claims the paths are inside the checkout now.
+          question: `${explain.title}. ${explain.summary}${workingCopy ? ` Its relative paths delete from the shell's folder; the run started in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}), and Boss Man can't see where it has moved to since: ${fileList(workingCopy.files, 400)}.` : ""}`,
           options: [ALLOW, ...always.map((a) => a.label), DENY],
           // The same allow-list as everywhere else: build output is Allow, source or anything else is
           // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).
@@ -1050,39 +1070,32 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
-          // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
-          context: { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) },
+          context: stored,
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
-      if (row && ceoId && wake) {
-        // High priority, like an alert: the agent is waiting, and the runner gives up at 10 minutes.
-        await wake({
-          agentId: ceoId,
-          reason: "decision",
-          priority: 3,
-          note: [
-            `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
-            `Command: ${explain.command ?? ""}`,
-            ...(workingCopy
+      if (row && ceoId && "ladder" in stored && stored.ladder) {
+        await wakeLadderCeo(runner.companyId, row, stored as typeof stored & { ladder: Ladder }, ceoId, [
+          `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
+          `Command: ${explain.command ?? ""}`,
+          ...(workingCopy
+            ? [
+                `Its deletes are plain relative paths and the command has no cd, so they happen in the shell's folder. The run started in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 1000)}. The shell keeps its folder between commands and a cd is allowed on its own, so Boss Man can't vouch for where it sits now. Any other deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner.`,
+                "Boss Man can't see the runner's files: if a folder on one of those paths is a symlink, the delete follows it out of the checkout. It recommends Allow only for build output (dist, node_modules and the like). Allow it when the paths are the agent's own throwaway files (a probe or test file it made, build output such as dist or node_modules) and its ticket explains them.",
+                "Deny it, or escalate it to the owner (decisions tool, action escalate), if it deletes source folders or files the ticket doesn't account for, or anything you can't explain.",
+              ]
+            : rule === TEMP_CLEANUP_RULE
               ? [
-                  `Its deletes are plain relative paths in ${agent?.name ?? "the agent"}'s working copy for ${workingCopy.ref ?? "its ticket"} (branch ${workingCopy.branch}): ${fileList(workingCopy.files, 1000)}. It has no cd. Any other deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner.`,
-                  "Boss Man can't see the runner's files: if a folder on one of those paths is a symlink, the delete follows it out of the checkout. It recommends Allow only for build output (dist, node_modules and the like). Allow it when the paths are the agent's own throwaway files (a probe or test file it made, build output such as dist or node_modules) and its ticket explains them.",
-                  "Deny it, or escalate it to the owner (decisions tool, action escalate), if it deletes source folders or files the ticket doesn't account for, or anything you can't explain.",
+                  "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
+                  "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
+                  "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
                 ]
-              : rule === TEMP_CLEANUP_RULE
-                ? [
-                    "Its only deletes are of entries directly in /tmp, and everything else in it is on Boss Man's short list of commands, so it came to you rather than the owner. Any folder it writes into in /tmp is one the same command deleted first, so it can't be a shortcut link to somewhere else.",
-                    "Two exceptions on that list reach outside /tmp. git worktree add writes into the project's repository (.git) and creates its -b branch there: check the branch name is the asking agent's own. pnpm or npm install runs the project's own install scripts, which can do anything: check that the folder is a checkout of the asking agent's own ticket branch.",
-                    "Allow it when the rest of the command looks like the agent's own work. Deny it, or escalate it to the owner (decisions tool, action escalate), if anything in it reaches outside /tmp, pushes, or you can't account for it.",
-                  ]
-                : [
-                    "A company rule sends it to you rather than the owner. Allow it if you can vouch for it, or deny it if not; if only the owner can settle it (a secret, host access, sign-off, an owner-only choice), escalate it to them (decisions tool, action escalate).",
-                  ]),
-            "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
-            `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
-          ].join("\n").slice(0, 4000),
-        });
+              : [
+                  "A company rule sends it to you rather than the owner. Allow it if you can vouch for it, or deny it if not; if only the owner can settle it (a secret, host access, sign-off, an owner-only choice), escalate it to them (decisions tool, action escalate).",
+                ]),
+          "Answer with the decisions tool (action answer) and give a note saying why: the owner reads it.",
+          `If you don't answer within ${CEO_HANDOVER_MINUTES} minutes it goes to the owner, marked as tried by you first.`,
+        ].join("\n").slice(0, 4000));
       } else if (row && tier === "ceo") await tellCeo(runner.companyId, row.question);
       return { outcome, rule, decisionId: row?.id ?? null };
     },
@@ -1785,7 +1798,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         settled = { agentId: extra.settledBy.agentId, name: who?.name ?? "the CEO", note: extra.note?.trim().replace(/\s+/g, " ").slice(0, 500) || null, at: now().toISOString() };
         settledContext = { ...(ctx as object), settled } as DecisionContext;
       }
-      // Conditional on still being open (and, for the CEO, still asked), so whoever closes it first wins and the loser changes nothing.
+      // Conditional on still being open (and, for the CEO, still asked) and still on the same tier it
+      // was read on, so whoever closes it first wins and the loser changes nothing. The tier clause
+      // closes the race where the ladder hands the open card to the owner between the CEO reading it
+      // and answering: the answer then matches nothing instead of closing the owner's card (BOS-159).
       const [closed] = await db
         .update(decisions)
         // A stale-blocker row frees its key so the blocker can be flagged again if it stalls again; so does a
@@ -1797,7 +1813,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           ...(ctx.type === "stale_blocker" || ctx.type === "check_stuck" || d.dedupeKey?.startsWith("alert:") ? { dedupeKey: null } : {}),
           ...(extra.handled ? { context: { ...(d.context as object), advice: { ...adviceOf(d.context), state: "handled", ...extra.handled } } } : settled ? { context: settledContext! } : {}),
         })
-        .where(and(eq(decisions.id, id), eq(decisions.status, "open"), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
+        .where(and(eq(decisions.id, id), eq(decisions.status, "open"), eq(decisions.tier, d.tier), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
       if (!closed) return null;
 

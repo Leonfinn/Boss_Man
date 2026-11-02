@@ -92,10 +92,13 @@ describe("owner chat", () => {
     await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p1", title: "Bash", kind: "execute", rawInput: { command: "ls" }, optionKinds: ["allow_once", "reject_once"] });
     await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p2", title: "mcp__bossman__create_ticket", kind: "other", rawInput: {}, optionKinds: ["allow_once", "reject_once"] });
     await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p3", title: "Edit", kind: "edit", rawInput: { file_path: "src/x.ts" }, optionKinds: ["allow_once", "reject_once"] });
+    // A shell request titled like a Boss Man tool is still a command (BOS-292 security review).
+    await c.emit({ type: "run.permission_request", runId: start.runId, requestId: "p4", title: "bossman_x; rm -rf /srv/precious", kind: "execute", rawInput: { command: "bossman_x; rm -rf /srv/precious" }, optionKinds: ["allow_once", "reject_once"] });
     expect(c.sent).toEqual([
       expect.objectContaining({ type: "permission.decide", requestId: "p1", verdict: "deny" }),
       expect.objectContaining({ type: "permission.decide", requestId: "p2", verdict: "allow" }),
       expect.objectContaining({ type: "permission.decide", requestId: "p3", verdict: "deny" }),
+      expect.objectContaining({ type: "permission.decide", requestId: "p4", verdict: "deny" }),
     ]);
 
     // Its MCP server has the board tools, plus looking up tickets, the wiki and skills (R77).
