@@ -2,7 +2,7 @@
 // not asked to be fenced starts exactly as before.
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -99,6 +99,65 @@ describe("a run that isn't asked to be fenced", () => {
     expect(r.reach.wroteOutside).toBe(true);
     expect(r.events.find((e) => e.type === "run.started")).toMatchObject({ fenced: false });
     expect(r.events).toContainEqual(expect.objectContaining({ type: "runner.log", level: "warn", message: expect.stringContaining("can't fence agents") }));
+  });
+});
+
+describe.skipIf(!live)("the shared memory link", () => {
+  it("is only made inside the agent's real home, whatever the agent did to its folders", async () => {
+    const remote = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
+    const g = (args: string[]) => execFileSync("git", args, { cwd: remote, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+    g(["init", "-q", "-b", "main"]);
+    writeFileSync(path.join(remote, "README.md"), "app\n");
+    g(["add", "."]);
+    g(["commit", "-qm", "init"]);
+    const root = mkdtempSync(path.join(tmpdir(), "bm-fence-link-"));
+    const workspaces = new Workspaces(path.join(root, "workspaces"));
+    const agentsRoot = path.join(root, "agents");
+    const agentId = randomUUID();
+    // In an earlier run the agent swapped its projects folder for a link to a folder of the runner's.
+    const elsewhere = path.join(root, "runner-data");
+    mkdirSync(elsewhere);
+    mkdirSync(path.join(agentsRoot, agentId, ".claude"), { recursive: true });
+    symlinkSync(elsewhere, path.join(agentsRoot, agentId, ".claude", "projects"));
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      workspaces,
+      mcpUrl: "http://127.0.0.1:1/mcp",
+      baseEnv: { PATH: process.env.PATH, HOME: root, CLAUDE_CONFIG_DIR: path.join(root, "shared-claude") },
+      resolveEnv: async () => ({}),
+      adapterBins: { claude: FAKE_REACH },
+      fence: { level, agentsRoot },
+      emit: (e) => e.type === "run.ended" && done(),
+    });
+    manager.handle({ type: "run.start", runId: randomUUID(), agentId, agentKind: "claude", model: null, fundingSourceId: null, cwd: root, prompt: "probe", mcpToken: "t", workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: remote, baseRef: "main" }, fence: true });
+    await ended;
+    expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  it("refuses to start when the agent turned its temp folder into a link", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "bm-fence-link-"));
+    const agentsRoot = path.join(root, "agents");
+    const agentId = randomUUID();
+    const elsewhere = path.join(root, "runner-data");
+    mkdirSync(elsewhere);
+    mkdirSync(path.join(agentsRoot, agentId), { recursive: true });
+    symlinkSync(elsewhere, path.join(agentsRoot, agentId, "tmp"));
+    const events: RunnerEvent[] = [];
+    let done!: () => void;
+    const ended = new Promise<void>((r) => (done = r));
+    const manager = new SessionManager({
+      mcpUrl: "http://127.0.0.1:1/mcp",
+      baseEnv: { PATH: process.env.PATH, HOME: root },
+      resolveEnv: async () => ({}),
+      adapterBins: { claude: FAKE_REACH },
+      fence: { level, agentsRoot },
+      emit: (e) => (events.push(e), e.type === "run.ended" && done()),
+    });
+    manager.handle({ type: "run.start", runId: randomUUID(), agentId, agentKind: "claude", model: null, fundingSourceId: null, cwd: path.join(root, "work"), prompt: "probe", mcpToken: "t", fence: true });
+    await ended;
+    expect((events.find((e) => e.type === "run.ended") as { error: string }).error).toMatch(/^Couldn't set up the agent's fence: tmp\//);
+    expect(readdirSync(elsewhere)).toEqual([]);
   });
 });
 

@@ -158,6 +158,18 @@ export function defaultBin(agentKind: string): string {
   return path.join(path.dirname(require.resolve(`${pkg}/package.json`)), rel);
 }
 
+/** Makes base/rel folder by folder, refusing to go through anything that isn't a real folder (a link). */
+function realDirsUnder(base: string, rel: string): boolean {
+  let at = base;
+  for (const part of rel.split(path.sep).filter(Boolean)) {
+    at = path.join(at, part);
+    const st = lstatSync(at, { throwIfNoEntry: false });
+    if (!st) mkdirSync(at);
+    else if (!st.isDirectory()) return false;
+  }
+  return true;
+}
+
 type RunState = {
   child: ChildProcess;
   sessionId: string | null;
@@ -430,7 +442,10 @@ export class SessionManager {
     const home = path.join(fence.agentsRoot, cmd.agentId);
     const tmp = path.join(home, "tmp", cmd.runId);
     const dirs = { CLAUDE_CONFIG_DIR: path.join(home, ".claude"), CODEX_HOME: path.join(home, ".codex"), XDG_CONFIG_HOME: path.join(home, ".config"), XDG_CACHE_HOME: path.join(home, ".cache"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state") };
-    for (const d of [tmp, ...Object.values(dirs)]) mkdirSync(d, { recursive: true });
+    mkdirSync(home, { recursive: true });
+    for (const d of [tmp, ...Object.values(dirs)]) {
+      if (!realDirsUnder(home, path.relative(home, d))) throw new Error(`${path.relative(home, d)} in the agent's home isn't a folder`);
+    }
     Object.assign(env, { HOME: home, TMPDIR: tmp }, dirs);
     // The shared repo's root is read-only to the agent, where auto-gc and pack-refs would write.
     addGitConfig(env, "gc.auto", "0");
@@ -457,8 +472,9 @@ export class SessionManager {
         const memory = path.join(shared, "projects", slug, "memory");
         const link = path.join(dirs.CLAUDE_CONFIG_DIR, "projects", slug, "memory");
         mkdirSync(memory, { recursive: true });
-        mkdirSync(path.dirname(link), { recursive: true });
-        if (!lstatSync(link, { throwIfNoEntry: false })) symlinkSync(memory, link);
+        // The agent owns its folder and could swap a parent for a link elsewhere, so the runner
+        // makes folders and its link only through real folders. The grant is the shared folder either way.
+        if (realDirsUnder(home, path.relative(home, path.dirname(link))) && !lstatSync(link, { throwIfNoEntry: false })) symlinkSync(memory, link);
         readWrite.push(memory);
       }
     }
