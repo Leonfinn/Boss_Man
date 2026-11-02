@@ -41,7 +41,7 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  *   otherwise it is read from a leading `cd` or the most-named folder in the command.
  */
 export function judgePermission(question: string, command: string | null, ownFolder?: string): JudgeReading {
-  if (!command) return judgeWithoutCommand(question);
+  if (!command) return judgeWithoutCommand(question, ownFolder);
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
   const c = command.replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
@@ -80,12 +80,41 @@ export function judgePermission(question: string, command: string | null, ownFol
     for (const m of c.matchAll(/\bcd\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/g)) if (own && m[1] !== own) return result("outside");
     const targets = [...c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()\s*(?:-\S+\s+)*['"]?((?:~|\$HOME|\/)[^\s'";|&)]*)/g)].map((m) => m[1]!);
     for (const t of targets) if (!/^\/tmp\//.test(t) && !(own && t.includes(own)) && t !== "/dev/null") return result("outside");
+    // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
+    for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
+    for (const m of c.matchAll(/\bcd\s+(?:--\s+)?['"]?([^\s;&|'")]*)/g)) {
+      const dir = m[1]!;
+      if (dir === "" || dir === "-") continue;
+      if (/^\/tmp(\/|$)/.test(dir) && !dir.includes("..")) continue;
+      if (own && dir.includes(own) && !dir.includes("..")) continue;
+      if (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir) && !dir.includes("..")) continue; // a sub-folder of where it already is
+      return result("outside");
+    }
+    // `find <path> ... -delete` / `-exec rm`: the start path decides.
+    for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
+      const start = m[2]!;
+      if (start === "" || start === "." || (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(start) && !start.includes(".."))) continue;
+      if (/^\/tmp\//.test(start) && !start.includes("..")) continue;
+      if (own && start.includes(own) && !start.includes("..")) continue;
+      return result("outside");
+    }
   }
   return result("ok");
 }
 
+/** Resolves `.` and `..` segments so a path can't climb out of the folder it starts in. */
+function normalizePath(p: string): string {
+  const out: string[] = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return "/" + out.join("/");
+}
+
 /** A tool call with no command: judged from the card's text, and unknown tools can't be vouched for. */
-function judgeWithoutCommand(question: string): JudgeReading {
+function judgeWithoutCommand(question: string, ownFolder?: string): JudgeReading {
   if (/\(no name given\)|Change \(no name|Fetch \(no name/.test(question)) return result("noTarget");
   const tool = /Uses the tool "([^"]+)"/.exec(question)?.[1];
   if (tool && !/^mcp__\w+__\w+$/.test(tool)) return result("noTarget");
@@ -99,7 +128,9 @@ function judgeWithoutCommand(question: string): JudgeReading {
   }
   if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\//.test(question)) return result("secret");
   const change = /wants to (change|delete|move)/.test(question);
-  const paths = [...question.matchAll(/(\/[\w.@+/-]+)/g)].map((m) => m[1]!);
+  const paths = [...question.matchAll(/(\/[\w.@+/-]+)/g)].map((m) => normalizePath(m[1]!.replace(/[.,]+$/, "")));
+  if (change && paths.some((p) => /\/\.git\/hooks\b/.test(p))) return result("others");
+  if (change && paths.some((p) => WORKSPACE_PATH.test(p) && ownFolder && !p.includes(`/${ownFolder}/`) && !p.endsWith(`/${ownFolder}`))) return result("others");
   if (change && paths.some((p) => !/^\/tmp\//.test(p) && !WORKSPACE_PATH.test(p))) return result("outside");
   return result("ok");
 }

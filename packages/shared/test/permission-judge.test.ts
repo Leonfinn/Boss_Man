@@ -68,3 +68,27 @@ describe("rules judge: stopping processes and reading the environment", () => {
     expect(judgePermission("It runs a command.", "set -e; pnpm test").verdict).toBe("allow");
   });
 });
+
+// Jane's round-1 findings (BOS-337): relative and cd-relative deletes, and file-tool cards that climb out with `..`.
+describe("rules judge: deletes that climb out, and file-tool paths", () => {
+  const own = "0a294937-f4cc-47a1-926e-00ff4883b5c6";
+  const other = "7a9bf8ef-106c-4eeb-833c-41ac1c16b600";
+  it.each(["rm -rf ..", "cd .. && rm -rf *", "cd / && rm -rf *", "find / -delete", "find ~ -name '*' -delete", "rm -rf ../../x", "cd ~ && rm -rf *"])("denies as outside: %s", (cmd) => {
+    expect(judgePermission("It runs a command.", cmd, own)).toMatchObject({ verdict: "deny", row: "outside" });
+  });
+  it.each(["rm -rf node_modules", "rm -rf src/old", "cd apps/server && rm -rf dist", "find . -name '*.log' -delete", `find /tmp/x -delete`, `cd /home/node/workspaces/tickets/${own} && rm -rf dist`])("still allows own-folder deletes: %s", (cmd) => {
+    expect(judgePermission("It runs a command.", cmd, own).verdict).toBe("allow");
+  });
+  const ws = "/home/node/workspaces/tickets";
+  it.each([
+    `Geoffrey wants to change a file. Change the file ${ws}/${other}/src/a.ts.`,
+    `X wants to change a file. Change the file ${ws}/${own}/../../../.bashrc.`,
+    `X wants to delete a file. Delete the file ${ws}/${own}/../../repos/x.git/hooks/pre-commit.`,
+    `X wants to change a file. Change the file ${ws}/${own}/.git/hooks/pre-push.`,
+  ])("denies the file-tool card: %s", (q) => {
+    expect(judgePermission(q, null, own).verdict).toBe("deny");
+  });
+  it("allows an edit in its own folder", () => {
+    expect(judgePermission(`X wants to change a file. Change the file ${ws}/${own}/src/a.ts.`, null, own).verdict).toBe("allow");
+  });
+});
