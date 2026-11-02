@@ -176,6 +176,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
+    /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
+    bootId: z.string().max(100).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
   }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
