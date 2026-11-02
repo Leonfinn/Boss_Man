@@ -157,6 +157,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;
 
+/** Harness name to exact version, e.g. { "claude-code": "2.1.0" }. */
+export const HarnessVersions = z.record(z.string().max(40), z.string().max(60));
+export type HarnessVersions = z.infer<typeof HarnessVersions>;
+
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
   /**
@@ -168,6 +172,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
+    harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
@@ -212,15 +218,23 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
-/** How long the runner lets a ticket's check run (R47), and how long the server waits for its answer (a minute longer). */
+/**
+ * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
+ * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for
+ * the answer a minute longer than both.
+ */
 export const VERIFY_TIMEOUT_MS = 30 * 60_000;
-export const VERIFY_ASK_TIMEOUT_MS = VERIFY_TIMEOUT_MS + 60_000;
+export const VERIFY_QUEUE_MAX_MS = 3 * 60 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_MAX_MS + VERIFY_TIMEOUT_MS + 60_000;
+/** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the 30-minute clock at the second. */
+export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
+export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
 /**
  * How long an approved ticket can go without any activity before its merge is treated as stopped:
- * longer than the server waits for a merge check, so a check still running is never mistaken for one
- * that died. The unmerged-approvals sweep and the merge card's stale marker both use it.
+ * longer than a check runs, so a check still running is never mistaken for one that died. A check waiting
+ * in the queue beats every minute (whileActive), so it can wait for hours without tripping this. The unmerged-approvals sweep and the merge card's stale marker both use it.
  */
-export const MERGE_MISSED_AFTER_MS = VERIFY_ASK_TIMEOUT_MS + 5 * 60_000;
+export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 
 /** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };

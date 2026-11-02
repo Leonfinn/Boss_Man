@@ -838,7 +838,14 @@ export function reviewService(
       const checkMerged = landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
       for (const command of checkMerged ? [] : checks) {
         await touch();
-        const v = await whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
+        const runCheck = () => whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
+        let v = await runCheck();
+        // Killed or out of memory (not timed out, not a real failure): the runner or server was cut off, not the work. Run it once more before bothering the owner.
+        const first = checkNeverFinished(v);
+        if (!v.ok && (first === "killed" || first === "out_of_memory") && !checkWaitedForLock(v)) {
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check ${first === "killed" ? "was killed" : "ran out of memory"} before it finished; running it once more. Nothing to do.` });
+          v = await runCheck();
+        }
         await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(command), passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
         if (!v.ok) return checkFailed(command, v);
       }

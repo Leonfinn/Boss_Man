@@ -1,2 +1,0 @@
-ALTER TABLE "companies" ALTER COLUMN "watchdog" SET DEFAULT '{"enabled":false,"recordOnly":false,"unassignedMinutes":15,"inProgressHours":2,"reviewHours":2,"blockedHours":8,"blockedUntilGraceHours":2,"ownerDecisionHours":8,"reviewBounces":2,"maxSnoozeHours":48,"maxSmRunsPerHour":4,"maxNudgesPerHour":12,"alertMinutes":30,"maxCeoAlertsPerHour":6}'::jsonb;--> statement-breakpoint
-ALTER TABLE "tickets" ADD COLUMN "checked_commit" text;

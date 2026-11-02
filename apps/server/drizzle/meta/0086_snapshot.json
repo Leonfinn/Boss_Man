@@ -1,6 +1,6 @@
 {
-  "id": "4d6cb0b0-848f-4470-9df1-b467c55ceb72",
-  "prevId": "9ebe906c-4191-49d8-918d-beb29c3eb2be",
+  "id": "3cceca0e-f3d0-479e-8a8a-b810f49b0ccb",
+  "prevId": "215bf1e6-9b49-4846-a038-823f2f545234",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5465,6 +5465,12 @@
         "image_version": {
           "name": "image_version",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "harness_versions": {
+          "name": "harness_versions",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

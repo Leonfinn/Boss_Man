@@ -39,12 +39,14 @@ case "$*" in
 esac
 FAKE
 chmod +x "$t/bin/docker"
+umask 022 # a default host umask: the script must tighten it itself
 export FAKE_LOG="$t/docker.log" BOSSMAN_BACKUP_DIR="$t/backups"
 PATH="$t/bin:$PATH" scripts/deploy.sh --yes --no-runner --commit "$two" >/dev/null
 [[ $(git rev-parse HEAD) == "$two" ]] || { echo "FAIL: --commit did not land on the requested commit"; exit 1; }
 grep -q '"result":"deployed"' "$t/backups/deploy-status.json" || { echo "FAIL: status result"; exit 1; }
 grep -q "\"to_commit\":\"$two\"" "$t/backups/deploy-status.json" || { echo "FAIL: status commit"; exit 1; }
 grep -q "compose up -d" "$FAKE_LOG" || { echo "FAIL: did not restart"; exit 1; }
+for f in "$t"/backups/bossman-*.sql.gz; do [[ "$(stat -c %a "$f")" == 600 ]] || { echo "FAIL: backup is not mode 600 under umask 022"; exit 1; }; done
 git reset -q --hard "$three"
 if PATH="$t/bin:$PATH" scripts/deploy.sh --no-runner --commit "$two" >/dev/null 2>&1; then echo "FAIL: went backwards"; exit 1; fi
 if scripts/deploy.sh --commit abc >/dev/null 2>&1; then echo "FAIL: short hash accepted"; exit 1; fi

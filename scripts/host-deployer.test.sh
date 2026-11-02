@@ -41,6 +41,7 @@ c1="$(push apps/server/a)"
 
 D="$T/deployer"; mkdir -p "$D/inbox" "$D/outbox"
 unset COMPOSE_FILE
+umask 022 # a default host umask: the deployer must tighten backups itself
 export BOSSMAN_DEPLOYER="$D" STUB_LOG="$T/stub.log" BOSSMAN_DEPLOY_STATUS="$T/deploy-status.json" BOSSMAN_BACKUP_DIR="$T/backups"
 : >"$STUB_LOG"
 # A webhook listener that appends each POST body to a file, on a free port.
@@ -321,6 +322,8 @@ bgreq "$b1"; bg
 has "$D/outbox/status.json" "green is live"
 order "$DL" "pg_dump" "build green commit=$b1" "migrate tag=green" "up -d --no-deps --force-recreate server-green" "exec -T server-green" "signal USR1 blue" "signal USR2 green" "validate sees green" "reload now green" "exec -T proxy wget"
 hasnt "$DL" "build blue" # only the idle colour is built
+ls "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz >/dev/null 2>&1 || fail "no backup written"
+for f in "$BOSSMAN_BACKUP_DIR"/bossman-*.sql.gz; do [[ $(stat -c %a "$f") == 600 ]] || fail "backup $f is not mode 600"; done
 live_is green
 [[ $(cat "$W/built.green") == "$b1" && $(git -C "$T/src" rev-parse HEAD) == "$b1" ]] || fail "idle colour not built at the commit / checkout not moved"
 [[ -e $W/running.blue && -e $W/running.green ]] || fail "old colour should stay up as a standby"

@@ -416,6 +416,15 @@ cd $B/src && docker compose logs --tail 100 server
 
 If a migration failed, don't edit the database by hand. Keep the log. Restore from a backup if you have one (`scripts/deploy.sh` keeps them in `$B`). Also check Postgres is healthy with `docker compose ps`.
 
+**Lock down backups made before this fix.**
+Backups written by current scripts are readable by their owner only (mode 600). Older ones may be readable by every user on the host and hold password hashes and sessions. Once, inside your backup folder (`$B` in this guide), run:
+
+```sh
+chmod 600 bossman-*.sql.gz restore-test-*.sql.gz
+```
+
+A pattern that matches no files prints an error; that is harmless.
+
 **The disk is filling up.**
 Check the host and Docker:
 
