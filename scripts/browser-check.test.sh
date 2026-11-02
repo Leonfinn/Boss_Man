@@ -36,3 +36,21 @@ grep -q -- '--window-size=1280,800' "$t/log" || fail "no desktop size"
 grep -q -- '--window-size=390,844.*--touch-events=enabled' "$t/log" || fail "no phone profile"
 grep -q 'http://10.1.2.3:3100/' "$t/log" || fail "browser not pointed at the address"
 echo "browser-check tests passed"
+
+# Demo with the real browser (skipped without one or node): a clipboard-dependent control sees the clipboard
+# API on localhost but not on the runner's own address, which is why checks must not run on localhost.
+chrome=$(command -v chromium chromium-browser google-chrome 2>/dev/null | head -n 1 || true)
+if [ -n "$chrome" ] && command -v node >/dev/null && addr=$("$here/browser-check.sh" --print-url --port 1 2>/dev/null); then
+  node -e '
+    const s = require("http").createServer((q, r) => r.end("<script>document.title = String(typeof navigator.clipboard)</script>"));
+    s.listen(0, "0.0.0.0", () => console.log(s.address().port));
+    setTimeout(() => process.exit(0), 60000);' >"$t/port" &
+  srv=$!
+  for _ in $(seq 50); do [ -s "$t/port" ] && break; sleep 0.1; done
+  port=$(cat "$t/port"); host=${addr#http://}; host=${host%:1/}
+  title() { "$chrome" --headless --no-sandbox --disable-gpu --virtual-time-budget=3000 --dump-dom "$1" 2>/dev/null | sed -n 's/.*<title>\(.*\)<\/title>.*/\1/p'; }
+  [ "$(title "http://127.0.0.1:$port/")" = "object" ] || fail "demo: clipboard missing on localhost"
+  [ "$(title "http://$host:$port/")" = "undefined" ] || fail "demo: clipboard present on $host"
+  kill "$srv" 2>/dev/null || true
+  echo "demo: clipboard object on localhost, undefined on $host"
+fi
