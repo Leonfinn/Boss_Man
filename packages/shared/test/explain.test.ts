@@ -125,7 +125,7 @@ describe("explainPermission", () => {
     // OpenCode sends its permission metadata as rawInput: { filepath, diff } for an edit, { files: [...] } for a patch.
     expect(explainPermission({ title: "edit", kind: "edit", rawInput: { filepath: "/work/src/a.ts", diff: "@@" } }, "A").summary).toBe("Change the file /work/src/a.ts.");
     expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/work/a.ts", relativePath: "a.ts" }] } }, "A").summary).toBe("Change the file a.ts.");
-    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/w/a.ts" }, { filePath: "/w/b.ts" }] } }, "A").summary).toBe("Change 2 files.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/w/a.ts" }, { filePath: "/w/b.ts" }] } }, "A").summary).toBe("Change 2 files: /w/a.ts, /w/b.ts.");
     expect(explainPermission({ title: "edit", kind: "edit", rawInput: {} }, "A").summary).toBe("Change (no name given).");
   });
 
