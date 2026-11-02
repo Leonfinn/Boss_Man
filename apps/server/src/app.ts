@@ -898,6 +898,9 @@ export async function buildApp(opts: AppOptions) {
       const g = approveGate(s, s.ntfy?.tokenSecretId ? await secretsSvc.reveal(s.ntfy.tokenSecretId) : null);
       return g.on ? { on: true } : { on: false, why: g.why };
     };
+    // BOS-313: check the merged result before pushing it (off by default while it rolls out).
+    owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
+    owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
       return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null, approve: await approveStatus(s) };
