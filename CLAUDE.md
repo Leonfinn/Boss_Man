@@ -11,10 +11,10 @@ Boss Man runs the same script before it merges approved work, so anything it rep
 
 ## Running a full check by hand
 
-Start a hand-run `check-all.sh` detached, never as a harness background task (the harness kills those when your run ends):
+Inside an agent session `check-all.sh` refuses to run: use `scripts/check-quick.sh` (above). When the CEO asks for a full run, set `CHECK_ALL_FORCE=1` and start it detached, never as a harness background task (the harness kills those when your run ends):
 
 ```
-setsid nohup scripts/check-all.sh > "$(git rev-parse --git-dir)/check.log" 2>&1 &
+CHECK_ALL_FORCE=1 setsid nohup scripts/check-all.sh > "$(git rev-parse --git-dir)/check.log" 2>&1 &
 ```
 
 Read that log for the `check-all: everything passed` line or a non-zero exit. A check that was signalled writes `check-all: killed by signal <name>` to the log and frees its queue place. Never kill another agent's process (no `pkill -f check-all.sh`, no `killall`): that kills their queued checks.

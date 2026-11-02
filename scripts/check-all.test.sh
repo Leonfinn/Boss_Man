@@ -16,7 +16,8 @@ runs() { grep -c . "$t/count" 2>/dev/null || true; }
 run() {
   local want_rc=$1 want_runs=$2 label=$3 body=$4 dir=${5:-$here/..} cmd=${6:-./scripts/check-all.sh} rc=0
   : >"$t/count"; export COUNT="$t/count"
-  (cd "$dir" && BOSSMAN_CHECK_BODY="$body" $cmd >"$t/out" 2>&1) || rc=$?
+  # Each case uses its own lock so the tests never wait on another agent's real check (the stub takes a slot now).
+  (cd "$dir" && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BODY="$body" $cmd >"$t/out" 2>&1) || rc=$?
   [ "$rc" -eq "$want_rc" ] || fail "$label: rc $rc, want $want_rc: $(cat "$t/out")"
   [ "$(runs)" -eq "$want_runs" ] || fail "$label: ran $(runs) times, want $want_runs"
 }
@@ -48,7 +49,7 @@ if command -v git >/dev/null; then
   cached() { # cached <expected rc> <expected runs> <label> <stub body> [env VAR=value ...]
     local want_rc=$1 want_runs=$2 label=$3 body=$4 rc=0; shift 4
     : >"$t/count"; export COUNT="$t/count"
-    (cd "$repo" && env BOSSMAN_CHECK_STORE="$store" BOSSMAN_CHECK_BODY="$body" "$@" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
+    (cd "$repo" && env CHECK_ALL_LOCK="$t/clock" CHECK_ALL_PAIR_PROOF="$t/cproof" BOSSMAN_CHECK_STORE="$store" BOSSMAN_CHECK_BODY="$body" "$@" ./scripts/check-all.sh >"$t/out" 2>&1) || rc=$?
     [ "$rc" -eq "$want_rc" ] || fail "$label: rc $rc, want $want_rc: $(cat "$t/out")"
     [ "$(runs)" -eq "$want_runs" ] || fail "$label: ran $(runs) times, want $want_runs"
   }
@@ -220,6 +221,12 @@ if command -v flock >/dev/null; then
     echo "check-all.test.sh: Landlock ABI 6 missing, fenced queue case skipped"
   fi
 
+  # The retry budget counts from the slot-taken time, not from before the queue wait (P13 Q4). A check that waits
+  # longer than the budget, then hits EAGAIN, is still retried; measured from before the wait it was never retried.
+  : >"$t/count"; export COUNT="$t/count"
+  rc=0; ( cd "$here/.." && CHECK_ALL_LOCK="$t/rlock" CHECK_ALL_PAIR_PROOF="$t/rproof" BOSSMAN_CHECK_BUDGET_SECONDS=2 CHECK_ALL_QUEUE_TEST_SLEEP=3 BOSSMAN_CHECK_BODY='echo x >>"$COUNT"; echo "Error: spawn EAGAIN"; exit 3' ./scripts/check-all.sh >"$t/budget.out" 2>&1 ) || rc=$?
+  [ "$rc" -eq 3 ] || fail "budget after queue wait: rc $rc, want 3: $(cat "$t/budget.out")"
+  [ "$(runs)" -eq 3 ] || fail "budget after queue wait: ran $(runs) times, want 3 (a long wait must not use up the retry budget)"
   # A signal leaves a trace and frees the queue place: the output, the stored log and the result store get "killed by signal <name>",
   # the exit is non-zero, and the check's queue entry is gone (before, a signalled check vanished without a word).
   if command -v git >/dev/null; then

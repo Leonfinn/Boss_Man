@@ -27,8 +27,7 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   attempts="${BOSSMAN_CHECK_ATTEMPTS:-3}"
   budget="${BOSSMAN_CHECK_BUDGET_SECONDS:-1500}"  # Boss Man kills the merge check at 30 min; stay well inside it
   pause="${BOSSMAN_CHECK_RETRY_SECONDS:-30}"
-  start=$SECONDS
-  log="$(mktemp)"; began_file="$(mktemp)"
+  log="$(mktemp)"; began_file="$(mktemp)"; slot_at=""
   trap 'rm -f "$log" "$began_file"' EXIT
 
   # Only a clean checkout has a tree hash that says what was checked.
@@ -73,6 +72,8 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   }
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
+    # Test hook: a simulated queue wait, which the fixed budget ignores (check-all.test.sh retry-budget case).
+    [ "$n" -gt 1 ] || [ -z "${CHECK_ALL_QUEUE_TEST_SLEEP:-}" ] || sleep "$CHECK_ALL_QUEUE_TEST_SLEEP"
     rc=0; : >"$began_file"; attempt_start=$SECONDS
     # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
     BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
@@ -82,8 +83,11 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
     if [ "$rc" -eq 0 ]; then record pass 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
-    took=$((SECONDS - attempt_start)); began=$(cat "$began_file"); [ -z "$began" ] || took=$(($(date +%s) - began))
-    if [ "$n" -lt "$attempts" ] && [ $((SECONDS - start + took + pause)) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
+    # The budget counts from the slot-taken time (the first non-empty $began_file), not from before the queue wait:
+    # a long wait used to use it up, so a check that then hit EAGAIN was never retried.
+    took=$((SECONDS - attempt_start)); began=$(cat "$began_file")
+    if [ -n "$began" ]; then [ -n "$slot_at" ] || slot_at=$began; took=$(($(date +%s) - began)); fi
+    if [ "$n" -lt "$attempts" ] && [ $(( $(date +%s) - ${slot_at:-$(date +%s)} + took + pause )) -le "$budget" ] && grep -qE 'spawn(Sync)? .*EAGAIN|EAGAIN: resource|Cannot fork|Resource temporarily unavailable|fork: retry' "$log"; then
       echo "check-all: attempt $n hit the runner's process limit (exit $rc); retrying in ${pause}s" >&2
       sleep "$pause"
     else
