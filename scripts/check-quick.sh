@@ -37,7 +37,7 @@ for d in "${pkgs[@]}"; do
 done
 # Tests related to the changed source or test files (vitest follows imports); an apps/site change runs its whole small suite.
 for d in "${pkgs[@]}" apps/site; do
-  files="$(grep -E "^$d/.*\.(ts|tsx)$" <<<"$changed" | grep -v '\.d\.ts$' | sed "s|^$d/||" || true)"
+  files="$(grep -E "^$d/.*\.(ts|tsx)$" <<<"$changed" | grep -v '\.d\.ts$' | while IFS= read -r f; do [ -f "$f" ] && echo "${f#"$d"/}"; done || true)"
   [ -n "$files" ] || continue
   name="$(node -p "require('./$d/package.json').name")"
   # shellcheck disable=SC2086  # one argument per file; paths have no spaces
