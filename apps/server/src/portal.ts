@@ -50,7 +50,7 @@ export function sendLogo(reply: FastifyReply, logo: { bytes: Buffer; type: strin
 
 type Feedback = ReturnType<typeof feedbackService>;
 
-export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean; limits?: Partial<PortalLimits>; now?: () => number }) {
+export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedback; secureCookies: boolean | "auto"; limits?: Partial<PortalLimits>; now?: () => number }) {
   const limits = { ...DEFAULT_PORTAL_LIMITS, ...deps.limits };
   const counter = windowCounter(deps.now ?? (() => Date.now()));
   const Text = (max: number) => z.string().trim().min(1).max(max);
@@ -70,7 +70,7 @@ export async function portalRoutes(app: FastifyInstance, deps: { feedback: Feedb
     const existing = req.cookies[VOTER_COOKIE];
     if (existing && /^[A-Za-z0-9_-]{22}$/.test(existing)) return existing;
     const voter = randomBytes(16).toString("base64url");
-    reply.setCookie(VOTER_COOKIE, voter, { path: "/api/portal", httpOnly: true, sameSite: "strict", secure: deps.secureCookies, maxAge: 365 * 86_400 });
+    reply.setCookie(VOTER_COOKIE, voter, { path: "/api/portal", httpOnly: true, sameSite: "strict", secure: deps.secureCookies === "auto" ? req.protocol === "https" : deps.secureCookies, maxAge: 365 * 86_400 });
     return voter;
   }
   function allowWrite(req: FastifyRequest, reply: FastifyReply, companyId: string) {
