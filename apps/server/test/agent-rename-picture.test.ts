@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import zlib from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
@@ -9,10 +10,46 @@ import { openPglite } from "../src/db/client.js";
 import { activity, agentAvatars, agents, decisions, notifications, ticketImages } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
-// A 1x1 PNG, and a bar of extra bytes so a "too large" picture can be built from it.
+// A 1x1 PNG, and a large PNG whose image data is garbage, so it can't be decoded.
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
-const bigPng = () => Buffer.concat([PNG, Buffer.alloc(300 * 1024, 1)]);
+const bigPng = () => Buffer.concat([PNG.subarray(0, 33), Buffer.from("IDAT", "latin1"), Buffer.alloc(300 * 1024, 0xff)]);
 const notAPicture = Buffer.from("%PDF-1.4 fake\n");
+
+/** A real PNG written out here: the given width x height, with the given image data. */
+function pngOf(width: number, height: number, body: Buffer): Buffer {
+  const chunk = (type: string, data: Buffer) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const payload = Buffer.concat([Buffer.from(type, "latin1"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32(payload));
+    return Buffer.concat([len, payload, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", body), chunk("IEND", Buffer.alloc(0))]);
+}
+
+function noisyPng(width: number, height: number): Buffer {
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  let seed = 7;
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 4 + 1);
+    raw[row] = 0;
+    for (let x = 0; x < width; x++) {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      const o = row + 1 + x * 4;
+      raw[o] = seed & 0xff;
+      raw[o + 1] = (seed >> 8) & 0xff;
+      raw[o + 2] = (seed >> 16) & 0xff;
+      raw[o + 3] = 0xff;
+    }
+  }
+  return pngOf(width, height, zlib.deflateSync(raw));
+}
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -189,19 +226,36 @@ describe("the CEO sets an agent's picture (BOS-265)", () => {
     await client.close();
   });
 
-  it("refuses another company's image, a document, and a picture over the limit", async () => {
+  it("refuses another company's image and a document, but shrinks a picture over the limit instead of refusing it (BOS-320)", async () => {
     const c = (ctx = await setup());
     const theirs = await upload(c, PNG, null, c.other.id);
     const doc = await upload(c, notAPicture, c.ticket.id);
-    const big = await upload(c, bigPng(), c.ticket.id);
+    const big = await upload(c, noisyPng(900, 700), c.ticket.id);
     const client = await c.mcp(c.ceo.id);
     const call = (args: Record<string, unknown>) => client.callTool({ name: "set_agent_picture", arguments: { agent: "Engineer - Developer", reason: "Try it.", ...args } });
     const other = await call({ imageId: theirs.id });
     expect(other).toMatchObject({ isError: true });
     expect(textOf(other)).toMatch(/No image with that id on a ticket in this company/);
     expect(textOf(await call({ imageId: doc.id }))).toMatch(/aren't a PNG, JPEG or WebP image/);
-    expect(textOf(await call({ imageId: big.id }))).toMatch(/at most 256 KB/);
-    expect(await c.db.select().from(agentAvatars)).toEqual([]);
+    // Over the cap: it goes through, shrunk to fit and still a real PNG.
+    const [before] = await c.db.select({ size: ticketImages.size }).from(ticketImages).where(eq(ticketImages.id, big.id));
+    expect(before!.size).toBeGreaterThan(256 * 1024);
+    expect(textOf(await call({ imageId: big.id }))).toMatch(/now has that picture \(it was shrunk to fit\)/);
+    const [stored] = await c.db.select().from(agentAvatars).where(eq(agentAvatars.agentId, c.engineer.id));
+    expect(stored).toMatchObject({ type: "image/png", imageId: big.id });
+    expect(stored!.bytes.length).toBeLessThanOrEqual(256 * 1024);
+    const shown = await c.req("GET", `/api/agents/${c.engineer.id}/avatar`);
+    expect(shown.headers["content-type"]).toBe("image/png");
+    expect(shown.rawPayload.subarray(0, 8).equals(PNG.subarray(0, 8))).toBe(true);
+    // The ticket's own image is left exactly as it was.
+    const [after] = await c.db.select({ size: ticketImages.size }).from(ticketImages).where(eq(ticketImages.id, big.id));
+    expect(after!.size).toBe(before!.size);
+    // A picture that can't be decoded even though it starts like a PNG is still refused, plainly.
+    const broken = await upload(c, bigPng(), c.ticket.id);
+    expect(textOf(await call({ imageId: broken.id }))).toMatch(/couldn't be shrunk/);
+    // So is one whose header claims a canvas too big to decode, before any memory is taken for it.
+    const bomb = await upload(c, pngOf(40_000, 40_000, Buffer.alloc(300 * 1024, 1)), c.ticket.id);
+    expect(textOf(await call({ imageId: bomb.id }))).toMatch(/couldn't be shrunk/);
     // And a non-CEO isn't allowed at all.
     const worker = await c.mcp(c.engineer.id);
     expect(await worker.callTool({ name: "set_agent_picture", arguments: { agent: "Quinn - QA", imageId: theirs.id, reason: "Try it." } })).toMatchObject({ isError: true });

@@ -1640,7 +1640,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     "set_agent_picture",
     {
       description:
-        "Set an agent's picture (CEO only), in chat and in your ticket runs, from an image already attached to one of your company's tickets (such as one the Graphics Designer made and attached with attach_image; any ticket read lists its image ids). Pass imageId, or clear to go back to the built-in portrait, and say why. PNG, JPEG or WebP only, 256 KB or smaller; another company's image or a document is refused. It shows on the Agents page, the board and the runs list, is logged, and the owner gets a feed note and can undo it on the Agents page.",
+        "Set an agent's picture (CEO only), in chat and in your ticket runs, from an image already attached to one of your company's tickets (such as one the Graphics Designer made and attached with attach_image; any ticket read lists its image ids). Pass imageId, or clear to go back to the built-in portrait, and say why. PNG, JPEG or WebP only; a picture over 256 KB is shrunk to fit on the server, and another company's image or a document is refused. It shows on the Agents page, the board and the runs list, is logged, and the owner gets a feed note and can undo it on the Agents page.",
       inputSchema: { agent: z.string().trim().min(1).max(80), imageId: z.string().uuid().optional(), clear: z.boolean().optional(), reason: z.string().trim().max(2000).optional() },
     },
     async ({ agent, imageId, clear, reason }) => {
@@ -1651,7 +1651,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
       if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
       try {
         const r = await team.setPicture(scope.companyId, ceo, who.id, { imageId: imageId ?? null, clear: !!clear }, reason);
-        return text(clear ? `${who.name}'s picture is back to the default.` : `${who.name} now has that picture. It shows on the Agents page, the board and the runs list.`);
+        return text(clear ? `${who.name}'s picture is back to the default.` : `${who.name} now has that picture${r.shrunk ? " (it was shrunk to fit)" : ""}. It shows on the Agents page, the board and the runs list.`);
       } catch (err) {
         if (err instanceof AgentError) return fail(err.message);
         throw err;

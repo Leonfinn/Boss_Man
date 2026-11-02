@@ -6,6 +6,7 @@ import type { Db } from "../db/client.js";
 import { agentAvatars, agentChanges, agents, ceoChapters, costEvents, decisions, fundingSources, paAnswers, projects, runs, settings, skills, ticketImages, tickets, wakes } from "../db/schema.js";
 import { record as logActivity } from "./activity.js";
 import { pictureType } from "./company-import.js";
+import { shrinkPicture } from "./picture-shrink.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
 import type { ModelChoice } from "./models.js";
 
@@ -358,20 +359,21 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
 
     /**
      * Sets an agent's picture from an image already on one of the company's tickets (BOS-265), or
-     * clears it back to the template's portrait. Only PNG, JPEG or WebP bytes are taken, sized as an
-     * owner's upload; the bytes are kept once per image and shared by every agent that uses it.
+     * clears it back to the template's portrait. Only PNG, JPEG or WebP bytes are taken; a picture
+     * over the cap is shrunk to fit on the server rather than refused (BOS-320), and the bytes are
+     * kept once per image and shared by every agent that uses it.
      */
-    async setPicture(companyId: string, ceoId: string, agentId: string, choice: { imageId?: string | null; clear?: boolean }, reason?: string): Promise<{ agent: AgentRow; cleared: boolean }> {
+    async setPicture(companyId: string, ceoId: string, agentId: string, choice: { imageId?: string | null; clear?: boolean }, reason?: string): Promise<{ agent: AgentRow; cleared: boolean; shrunk: boolean }> {
       const a = await agent(agentId);
       if (a.companyId !== companyId) throw new AgentError(404, "No such agent.");
       const why = reason?.trim().slice(0, REASON_MAX) || null;
       if (choice.clear) {
-        if (!a.avatarAt) return { agent: a, cleared: true };
+        if (!a.avatarAt) return { agent: a, cleared: true, shrunk: false };
         await db.delete(agentAvatars).where(eq(agentAvatars.agentId, agentId));
         const [after] = await db.update(agents).set({ avatarAt: null }).where(eq(agents.id, agentId)).returning();
         await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture went back to the default${why ? `: ${why}` : ""}` });
         await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO set ${a.name}'s picture back to the default`, body: `${why ? `${why}\n` : ""}See it, or undo it, on the Agents page.`, link: "#/agents" });
-        return { agent: after!, cleared: true };
+        return { agent: after!, cleared: true, shrunk: false };
       }
       const imageId = choice.imageId?.trim();
       if (!imageId) throw new AgentError(422, "Give an image id (one attached to a ticket in this company) or set clear to go back to the default.");
@@ -380,15 +382,23 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
       // The bytes decide, never the stored type or a name.
       const type = pictureType(img.bytes);
       if (!type) throw new AgentError(422, `${img.size} bytes that aren't a PNG, JPEG or WebP image. Pick a picture, not a document.`);
-      if (img.bytes.length > AVATAR_MAX_BYTES) throw new AgentError(413, `That picture is ${Math.round(img.bytes.length / 1024)} KB; a picture can be at most ${AVATAR_MAX_BYTES / 1024} KB. Pick a smaller one.`);
+      // Over the cap, shrink it here and keep its format rather than make the CEO go and find a smaller one (BOS-320).
+      let bytes = img.bytes;
+      let shrunk = false;
+      if (bytes.length > AVATAR_MAX_BYTES) {
+        const small = await shrinkPicture(bytes, type, AVATAR_MAX_BYTES);
+        if (!small || pictureType(small) !== type) throw new AgentError(413, `That picture is ${Math.round(bytes.length / 1024)} KB and couldn't be shrunk to ${AVATAR_MAX_BYTES / 1024} KB. It may be damaged; export it again as a PNG, JPEG or WebP and attach that.`);
+        bytes = small;
+        shrunk = true;
+      }
       await db
         .insert(agentAvatars)
-        .values({ agentId, bytes: img.bytes, type, imageId: img.id })
-        .onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes: img.bytes, type, imageId: img.id } });
+        .values({ agentId, bytes, type, imageId: img.id })
+        .onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type, imageId: img.id } });
       const [after] = await db.update(agents).set({ avatarAt: now() }).where(eq(agents.id, agentId)).returning();
-      await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture was set from a ticket image${why ? `: ${why}` : ""}` });
+      await logActivity(db, { companyId, agentId: ceoId, kind: "agent_picture", summary: `${a.name}'s picture was set from a ticket image${shrunk ? " (shrunk to fit)" : ""}${why ? `: ${why}` : ""}` });
       await notify({ companyId, agentId: ceoId, level: "note", title: `The CEO set ${a.name}'s picture`, body: `${why ? `${why}\n` : ""}It shows on the Agents page, the board and the runs list. You can undo it there.`, link: "#/agents" });
-      return { agent: after!, cleared: false };
+      return { agent: after!, cleared: false, shrunk };
     },
 
     /**
