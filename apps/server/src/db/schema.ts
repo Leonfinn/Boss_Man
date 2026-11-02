@@ -104,7 +104,7 @@ export const agents = pgTable(
     duty: text("duty"),
     /**
      * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
-     * migration 0089 moved every use into the review policy, and it is read only for a leftover
+     * migration 0093 moved every use into the review policy, and it is read only for a leftover
      * "marked" cell. Kept one release so a rollback has it; drop it after.
      */
     reviewKind: text("review_kind"),

@@ -1,4 +1,4 @@
-// BOS-198: migration 0089 turns every "marked" review cell into the agent it meant, losing nothing.
+// BOS-198: migration 0093 turns every "marked" review cell into the agent it meant, losing nothing.
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { eq, sql } from "drizzle-orm";
@@ -6,7 +6,7 @@ import { DEFAULT_REVIEW_POLICY, type ReviewPolicy } from "@boss-man/shared";
 import { openPglite } from "../src/db/client.js";
 import { agents, companies, projects } from "../src/db/schema.js";
 
-const SQL = readFileSync(new URL("../drizzle/0089_reviewer_marks_to_policy.sql", import.meta.url), "utf8");
+const SQL = readFileSync(new URL("../drizzle/0093_reviewer_marks_to_policy.sql", import.meta.url), "utf8");
 
 let close: (() => Promise<void>) | undefined;
 afterEach(async () => {
@@ -14,7 +14,7 @@ afterEach(async () => {
   close = undefined;
 });
 
-describe("migration 0089: reviewer marks into Settings > Reviews", () => {
+describe("migration 0093: reviewer marks into Settings > Reviews", () => {
   it("names the marked agent, a list when several, the CEO when none; leaves everything else alone", async () => {
     const opened = await openPglite();
     close = opened.close;
