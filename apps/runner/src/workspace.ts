@@ -23,7 +23,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
-import { checkQueueEnv, fencedCommand, fenceProfile } from "./fence.js";
+import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant } from "./fence.js";
 import { checkMigrations } from "./migrations.js";
 
 const run = promisify(execFile);
@@ -151,6 +151,13 @@ export class Workspaces {
    * dangerous when the agent itself ran unfenced. Off (no Landlock), it's SAFE_GIT_ENV only, as before.
    */
   fenceCloneGit = Workspaces.fenceCloneGitByDefault;
+
+  /**
+   * Where a fenced merge check lives (BOS-323), set at start-up when the runner can fence: its own
+   * home, shared by every fenced check (caches, harness state), and the pnpm store it installs from.
+   * Null: a check asked to run fenced runs as before, and says so.
+   */
+  checkFence: { home: string; pnpmStore?: string } | null = null;
 
   /**
    * opts.repo is the shared repo a clone at opts.cwd borrows from: the one folder outside the clone
@@ -696,22 +703,26 @@ export class Workspaces {
    * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
-  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS): Promise<VerifyResult> {
-    return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs);
+  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS, fence = false): Promise<VerifyResult> {
+    return this.runCheck(await this.reopen(spec), command, timeoutMs, queueMaxMs, fence ? spec.projectId : null);
   }
 
-  /** One check command in a folder: its own process group, output kept to the last 8 KB. */
-  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS): Promise<VerifyResult> {
+  /** One check command in a folder: its own process group, output kept to the last 8 KB. A project id asks for the fence. */
+  private runCheck(dir: string, command: string, timeoutMs: number, queueMaxMs = VERIFY_QUEUE_MAX_MS, fenceProject: string | null = null): Promise<VerifyResult> {
+    const fence = fenceProject !== null;
     const started = Date.now();
+    // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
+    let env: NodeJS.ProcessEnv = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) };
+    let launch = { bin: "sh", args: ["-c", command] };
+    let tmp: string | null = null;
+    if (fence && this.checkFence) {
+      const set = this.fenceCheck(fenceProject ?? "", dir, env, launch);
+      ({ env, launch, tmp } = set);
+    }
+    const fenced = fence ? { fenced: tmp !== null } : {};
     return new Promise<VerifyResult>((resolve) => {
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
-      const child = spawn("sh", ["-c", command], {
-        cwd: dir,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
-      });
+      const child = spawn(launch.bin, launch.args, { cwd: dir, detached: true, stdio: ["ignore", "pipe", "pipe"], env });
       const killGroup = (signal: NodeJS.Signals) => {
         try {
           if (child.pid) process.kill(-child.pid, signal);
@@ -746,7 +757,8 @@ export class Workspaces {
         clearTimeout(timer);
         clearTimeout(hardKill);
         killGroup("SIGKILL"); // strays left behind by a check that has already exited
-        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started });
+        if (tmp) rmSync(tmp, { recursive: true, force: true });
+        resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started, ...fenced });
       };
       let timer: NodeJS.Timeout;
       const arm = (ms: number) => {
@@ -764,6 +776,39 @@ export class Workspaces {
       });
       child.on("close", (code) => finish(code));
     });
+  }
+
+  /**
+   * The merge check inside the fence (BOS-323), with what an agent's session gets for the same copy:
+   * read-write on the ticket's copy, the check's own home, a temp folder for this check, the pnpm
+   * store and check-all's queue; read-only on the system, the runner's install, the global npm tools,
+   * the browsers, check-all's results and the shared repo (for a worktree, what a commit writes too).
+   * Nothing of the daemon's: not its HOME, its token or other tickets' copies.
+   */
+  private fenceCheck(projectId: string, dir: string, env: NodeJS.ProcessEnv, launch: { bin: string; args: string[] }) {
+    const { home, pnpmStore } = this.checkFence!;
+    mkdirSync(path.join(home, "tmp"), { recursive: true });
+    const tmp = mkdtempSync(path.join(home, "tmp", "check-"));
+    const out: NodeJS.ProcessEnv = { ...env, HOME: home, TMPDIR: tmp };
+    const readWrite: string[] = [];
+    const readOnly = [this.baseEnv.NPM_CONFIG_PREFIX, this.baseEnv.PLAYWRIGHT_BROWSERS_PATH].filter((p): p is string => !!p);
+    if (pnpmStore) {
+      mkdirSync(pnpmStore, { recursive: true });
+      // pnpm keeps the store's location in HOME's config; without this it starts a new store in the copy.
+      out.npm_config_store_dir = pnpmStore;
+      readWrite.push(pnpmStore);
+    }
+    if (this.baseEnv.NPM_CONFIG_PREFIX) out.NPM_CONFIG_PREFIX = this.baseEnv.NPM_CONFIG_PREFIX;
+    if (this.baseEnv.PLAYWRIGHT_BROWSERS_PATH) out.PLAYWRIGHT_BROWSERS_PATH = this.baseEnv.PLAYWRIGHT_BROWSERS_PATH;
+    if (this.coordDir) {
+      const grant = checkQueueGrant(this.coordDir);
+      readWrite.push(grant.readWrite);
+      readOnly.push(grant.readOnly);
+    }
+    // A worktree's shared repo has a read-only root, where auto-gc would write.
+    addGitConfig(out, "gc.auto", "0");
+    const rules = fenceProfile({ cwd: dir, home, tmp, repo: repoGrant(this.repoDir(projectId), dir), readOnly, readWrite });
+    return { env: out, launch: fencedCommand(rules, launch.bin, launch.args), tmp };
   }
 
   /**

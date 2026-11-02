@@ -33,6 +33,8 @@ const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
 const sandbox = sandboxSelfTest();
 // The runner's own git in a ticket's clone runs fenced wherever the fence works (BOS-323).
 workspaces.fenceCloneGit = sandbox.level !== "unavailable";
+// A merge check asked to run fenced gets a home of its own beside the agents', and the shared pnpm store.
+if (sandbox.level !== "unavailable") workspaces.checkFence = { home: path.join(dataDir, "agents", "merge-check"), pnpmStore: env.npm_config_store_dir ?? path.join(workspacesRoot, ".pnpm-store") };
 log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
 
 let connection: RunnerConnection;

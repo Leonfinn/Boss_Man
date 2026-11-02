@@ -150,7 +150,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** An image (a screenshot) from the ticket's working folder, to attach to the ticket; the reply carries it as base64. */
   z.object({ type: z.literal("workspace.image"), requestId: z.string(), ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** Runs the ticket's check in its worktree (R47). */
-  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
+  /**
+   * fence: run the check inside the fence (BOS-323), like run.start's. A runner that can't fence runs
+   * it as before and says so (VerifyResult.fenced); an older runner ignores it.
+   */
+  z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1), fence: z.boolean().optional() }),
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
@@ -244,7 +248,8 @@ export type WorkspaceDiff = {
 };
 
 /** The outcome of a ticket's check (R47). */
-export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
+/** fenced: set only when the check was asked to run fenced, saying whether it was. */
+export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number; fenced?: boolean };
 /**
  * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
  * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for

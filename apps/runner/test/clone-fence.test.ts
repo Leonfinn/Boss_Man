@@ -112,3 +112,66 @@ describe.skipIf(!live)("the runner's git in a clone, fenced (BOS-323)", () => {
     expect(tryWrite(path.join(wt, "w"))).toEqual(["objects", "refs", "logs"]);
   });
 });
+
+describe.skipIf(!live)("the merge check, fenced when asked (BOS-323)", () => {
+  /** A ticket's copy on a runner with check-all's queue folder and a fenced check home, as main.ts sets it up. */
+  async function checkable(copies: "clone" | "worktree") {
+    const url = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
+    git(url, "init", "-q", "-b", "main");
+    writeFileSync(path.join(url, "README.md"), "v1\n");
+    git(url, "add", ".");
+    git(url, "commit", "-q", "-m", "v1");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root, { ...process.env, BOSSMAN_TICKET_COPIES: copies }, path.join(root, ".bossman-coord"));
+    ws.checkFence = { home: path.join(root, "agents", "merge-check"), pnpmStore: path.join(root, ".pnpm-store") };
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: url, baseRef: "main" };
+    const dir = (await ws.ensure(spec)).path;
+    // Stand-ins for what the daemon holds: its token beside the workspaces, and a sibling folder.
+    const secret = path.join(mkdtempSync(path.join(tmpdir(), "bm-runner-data-")), "token");
+    writeFileSync(secret, "runner-token\n");
+    return { ws, spec, dir, root, secret, outside: mkdtempSync(path.join(tmpdir(), "bm-outside-")) };
+  }
+
+  for (const copies of ["clone", "worktree"] as const) {
+    it(`keeps a fenced check to the ticket's ${copies}, its home and temp folder, and it still runs pnpm`, async () => {
+      const { ws, spec, dir, root, secret, outside } = await checkable(copies);
+      const script = [
+        'echo "home=$HOME"',
+        'touch "$TMPDIR/t" && echo tmp-ok',
+        "touch built.txt && echo copy-ok",
+        `touch ${outside}/x 2>/dev/null && echo outside-written`,
+        `cat ${secret} 2>/dev/null && echo token-read`,
+        "pnpm --version >/dev/null && echo pnpm-ok",
+        "git status --porcelain >/dev/null && echo git-ok",
+      ].join("; ");
+      const res = await ws.verify(spec, script, undefined, undefined, true);
+      expect(res).toMatchObject({ ok: true, fenced: true });
+      expect(res.output).toContain(`home=${path.join(root, "agents", "merge-check")}`);
+      for (const ok of ["tmp-ok", "copy-ok", "pnpm-ok", "git-ok"]) expect(res.output).toContain(ok);
+      expect(res.output).not.toContain("outside-written");
+      expect(res.output).not.toContain("runner-token");
+      expect(existsSync(path.join(dir, "built.txt"))).toBe(true);
+      // The check's temp folder goes with it.
+      expect(readdirSync(path.join(root, "agents", "merge-check", "tmp"))).toEqual([]);
+    });
+  }
+
+  it("takes turns in the same check-all queue as an unfenced check, and can't forge its results", async () => {
+    const { ws, spec } = await checkable("clone");
+    const show = 'echo "lock=$CHECK_ALL_LOCK store=$BOSSMAN_CHECK_STORE"';
+    const plain = await ws.verify(spec, show);
+    const fenced = await ws.verify(spec, `${show}; touch "$(dirname "$CHECK_ALL_LOCK")/q" && echo queue-ok; touch "$BOSSMAN_CHECK_STORE/forged" 2>/dev/null && echo forged`, undefined, undefined, true);
+    expect(fenced.output.split("\n")[0]).toBe(plain.output.trim());
+    expect(fenced.output).toContain("queue-ok");
+    expect(fenced.output).not.toContain("forged");
+  });
+
+  it("runs as before when the runner can't fence the check, and says so; unasked, nothing changes", async () => {
+    const { ws, spec, outside } = await checkable("clone");
+    ws.checkFence = null;
+    expect(await ws.verify(spec, 'echo "home=$HOME"', undefined, undefined, true)).toMatchObject({ ok: true, fenced: false, output: `home=${process.env.HOME}\n` });
+    // Unfenced, the same write outside the copy goes through: what the fenced test refuses is real.
+    expect((await ws.verify(spec, `touch ${outside}/x && echo outside-written`, undefined, undefined, true)).output).toContain("outside-written");
+    expect(Object.keys(await ws.verify(spec, "true")).sort()).toEqual(["exitCode", "ms", "ok", "output", "timedOut"]);
+  });
+});
