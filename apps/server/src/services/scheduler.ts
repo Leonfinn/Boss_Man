@@ -397,7 +397,7 @@ export function schedulerService(
       .leftJoin(agents, eq(agents.id, tickets.assigneeAgentId))
       .where(and(inArray(tickets.id, ids), eq(tickets.watcherAgentId, w.agentId)));
     for (const { t, assignee } of watched) {
-      const [last] = await db.select().from(runs).where(eq(runs.ticketId, t.id)).orderBy(desc(runs.startedAt)).limit(1);
+      const [last] = await db.select().from(runs).where(and(eq(runs.ticketId, t.id), sql`${runs.origin} is distinct from ${WATCH_REASON}`, sql`${runs.origin} is distinct from ${REVIEW_REASON}`)).orderBy(desc(runs.startedAt)).limit(1);
       const deps = await db
         .select({ ticket: tickets.title, ticketId: ticketDependencies.blockerTicketId, state: tickets.systemState, activity: tickets.lastActivityAt, decision: decisions.question, decisionStatus: decisions.status, engagement: ticketDependencies.blockerEngagementId })
         .from(ticketDependencies)
@@ -469,8 +469,8 @@ export function schedulerService(
     // Work in review waits on its reviewer (the review flow wakes them), so the tree hasn't stalled.
     if (tree.some((x) => x.t.systemState === "review")) return null;
     const ids = tree.map((x) => x.t.id);
-    const [busyRun] = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt))).limit(1);
-    const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
+    const [busyRun] = await db.select({ id: runs.id }).from(runs).where(and(inArray(runs.ticketId, ids), isNull(runs.endedAt), sql`${runs.origin} is distinct from ${WATCH_REASON}`)).limit(1);
+    const [busyWake] = await db.select({ id: wakes.id }).from(wakes).where(and(inArray(wakes.ticketId, ids), ne(wakes.reason, WATCH_REASON), inArray(wakes.status, ["queued", "deferred"]))).limit(1);
     if (busyRun || busyWake) return null;
     const deps = await db
       .select({ blocked: ticketDependencies.blockedTicketId, ticket: tickets.title, ticketState: tickets.systemState, decision: decisions.status, engagement: engagements.status })
@@ -1300,7 +1300,7 @@ export function schedulerService(
         for (const b of budgets.filter((b) => b.status.action === "ask" && inScope(b))) await askAboutBudget(b, w.companyId);
 
         // A project's monthly cap holds new runs for its tickets; runs already going finish.
-        if (wt?.monthlyCap != null) {
+        if (wt?.monthlyCap != null && w.reason !== WATCH_REASON) {
           const month = monthStartUtc(t);
           const spent = await projectSpendMicros(db, wt.projectId, month);
           if (spent >= wt.monthlyCap) {
@@ -1324,12 +1324,12 @@ export function schedulerService(
 
         // A ticket's spend across all its runs has a ceiling, because review and retry loops multiply runs (R53).
         const ticketCap = wt?.cap ?? wt?.projectCap;
-        if (w.ticketId && ticketCap != null) {
+        if (w.ticketId && ticketCap != null && w.reason !== WATCH_REASON) {
           const [spent] = await db
             .select({ total: sql<string>`coalesce(sum(${costEvents.costMicros}), 0)` })
             .from(costEvents)
             .innerJoin(runs, eq(runs.id, costEvents.runId))
-            .where(eq(runs.ticketId, w.ticketId));
+            .where(and(eq(runs.ticketId, w.ticketId), sql`${runs.origin} is distinct from ${WATCH_REASON}`));
           const total = Number(spent?.total ?? 0);
           if (total >= ticketCap) {
             await db
@@ -1352,7 +1352,7 @@ export function schedulerService(
         // Above high priority a wake, or any wake on an urgent ticket, still goes through the quota
         // check: under the default "pause" it is held at the limit, so nothing spends unapproved
         // extra usage (BOS-253).
-        const [urgentTicket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+        const [urgentTicket] = w.ticketId && w.reason !== WATCH_REASON ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
         if (agent?.fundingSourceId && (w.priority < limits.highPriority || !!urgentTicket?.urgent)) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
           if (source?.kind === "subscription") {

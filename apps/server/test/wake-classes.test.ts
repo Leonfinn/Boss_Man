@@ -1,6 +1,6 @@
 // Wake classes (DR-002, BOS-296): every reason has a class, and the class decides what the
 // scheduler may drop, replace, age and reserve a slot for.
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,7 +8,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runs, tickets, wakes } from "../src/db/schema.js";
+import { costEvents, decisions, runs, tickets, wakes } from "../src/db/schema.js";
 import { WAKE_CLASS, wakeClass } from "../src/services/wake-classes.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -164,6 +164,26 @@ describe("wake classes: watch wakes", () => {
     const [w] = await ctx!.db.select().from(wakes).where(eq(wakes.reason, "ticket watch"));
     expect(w).toMatchObject({ ticketId: t.id });
     expect((await ctx!.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.systemState).not.toBe("in_progress");
+  });
+
+  it("still launches a watch report on a ticket that is over its cost cap, and its cost is not counted against the cap", async () => {
+    ctx = await setup();
+    await ctx!.req("PATCH", `/api/projects/${ctx!.project.id}`, { ticketCostCapUsd: 1 });
+    const t = (await ctx!.req("POST", `/api/projects/${ctx!.project.id}/tickets`, { title: "Watched" })).json();
+    const worker = await ctx!.agent("Worker");
+    const fs = (await ctx!.req("POST" as never, "/api/funding-sources", { name: "API", kind: "api_payg", provider: "anthropic" })).json();
+    const spend = async (origin: string | null, usd: number) => {
+      const runId = randomUUID();
+      await ctx!.db.insert(runs).values({ id: runId, companyId: ctx!.company.id, agentId: worker.id, ticketId: t.id, origin, endedAt: new Date() });
+      await ctx!.db.insert(costEvents).values({ fundingSourceId: fs.id, companyId: ctx!.company.id, runId, costMicros: usd * 1e6 });
+    };
+    await spend("ticket watch", 5);
+    await ctx!.scheduler.wake({ agentId: ctx!.ceo.id, ticketId: t.id, reason: "ticket watch" });
+    expect(await ctx!.scheduler.tick()).toMatchObject({ launched: 1, deferred: 0 });
+    // Worker spend still counts: the same wake as agent work is held.
+    await spend(null, 1.1);
+    await ctx!.scheduler.wake({ agentId: worker.id, ticketId: t.id, reason: "assigned" });
+    expect(await ctx!.scheduler.tick()).toMatchObject({ deferred: 1 });
   });
 });
 
