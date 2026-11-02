@@ -270,7 +270,9 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 export type MergeResult =
   | { status: "merged" | "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
-  | { status: "uncommitted"; files: string[] };
+  | { status: "uncommitted"; files: string[] }
+  /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
+  | { status: "migration_journal"; problems: string[] };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
 export type CarriedTicket = { ticketId: string; branch: string };
