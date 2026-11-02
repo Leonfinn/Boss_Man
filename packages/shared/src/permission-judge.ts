@@ -98,3 +98,7 @@ function judgeWithoutCommand(question: string): JudgeReading {
   if (change && paths.some((p) => !/^\/tmp\//.test(p) && !WORKSPACE_PATH.test(p))) return result("outside");
   return result("ok");
 }
+
+/** The company setting: off, watch (log next to the human's answer only) or advise (sets the suggested button). There is no "act": the judge never answers a card. */
+export const PERMISSION_JUDGE_MODES = ["off", "watch", "advise"] as const;
+export type PermissionJudgeMode = (typeof PERMISSION_JUDGE_MODES)[number];
