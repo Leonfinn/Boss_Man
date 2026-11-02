@@ -5,7 +5,7 @@
 #
 #   host-deployer.sh              handle one request, if there is one
 #   host-deployer.sh --dry-run    run every check and say what would happen; changes nothing
-#   host-deployer.sh --rollback   blue/green only, by hand at the NAS, as root: go back to the other colour (the
+#   host-deployer.sh --rollback   blue/green only, by hand on the host, as root: go back to the other colour (the
 #                                 previous release), also after the 15-minute window. With --dry-run it only checks.
 #
 # It reads one small request file the server wrote, treats it as data only, checks it, and runs
@@ -324,10 +324,10 @@ do_deploy_bluegreen() {
   [[ -n $why ]] || compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || why="Could not signal $BG_IDLE."
   [[ -n $why ]] || wait_ready "server-$BG_IDLE" leader "$COMMIT" "$BG_HANDOVER_SECONDS" || why="$BG_IDLE did not become the leader."
   [[ -n $why ]] || flip_proxy "$BG_IDLE" || why="The proxy did not accept the switch to $BG_IDLE."
-  [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="The checks through the proxy failed."
+  [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "$why Switched back to $BG_LIVE automatically. Backup: $BG_BACKUP"
-    else bg_fail failed "$why The switch-back ALSO failed: look at the NAS now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "$why The switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
     return 1
   fi
 
@@ -363,7 +363,7 @@ soak_tick() {
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
   if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
-  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the NAS now (docker compose ps; $LOG)."; fi
+  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the host now (docker compose ps; $LOG)."; fi
 }
 
 # By hand, any time (also after the soak window): go back to the other colour, i.e. the previous release.
@@ -402,10 +402,10 @@ do_rollback_bluegreen() {
   [[ -n $why ]] || compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || why="Could not signal $BG_IDLE."
   [[ -n $why ]] || wait_ready "server-$BG_IDLE" leader "$ocommit" "$BG_HANDOVER_SECONDS" || why="$BG_IDLE did not become the leader."
   [[ -n $why ]] || flip_proxy "$BG_IDLE" || why="The proxy did not accept the switch to $BG_IDLE."
-  [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="The checks through the proxy failed."
+  [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
-    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the NAS now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.
@@ -431,7 +431,7 @@ main() {
     ((!DRY)) || exit "$rrc"
     COMMIT="$(g rev-parse HEAD)"
     log "${BG_RESULT:-failed}: ${BG_MSG:-Rollback stopped with an error.}"
-    write_status "${BG_RESULT:-failed}" "${BG_MSG:-Rollback stopped with an error. See $LOG on the NAS.}" "$BG_BACKUP"
+    write_status "${BG_RESULT:-failed}" "${BG_MSG:-Rollback stopped with an error. See $LOG on the host.}" "$BG_BACKUP"
     post_webhook "${BG_RESULT:-failed}" "${BG_MSG:-Rollback failed.}"
     exit "$rrc"
   fi
@@ -491,7 +491,7 @@ main() {
     g merge-base --is-ancestor "$head" "$COMMIT" || finish rejected "Rejected: ${COMMIT:0:8} is not a fast-forward of the deployed ${head:0:8}."
     local infra
     infra="$(g diff --name-only "$head" "$COMMIT" | grep -E "$INFRA" | { grep -Ev "$NOT_INFRA" || true; } | head -5 | paste -sd, - || true)"
-    [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand at the NAS: scripts/deploy.sh"
+    [[ -z $infra ]] || finish rejected "Rejected: this change touches deployment files ($infra). Deploy it by hand on the host: scripts/deploy.sh"
   fi
 
   if ((DRY)); then
@@ -506,7 +506,7 @@ main() {
   local rc=0 result msg
   if [[ $TARGET == server ]] && bluegreen_enabled; then
     do_deploy_bluegreen >>"$LOG" 2>&1 || rc=$?
-    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the NAS."
+    [[ $BG_RESULT == deployed ]] || BG_MSG="${BG_MSG:-The blue/green swap stopped with an error (exit $rc).} See $LOG on the host."
     finish "${BG_RESULT:-failed}" "$BG_MSG" "$BG_BACKUP"
   fi
   if [[ $TARGET == server ]]; then do_deploy_server >>"$LOG" 2>&1 || rc=$?; else do_update_runner >>"$LOG" 2>&1 || rc=$?; fi
@@ -521,7 +521,7 @@ main() {
     if [[ $TARGET == server ]]; then msg="Deployed ${head:0:8} to ${COMMIT:0:8}."; else msg="New runner image ready (commit ${COMMIT:0:8}); Boss Man is waiting for runs to finish, then swaps the runners and reports the result."; fi
   else
     case $result in partial | rolled_back) ;; *) result=failed ;; esac
-    msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the NAS."
+    msg="${msg:-The $TARGET action stopped with an error (exit $rc).} See $LOG on the host."
   fi
   finish "$result" "$msg" "$(deploy_status_field backup)"
 }

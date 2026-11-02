@@ -192,7 +192,7 @@ req runner "$c3"; host; has "$D/outbox/status.json" "only to the commit that is 
 req runner "$head"; host
 [[ $(status result) == deployed && $(status target) == runner ]] || fail "runner status"
 has "$STUB_LOG" "update-runner.sh"
-hasnt "$STUB_LOG" "update-runner.sh --now" # the runner target drains; --now is for a person at the NAS
+hasnt "$STUB_LOG" "update-runner.sh --now" # the runner target drains; --now is for a person at the host
 
 # 9. A failed deploy reports the failure, keeps the status honest and posts the webhook.
 git -C "$T/w" reset -q --hard "$c2"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop the compose change from main
