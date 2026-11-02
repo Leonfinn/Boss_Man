@@ -1,5 +1,5 @@
 {
-  "id": "3cceca0e-f3d0-479e-8a8a-b810f49b0ccb",
+  "id": "b3ea7be0-a520-4d72-8352-ae717d0a4b6f",
   "prevId": "215bf1e6-9b49-4846-a038-823f2f545234",
   "version": "7",
   "dialect": "postgresql",
@@ -5498,6 +5498,18 @@
           "primaryKey": false,
           "notNull": false
         },
+        "sandbox": {
+          "name": "sandbox",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sandbox_checked_at": {
+          "name": "sandbox_checked_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -7501,12 +7513,6 @@
         },
         "merge_commit": {
           "name": "merge_commit",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "checked_commit": {
-          "name": "checked_commit",
           "type": "text",
           "primaryKey": false,
           "notNull": false

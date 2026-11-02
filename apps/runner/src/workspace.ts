@@ -15,6 +15,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { checkQueueEnv } from "./fence.js";
 import { checkMigrations } from "./migrations.js";
 
 const run = promisify(execFile);
@@ -94,6 +95,8 @@ export class Workspaces {
   constructor(
     readonly root: string,
     private readonly baseEnv: NodeJS.ProcessEnv = process.env,
+    /** check-all.sh's shared queue folder (checkQueueEnv), so the merge check takes turns with agents' checks. */
+    private readonly coordDir?: string,
   ) {}
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
@@ -499,7 +502,7 @@ export class Workspaces {
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
         // BOSSMAN_MERGE_CHECK: scripts/check-all.sh lets the merge check take the shared lock ahead of agents' hand-run checks.
-        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1" } as NodeJS.ProcessEnv,
+        env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, CI: "1", BOSSMAN_MERGE_CHECK: "1", ...(this.coordDir ? checkQueueEnv(this.coordDir) : {}) } as NodeJS.ProcessEnv,
       });
       const killGroup = (signal: NodeJS.Signals) => {
         try {
