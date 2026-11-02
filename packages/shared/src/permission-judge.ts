@@ -113,7 +113,21 @@ export function judgePermission(question: string, command: string | null, ownFol
 function withoutOwnMemory(command: string, ownProject?: string): string {
   if (!ownProject || !/^[\w.-]+$/.test(ownProject) || ownProject.includes("..")) return command;
   const own = ownProject.replace(/[.]/g, "\\.");
-  return command.replace(new RegExp(`(?:~|\\$HOME|\\/home\\/[\\w.-]+|\\/root)\\/\\.claude\\/projects\\/${own}\\/memory\\/[\\w@+./-]*`, "g"), (m) => (m.includes("..") ? m : "MEMORY_PATH"));
+  const prefix = `(?:~|\\$HOME|\\/home\\/[\\w.-]+|\\/root)\\/\\.claude\\/projects\\/${own}\\/memory\\/`;
+  if (!new RegExp(prefix).test(command)) return command;
+  // Only a plain command qualifies: no `..`, quotes, braces, globs, backslashes, `$` or backticks anywhere; no cd, ln,
+  // interpreters, or network tools next to the memory path (they could escape it or send its content out).
+  // (A quote, brace or glob right after the path stops the whole-token match below, so it is not scrubbed either.)
+  if (/\.\.|[\\`]|\$(?!HOME\b)|\$\(|(?<![\w/.-])(cd|pushd|ln|python3?|node|perl|ruby|php|curl|wget|nc|ncat|socat|ssh|scp|rsync|sh|bash|zsh|eval|source)(?![\w/.-])/.test(command)) return command;
+  const scrubbed = command.replace(new RegExp(`${prefix}[\\w@+./-]*(?=$|[\\s;&|<>)])`, "g"), "MEMORY_PATH");
+  // Every other absolute or home path must be /tmp, a ticket folder or /dev/null; anything else (mv x ~/.bashrc) is not plain.
+  for (const m of scrubbed.matchAll(/(?:^|[\s=<>])((?:~|\$HOME|\/)[^\s;&|<>)]*)/g)) {
+    const t = m[1]!;
+    if (!/^\/tmp\/|^\/dev\/null$|\/workspaces\/(?:tickets|reviews)\//.test(t)) return command;
+  }
+  // A leftover reference to the memory folder (not matched whole above) means something odd followed it.
+  if (new RegExp(prefix).test(scrubbed)) return command;
+  return scrubbed;
 }
 
 /** Resolves `.` and `..` segments so a path can't climb out of the folder it starts in. */
