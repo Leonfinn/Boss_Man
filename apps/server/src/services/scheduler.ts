@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
@@ -713,6 +713,18 @@ export function schedulerService(
     return t?.repoUrl ? { ...t, repoUrl: t.repoUrl } : null;
   }
 
+  /**
+   * A run that could not start is a card on the first failure, naming the reason (BOS-314), not
+   * after three. One card per agent at a time: while one is open, further failed starts add none.
+   */
+  async function flagFailedStart(w: typeof wakes.$inferSelect, reason: string) {
+    const [open] = await db.select({ id: decisions.id }).from(decisions).where(and(like(decisions.dedupeKey, `start-fail:${w.agentId}:%`), eq(decisions.status, "open"))).limit(1);
+    if (open) return;
+    const [agent] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
+    const [t] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}` });
+  }
+
   async function launch(w: typeof wakes.$inferSelect): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
@@ -1325,6 +1337,7 @@ export function schedulerService(
           // Another pass already took it; leave its state alone.
           if ("claimed" in launched) continue;
           await wait(launched.reason);
+          await flagFailedStart(w, launched.reason);
           continue;
         }
         result.launched++;

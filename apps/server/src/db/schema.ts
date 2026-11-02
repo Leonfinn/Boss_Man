@@ -330,6 +330,8 @@ export const tickets = pgTable(
     /** What the agent said when it last moved the ticket (R85). Not in the version trigger, so it never bumps it. */
     stateNote: text("state_note"),
     stateNoteAt: timestamp("state_note_at", { withTimezone: true }),
+    /** When an agent last posted on this ticket, a reply or a state note (BOS-314). */
+    lastPostAt: timestamp("last_post_at", { withTimezone: true }),
     /** When an owner action made the state note possibly out of date (BOS-123). */
     stateNoteStaleAt: timestamp("state_note_stale_at", { withTimezone: true }),
     /** Its number in the company's sequence (shown as PREFIX-number); set by a database trigger on insert unless given. */
@@ -524,6 +526,10 @@ export const runs = pgTable("runs", {
   outcome: text("outcome"),
   /** When the owner asked to stop the run; the sweep ends it if the runner never confirms. */
   cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+  /** When the run last posted on its ticket (a reply or a state note); silence is measured from it (BOS-314). */
+  lastPostAt: timestamp("last_post_at", { withTimezone: true }),
+  /** When Boss Man asked the silent run for a status, so it is asked once (BOS-314). */
+  silentSteeredAt: timestamp("silent_steered_at", { withTimezone: true }),
 });
 
 export const fundingKind = pgEnum("funding_kind", ["api_credit", "subscription", "usage_credits", "api_payg"]);
