@@ -64,6 +64,7 @@ export const LOCK_RETRY_TEXT = "Merge check waiting for lock, retrying";
 
 /** How long the server waits for the runner to merge or push an approved branch. */
 export const MERGE_WAIT_MS = 10 * 60_000;
+const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
 
@@ -350,6 +351,12 @@ export function reviewService(
     if (!ticket.assigneeAgentId || !wake) throw new ReviewError(409, "The ticket has no assignee to send this to.");
     const w = (await wake(ticket.assigneeAgentId, { ticketId: ticket.id, reason, priority: 3, note: text, causedByRunId })) as { status: string };
     return w.status === "steered" ? "sent to the running agent" : "the assignee will be woken with it";
+  }
+
+  /** BOS-313: whether the merge gate checks the merged result it pushes. Off until the owner turns it on; off keeps the old path. */
+  async function checkMergedResult(): Promise<boolean> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, CHECK_MERGED_KEY));
+    return row?.value === true;
   }
 
   async function templates(companyId: string): Promise<GitTemplates> {
@@ -812,7 +819,26 @@ export function reviewService(
 
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
-      for (const command of checks) {
+      const kindOf = (command: string) => (command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify");
+      // A failed check: wait for the lock, a stuck check, or the ticket goes back with the output (shared by both ways of checking).
+      const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
+        // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
+        if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
+        const never = checkNeverFinished(v);
+        if (never) {
+          const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
+          await raiseCheckStuck(db, t, command, reason, v.output);
+          return { outcome: "check_stuck", delivered: null, detail: v };
+        }
+        const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
+        // The same failing check again and again means the agent is going round in circles (R50).
+        const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });
+        const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
+        return { outcome: "verify_failed", delivered, detail: v };
+      };
+      // BOS-313 (F6): with the setting on, the checks run on the merge commit that will be pushed, inside the merge itself.
+      const checkMerged = landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
+      for (const command of checkMerged ? [] : checks) {
         await touch();
         const runCheck = () => whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
         let v = await runCheck();
@@ -822,22 +848,8 @@ export function reviewService(
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check ${first === "killed" ? "was killed" : "ran out of memory"} before it finished; running it once more. Nothing to do.` });
           v = await runCheck();
         }
-        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify", passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
-        if (!v.ok) {
-          // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
-          if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
-          const never = checkNeverFinished(v);
-          if (never) {
-            const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
-            await raiseCheckStuck(db, t, command, reason, v.output);
-            return { outcome: "check_stuck", delivered: null, detail: v };
-          }
-          const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
-          // The same failing check again and again means the agent is going round in circles (R50).
-          const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });
-          const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
-          return { outcome: "verify_failed", delivered, detail: v };
-        }
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(command), passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
+        if (!v.ok) return checkFailed(command, v);
       }
 
       // Its migrations must not take a number another branch already has (BOS-219): the merge is the
@@ -860,7 +872,19 @@ export function reviewService(
       await touch();
       const m: MergeResult | PushResult = pr
         ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
-        : await whileActive(() => ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }), MERGE_WAIT_MS));
+        : await whileActive(() =>
+            ask<MergeResult>(
+              (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})`, ...(checkMerged ? { checks } : {}) }),
+              // The runner may check up to three merged results, one after another.
+              checkMerged ? MERGE_WAIT_MS + 3 * checks.length * VERIFY_ASK_TIMEOUT_MS : MERGE_WAIT_MS,
+            ),
+          );
+      if (m.status === "check_failed") {
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(m.command), passed: false, detail: m.result.output.slice(-500) });
+        return checkFailed(m.command, m.result);
+      }
+      // The target kept moving while the merged result was checked; nothing was pushed, so land() tries again.
+      if (m.status === "main_moved") return { outcome: "lock_wait", delivered: null, detail: m };
       if (m.status === "uncommitted") {
         const tpl = (await templates(t.companyId)).commit;
         const delivered = await sendBack(`The review was approved, but these files aren't committed: ${m.files.join(", ")}. ${renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title })} Then move the ticket back to review.`, "commit");
@@ -892,7 +916,11 @@ export function reviewService(
         await db.update(tickets).set({ pullRequestUrl: opened.url, pullRequestNumber: opened.number, pullRequestHead: m.commit, pullRequestNote: null }).where(eq(tickets.id, ticketId));
         return this.mergePullRequest(ticketId);
       }
-      await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, ticketId));
+      const checkedSha = m.status === "merged" ? m.checked?.sha : undefined;
+      if (checkedSha) {
+        for (const command of checks) await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: checkedSha, kind: kindOf(command), passed: true, detail: null });
+      }
+      await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
       await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
       return { outcome: "merged", delivered: null, detail: m };
     },
@@ -967,6 +995,12 @@ export function reviewService(
     },
 
     templates,
+
+    checkMergedResult,
+    async setCheckMergedResult(on: boolean) {
+      await db.insert(settings).values({ key: CHECK_MERGED_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
+      return on;
+    },
 
     async setTemplates(companyId: string, patch: Partial<GitTemplates>) {
       const next = { ...(await templates(companyId)), ...patch };
