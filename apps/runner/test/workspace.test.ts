@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { branchFor, gitAuthEnv, Workspaces } from "../src/workspace.js";
+import { branchFor, gitAuthEnv, safeGitEnv, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
 
@@ -69,6 +69,28 @@ describe("git workspaces (R38)", () => {
     expect(ws.savedPatch(ids.a)).toBeNull();
   });
 
+  it("does not run hooks or a filesystem monitor named in the shared repo's config", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const specA = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    await ws.ensure(specA);
+    const evil = mkdtempSync(path.join(tmpdir(), "bm-evil-"));
+    const marker = path.join(evil, "ran");
+    mkdirSync(path.join(evil, "hooks"));
+    for (const hook of ["post-checkout", "reference-transaction"]) {
+      writeFileSync(path.join(evil, "hooks", hook), `#!/bin/sh\necho ${hook} >> ${marker}\n`, { mode: 0o755 });
+    }
+    writeFileSync(path.join(evil, "fsmonitor"), `#!/bin/sh\necho fsmonitor >> ${marker}\n`, { mode: 0o755 });
+    git(ws.repoDir(ids.project), "config", "core.hooksPath", path.join(evil, "hooks"));
+    git(ws.repoDir(ids.project), "config", "core.fsmonitor", path.join(evil, "fsmonitor"));
+
+    const specB = { ...specA, ticketId: ids.b };
+    const b = await ws.ensure(specB);
+    writeFileSync(path.join(b.path, "x.txt"), "x\n");
+    await ws.release(specB);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("serialises concurrent creation on one repo", async () => {
     const r = remote();
     const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
@@ -85,6 +107,21 @@ describe("git workspaces (R38)", () => {
     expect(env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader" });
     expect(Buffer.from(env.GIT_CONFIG_VALUE_0!.replace("Authorization: Basic ", ""), "base64").toString()).toBe("x-access-token:ghp_x");
     expect(gitAuthEnv({})).toEqual({ GIT_TERMINAL_PROMPT: "0" });
+  });
+
+  it("keeps the hook and fsmonitor settings when a git token adds its own config entry", () => {
+    const env = safeGitEnv(gitAuthEnv({ GIT_TOKEN: "ghp_x" }));
+    expect(env).toMatchObject({
+      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: "/dev/null",
+      GIT_CONFIG_KEY_1: "core.fsmonitor",
+      GIT_CONFIG_VALUE_1: "false",
+      GIT_CONFIG_KEY_2: "http.extraHeader",
+      GIT_TERMINAL_PROMPT: "0",
+    });
+    expect(env.GIT_CONFIG_VALUE_2).toMatch(/^Authorization: Basic /);
+    expect(safeGitEnv(gitAuthEnv({}))).toMatchObject({ GIT_CONFIG_COUNT: "2" });
   });
 
   it("reports a clone that fails", async () => {
@@ -213,6 +250,27 @@ describe("workspace clean-up (R54)", () => {
     expect(later.usedBytes).toBe(later.tickets[0]!.bytes + later.repos[0]!.bytes);
     // The ticket's branch survives its worktree.
     expect(git(ws.repoDir(ids.project), "branch", "--list", branchFor(ids.b))).toContain(ids.b);
+  });
+});
+
+describe("the git author a rename asks for (BOS-265)", () => {
+  it("signs a turn's checkpoint with the agent's current name, and keeps Boss Man's own commits as Boss Man", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "a.txt"), "a\n");
+    await ws.checkpoint(spec, "after a turn", "Zippy");
+    const head = git(ws.repoDir(ids.project), "rev-parse", "refs/bossman/checkpoints/" + ids.a + "/000001");
+    expect(git(ws.repoDir(ids.project), "log", "-1", "--format=%an <%ae>|%cn", head)).toBe("Zippy <bossman@localhost>|Zippy");
+    // No name sent (an older server), or a blank one: Boss Man signs, never an empty author.
+    writeFileSync(path.join(w.path, "b.txt"), "b\n");
+    await ws.checkpoint(spec, "after a turn", "  ");
+    const next = git(ws.repoDir(ids.project), "rev-parse", "refs/bossman/checkpoints/" + ids.a + "/000002");
+    expect(git(ws.repoDir(ids.project), "log", "-1", "--format=%an", next)).toBe("Boss Man");
+    // A reviewer's copy is Boss Man's snapshot of the work, not the agent's commit.
+    const rev = await ws.ensureReview(spec);
+    expect(git(ws.repoDir(ids.project), "log", "-1", "--format=%an %s", rev.commit)).toBe("Boss Man Boss Man review copy");
   });
 });
 

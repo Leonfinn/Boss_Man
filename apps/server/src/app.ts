@@ -87,8 +87,13 @@ export type AppOptions = {
   db: Db;
   master: MasterKey;
   liveValidator?: LiveValidator;
-  /** Mark cookies Secure. Turn off only for plain-HTTP local development. */
-  secureCookies?: boolean;
+  /**
+   * Mark cookies Secure: true always (default), false never (plain-HTTP development), or "auto" to
+   * decide per request from req.protocol, which is https only behind a trusted proxy (BOS-242).
+   */
+  secureCookies?: boolean | "auto";
+  /** Exact addresses of the proxies whose X-Forwarded-* headers are believed (BOS-242). Never "true". */
+  trustedProxies?: string[];
   logger?: boolean;
   /** Quiet time before a wiki page is embedded after a write. Default 30s. */
   semanticDebounceMs?: number;
@@ -176,7 +181,8 @@ async function serveWeb(app: FastifyInstance, root: string) {
 
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
-  const app = Fastify({ logger: opts.logger ?? false });
+  // Trust only the exact proxy addresses given (the Tailscale Serve hop), never every hop.
+  const app = Fastify({ logger: opts.logger ?? false, trustProxy: opts.trustedProxies?.length ? opts.trustedProxies : false });
   // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
   const errorBuffer = createErrorBuffer();
   const logError = app.log.error.bind(app.log);
@@ -225,7 +231,7 @@ export async function buildApp(opts: AppOptions) {
   });
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader() });
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), log: (m) => app.log.warn(m) });
-  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId));
+  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m));
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
   const deploysSvc = deploysService(db, {
     now: opts.now,
@@ -452,6 +458,7 @@ export async function buildApp(opts: AppOptions) {
     withdrawDecision: (id) => decisionsSvc.withdrawSkill(id),
     tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
     closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
+    closeReviewDone: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote }),
     now: opts.now,
   });
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
@@ -535,7 +542,10 @@ export async function buildApp(opts: AppOptions) {
     return reply.code(500).send({ error: "internal_error" });
   });
 
-  async function startSession(reply: FastifyReply, ownerId: string) {
+  /** Secure flag for one request: see AppOptions.secureCookies. */
+  const cookieSecure = (req: FastifyRequest) => (opts.secureCookies === "auto" ? req.protocol === "https" : opts.secureCookies ?? true);
+
+  async function startSession(req: FastifyRequest, reply: FastifyReply, ownerId: string) {
     const token = newSessionToken();
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 86_400_000);
     await db.insert(sessions).values({ tokenHash: hashToken(token), ownerId, expiresAt });
@@ -543,7 +553,7 @@ export async function buildApp(opts: AppOptions) {
       path: "/",
       httpOnly: true,
       sameSite: "strict",
-      secure: opts.secureCookies ?? true,
+      secure: cookieSecure(req),
       expires: expiresAt,
     });
   }
@@ -593,7 +603,7 @@ export async function buildApp(opts: AppOptions) {
     const [row] = await db.select({ n: count() }).from(owners);
     if ((row?.n ?? 0) > 0) return reply.code(409).send({ error: "already_set_up" });
     const [owner] = await db.insert(owners).values({ username: body.username, passwordHash: await hashPassword(body.password) }).returning();
-    await startSession(reply, owner!.id);
+    await startSession(req, reply, owner!.id);
     return reply.code(201).send({ username: owner!.username });
   });
 
@@ -614,7 +624,7 @@ export async function buildApp(opts: AppOptions) {
       return reply.code(401).send({ error: "wrong_username_or_password" });
     }
     logins.succeeded(req.ip, body.username);
-    await startSession(reply, owner.id);
+    await startSession(req, reply, owner.id);
     return { username: owner.username };
   });
 
@@ -684,7 +694,13 @@ export async function buildApp(opts: AppOptions) {
       const { diskCapGb, ...rest } = b;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
-      return c ?? reply.code(404).send({ error: "not_found" });
+      if (!c) return reply.code(404).send({ error: "not_found" });
+      // The disk cap is the owner's own setting (BOS-274): keep a record of who changed it and to what.
+      if (diskCapGb !== undefined) {
+        const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+        await record(db, { companyId: id, kind: "settings", summary: diskCapGb === null ? "Owner reset the workspace disk cap to the server default (20 GB)" : `Owner set the workspace disk cap to ${gb(Math.round(diskCapGb * 1024 ** 3))}`, detail: { diskCapGb } });
+      }
+      return c;
     });
 
     owner.get("/api/companies", async () => {
@@ -1860,7 +1876,8 @@ export async function buildApp(opts: AppOptions) {
       if (!type) return reply.code(415).send({ error: "bad_type", message: "The picture must be a PNG, JPEG or WebP image." });
       const [a] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, id));
       if (!a) return reply.code(404).send({ error: "not_found", message: "No such agent." });
-      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type } });
+      // An upload replaces any picture the CEO copied from a ticket image (BOS-265).
+      await db.insert(agentAvatars).values({ agentId: id, bytes, type }).onConflictDoUpdate({ target: agentAvatars.agentId, set: { bytes, type, imageId: null } });
       const [row] = await db.update(agents).set({ avatarAt: new Date() }).where(eq(agents.id, id)).returning({ avatarAt: agents.avatarAt });
       return row;
     });

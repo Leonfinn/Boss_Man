@@ -23,6 +23,11 @@ function fakeGitea() {
   const pr = { number: 7, html_url: `${GITEA}/leon/site/pulls/7`, state: "open", merged: false, merge_commit_sha: null as string | null };
   const mergeAnswers: Array<{ status: number; body?: unknown }> = [];
   const checks = { state: "pending", statuses: [] as Array<{ context: string; status: string }> };
+  // Pull requests and their commits, by number (BOS-130); 7 is the one the fake opens.
+  const pulls = new Map<number, typeof pr>([[7, pr]]);
+  const commits = new Map<number, string[]>();
+  // Branch heads at the host, by branch name (BOS-130).
+  const heads = new Map<string, string>();
   const json = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -38,11 +43,23 @@ function fakeGitea() {
       if (a.status === 200) Object.assign(pr, { state: "closed", merged: true, merge_commit_sha: "e".repeat(40) });
       return json(a.status, a.body);
     }
-    if (method === "GET" && url === `${base}/7`) return json(200, pr);
+    const one = /^\/(\d+)(\/commits)?(\?.*)?$/.exec(url.slice(base.length));
+    if (method === "GET" && one) {
+      const n = Number(one[1]);
+      const pull = pulls.get(n);
+      if (!pull) return json(404, { message: "no such pull request" });
+      if (one[2]) return json(200, (commits.get(n) ?? []).map((sha) => ({ sha })));
+      return json(200, pull);
+    }
     if (method === "GET" && url === `${GITEA}/api/v1/repos/leon/site/commits/${HEAD}/status`) return json(200, checks);
+    const branch = /^\/branches\/(.+)$/.exec(url.slice(`${GITEA}/api/v1/repos/leon/site`.length));
+    if (method === "GET" && branch) {
+      const sha = heads.get(branch[1]!);
+      return sha ? json(200, { name: branch[1], commit: { id: sha } }) : json(404, { message: "no such branch" });
+    }
     return json(404, { message: `no fake for ${method} ${url}` });
   }) as typeof globalThis.fetch;
-  return { fetch, calls, pr, mergeAnswers, checks };
+  return { fetch, calls, pr, mergeAnswers, checks, pulls, commits, heads };
 }
 
 async function setup(opts: { token?: boolean } = {}) {
@@ -67,6 +84,7 @@ async function setup(opts: { token?: boolean } = {}) {
     if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "", truncated: false } }));
     if (c.type === "workspace.push") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "pushed", branch: `bossman/${c.ticketId}`, commit: HEAD } }));
     if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "merged", commit: "c".repeat(40) } }));
+    if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { needed: false, reason: "No other branch uses this ticket's migration numbers." } }));
     return true;
   });
   const ticket = (await req("POST", `/api/projects/${project.id}/tickets`, { title: "Add rate limiting", body: "Limit the API to 100 requests a minute.", assigneeAgentId: worker.id, state: "review" })).json() as { id: string };
@@ -163,5 +181,52 @@ describe("check results wake the right agent (R86)", () => {
     const passed = (await c.db.select().from(wakes)).filter((w) => w.reason === "ci passed");
     expect(passed).toEqual([expect.objectContaining({ agentId: ceo!.id, ticketId: c.ticket.id, note: expect.stringContaining("Required status check is not passing") })]);
     expect((await c.db.select().from(checkResults).orderBy(checkResults.at)).map((r) => r.passed)).toEqual([false, true]);
+  });
+});
+
+describe("a pull request whose branch carries another open ticket's work (BOS-130)", () => {
+  it("doesn't merge it at the host, and says which ticket must go first", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    // A high-risk ticket with its own open pull request: its reviewed head is one of this branch's commits.
+    const carried = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Permission gate", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+    const theirHead = "f".repeat(40);
+    await c.db.update(tickets).set({ branch: `bossman/${carried.id}`, risk: "high", pullRequestNumber: 8, pullRequestHead: theirHead }).where(eq(tickets.id, carried.id));
+    c.gitea.pulls.set(8, { number: 8, html_url: `${GITEA}/leon/site/pulls/8`, state: "open", merged: false, merge_commit_sha: null });
+    // This ticket's open pull request: its commits include the carried ticket's reviewed head.
+    c.gitea.pulls.set(7, { number: 7, html_url: `${GITEA}/leon/site/pulls/7`, state: "open", merged: false, merge_commit_sha: null });
+    c.gitea.commits.set(7, ["a".repeat(40), theirHead]);
+    await c.db.update(tickets).set({ pullRequestNumber: 7, pullRequestUrl: `${GITEA}/leon/site/pulls/7`, pullRequestHead: "b".repeat(40) }).where(eq(tickets.id, c.ticket.id));
+
+    const res = await c.req("POST", `/api/tickets/${c.ticket.id}/pull-request/merge`);
+    expect(res.statusCode).toBe(200);
+    expect(c.gitea.calls.some((x) => x.url.endsWith("/pulls/7/merge"))).toBe(false);
+    const t = await c.state();
+    expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
+    expect(t.pullRequestNote).toContain('"Permission gate"');
+    expect(t.pullRequestNote).toContain("must merge first");
+  });
+
+  it("still merges the pull request when nothing is carried", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    expect((await c.approve()).json()).toMatchObject({ outcome: "merged" });
+    expect(await c.state()).toMatchObject({ systemState: "done", mergeCommit: "e".repeat(40) });
+  });
+
+  it("doesn't merge when the host can't say what the other ticket is carrying", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: `${GITEA}/leon/site.git`, landing: "pull_request" });
+    // An open ticket whose branch has no pull request; the host doesn't know that branch.
+    const other = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Permission gate", assigneeAgentId: c.worker.id, state: "review" })).json() as { id: string };
+    await c.db.update(tickets).set({ branch: `bossman/${other.id}` }).where(eq(tickets.id, other.id));
+    await c.db.update(tickets).set({ pullRequestNumber: 7, pullRequestUrl: `${GITEA}/leon/site/pulls/7`, pullRequestHead: "b".repeat(40) }).where(eq(tickets.id, c.ticket.id));
+
+    const res = await c.req("POST", `/api/tickets/${c.ticket.id}/pull-request/merge`);
+    expect(res.statusCode).toBe(409);
+    expect(res.json().message).toContain("so it wasn't merged");
+    expect(c.gitea.calls.some((x) => x.url.endsWith("/pulls/7/merge"))).toBe(false);
+    const t = await c.state();
+    expect(t).toMatchObject({ systemState: "review", mergeCommit: null });
   });
 });

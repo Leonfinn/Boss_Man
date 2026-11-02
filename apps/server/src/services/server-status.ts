@@ -63,7 +63,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
     /** The read-only server status, filtered to one company wherever it could name another's work. */
     async status(companyId: string) {
       const at = now();
-      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
+      const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
 
       // The ticket each waiting wake is for, and whether it's Urgent, so an urgent wake that is
       // waiting can be found and its reason read (BOS-253).
@@ -125,7 +125,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         maintenance: await deps.hold(),
         migration: await latestMigration(db),
         runner: runner
-          ? { connected: deps.isConnected(runner.id), lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion }
+          ? { connected: deps.isConnected(runner.id), lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null }
           : null,
         wakes: {
           waiting: waiting.map((w) => ({ id: w.id, agent: w.agent, reason: w.reason, ticketId: w.ticketId, urgent: !!w.ticketUrgent, held: w.statusReason, waitingSeconds: ageSeconds(w.createdAt, at) })),

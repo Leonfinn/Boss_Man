@@ -2,6 +2,7 @@
 # rebuild-live.sh against a fake docker: it rebuilds the colour the proxy names, signals it, and waits
 # until it leads at the checkout's commit; a failed build stops before anything restarts; a server
 # that stays on standby is asked again and the script fails loudly. Run: scripts/rebuild-live.test.sh
+umask 022 # a default host umask: the script must tighten backups itself
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -42,6 +43,13 @@ logged "compose up -d --no-deps --force-recreate server-green" || fail "didn't r
 logged "compose kill -s SIGUSR2 server-green" || fail "didn't tell it to take charge"
 grep -q "server-green leads at" "$T/out" || fail "didn't confirm the leader"
 [[ $(find "$T/backups" -name 'rebuild-*.sql.gz' | wc -l) == 1 ]] || fail "no backup kept"
+[[ $(stat -c %a "$(find "$T/backups" -name 'rebuild-*.sql.gz')") == 600 ]] || fail "the backup is not owner-only"
+# Retention: only rebuild-* backups are pruned, newest 14 kept.
+for i in $(seq 1 20); do touch -d "2020-01-$(printf %02d "$i")" "$T/backups/rebuild-old-$i.sql.gz"; done
+touch "$T/backups/bossman-keep.sql.gz"
+run || fail "a rebuild with old backups failed"
+[[ $(find "$T/backups" -name 'rebuild-*.sql.gz' | wc -l) == 14 ]] || fail "backups were not pruned to 14"
+[[ -e $T/backups/bossman-keep.sql.gz ]] || fail "pruned a backup that is not a rebuild one"
 
 # A failed build stops before anything restarts.
 BUILD_RC=1 run && fail "a failed build reported success"

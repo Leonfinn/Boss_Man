@@ -18,6 +18,7 @@ export * from "./git-host.js";
 export * from "./agent-templates.js";
 export * from "./checks.js";
 export * from "./funding.js";
+export * from "./speakers.js";
 export * from "./review-policy.js";
 export * from "./explain.js";
 export * from "./addons.js";

@@ -34,9 +34,12 @@ echo "Rebuilding the live colour, $colour, at commit ${commit:0:7}."
 step "1/5 Back up the database"
 backup="$BACKUP_DIR/rebuild-$(date +%F-%H%M).sql.gz"
 mkdir -p "$BACKUP_DIR"
-docker compose exec -T db pg_dump -U bossman bossman | gzip >"$backup.partial" || { rm -f "$backup.partial"; die "the backup failed; nothing was changed."; }
+(umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$backup.partial") || { rm -f "$backup.partial"; die "the backup failed; nothing was changed."; }
 { [[ -s $backup.partial ]] && gzip -t "$backup.partial"; } || { rm -f "$backup.partial"; die "the backup is empty or damaged; nothing was changed."; }
 mv "$backup.partial" "$backup"
+# Same retention as deploy.sh and the host deployer: only rebuild-*.sql.gz, newest 14 kept.
+old="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'rebuild-*.sql.gz' -printf '%T@ %p\n' | sort -rn | tail -n +15 | cut -d' ' -f2-)"
+[[ -z $old ]] || while IFS= read -r f; do rm -f -- "$f"; done <<<"$old"
 ls -l "$backup"
 
 step "2/5 Build server-$colour"

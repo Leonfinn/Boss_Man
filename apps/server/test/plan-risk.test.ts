@@ -39,6 +39,7 @@ async function setup(opts: { listen?: boolean; answers?: { verify?: (command: st
     if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "", truncated: false } }));
     if (c.type === "workspace.verify") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: opts.answers?.verify?.(c.command) ?? { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } }));
     if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "merged", commit: "c".repeat(40) } }));
+    if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { needed: false, reason: "No other branch uses this ticket's migration numbers." } }));
     return true;
   });
   let seq = 0;

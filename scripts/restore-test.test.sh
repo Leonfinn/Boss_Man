@@ -47,4 +47,8 @@ rm "$t/backups/bossman-2026-01-02-0000.sql.gz"; : >"$t/log"
 if FAKE_RESTORED=0 "$here/restore-test.sh" >"$t/out" 2>&1; then fail "empty data passed"; fi
 grep -q "FAIL: no tickets" "$t/out" || fail "no failure message"
 grep -q "DROP DATABASE IF EXISTS bossman_restore_test" "$t/log" || fail "throwaway left behind"
+# A fresh backup is owner-only, even under a default umask.
+: >"$t/log"; rm -f "$t"/backups/restore-test-*.sql.gz
+(umask 022; "$here/restore-test.sh" --fresh-backup --keep >"$t/out" 2>&1) || true
+for f in "$t"/backups/restore-test-*.sql.gz; do [[ -e $f ]] || fail "no fresh backup written"; [[ $(stat -c %a "$f") == 600 ]] || fail "fresh backup is not mode 600"; done
 echo "restore-test.test.sh: ok"
