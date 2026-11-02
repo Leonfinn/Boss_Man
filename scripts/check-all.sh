@@ -88,13 +88,17 @@ if command -v flock >/dev/null; then
   fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
   if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-10800}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
-  mkdir -p "$QDIR"
+  # An unreachable lock folder (for example outside a fenced session's grant) fails at once with a clear message,
+  # never a silent wait: a slot file that cannot be opened would otherwise read as "busy" forever.
+  lock_unusable() { echo "check-all: cannot use the check lock folder: $1 (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
+  mkdir -p "$QDIR" 2>/dev/null || lock_unusable "cannot create $QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
-  : >"$qfile"; trap 'rm -f "$qfile"' EXIT
+  { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
+  trap 'rm -f "$qfile"' EXIT
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
-      exec 9>"$LOCK.slot.$k"
+      { exec 9>"$LOCK.slot.$k"; } 2>/dev/null || lock_unusable "cannot open $LOCK.slot.$k"
       if flock -n 9; then return 0; fi
     done
     exec 9>&-
