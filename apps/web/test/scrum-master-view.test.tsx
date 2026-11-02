@@ -25,6 +25,11 @@ describe("watchdog health line (BOS-60)", () => {
     expect(healthLine({ ...on, trippedAt: "2026-10-27T09:30:00Z", pausedUntil: "2026-10-27T10:30:00Z" }, now)).toMatchObject({ tone: "amber", text: expect.stringContaining("back in 30 min") });
     expect(healthLine({ ...on, lastSweepAt: "2026-10-27T09:30:00Z" }, now).tone).toBe("amber");
   });
+  it("says when it is only rehearsing (BOS-166)", () => {
+    const line = healthLine({ ...on, settings: { enabled: true, recordOnly: true } }, now);
+    expect(line.text).toBe("Watchdog: record only (not acting) · last check 3 min ago · 2 issues being handled");
+    expect(line.tone).toBe("");
+  });
 });
 
 describe("Open now and the timeline (BOS-199)", () => {
@@ -86,5 +91,23 @@ describe("Scrum Master activity (BOS-60)", () => {
     expect(calls[0]).toContain("excludeKind=sweep_wake");
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     await vi.waitFor(() => expect(calls).toContain("POST /api/watchdog-actions/a1/undo"));
+  });
+
+  it("marks a record-only entry as not sent and offers no undo (BOS-166)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([
+            { id: "a2", kind: "record_sweep_wake", ticketId: null, reason: "2 problems found (record only)", actorName: "Boss Man", createdAt: "2026-10-27T09:00:00Z", undoable: false, undoneAt: null, after: null, recorded: true },
+          ]),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+    render(<ScrumMasterLog companyId="c1" />);
+    expect(await screen.findByText("Would have woken the Scrum Master")).toBeTruthy();
+    expect(screen.getByText("Not sent")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
   });
 });

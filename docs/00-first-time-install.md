@@ -82,7 +82,7 @@ You should see one commit line.
 
 If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
 
-**Is the repo still private?** (Only before the public launch.) Clone with a read-only deploy key instead: [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+**Older install with a deploy key?** It keeps working; see [docs/06, step 2](06-install-truenas.md#2-get-the-code).
 
 ## 3. Make the folders, the master key and the token file
 
@@ -415,6 +415,15 @@ cd $B/src && docker compose logs --tail 100 server
 ```
 
 If a migration failed, don't edit the database by hand. Keep the log. Restore from a backup if you have one (`scripts/deploy.sh` keeps them in `$B`). Also check Postgres is healthy with `docker compose ps`.
+
+**Lock down backups made before this fix.**
+Backups written by current scripts are readable by their owner only (mode 600). Older ones may be readable by every user on the host and hold password hashes and sessions. Once, inside your backup folder (`$B` in this guide), run:
+
+```sh
+chmod 600 bossman-*.sql.gz restore-test-*.sql.gz
+```
+
+A pattern that matches no files prints an error; that is harmless.
 
 **The disk is filling up.**
 Check the host and Docker:

@@ -1,8 +1,8 @@
 // Review (R39): the review state carries the ticket's diff against its base, line comments
 // go back to the agent as one message, and commit and PR steps are prompts from templates
 // the owner can edit. Approving finishes the ticket until the merge step (R46) exists.
-import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
-import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, riskOf, ruleFor, type GitHostKind, type MergeResult, type PushResult, type ReviewComment, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
+import { and, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { deepChecks, DEFAULT_GIT_TEMPLATES, formatReviewComments, MERGE_MISSED_AFTER_MS, parseRepoUrl, renderTemplate, RISK_TIERS, riskOf, ruleFor, type CarriedTicket, type GitHostKind, type MergeResult, type MigrationsResult, type PushResult, type ReviewComment, type RiskTier, type VerifyResult, type WorkspaceDiff, VERIFY_ASK_TIMEOUT_MS } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { agents, checkResults, decisions, projects, reviewRequests, runners, settings, ticketDependencies, tickets } from "../db/schema.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -72,7 +72,7 @@ export const NOTHING_CHANGED = "Nothing in the repository changed. Make the chan
 
 /** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
-  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string };
+  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string };
   const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
   switch (r.outcome) {
     case "merged":
@@ -81,6 +81,10 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       return `Approved; the ticket is done.${d.note ? ` ${d.note}` : ""}`;
     case "pull_request":
       return `${d.url ? `Pull request opened: ${d.url}.` : "Approved."}${d.note ? ` It hasn't merged yet: ${d.note}` : ""}`;
+    case "carried":
+      return d.unchecked
+        ? `Approved, but not merged: Boss Man couldn't check whether the branch carries other tickets' unmerged work (${d.unchecked}), so it didn't merge. The ticket stays in review; approving it again tries the check again.`
+        : `Approved, but not merged: its branch also carries unapproved work from ${(d.carried ?? []).map((c) => `"${c.title}"`).join(", ")}. That ticket must merge first; the ticket stays in review.`;
     case "empty":
       return `Approved, but not closed: nothing in the repository changed. ${back} to make the change, or to mark the ticket as not needing code.`;
     case "verify_failed":
@@ -95,6 +99,14 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       return `Approved, but not merged (${r.outcome.replace(/_/g, " ")}).`;
   }
 }
+
+/** The highest of several risk tiers; unrated tickets are medium (BOS-130). */
+export function highestRisk(risks: Array<RiskTier | null | undefined>): RiskTier {
+  return risks.map(riskOf).reduce((a, b) => (RISK_TIERS.indexOf(b) > RISK_TIERS.indexOf(a) ? b : a), "trivial" as RiskTier);
+}
+
+/** A ticket whose branch carries unapproved work, and the ticket it waits for (BOS-130). */
+type CarriedInfo = CarriedTicket & { title: string; risk: RiskTier | null };
 
 /** Narrow on purpose: only the owner's "Merge without the check" uses skipChecks, for one landing. */
 export type LandOptions = { skipChecks?: boolean };
@@ -183,6 +195,132 @@ export function reviewService(
     return { cfg: { kind: gitHost as GitHostKind, apiBase: gitApiBase, owner: a.owner, repo: a.repo }, token };
   }
 
+  /** The project's open tickets that have a branch of their own, other than this one: candidates to be carried (BOS-130). */
+  async function otherOpenBranches(t: typeof tickets.$inferSelect) {
+    return db
+      .select({ ticketId: tickets.id, branch: tickets.branch, title: tickets.title, risk: tickets.risk })
+      .from(tickets)
+      .where(and(eq(tickets.projectId, t.projectId), ne(tickets.id, t.id), ne(tickets.systemState, "done"), isNotNull(tickets.branch)));
+  }
+
+  /**
+   * The unmerged commits of other open tickets' branches that this branch carries (BOS-130): the
+   * runner works it out from git. This is a safety gate, so it refuses rather than merges when it
+   * can't answer: the runner failing or timing out is an error, and a runner too old to do the
+   * check falls back to the host's own answer, which refuses when it can't give one either.
+   */
+  async function carriedBetween(runnerId: string, t: typeof tickets.$inferSelect, defaultBranch: string, gitHost: string | null, gitApiBase: string | null): Promise<CarriedInfo[]> {
+    const others = (await otherOpenBranches(t)).filter((o): o is typeof o & { branch: string } => !!o.branch && o.branch !== t.branch);
+    if (!others.length) return [];
+    let ids: string[];
+    if (deps.runners.can(runnerId, "carried-check")) {
+      let r: { carried?: CarriedTicket[] };
+      try {
+        // The same wait as a merge: the check queues behind other git jobs for the same repo lock.
+        r = await deps.runners.request<{ carried?: CarriedTicket[] }>(runnerId, (requestId) => ({
+          type: "workspace.carried",
+          requestId,
+          projectId: t.projectId,
+          ticketId: t.id,
+          target: defaultBranch,
+          branches: others.map((o) => ({ ticketId: o.ticketId, branch: o.branch })),
+        }), MERGE_WAIT_MS);
+      } catch (err) {
+        throw new ReviewError(409, `Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged: ${(err as Error).message} Try approving it again.`);
+      }
+      if (!Array.isArray(r.carried)) throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged. Try approving it again.");
+      ids = r.carried.map((c) => c.ticketId);
+    } else {
+      // An older runner: the host's pull requests are the only other answer, and they must give one.
+      ids = await carriedOnHost(t, gitHost, gitApiBase, others);
+    }
+    return others.filter((o) => ids.includes(o.ticketId)).map((o) => ({ ticketId: o.ticketId, branch: o.branch, title: o.title, risk: o.risk }));
+  }
+
+  /**
+   * The host's own answer, for a runner too old to compare branches (BOS-130): a ticket is carried
+   * when the commit its pull request was reviewed at is one of the commits this ticket's pull
+   * request is made of, up to the commit that was reviewed. An open pull request carries that too,
+   * since its head is the reviewed commit and this branch already has it. Anything the host can't
+   * answer is an error, never an empty list, so nothing merges on a guess.
+   */
+  async function carriedOnHost(t: typeof tickets.$inferSelect, gitHost: string | null, gitApiBase: string | null, others: Array<{ ticketId: string; branch: string; title: string }>): Promise<string[]> {
+    if (!deps.gitHosts || !deps.gitToken || (gitHost !== "github" && gitHost !== "gitea") || !gitApiBase)
+      throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work: Boss Man doesn't know this project's git host or has no git token. Nothing was merged.");
+    const { t: fresh, defaultBranch, repoUrl } = await ticketWithRepo(t.id);
+    const { cfg, token } = await prTarget(fresh.companyId, repoUrl, gitHost, gitApiBase);
+    const viaHost = deps.gitHosts;
+    // The commit the host reviewed each other open ticket's pull request at.
+    const theirs: Array<{ ticketId: string; head: string }> = [];
+    for (const o of others) {
+      const [row] = await db.select({ number: tickets.pullRequestNumber, head: tickets.pullRequestHead, branch: tickets.branch }).from(tickets).where(eq(tickets.id, o.ticketId));
+      if (!row?.branch) continue;
+      // No pull request yet: the branch's own head at the host is what is waiting to land.
+      const head = row.head ?? (await viaHost.branchHead(cfg, token, row.branch).catch((err) => {
+        throw new ReviewError(409, `Couldn't read the branch of "${o.title}" on the host, so it wasn't merged: ${(err as Error).message}`);
+      }));
+      theirs.push({ ticketId: o.ticketId, head });
+    }
+    if (!theirs.length) return [];
+    let mine: string[];
+    try {
+      if (fresh.pullRequestNumber) mine = (await viaHost.getWithCommits(cfg, token, fresh.pullRequestNumber, fresh.pullRequestHead)).commits;
+      // No pull request yet: the commits on the branch since the target, from the host's compare.
+      else mine = fresh.branch ? await viaHost.compare(cfg, token, defaultBranch, fresh.branch) : [];
+    } catch (err) {
+      throw new ReviewError(409, `Couldn't read this branch's commits on the host, so it wasn't merged: ${(err as Error).message}`);
+    }
+    return theirs.filter((x) => mine.includes(x.head)).map((x) => x.ticketId);
+  }
+
+  /**
+   * What to do when the check can't say whether the branch carries other open tickets' work
+   * (BOS-130): a safety gate refuses when it can't answer. Nothing merges, the ticket stays in
+   * review with the reason on it, the owner hears, and the assignee is asked to move it back.
+   */
+  async function refuseUnchecked(t: typeof tickets.$inferSelect, err: ReviewError) {
+    await wait(t, `Not merged: Boss Man couldn't check whether this branch carries other tickets' unmerged work (${err.message}). Nothing was merged.`);
+    const text = `The review of "${t.title}" was approved, but Boss Man couldn't check whether its branch carries other tickets' unmerged work (${err.message}), so it didn't merge. Move the ticket back to review to try again.`;
+    const delivered = await tellAgent({ ...t, systemState: "in_progress" }, text, "carried check failed").catch(() => null);
+    return { outcome: "carried" as const, delivered, detail: { unchecked: err.message } };
+  }
+
+  /**
+   * What to do when the branch carries other open tickets' work (BOS-130): nothing merges. When one
+   * of them would need the owner's sign-off at its risk, they're told, so its review, deeper check
+   * and staging aren't skipped by riding on this ticket. There is never a merge to approve here:
+   * the carried ticket has to merge first.
+   */
+  async function refuseCarried(t: typeof tickets.$inferSelect, carried: CarriedInfo[], o: { reviewerAgentId: string | null }) {
+    const names = carried.map((c) => `"${c.title}"`).join(", ");
+    const theirRisk = riskOf(highestRisk(carried.map((c) => c.risk)));
+    const detail = { carried: carried.map((c) => ({ ticketId: c.ticketId, title: c.title, risk: c.risk })) };
+    // The ticket stays in review, with the reason on it, until the carried ticket has merged.
+    await db.update(tickets).set({ pullRequestNote: `Waiting: its branch also carries unapproved work from ${names} (${theirRisk} risk), which must merge first.` }).where(eq(tickets.id, t.id));
+    const policy = await effectivePolicy(db, t);
+    if (carried.some((c) => ruleFor(policy, c.risk).ownerSignoff)) {
+      const [d] = await db
+        .insert(decisions)
+        .values({
+          companyId: t.companyId,
+          kind: "question",
+          question: `${names} (${theirRisk} risk) must be reviewed and merged before "${t.title}" can land: its branch carries that unmerged work. Merge ${names} first, then approve this ticket again.`,
+          options: ["Got it"],
+          recommendedOption: "Got it",
+          raisedByAgentId: o.reviewerAgentId,
+          tier: "owner",
+          dedupeKey: `carried:${t.id}:${carried.map((c) => c.ticketId).sort().join(",")}`,
+          context: { type: "carried", ticketId: t.id, carried: carried.map((c) => c.ticketId), risk: theirRisk },
+        })
+        .onConflictDoNothing()
+        .returning({ id: decisions.id });
+      if (d) await addTicketDependency(db, { companyId: t.companyId, blockedTicketId: t.id, blockerDecisionId: d.id, actor: { type: "system" } });
+    }
+    const text = `The review of "${t.title}" was approved, but its branch also carries unmerged work from ${names}. Nothing was merged: ${names} must merge first. Once ${carried.length > 1 ? "those tickets have" : "it has"}, move this ticket back to review.`;
+    const delivered = await tellAgent(t, text, "carried work").catch(() => null);
+    return { outcome: "carried" as const, delivered, detail };
+  }
+
   async function finishMerged(t: typeof tickets.$inferSelect, commit: string | null) {
     await db.update(tickets).set({ mergeCommit: commit, pullRequestNote: null }).where(eq(tickets.id, t.id));
     await deps.work.updateTicket(t.id, { state: "done", outcome: "completed", overLimit: true });
@@ -232,6 +370,36 @@ export function reviewService(
         return await deps.runners.request<WorkspaceDiff>(runner.id, (requestId) => ({ type: "workspace.diff", requestId, projectId: t.projectId, ticketId, ...(range === "last_turn" ? { range } : {}) }));
       } catch (err) {
         throw new ReviewError(409, (err as Error).message);
+      }
+    },
+
+    /**
+     * Whether the ticket's new migration numbers are free (BOS-219). At review time it also looks at
+     * the other open tickets in its project, so the agent hears early. The check that counts, just
+     * before the merge, compares only against the default branch: once one ticket has merged, the
+     * next must not be sent back because a branch it clashes with is still open, or two clashing
+     * tickets would keep bouncing each other. An offline runner or an unreadable branch gives
+     * "couldn't say", which never holds a ticket up.
+     */
+    async migrations(ticketId: string, companyId?: string, withOthers = true): Promise<MigrationsResult> {
+      const { t, repoUrl, defaultBranch } = await ticketWithRepo(ticketId, companyId);
+      if (!repoUrl || t.noCode) return { needed: null, reason: "This ticket has no code of its own to check." };
+      const others = !withOthers
+        ? []
+        : (
+            await db
+              .select({ branch: tickets.branch })
+              .from(tickets)
+              .where(and(eq(tickets.companyId, t.companyId), eq(tickets.projectId, t.projectId), inArray(tickets.systemState, ["in_progress", "review", "blocked"]), isNotNull(tickets.branch)))
+          )
+            .map((o) => o.branch!)
+            .filter((b) => b && b !== `bossman/${ticketId}`);
+      const [runner] = await db.select({ id: runners.id }).from(runners).where(eq(runners.companyId, t.companyId));
+      if (!runner) return { needed: null, reason: "The company has no runner, so there was nothing to compare." };
+      try {
+        return await deps.runners.request<MigrationsResult>(runner.id, (requestId) => ({ type: "workspace.migrations", requestId, projectId: t.projectId, ticketId, target: defaultBranch, others }));
+      } catch (err) {
+        return { needed: null, reason: `I couldn't check the migration numbers: ${(err as Error).message}` };
       }
     },
 
@@ -522,7 +690,7 @@ export function reviewService(
      * default branch, and the merge closes the ticket. A failed check, a conflict or
      * uncommitted work sends the ticket back to the agent with what to do.
      */
-    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried"; delivered: string | null; detail?: unknown }> {
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
@@ -567,7 +735,7 @@ export function reviewService(
       }
     },
 
-    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted"; delivered: string | null; detail?: unknown }> {
+    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
@@ -624,6 +792,22 @@ export function reviewService(
         return { outcome: "done", delivered: null, detail: { note: "Nothing in the repository changed, so there was nothing to check or merge." } };
       }
 
+      // A branch that also carries another open ticket's unmerged work can't go on the target: that
+      // work hasn't been reviewed, signed off or checked at its own risk (BOS-130). One approval is
+      // never enough for two tickets, so this is checked before anything runs or is pushed.
+      let carried: CarriedInfo[];
+      try {
+        carried = await carriedBetween(runner.id, t, defaultBranch, gitHost, gitApiBase);
+      } catch (err) {
+        if (!(err instanceof ReviewError)) throw err;
+        const r = await refuseUnchecked(t, err);
+        return { outcome: r.outcome, delivered: r.delivered, detail: r.detail };
+      }
+      if (carried.length) {
+        const r = await refuseCarried(t, carried, { reviewerAgentId: null });
+        return { outcome: "carried", delivered: r.delivered ?? null, detail: r.detail };
+      }
+
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
       for (const command of checks) {
@@ -645,6 +829,18 @@ export function reviewService(
           const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
           return { outcome: "verify_failed", delivered, detail: v };
         }
+      }
+
+      // Its migrations must not take a number another branch already has (BOS-219): the merge is the
+      // moment it matters, so this is checked again here and, when taken, the ticket goes back with
+      // the number free right now. A check that can't say never blocks the merge.
+      const migrations = await this.migrations(ticketId, undefined, false).catch(() => null);
+      if (migrations?.needed) {
+        const delivered = await sendBack(
+          `The review was approved, but a migration number is already taken: ${migrations.why.join("; ")}. Another branch merged a migration with the same number, so this can't land as it is. Rename it to ${String(migrations.next).padStart(4, "0")} (and any others it moved), set its journal entry's \`when\` later than the newest one already on ${defaultBranch}, run \`node scripts/lint-migrations.mjs\` (which now catches this), run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.${migrations.others.length ? `\nOther numbers taken: ${migrations.others.join("; ")}.` : ""}`,
+          "migration number taken",
+        );
+        return { outcome: "verify_failed", delivered, detail: migrations };
       }
 
       // A pull request: the host must be known and reachable before anything is pushed (R59).
@@ -698,9 +894,19 @@ export function reviewService(
       if (!t.pullRequestNumber) throw new ReviewError(409, "This ticket has no pull request.");
       if (t.systemState === "done") return { outcome: "merged", delivered: null };
       const { cfg, token } = await prTarget(t.companyId, repoUrl, gitHost, gitApiBase);
+      // A hand-merge is the same merge as approval's: a branch carrying another open ticket's
+      // unmerged work doesn't land here either (BOS-130).
       try {
         const now = await deps.gitHosts!.get(cfg, token, t.pullRequestNumber);
+        // Already merged on the host (someone did it by hand): the ticket is finished, whatever the branch had.
         if (now.merged) return finishMerged(t, now.mergeCommit);
+        const others = (await otherOpenBranches(t)).filter((o): o is typeof o & { branch: string } => !!o.branch);
+        const ids = await carriedOnHost(t, gitHost, gitApiBase, others);
+        const carried = others.filter((o) => ids.includes(o.ticketId));
+        if (carried.length) {
+          const names = carried.map((o) => `"${o.title}"`).join(", ");
+          return wait(t, `Not merged: this branch also carries unmerged work from ${names}, which must merge first. Nothing was merged.`);
+        }
         if (now.closed) return wait(t, "The pull request was closed on the host without merging. Reopen it there, or approve the ticket again to open a new one.");
         // Only the reviewed commit is merged: anything pushed to the branch since needs a new review.
         const tried = await deps.gitHosts!.merge(cfg, token, t.pullRequestNumber, { headSha: t.pullRequestHead, title: `Merge "${t.title}" into ${defaultBranch}`, message: `Boss Man ticket ${t.id}.` });
