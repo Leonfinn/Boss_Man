@@ -192,7 +192,7 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
   it("recommends Allow only for build output, never for source (adversarial review)", async () => {
     expect((await ctx.ask("rm -rf dist node_modules", ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "ceo", recommendedOption: "Allow once" });
     // BOS-150: a trailing slash or a deeper path follows a symlinked dist, so it is never recommended Allow
-    for (const [c, tier] of [["rm -rf dist/", "owner"], ["rm -rf apps/web/dist/", "owner"], ["rm -rf dist apps/web/dist", "ceo"]]) {
+    for (const [c, tier] of [["rm -rf dist/", "owner"], ["rm -rf apps/web/dist/", "owner"], ["rm -rf dist apps/web/dist", "ceo"]] as [string, string][]) {
       expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier, recommendedOption: "Deny" });
     }
     for (const c of ["rm -rf src", "rm -rf package.json", "rm -rf .github/workflows", "rm -f .env", "rm -rf dist src"]) {
