@@ -3,7 +3,7 @@
 # scripts/check-all.sh. Prints one PASS/FAIL line per step (output of a failed step follows it) and exits non-zero on any failure.
 # BASE (default origin/main) is the branch to compare with. Tests stub the commands through PATH.
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 base="${BASE:-origin/main}"
 
 changed="$(git diff --name-only "$base"...HEAD)" || { echo "FAIL  diff against $base"; exit 1; }
@@ -26,7 +26,7 @@ if has '^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig[^/]*\.json
   pkgs=(apps/launcher apps/runner apps/server apps/web packages/shared)
 fi
 
-step "merge with $base is clean" bash -c 'git merge-tree --write-tree "$1" HEAD' _ "$base"
+step "merge with $base is clean" git merge-tree --write-tree "$base" HEAD
 if has '^apps/server/drizzle/|^scripts/lint-migrations'; then step "migration lint" node scripts/lint-migrations.mjs; fi
 if has '^scripts/.*\.mjs$'; then step "script tests" node --test scripts/*.test.mjs; fi
 
