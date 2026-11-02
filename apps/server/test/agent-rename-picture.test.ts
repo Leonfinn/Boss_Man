@@ -219,12 +219,13 @@ describe("the CEO sets an agent's picture (BOS-265)", () => {
     const r = await client.callTool({ name: "set_agent_picture", arguments: { agent: "Engineer - Developer", imageId: big.id, reason: "A real face." } });
     expect(textOf(r)).toBe("Engineer - Developer now has that picture. It shows on the Agents page, the board and the runs list.");
     const [kept] = await c.db.select().from(agentAvatars).where(eq(agentAvatars.agentId, c.engineer.id));
-    expect(kept!.type).toBe("image/png");
     expect(kept!.bytes.length).toBeLessThanOrEqual(256 * 1024);
     expect(kept!.bytes.length).toBeLessThan(photo.length);
     const avatar = await c.req("GET", `/api/agents/${c.engineer.id}/avatar`);
     expect(avatar.statusCode).toBe(200);
-    expect(pictureType(kept!.bytes)).toBe("image/png");
+    // PNG is lossless, so an oversized one is written as WebP; either way it's a picture the board shows.
+    expect(kept!.type).toBe("image/webp");
+    expect(pictureType(kept!.bytes)).toBe(kept!.type);
     // The ticket keeps the original at full size: the shrink is only for the avatar copy.
     const stored = (await c.db.select().from(ticketImages).where(eq(ticketImages.id, big.id)))[0]!;
     expect(stored.bytes.length).toBe(photo.length);

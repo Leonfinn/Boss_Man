@@ -49,9 +49,10 @@ function codecs(): Promise<Codecs> {
         "image/webp": decodeWebp as Decode,
       },
       encode: {
+        // The PNG encoder takes no options; its pixels are written losslessly.
         "image/png": (d) => encodePng(d as ImageData),
-        "image/jpeg": (d, o) => encodeJpeg(d as ImageData, o),
-        "image/webp": (d, o) => encodeWebp(d as ImageData, o),
+        "image/jpeg": (d, o) => encodeJpeg(d as ImageData, { quality: o?.quality }),
+        "image/webp": (d, o) => encodeWebp(d as ImageData, { quality: o?.quality }),
       },
     };
   })());
@@ -120,9 +121,11 @@ function scale(pixels: Pixels, width: number, height: number): Pixels {
 /**
  * A picture under the cap that an agent can use as its avatar (BOS-320). A picture that already fits
  * comes back untouched; a larger one is decoded, scaled to fit 512 px on its longest side and written
- * back in the same format, losing quality step by step only until it's under the cap. Null means it
- * can't be shrunk: damaged bytes, an image already within 512 px (whose size is its detail), or one
- * still too large at the lowest quality — the caller refuses those as before.
+ * back in the same format, losing quality step by step only until it's under the cap. A PNG is
+ * lossless, so if scaling alone leaves it too large it is written as WebP instead, which every browser
+ * shows and which a phone photo easily fits. Null means it can't be shrunk: damaged bytes, an image
+ * already within 512 px (whose size is its detail), or one still too large at the lowest quality — the
+ * caller refuses those as before.
  */
 export async function shrinkPicture(bytes: Uint8Array, maxBytes = PICTURE_MAX_BYTES): Promise<Shrunk | null> {
   const type = pictureType(bytes);
@@ -143,13 +146,20 @@ export async function shrinkPicture(bytes: Uint8Array, maxBytes = PICTURE_MAX_BY
   if (ratio < 1) pixels = scale(pixels, Math.max(1, Math.round(pixels.width * ratio)), Math.max(1, Math.round(pixels.height * ratio)));
   // PNG is lossless, so only a smaller size helps it; the other formats lose quality until they fit.
   const qualities = type === "image/png" ? [0] : [80, 65, 50, 35, 20];
-  for (const quality of qualities) {
-    try {
+  try {
+    for (const quality of qualities) {
       const out = await c.encode[type]!(pixels, { quality });
       if (out.byteLength <= maxBytes) return { bytes: Buffer.from(out), type };
-    } catch {
-      return null;
     }
+    // A PNG can't lose quality, so when scaling didn't do it, write it as WebP.
+    if (type === "image/png") {
+      for (const quality of [80, 65, 50, 35, 20]) {
+        const out = await c.encode["image/webp"]!(pixels, { quality });
+        if (out.byteLength <= maxBytes) return { bytes: Buffer.from(out), type: "image/webp" };
+      }
+    }
+  } catch {
+    return null;
   }
   return null;
 }
