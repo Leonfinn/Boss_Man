@@ -62,13 +62,25 @@ fi
 # The slots and queue (need flock). pnpm/node are stubbed and CHECK_ALL_STOP_AFTER_LOCK stops the child once a slot is held.
 if command -v flock >/dev/null; then
   mkdir "$t/bin"; printf '#!/bin/sh\nexit 0\n' >"$t/bin/pnpm"; cp "$t/bin/pnpm" "$t/bin/node"; chmod +x "$t/bin/pnpm" "$t/bin/node"
-  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 "$@" ./scripts/check-all.sh 2>&1); }
+  lock() { (cd "$here/.." && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_STOP_AFTER_LOCK=1 CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/proof" "$@" ./scripts/check-all.sh 2>&1); }
   hold() { ( exec 8>"$t/lock.slot.$1"; flock 8; sleep "$2" ) & }
 
   out=$(lock env) || fail "free slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "free slot: not acquired"
 
-  # One slot by default: a busy slot makes a merge check give up. With CHECK_ALL_SLOTS=2 a second check runs.
+  # One slot until a side-by-side pair has passed: a busy slot makes a second check wait, and CHECK_ALL_SLOTS=2 alone is ignored.
+  hold 1 3; holder=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1 CHECK_ALL_SLOTS=2) || rc=$?
+  [ "$rc" = 75 ] || fail "no proof: expected exit 75, got $rc: $out"
+  grep -q "ignored" <<<"$out" || fail "no proof: no ignored message: $out"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  hold 1 3; holder=$!; sleep 0.3
+  out=$(lock env CHECK_ALL_PAIR_TRIAL=1) || fail "trial: expected success, got: $out"
+  grep -q "lock held" <<<"$out" || fail "trial: second slot not acquired"
+  kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+  echo "A=600s B=640s no OOM" >"$t/proof"
+
+  # With a recorded pair, two slots: one busy slot does not stop a second check.
   hold 1 4; holder=$!; sleep 0.3
   out=$(lock env CHECK_ALL_SLOTS=2) || fail "second slot: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "second slot: not acquired"
@@ -80,6 +92,11 @@ if command -v flock >/dev/null; then
   [ "$rc" = 75 ] || fail "busy slots: expected exit 75, got $rc: $out"
   grep -q "place 1 of 1" <<<"$out" || fail "busy slots: no place message: $out"
   grep -q "gave up" <<<"$out" || fail "busy slots: messages missing: $out"
+  # A leading zero in a stored duration or in a queue name is read as base 10, not octal (09 would abort the wait).
+  mkdir "$t/zstore"; echo '{"status":"pass","duration_seconds":09}' >"$t/zstore/a.json"
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2 BOSSMAN_CHECK_STORE="$t/zstore") || rc=$?
+  [ "$rc" = 75 ] || fail "leading zero: expected exit 75, got $rc: $out"
+  grep -q "about 1 min" <<<"$out" || fail "leading zero: no estimate: $out"
   [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "gave-up check left its queue entry"
   kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
 
@@ -88,6 +105,13 @@ if command -v flock >/dev/null; then
   out=$(lock env CHECK_ALL_LOCK_WAIT=0) || fail "hand-run wait: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "hand-run wait: lock not acquired: $out"
   wait "$h1" "$h2"
+
+  # A merge check with no CHECK_ALL_LOCK_WAIT set waits its turn (the default is hours, not 10 minutes) and announces when its checks begin.
+  hold 1 3; h1=$!; sleep 0.3
+  out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_SLOTS=1) || fail "merge wait: expected success, got: $out"
+  grep -q "waiting for a free check slot" <<<"$out" || fail "merge wait: no queue message: $out"
+  grep -q "slot taken, running the checks" <<<"$out" || fail "merge wait: no start marker: $out"
+  wait "$h1"
 
   # Queue order: a merge check that arrives later goes ahead of a hand-run check; hand-run checks keep their order.
   hold 1 3; h1=$!; hold 2 3; h2=$!; sleep 0.3
@@ -110,7 +134,8 @@ if command -v flock >/dev/null; then
   grep -q "lock held" <<<"$out" || fail "dead waiter blocked the queue: $out"
   wait "$h1" "$h2"
 
-  # Default is one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  # No recorded pair means one slot: with slot 1 busy a second check waits (merge check gives up), even though slot 2 is free.
+  rm -f "$t/proof"
   hold 1 3; h1=$!; sleep 0.3
   rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=1) || rc=$?
   [ "$rc" = 75 ] || fail "default slots: expected one slot (exit 75), got $rc: $out"
