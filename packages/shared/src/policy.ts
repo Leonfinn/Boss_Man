@@ -65,7 +65,7 @@ export function isBossmanCall(info: PermissionInfo): boolean {
   return isBossmanTool(info.title);
 }
 
-/** Table rows 3: the built-in guards. Checked before any company allow, so a broad allow cannot lift them (BOS-307, DR-001). */
+/** Table row 3: the built-in guards. Checked before any company allow, so a broad allow cannot lift them (BOS-307, DR-001). */
 export const BUILTIN_GUARDS: PolicyRuleSpec[] = [
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
   { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
