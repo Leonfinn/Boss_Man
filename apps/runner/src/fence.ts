@@ -3,7 +3,7 @@
 // edits, browsers) can only write the session's own folders, and can't read other agents' files
 // and secrets, signal the runner, or reach other sessions' sockets. Proven in the BOS-315 spike.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,8 +51,11 @@ export type FenceSpec = {
   /** The agent's own home (harness state and caches) and this run's temp folder inside it. */
   home: string;
   tmp: string;
-  /** The ticket's shared bare repo and its worktree's admin folder, while tickets use worktrees (until Sandbox 3). */
-  repo?: { bare: string; admin: string | null };
+  /**
+   * The ticket's shared bare repo, and for a worktree its admin folder. A ticket's own clone
+   * (BOS-323) keeps everything it writes in its own .git, so the shared repo is read-only to it.
+   */
+  repo?: { bare: string; admin: string | null; clone?: boolean };
   /** More folders to read (skills, the adapter's install) or write (the pnpm store, the check queue). */
   readOnly?: string[];
   readWrite?: string[];
@@ -70,8 +73,10 @@ export function fenceProfile(spec: FenceSpec): FenceRules {
   const rw = [spec.cwd, spec.home, spec.tmp, "/dev/shm", "/dev/pts", ...(spec.readWrite ?? [])];
   if (spec.repo) {
     ro.push(spec.repo.bare);
-    rw.push(...["objects", "refs", "logs"].map((d) => path.join(spec.repo!.bare, d)));
-    if (spec.repo.admin) rw.push(spec.repo.admin);
+    if (!spec.repo.clone) {
+      rw.push(...["objects", "refs", "logs"].map((d) => path.join(spec.repo!.bare, d)));
+      if (spec.repo.admin) rw.push(spec.repo.admin);
+    }
   }
   const uniq = (list: string[]) => [...new Set(list.filter(Boolean).map((p) => path.resolve(p)))];
   return { ro: uniq(ro), rw: uniq(rw), roFiles: [], rwFiles: DEVICES_RW };
@@ -125,7 +130,8 @@ export function worktreeAdmin(bare: string, cwd: string): string | null {
  * The shared repo's grant for a session working in one of its worktrees. Git won't create the
  * folders a commit writes once the repo's root is read-only, so they're made here first.
  */
-export function repoGrant(bare: string, cwd: string): { bare: string; admin: string | null } {
+export function repoGrant(bare: string, cwd: string): { bare: string; admin: string | null; clone?: boolean } {
+  if (statSync(path.join(cwd, ".git"), { throwIfNoEntry: false })?.isDirectory()) return { bare, admin: null, clone: true };
   for (const d of ["objects", "refs", "logs"]) mkdirSync(path.join(bare, d), { recursive: true });
   return { bare, admin: worktreeAdmin(bare, cwd) };
 }

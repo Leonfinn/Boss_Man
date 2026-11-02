@@ -480,16 +480,16 @@ export class SessionManager {
       readWrite.push(grant.readWrite);
       readOnlyExtra.push(grant.readOnly);
     }
-    let repo: { bare: string; admin: string | null } | undefined;
+    let repo: ReturnType<typeof repoGrant> | undefined;
     if (cmd.workspace && this.opts.workspaces) {
       repo = repoGrant(this.opts.workspaces.repoDir(cmd.workspace.projectId), cmd.cwd);
-      // Claude Code keeps a project's auto-memory under its config folder, keyed by the shared repo.
-      // Agents share it today, so the agent's own folder links to the shared one, granted alone.
+      // Claude Code keeps a project's auto-memory under its config folder, keyed by the git root: the
+      // shared repo for a worktree, the clone itself for a clone. Agents share the project's, so the
+      // agent's own folder links that key to the shared one, granted alone.
       const shared = base.CLAUDE_CONFIG_DIR;
       if (shared && cmd.agentKind === "claude") {
-        const slug = claudeProjectSlug(repo.bare);
-        const memory = path.join(shared, "projects", slug, "memory");
-        const link = path.join(dirs.CLAUDE_CONFIG_DIR, "projects", slug, "memory");
+        const memory = path.join(shared, "projects", claudeProjectSlug(repo.bare), "memory");
+        const link = path.join(dirs.CLAUDE_CONFIG_DIR, "projects", claudeProjectSlug(repo.clone ? cmd.cwd : repo.bare), "memory");
         mkdirSync(memory, { recursive: true });
         // The agent owns its folder and could swap a parent for a link elsewhere, so the runner
         // makes folders and its link only through real folders. The grant is the shared folder either way.

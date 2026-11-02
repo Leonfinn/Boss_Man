@@ -18,12 +18,12 @@
 // recreated because the base moved, uncommitted work survives clean-up as a patch, and only
 // the clone itself is provisioned, so ignored local files like .env never leak in.
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
-import { checkQueueEnv } from "./fence.js";
+import { checkQueueEnv, fencedCommand, fenceProfile } from "./fence.js";
 import { checkMigrations } from "./migrations.js";
 
 const run = promisify(execFile);
@@ -116,6 +116,8 @@ export function safeGitEnv(extra: Record<string, string> = {}): Record<string, s
 }
 
 export class Workspaces {
+  /** What new instances start with for fenceCloneGit; the test suites that run every operation fenced turn it on. */
+  static fenceCloneGitByDefault = false;
   private readonly locks = new Map<string, Promise<unknown>>();
 
   constructor(
@@ -141,10 +143,50 @@ export class Workspaces {
     return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
   }
 
-  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
+  /**
+   * Whether the runner's own git in a ticket's clone runs inside the fence (BOS-323), set from the
+   * runner's fence self-test at start-up. A clone's config, hooks and attributes are the agent's to
+   * write, and a filter or fsmonitor named there runs whatever -c says, so the daemon's git there is
+   * fenced to that clone. It doesn't follow the company's fence setting: a planted config is just as
+   * dangerous when the agent itself ran unfenced. Off (no Landlock), it's SAFE_GIT_ENV only, as before.
+   */
+  fenceCloneGit = Workspaces.fenceCloneGitByDefault;
+
+  /**
+   * opts.repo is the shared repo a clone at opts.cwd borrows from: the one folder outside the clone
+   * its fenced git may read. It's the caller's, never read from the clone, whose alternates file the
+   * agent can rewrite to point at another project.
+   */
+  private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string; reads?: string[] } = {}) {
+    if (this.fenceCloneGit && opts.cwd && isClone(opts.cwd)) return this.fencedGit(args, opts.cwd, opts.repo, opts.env, opts.reads);
     const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(opts.env) };
     const { stdout } = await run("git", args, { cwd: opts.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
+  }
+
+  /**
+   * Git in a clone, fenced: read-write on the clone, a temp folder for this call (its HOME) and the
+   * caller's index folder; read-only on the system, the shared repo and any file the caller names. No global or system config,
+   * nothing from the daemon's env but PATH, so a program the clone's config names can reach nothing else.
+   */
+  private async fencedGit(args: string[], dir: string, repo: string | undefined, extra: Record<string, string> = {}, reads: string[] = []) {
+    if (!repo) throw new Error(`git in the clone ${dir} was called without its shared repo, so it can't be fenced.`);
+    const tmp = this.scratch("git");
+    try {
+      const readWrite = [tmp, ...(extra.GIT_INDEX_FILE ? [path.dirname(extra.GIT_INDEX_FILE)] : [])];
+      const cmd = fencedCommand(fenceProfile({ cwd: dir, home: tmp, tmp, readOnly: [repo, ...reads], readWrite }), "git", args);
+      const env = { PATH: this.baseEnv.PATH, HOME: tmp, TMPDIR: tmp, GIT_CONFIG_GLOBAL: "/dev/null", ...safeGitEnv(extra) };
+      const { stdout } = await run(cmd.bin, cmd.args, { cwd: dir, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
+      return stdout.trim();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  /** A new folder of the runner's own under tmp/, for one operation (housekeeping sweeps any left behind). */
+  private scratch(name: string) {
+    mkdirSync(path.join(this.root, "tmp"), { recursive: true });
+    return mkdtempSync(path.join(this.root, "tmp", `${name}-`));
   }
 
   /**
@@ -193,18 +235,18 @@ export class Workspaces {
     mkdirSync(path.dirname(tmp), { recursive: true });
     await this.git(["init", "--quiet", tmp]);
     writeFileSync(path.join(tmp, ".git", "objects", "info", "alternates"), `${path.join(repo, "objects")}\n`);
-    await this.git(["remote", "add", "origin", url], { cwd: tmp });
+    await this.git(["remote", "add", "origin", url], { cwd: tmp, repo });
     // Other tickets' branches, read-only: `git fetch shared` then e.g. `git merge shared/bossman/<ticket>`.
-    await this.git(["remote", "add", "shared", repo], { cwd: tmp });
-    await this.git(["config", "remote.shared.fetch", "+refs/heads/bossman/*:refs/remotes/shared/bossman/*"], { cwd: tmp });
-    await this.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", repo, "+refs/remotes/origin/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], { cwd: tmp });
+    await this.git(["remote", "add", "shared", repo], { cwd: tmp, repo });
+    await this.git(["config", "remote.shared.fetch", "+refs/heads/bossman/*:refs/remotes/shared/bossman/*"], { cwd: tmp, repo });
+    await this.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", repo, "+refs/remotes/origin/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], { cwd: tmp, repo });
   }
 
   /** Points a clone's HEAD at commit: on branch, or detached when branch is null. Nothing is checked out. */
-  private async setHead(dir: string, commit: string, branch: string | null) {
-    if (!branch) return void (await this.git(["update-ref", "--no-deref", "HEAD", commit], { cwd: dir }));
-    await this.git(["update-ref", `refs/heads/${branch}`, commit], { cwd: dir });
-    await this.git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], { cwd: dir });
+  private async setHead(repo: string, dir: string, commit: string, branch: string | null) {
+    if (!branch) return void (await this.git(["update-ref", "--no-deref", "HEAD", commit], { cwd: dir, repo }));
+    await this.git(["update-ref", `refs/heads/${branch}`, commit], { cwd: dir, repo });
+    await this.git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], { cwd: dir, repo });
   }
 
   /** Where a copy is built before it's moved into place, so a half-made copy is never taken for one. */
@@ -214,8 +256,8 @@ export class Workspaces {
   private async makeClone(repo: string, dir: string, commit: string, branch: string | null) {
     const tmp = this.buildDir(dir);
     await this.initClone(repo, tmp);
-    await this.setHead(tmp, commit, branch);
-    await this.git(["reset", "--hard", "--quiet"], { cwd: tmp });
+    await this.setHead(repo, tmp, commit, branch);
+    await this.git(["reset", "--hard", "--quiet"], { cwd: tmp, repo });
     renameSync(tmp, dir);
   }
 
@@ -237,7 +279,7 @@ export class Workspaces {
       const branch = await this.git(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir }).catch(() => null);
       const tmp = this.buildDir(dir);
       await this.initClone(repo, tmp);
-      await this.setHead(tmp, head, branch);
+      await this.setHead(repo, tmp, head, branch);
       // Locked, so a worktree prune can't drop its admin folder while the .git file is aside.
       await this.gitCode(["worktree", "lock", "--reason", "turning into a clone (BOS-323)", dir], { cwd: repo });
       renameSync(gitPath, aside);
@@ -245,7 +287,7 @@ export class Workspaces {
       rmSync(tmp, { recursive: true, force: true });
     }
     if (!existsSync(aside)) return;
-    await this.git(["reset", "--quiet"], { cwd: dir });
+    await this.git(["reset", "--quiet"], { cwd: dir, repo });
     const admin = readFileSync(aside, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
     if (admin && path.dirname(path.resolve(dir, admin)) === path.join(repo, "worktrees")) rmSync(path.resolve(dir, admin), { recursive: true, force: true });
     rmSync(aside);
@@ -267,10 +309,21 @@ export class Workspaces {
     const branch = `refs/heads/${branchFor(ticketId)}`;
     const checkpoints = `${this.checkpointPrefix(ticketId)}*`;
     const review = this.reviewRef(ticketId);
-    const has = async (ref: string) => (await this.gitCode(["rev-parse", "--verify", "--quiet", ref], { cwd: dir })).code === 0;
+    const has = async (ref: string) => (await this.gitCode(["rev-parse", "--verify", "--quiet", ref], { cwd: dir, repo })).code === 0;
     const specs = [`+${branch}:${branch}`, `+${checkpoints}:${checkpoints}`, ...((await has(review)) ? [`+${review}:${review}`] : [])];
-    const r = await this.gitCode(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", dir, ...specs], { cwd: repo });
-    if (r.code !== 0) throw new Error(`Couldn't bring ticket ${ticketId}'s branch over from its copy: ${r.stderr.slice(0, 500)}`);
+    // The clone's side of the fetch (upload-pack) reads the clone's config, so it's fenced too: it
+    // may read the clone and the shared repo and write only its own temp folder. The shared repo's
+    // side checks every object it takes.
+    const tmp = this.fenceCloneGit ? this.scratch("upload-pack") : null;
+    try {
+      const uploadPack = tmp
+        ? ["--upload-pack", shellQuote(fencedCommand(fenceProfile({ cwd: tmp, home: tmp, tmp, readOnly: [dir, repo] }), "env", [`HOME=${tmp}`, `TMPDIR=${tmp}`, "GIT_CONFIG_GLOBAL=/dev/null", "git", "upload-pack"]))]
+        : [];
+      const r = await this.gitCode(["-c", "fetch.fsckObjects=true", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", ...uploadPack, dir, ...specs], { cwd: repo });
+      if (r.code !== 0) throw new Error(`Couldn't bring ticket ${ticketId}'s branch over from its copy: ${r.stderr.slice(0, 500)}`);
+    } finally {
+      if (tmp) rmSync(tmp, { recursive: true, force: true });
+    }
   }
 
   /** In a clone, the review snapshot's ref, so it can be fetched into the shared repo. */
@@ -320,7 +373,7 @@ export class Workspaces {
       let restoredPatch = false;
       const patch = this.patchFile(spec.ticketId);
       if (existsSync(patch)) {
-        await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir });
+        await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir, repo, reads: [patch] });
         rmSync(patch);
         restoredPatch = true;
       }
@@ -346,7 +399,7 @@ export class Workspaces {
       await this.addCopy(repo, dir, await this.git(["rev-parse", `refs/heads/${branch}`], { cwd: repo }), branch);
       const patch = this.patchFile(spec.ticketId);
       if (existsSync(patch)) {
-        await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir });
+        await this.git(["apply", "--whitespace=nowarn", patch], { cwd: dir, repo, reads: [patch] });
         rmSync(patch);
       }
       return dir;
@@ -377,10 +430,10 @@ export class Workspaces {
       const dir = this.reviewDir(spec.ticketId);
       let commit: string;
       if (existsSync(path.join(dev, ".git"))) {
-        commit = await this.snapshot(dev);
+        commit = await this.snapshot(repo, dev);
         // A clone's snapshot is only in its own objects: the shared repo, which the review copy reads, needs it too.
         if (isClone(dev)) {
-          await this.git(["update-ref", this.reviewRef(spec.ticketId), commit], { cwd: dev });
+          await this.git(["update-ref", this.reviewRef(spec.ticketId), commit], { cwd: dev, repo });
           await this.syncBranch(repo, dev, spec.ticketId);
         }
       } else {
@@ -393,8 +446,8 @@ export class Workspaces {
         );
       }
       if (existsSync(path.join(dir, ".git"))) {
-        await this.git(["checkout", "--quiet", "--force", "--detach", commit], { cwd: dir });
-        await this.git(["clean", "-fdq"], { cwd: dir });
+        await this.git(["checkout", "--quiet", "--force", "--detach", commit], { cwd: dir, repo });
+        await this.git(["clean", "-fdq"], { cwd: dir, repo });
       } else {
         await this.git(["worktree", "prune"], { cwd: repo });
         mkdirSync(path.dirname(dir), { recursive: true });
@@ -405,18 +458,18 @@ export class Workspaces {
   }
 
   /** The worktree as it is now, as a commit no ref points at; its branch, index and files are untouched. */
-  private async snapshot(dir: string): Promise<string> {
-    const index = path.join(this.root, "tmp", `${path.basename(dir)}.review.index`);
-    mkdirSync(path.dirname(index), { recursive: true });
-    const env = { GIT_INDEX_FILE: index };
+  private async snapshot(repo: string, dir: string): Promise<string> {
+    // Each index in a folder of its own: a fenced git may write its index's folder, and no other.
+    const scratch = this.scratch(`${path.basename(dir)}.review`);
+    const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
-      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
-      await this.git(["add", "-A"], { cwd: dir, env });
-      const tree = await this.git(["write-tree"], { cwd: dir, env });
+      await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
+      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const who = this.authorEnv();
-      return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who });
+      return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who, repo });
     } finally {
-      rmSync(index, { force: true });
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
@@ -437,8 +490,8 @@ export class Workspaces {
       const clone = isClone(dir);
       // The branch is all that's kept of a clone, so it must reach the shared repo before the clone goes.
       if (clone) await this.syncBranch(repo, dir, spec.ticketId);
-      await this.git(["add", "-A"], { cwd: dir });
-      const diff = await this.git(["diff", "--cached", "--binary", "HEAD"], { cwd: dir });
+      await this.git(["add", "-A"], { cwd: dir, repo });
+      const diff = await this.git(["diff", "--cached", "--binary", "HEAD"], { cwd: dir, repo });
       let savedPatch = false;
       if (diff) {
         mkdirSync(path.dirname(this.patchFile(spec.ticketId)), { recursive: true });
@@ -512,27 +565,26 @@ export class Workspaces {
     const repo = this.repoDir(spec.projectId);
     const dir = await this.reopen(spec);
     const baseCommit = await this.git(["config", "--get", `bossman.ticket-${spec.ticketId}.base`], { cwd: repo });
-    const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
-    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..HEAD`], { cwd: dir });
+    const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
+    const log = await this.git(["log", "--format=%H%x09%s", `${baseCommit}..HEAD`], { cwd: dir, repo });
     const commits = log ? log.split("\n").map((l) => ({ sha: l.slice(0, 40), subject: l.slice(41) })) : [];
-    const index = path.join(this.root, "tmp", `${spec.ticketId}.index`);
-    mkdirSync(path.dirname(index), { recursive: true });
-    const env = { GIT_INDEX_FILE: index };
+    const scratch = this.scratch(`${spec.ticketId}.diff`);
+    const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
-      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
-      await this.git(["add", "-A"], { cwd: dir, env });
-      const numstat = await this.git(["diff", "--cached", "--numstat", baseCommit], { cwd: dir, env });
+      await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
+      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      const numstat = await this.git(["diff", "--cached", "--numstat", baseCommit], { cwd: dir, env, repo });
       const files = numstat
         ? numstat.split("\n").map((l) => {
             const [a, r, ...p] = l.split("\t");
             return { path: p.join("\t"), added: a === "-" ? 0 : Number(a), removed: r === "-" ? 0 : Number(r) };
           })
         : [];
-      const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env });
+      const full = await this.git(["diff", "--cached", baseCommit], { cwd: dir, env, repo });
       const truncated = Buffer.byteLength(full) > maxBytes;
       return { baseCommit, head, commits, files, diff: truncated ? full.slice(0, maxBytes) : full, truncated };
     } finally {
-      rmSync(index, { force: true });
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
@@ -569,24 +621,24 @@ export class Workspaces {
   }
 
   private async recordCheckpoint(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, dir: string, label: string, by?: string) {
-    const index = path.join(this.root, "tmp", `${spec.ticketId}.checkpoint.index`);
-    mkdirSync(path.dirname(index), { recursive: true });
-    const env = { GIT_INDEX_FILE: index };
+    const repo = this.repoDir(spec.projectId);
+    const scratch = this.scratch(`${spec.ticketId}.checkpoint`);
+    const env = { GIT_INDEX_FILE: path.join(scratch, "index") };
     try {
-      await this.git(["read-tree", "HEAD"], { cwd: dir, env });
-      await this.git(["add", "-A"], { cwd: dir, env });
-      const tree = await this.git(["write-tree"], { cwd: dir, env });
+      await this.git(["read-tree", "HEAD"], { cwd: dir, env, repo });
+      await this.git(["add", "-A"], { cwd: dir, env, repo });
+      const tree = await this.git(["write-tree"], { cwd: dir, env, repo });
       const list = await this.checkpoints(spec.projectId, spec.ticketId);
       const last = list[list.length - 1];
-      const parent = last?.commit ?? (await this.git(["rev-parse", "HEAD"], { cwd: dir }));
-      if ((await this.git(["rev-parse", `${parent}^{tree}`], { cwd: dir })) === tree) return null;
-      const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: dir, env: this.authorEnv(by) });
+      const parent = last?.commit ?? (await this.git(["rev-parse", "HEAD"], { cwd: dir, repo }));
+      if ((await this.git(["rev-parse", `${parent}^{tree}`], { cwd: dir, repo })) === tree) return null;
+      const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: dir, env: this.authorEnv(by), repo });
       const turn = (last?.n ?? 0) + 1;
-      await this.git(["update-ref", `${this.checkpointPrefix(spec.ticketId)}${String(turn).padStart(6, "0")}`, commit], { cwd: dir });
-      const files = await this.git(["diff", "--name-only", parent, commit], { cwd: dir });
+      await this.git(["update-ref", `${this.checkpointPrefix(spec.ticketId)}${String(turn).padStart(6, "0")}`, commit], { cwd: dir, repo });
+      const files = await this.git(["diff", "--name-only", parent, commit], { cwd: dir, repo });
       return { turn, commit, files: files ? files.split("\n").length : 0 };
     } finally {
-      rmSync(index, { force: true });
+      rmSync(scratch, { recursive: true, force: true });
     }
   }
 
@@ -614,7 +666,7 @@ export class Workspaces {
   }
 
   /** Runs git and returns its exit code instead of throwing on a non-zero exit. */
-  private async gitCode(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
+  private async gitCode(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string } = {}): Promise<{ code: number; stdout: string; stderr: string }> {
     try {
       return { code: 0, stdout: (await this.git(args, opts)) ?? "", stderr: "" };
     } catch (err) {
@@ -729,7 +781,7 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const branch = `refs/heads/${branchFor(spec.ticketId)}`;
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir });
+        const dirty = await this.git(["status", "--porcelain"], { cwd: dir, repo });
         if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
@@ -901,7 +953,7 @@ export class Workspaces {
       const dir = this.ticketDir(spec.ticketId);
       const name = branchFor(spec.ticketId);
       if (existsSync(path.join(dir, ".git"))) {
-        const dirty = await this.git(["status", "--porcelain"], { cwd: dir });
+        const dirty = await this.git(["status", "--porcelain"], { cwd: dir, repo });
         if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
         if (isClone(dir)) await this.syncBranch(repo, dir, spec.ticketId);
       }
@@ -1005,3 +1057,6 @@ export class Workspaces {
     return existsSync(f) ? readFileSync(f, "utf8") : null;
   }
 }
+
+/** One command line for sh, each word single-quoted (git runs --upload-pack through the shell). */
+const shellQuote = (c: { bin: string; args: string[] }) => [c.bin, ...c.args].map((w) => `'${w.replace(/'/g, `'\\''`)}'`).join(" ");
