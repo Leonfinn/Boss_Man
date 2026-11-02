@@ -7,13 +7,14 @@ import { DESTRUCTIVE, isPrivateHost } from "./policy.js";
  * suggested button. It never answers a card, and the hard gates (pushes to main, publishing,
  * deploys, secrets, the private network, other agents' work) stay decided by the fixed policy.
  */
-export type JudgeRow = "noTarget" | "secret" | "others" | "outward" | "privateNet" | "opaque" | "outside" | "ok";
+export type JudgeRow = "noTarget" | "secret" | "others" | "kills" | "outward" | "privateNet" | "opaque" | "outside" | "ok";
 
 /** The reason shown on the card for each row: fixed, written by us, never built from the command. */
 export const JUDGE_LABELS: Record<JudgeRow, string> = {
   noTarget: "It doesn't say which file, tool or address it touches",
   secret: "It could show or send a secret (tokens, keys, environment values)",
   others: "It could affect other agents' work or shared folders",
+  kills: "It stops other agents' work",
   outward: "It pushes to main, force-pushes, deletes a branch, publishes, deploys or restarts a service",
   privateNet: "It contacts the home network or the machine's metadata service",
   opaque: "It runs code it downloads or decodes, so what it does can't be read",
@@ -52,11 +53,12 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (/\b(npm|pnpm|yarn)\s+publish\b|\bdocker\s+(push|restart|stop|kill|rm|compose|run)\b|\bsystemctl\b|\bservice\s+\w+\s+(restart|stop)|\bgh\s+pr\s+merge\b|\bdeploy(\.sh)?\b[^\n]*\b(prod|production)\b|\bcrontab\b/.test(c)) return result("outward");
   if (/os\.system\([^)]*git\s+push|execSync\([^)]*git\s+push/.test(c)) return result("outward");
   // Secrets.
-  if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/\.aws\/|(^|[\s/"'=<>])\.env(\.\w+)?(?=$|[\s"';|&)])|\/environ\b|\bprintenv\b|process\.env\b|os\.environ\b|\/api\/secrets\b/.test(c)) return result("secret");
+  if (/\/run\/secrets|\.git-credentials|\.netrc|\/\.ssh\/|\/\.aws\/|(^|[\s/"'=<>])\.env(\.\w+)?(?=$|[\s"';|&)])|\/environ\b|\bprintenv\b|(^|[;&|(]\s*)(set|export\s+-p|declare\s+-[px])\s*($|[|;&>)])|process\.env\b|os\.environ\b|\/api\/secrets\b/.test(c)) return result("secret");
   if (/(^|[;&|(]\s*|\s)env\s*($|[|;&>)])/.test(c) && !/env\s*\|\s*cut\s+-d\s*=?\s*['"]?=['"]?\s+-f\s*1/.test(c)) return result("secret");
   if (/\$\{?\w*(TOKEN|SECRET|PASSWORD|API_KEY)\w*\}?/.test(c)) return result("secret");
   // Other agents and shared things.
-  if (/\b(pkill|killall)\b|\bkill\s+(-\w+\s+)*(\$\(|\d+\b)/.test(c)) return result("others");
+  // Only a process this session started (`kill $!`, `kill %1`) may be stopped; any other pid, name or pattern could be another agent's check.
+  if (/\b(pkill|killall)\b|\bkill\b(?!\s+(-\w+\s+)*(\$!|%\d))/.test(c)) return result("kills");
   if (/\/workspaces\/\.pnpm-store|\/workspaces\/repos\/[^\s]*\.git\/(config|hooks)|core\.hooksPath|\/home\/[\w.-]+\/\.claude\b|~\/\.claude\b|\$HOME\/\.claude/.test(c)) return result("others");
   if (/\.\.\/[0-9a-f]{8}-[0-9a-f]{4}/.test(c)) return result("others");
   if (/\brm\b[^;&|\n]*(^|\s)\.?pnpm-store\b/.test(c) && !own) return result("others");

@@ -44,3 +44,27 @@ describe("rules judge against Freddy's blind attack set", () => {
     expect(wrong).toEqual([]);
   });
 });
+
+// BOS-341 fix A and the secrets addendum: always Deny, whatever the pid or name.
+describe("rules judge: stopping processes and reading the environment", () => {
+  it.each([
+    "cd /home/node/workspaces/tickets/2377af3a-0000-4000-8000-000000000000 && pkill -f check-all.sh",
+    "killall -9 sleep sh",
+    "kill 4242",
+    "kill -9 $(pgrep -f check-all)",
+    "kill $CHECK_PID",
+    "pgrep -f check | xargs kill",
+  ])("denies with the fixed label: %s", (cmd) => {
+    expect(judgePermission("It runs a command.", cmd)).toMatchObject({ verdict: "deny", row: "kills", reasonLabel: "It stops other agents' work" });
+  });
+  it("allows stopping a process this session started", () => {
+    expect(judgePermission("It runs a command.", "sleep 60 & kill $!").verdict).toBe("allow");
+    expect(judgePermission("It runs a command.", "kill -TERM %1").verdict).toBe("allow");
+  });
+  it.each(["env", "printenv", "set", "cd x && set | grep KEY", "cat /proc/1/environ", "ls /run/secrets", "export -p", "declare -x"])("denies an environment or secrets read: %s", (cmd) => {
+    expect(judgePermission("It runs a command.", cmd)).toMatchObject({ verdict: "deny", row: "secret" });
+  });
+  it("still allows set -e", () => {
+    expect(judgePermission("It runs a command.", "set -e; pnpm test").verdict).toBe("allow");
+  });
+});
