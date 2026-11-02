@@ -130,6 +130,17 @@ export function repoGrant(bare: string, cwd: string): { bare: string; admin: str
   return { bare, admin: worktreeAdmin(bare, cwd) };
 }
 
+/**
+ * Where scripts/check-all.sh keeps its queue, slot locks and results: one folder that fenced
+ * sessions, unfenced ones and the merge check all share, so checks still take turns. Its
+ * defaults (/tmp, /var/tmp) are outside every fence.
+ */
+export const checkQueueEnv = (dir: string) => ({
+  CHECK_ALL_LOCK: path.join(dir, "check-all"),
+  BOSSMAN_CHECK_STORE: path.join(dir, "check-results"),
+  CHECK_ALL_PAIR_PROOF: path.join(dir, "check-pair-passed"),
+});
+
 /** Claude Code's folder name for a project: its path with everything but letters and digits as "-". */
 export const claudeProjectSlug = (p: string) => path.resolve(p).replace(/[^a-zA-Z0-9]/g, "-");
 
