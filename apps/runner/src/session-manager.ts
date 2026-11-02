@@ -146,8 +146,6 @@ export const stderrTail = (stderr: string) =>
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
 export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
 
-/** Claude Code's folder name for a project: its path with everything but letters and digits as "-". */
-const claudeProjectSlug = (p: string) => path.resolve(p).replace(/[^a-zA-Z0-9]/g, "-");
 
 /**
  * Claude Code keeps a project's auto-memory under its config folder, keyed by the git repo's
