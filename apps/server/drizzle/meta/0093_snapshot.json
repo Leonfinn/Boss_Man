@@ -1,6 +1,6 @@
 {
-  "id": "ed185f9e-358a-4d1d-9c9d-812eafea6b57",
-  "prevId": "b3ea7be0-a520-4d72-8352-ae717d0a4b6f",
+  "id": "0c09bb3f-25e6-4c45-92fa-4858af0dbe09",
+  "prevId": "7d1f2c4e-5b6a-4c8d-9e0f-1a2b3c4d5e6f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1242,24 +1242,6 @@
           "notNull": true,
           "default": 120
         },
-        "standing_rules": {
-          "name": "standing_rules",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "standing_rules_by": {
-          "name": "standing_rules_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "standing_rules_at": {
-          "name": "standing_rules_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "watchdog": {
           "name": "watchdog",
           "type": "jsonb",
@@ -1304,6 +1286,24 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "standing_rules": {
+          "name": "standing_rules",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "standing_rules_by": {
+          "name": "standing_rules_by",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "standing_rules_at": {
+          "name": "standing_rules_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -7531,6 +7531,12 @@
         },
         "merge_commit": {
           "name": "merge_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "checked_commit": {
+          "name": "checked_commit",
           "type": "text",
           "primaryKey": false,
           "notNull": false

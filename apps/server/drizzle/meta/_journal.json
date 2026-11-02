@@ -600,8 +600,15 @@
     {
       "idx": 85,
       "version": "7",
-      "when": 1793655217807,
-      "tag": "0089_standing_rules",
+      "when": 1793650814895,
+      "tag": "0092_checked_commit",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1793656098277,
+      "tag": "0093_standing_rules",
       "breakpoints": true
     }
   ]
