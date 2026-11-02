@@ -14,12 +14,14 @@
 #                               # Set it only if Boss Man runs under another Compose project name: <project>_edge.
 #   NTFY_EDGE_IP=<address>      # default 172.30.0.6, ntfy fixed address on edge. Must sit inside BOSSMAN_EDGE_SUBNET and never be
 #                               # BOSSMAN_EDGE_IP (the one address whose forwarded headers the server trusts) or the gateway (.1).
-# Optional: NTFY_VERSION (pinned below), NTFY_CACHE_DURATION (1h),
+# Optional: NTFY_IMAGE (pinned by digest below; change version and digest together), NTFY_CACHE_DURATION (1h),
 #   NTFY_UPSTREAM_BASE_URL (leave unset; iPhone only, see the doc).
 #
 # No port is published on the host at all. The container joins the "edge" network of the Tailscale sidecar
 # from deploy/tailscale.yml (BOS-242, set that up first); the sidecar's Serve config (deploy/tailscale/serve.json)
 # publishes it on tailnet port 8443 as http://ntfy:80. Never use Funnel.
+# Boss Man's server is on the same edge network and publishes to http://ntfy:80 directly (no ts.net name needed);
+# only the phone and the Approve buttons use the https address.
 # Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
 # `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set, so nothing is
 # relayed anywhere. Messages are kept for NTFY_CACHE_DURATION, then dropped.
@@ -27,10 +29,11 @@
 services:
   ntfy:
     profiles: ["ntfy"]
-    image: binwiederhier/ntfy:${NTFY_VERSION:-v2.11.0}
+    image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.11.0@sha256:4a7d0f0adc6d5d9fc36e64ab55ef676e76e124a2bdd50ce115b6d9c1c7430294}
     command: ["serve"]
     restart: unless-stopped
     user: "1000:1000"
+    cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     read_only: true
     tmpfs: ["/tmp"]
@@ -59,6 +62,7 @@ services:
         # Fixed so Docker can never hand ntfy the Tailscale container address (BOSSMAN_EDGE_IP) if that container is recreated.
         ipv4_address: ${NTFY_EDGE_IP:-172.30.0.6}
     mem_limit: 256m
+    pids_limit: 128
 
 networks:
   edge:

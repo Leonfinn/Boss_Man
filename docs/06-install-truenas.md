@@ -839,16 +839,16 @@ Treat the topic name and the passwords as secrets: notifications will carry Appr
    ```
    The last command prints the **publish token** (it starts with `tk_`). Copy it now.
 5. In Boss Man, open **Settings > Secrets** and save the publish token as a new secret.
-6. Open **Settings > Notifications** and fill in **ntfy server** with the https address from step 2, **Topic**, and **Access token** (the secret from step 5). Set **Boss Man's address on your phone** to Boss Man's https address.
-   **Unproven:** Boss Man's server container is not on your tailnet, so the ts.net name may not be reachable from inside it. Before you send the test, check from the server container (replace the name; ntfy answers this health URL without a login):
-   ```
-   docker compose exec server wget -qO- https://<host-name>.<tailnet>.ts.net:8443/v1/health
-   ```
-   It should print `{"healthy":true}`. If it fails, "Send a test" will fail too: stop and tell me. The fix (the server's `extra_hosts` pointing the ts.net name at the Tailscale container on `edge`, so the server keeps talking https) belongs in BOS-242's `deploy/tailscale.yml`, and it is not tested yet.
+6. Open **Settings > Notifications** and fill in **ntfy server** with `http://ntfy:80`, **Topic**, and **Access token** (the secret from step 5). Set **Boss Man's address on your phone** to Boss Man's https address. Boss Man's server and ntfy share the private `edge` network from section 10b, so Boss Man sends over that network and needs no tailnet name. Only your phone and the Approve buttons use the https address. If "Send a test" fails, check that ntfy is running (`docker compose -p boss-man-ntfy ps`) and that the server is on the `edge` network.
 7. In the ntfy app on your phone (the phone must be on your tailnet), choose **Use another server**, enter the https address, and log in as `phone-read` with its password. Subscribe to your topic.
 8. In Boss Man, choose **Send a test to my phone**. It should arrive within seconds.
 
-Check that it is locked down: `curl -s -o /dev/null -w '%{http_code}\n' https://<host-name>.<tailnet>.ts.net:8443/<topic>/json?poll=1` must print `401` or `403`, and from a device that is not on your tailnet the address must not answer at all.
+Check that it is locked down. Both commands must print `401` or `403` (the first tries to read, the second to publish, with no login):
+```
+curl -s -o /dev/null -w '%{http_code}\n' https://<host-name>.<tailnet>.ts.net:8443/<topic>/json?poll=1
+curl -s -o /dev/null -w '%{http_code}\n' -d probe https://<host-name>.<tailnet>.ts.net:8443/<topic>
+```
+From a device that is not on your tailnet the address must not answer at all.
 
 ### iPhone
 
