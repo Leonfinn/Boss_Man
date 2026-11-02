@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { branchFor, gitAuthEnv, Workspaces } from "../src/workspace.js";
+import { branchFor, gitAuthEnv, isClone, Workspaces } from "../src/workspace.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).trim();
 
@@ -77,7 +77,8 @@ describe("git workspaces (R38)", () => {
       ws.ensure({ projectId: ids.project, ticketId: ids.b, repoUrl: r.dir, baseRef: "main" }),
     ]);
     expect(a.created && b.created).toBe(true);
-    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
+    if (isClone(a.path)) expect([a.path, b.path].map((p) => git(p, "rev-parse", "--abbrev-ref", "HEAD"))).toEqual([branchFor(ids.a), branchFor(ids.b)]);
+    else expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
   });
 
   it("passes a git token through the environment only", () => {

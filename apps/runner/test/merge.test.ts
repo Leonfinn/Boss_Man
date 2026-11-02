@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { Workspaces } from "../src/workspace.js";
+import { isClone, Workspaces } from "../src/workspace.js";
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
@@ -164,6 +164,16 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
   /** Another ticket's branch, made and committed on the same runner, then pushed aside. */
   const otherTicket = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const ids2 = { other: otherTicket };
+  /**
+   * What a developer merges to take in another ticket's branch: a worktree sees it directly; a
+   * clone (BOS-323) fetches it from the shared repo once a turn's end has brought it there.
+   */
+  const otherBranch = async (ws: Workspaces, dir: string) => {
+    if (!isClone(dir)) return `bossman/${ids2.other}`;
+    await ws.checkpoint({ projectId: ids.project, ticketId: ids2.other }, "after a turn");
+    git(dir, "fetch", "-q", "shared");
+    return `shared/bossman/${ids2.other}`;
+  };
 
   it("says which other branches' unmerged commits this branch has, and only those", async () => {
     const o = origin();
@@ -189,7 +199,7 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     expect(git(path.join((ws as { root: string }).root, "repos", `${ids.project}.git`), "show", `refs/heads/bossman/${ids.t}:feature.txt`)).toBe("new");
 
     // This ticket merges the other in, as a developer would to stay up to date.
-    git(w.path, "merge", "--no-edit", `bossman/${ids2.other}`);
+    git(w.path, "merge", "--no-edit", await otherBranch(ws, w.path));
     expect(await ws.carried(spec, "main", branches)).toEqual({ carried: [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }] });
     // Nothing merges with the guard in place: the branch is exactly as it was.
     expect(git(w.path, "status", "--porcelain")).toBe("");
@@ -203,7 +213,7 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     git(other.path, "add", ".");
     git(other.path, "commit", "-qm", "other ticket's work");
     await ws.merge({ projectId: spec.projectId, ticketId: ids2.other }, "main", "Merge the other ticket");
-    git(w.path, "merge", "--no-edit", `bossman/${ids2.other}`);
+    git(w.path, "merge", "--no-edit", await otherBranch(ws, w.path));
     expect(await ws.carried(spec, "main", [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }])).toEqual({ carried: [] });
   });
 });
