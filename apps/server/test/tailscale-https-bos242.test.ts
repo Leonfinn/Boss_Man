@@ -67,7 +67,8 @@ describe("BOS-242 deploy/tailscale.yml shape", () => {
   });
   it("keeps the server on default and launcher as well as edge", () => {
     const server = yml.slice(yml.indexOf("\n  server:"));
-    for (const n of ["default", "launcher", "edge"]) expect(server).toMatch(new RegExp(`\\n      ${n}: \\{\\}`));
+    for (const n of ["default", "launcher"]) expect(server).toMatch(new RegExp(`\\n      ${n}: \\{\\}`));
+    expect(server).toMatch(/\n      edge:\n[^\n]*\n        ipv4_address: \$\{BOSSMAN_EDGE_SERVER_IP:-172\.30\.0\.3\}/);
   });
   it("pins the image by digest", () => {
     expect(yml).toMatch(/image: tailscale\/tailscale:v[\d.]+@sha256:[0-9a-f]{64}/);

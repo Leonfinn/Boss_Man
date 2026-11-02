@@ -138,6 +138,7 @@ jobs:
         run: |
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config -q
           POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "BOSSMAN_TRUSTED_PROXIES: 172.30.0.2"
+          POSTGRES_PASSWORD=ci docker compose -f docker-compose.yml -f deploy/tailscale.yml config | grep -q "ipv4_address: 172.30.0.3"
       - name: Self-deploy override mounts the two folders and no Docker socket
         run: |
           POSTGRES_PASSWORD=ci BOSSMAN_DATA=/srv/bm BOSSMAN_DEPLOYER=/mnt/tank/boss-man/deployer docker compose -f docker-compose.yml -f deploy/truenas.yml -f deploy/truenas-deployer.yml --profile runners config > merged-deployer.yml

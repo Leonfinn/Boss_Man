@@ -14,10 +14,11 @@ Settings in `.env` (all optional; the defaults are used if absent):
 | --- | --- | --- |
 | `BOSSMAN_EDGE_SUBNET` | `172.30.0.0/29` | Address range of the private `edge` network |
 | `BOSSMAN_EDGE_IP` | `172.30.0.2` | The Tailscale container's address. It must sit inside the subnet and not be the first address (`.1` is the gateway) |
+| `BOSSMAN_EDGE_SERVER_IP` | `172.30.0.3` | The Boss Man server's own address on `edge`. Same subnet, not `.1`, and different from `BOSSMAN_EDGE_IP`. It is pinned so Docker cannot give the Tailscale container's address to the server first |
 | `BOSSMAN_DATA` | `/srv/boss-man/data` | Tailscale's state lives in `$BOSSMAN_DATA/tailscale` |
 | `TS_HOSTNAME` | `boss-man` | The machine name, so the address is `<TS_HOSTNAME>.<tailnet>.ts.net` |
 
-If the default range clashes with a network the host already uses (your LAN, a VPN, other Docker networks), pick another private range, for example `BOSSMAN_EDGE_SUBNET=10.99.88.0/29` and `BOSSMAN_EDGE_IP=10.99.88.2`. Step 3 shows how to check.
+If the default range clashes with a network the host already uses (your LAN, a VPN, other Docker networks), pick another private range, for example `BOSSMAN_EDGE_SUBNET=10.99.88.0/29`, `BOSSMAN_EDGE_IP=10.99.88.2` and `BOSSMAN_EDGE_SERVER_IP=10.99.88.3`. Step 3 shows how to check.
 
 ## What each host needs
 
@@ -38,7 +39,7 @@ The container runs in Tailscale's **userspace mode** (`TS_USERSPACE=true`). It n
    mkdir -p "$BOSSMAN_DATA/tailscale"
    ```
 
-   If it prints a network instead of `free`, or `ip -4 route` shows 172.30.0.x in use, set `BOSSMAN_EDGE_SUBNET` and `BOSSMAN_EDGE_IP` in `.env` (see above) before step 5.
+   If it prints a network instead of `free`, or `ip -4 route` shows 172.30.0.x in use, set `BOSSMAN_EDGE_SUBNET`, `BOSSMAN_EDGE_IP` and `BOSSMAN_EDGE_SERVER_IP` in `.env` (see above) before step 5.
 4. Back up `.env`, then add the key and the extra compose file (use your own key):
 
    ```sh
