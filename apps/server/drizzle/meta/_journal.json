@@ -610,13 +610,6 @@
       "when": 1793656641004,
       "tag": "0093_phone_approve",
       "breakpoints": true
-    },
-    {
-      "idx": 87,
-      "version": "7",
-      "when": 1793656653561,
-      "tag": "0087_yielding_mockingbird",
-      "breakpoints": true
     }
   ]
 }
