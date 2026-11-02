@@ -22,6 +22,7 @@
 #   AVAILABLE_REFRESH_SECONDS  how often to look for a new commit on main (300); sooner when the server
 #                              leaves inbox/check ("Deploy latest" found nothing new; only its existence is read)
 #   SOAK_SECONDS       blue/green: how long the old colour stays up as a standby after a good swap (900)
+#   SOAK_CHECK_SECONDS blue/green: how long a failing check during that window is retried before the automatic switch-back (60)
 #
 # Blue/green (docs/09-self-deploy.md, "Phase 3, part 2"): when COMPOSE_FILE (environment or the checkout's .env)
 # names deploy/truenas-bluegreen.yml, target "server" does a zero-downtime colour swap instead of deploy.sh.
@@ -38,7 +39,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin # cron'
 D="${BOSSMAN_DEPLOYER:-$(cd "$(dirname "$0")" && pwd)}"
 REPO="$D/../src"
 WEBHOOK_URL="" WEBHOOK_ON_SUCCESS=0 RATE_LIMIT_SECONDS=600 AVAILABLE_REFRESH_SECONDS=300
-BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}"
+BG_POLL_SECONDS="${BG_POLL_SECONDS:-2}" BG_READY_SECONDS="${BG_READY_SECONDS:-120}" BG_HANDOVER_SECONDS="${BG_HANDOVER_SECONDS:-30}" SOAK_SECONDS="${SOAK_SECONDS:-900}" SOAK_CHECK_SECONDS="${SOAK_CHECK_SECONDS:-60}"
 CONF="$D/host.conf"
 if [[ -e $CONF ]]; then
   [[ ! -L $CONF && $(stat -c %u "$CONF") == "$(id -u)" && $(stat -c %a "$CONF") =~ ^[0-7]00$ ]] || { echo "ERROR: $CONF must be a plain file, owned by $(id -un), mode 600." >&2; exit 1; }
@@ -277,8 +278,11 @@ switch_back() {
 }
 
 # After the swap: the proxy answers as the new leader at the new commit, and the portal answers.
-verify_live() { # commit seconds
-  wait_ready proxy leader "$1" "$2" && probe proxy 3101 /portal.html >/dev/null 2>&1
+verify_live() { # commit seconds: on failure VERIFY_WHY says which check failed and what it saw
+  local body=""
+  VERIFY_WHY=""
+  wait_ready proxy leader "$1" "$2" || { VERIFY_WHY="the server did not answer as the leader at ${1:0:8} through the proxy within ${2}s (last answer: $(probe proxy 3100 /api/ready 2>&1 | head -c 300 || true))"; return 1; }
+  body="$(probe proxy 3101 /portal.html 2>&1 >/dev/null)" || { VERIFY_WHY="the portal page did not load through the proxy (${body:0:300})"; return 1; }
 }
 
 pre_fail() { # message: undo what happened before the hand-over; the live colour was never touched
@@ -341,7 +345,7 @@ soak_tick() {
   [[ -n $commit && $old != "$new" ]] || { log "Ignoring a malformed $f."; ((DRY)) || rm -f "$f"; return 0; }
   if ((DRY)); then log "[dry-run] a soak is running: $new live, $old standby until $deadline"; return 0; fi
   [[ $(live_colour || true) == "$new" ]] || { log "The proxy no longer points at $new; ending the soak."; rm -f "$f"; return 0; }
-  if verify_live "$commit" 10; then
+  if verify_live "$commit" "$SOAK_CHECK_SECONDS"; then
     if (($(date +%s) >= deadline)); then
       log "Soak over: stopping the old colour ($old)."
       compose stop "server-$old" >>"$LOG" 2>&1 || log "Could not stop server-$old."
@@ -349,10 +353,12 @@ soak_tick() {
     fi
     return 0
   fi
+  log "Check failed on $new at ${commit:0:8}: $VERIFY_WHY"
   BG_LIVE="$old" BG_IDLE="$new" BG_PREV="$prev"
-  REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$commit" COMMIT="$prev"
+  # The record names the commit that failed (to_commit), as a swap-time rollback does, and the one we are back on (from_commit).
+  REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
-  if switch_back; then finish rolled_back "The checks on $new failed during the standby window; switched back to $old automatically (code back at ${prev:0:8})."
+  if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
   else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the NAS now (docker compose ps; $LOG)."; fi
 }
 
