@@ -14,6 +14,7 @@ import { record } from "./activity.js";
 import { AnswerError, APPROVE_HAND_APPLY, DEPLOY, NOT_NOW, UPDATE_RUNNERS, clearOwnerTodo, raiseOwnerTodo, type DecisionContext, type DeployUpdate } from "./decisions.js";
 import type { NotifyInput } from "./notifications.js";
 import { sh, step } from "./steps.js";
+import type { ReleaseHow, ReleaseLog } from "./release-log.js";
 
 type SelfDeployContext = Extract<DecisionContext, { type: "self_deploy" }>;
 
@@ -53,7 +54,7 @@ const isSha = (s: string) => /^[0-9a-f]{7,64}$/.test(s);
 /** The ladder: success is a note, a refusal a flag, anything half-done or broken a page. */
 const LEVEL = { deployed: "note", nothing_new: "note", rejected: "flag", failed: "page", partial: "page", rolled_back: "page", running: "note" } as const;
 
-export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; log?: (msg: string) => void }) {
+export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: NotifyInput) => Promise<unknown>; /** The live-commit record and the Release Manager's wake (BOS-284). */ releaseLog?: ReleaseLog; log?: (msg: string) => void }) {
   const dir = deps.dir;
   const inboxFile = dir && path.join(dir, "inbox", "request.json");
   const readJson = async <T>(file: string, schema: z.ZodType<T>): Promise<T | null> => {
@@ -329,14 +330,33 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
       const a = await available();
       // A to-do clears as soon as what runs is the approved commit, even if the rest below returns early.
       if (a) await this.clearDoneOwnerTodos(a);
-      if (!a || !a.tip || s?.result === "running" || (await pending())) return;
+      const woken = await this.noteLive(a, s);
+      if (!a || !a.tip || s?.result === "running" || (await pending())) return woken;
       // The host just refused or deployed this very commit: the offer is stale until the host rewrites it.
-      if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return;
+      if (s && ["rejected", "deployed", "nothing_new"].includes(s.result) && s.to_commit === a.tip && Date.parse(a.checkedAt) <= Date.parse(s.ended)) return woken;
       if (a.tip === a.deployed) {
         for (const d of await openFor("server")) await db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, d.id));
-        return;
+        return woken;
       }
       await raise("server", a.tip, a.deployed, a);
+      return woken;
+    },
+
+    /**
+     * Tells the release log what is live now (BOS-284): the commit the host says it deployed (a deploy,
+     * a blue/green switch or switch-back, a rollback, or a hand-apply the host saw), then lets it wake
+     * each company's Release Manager on one small ticket. The commit is the same one server_status
+     * reports as live, so nothing here depends on where the host keeps its files. Returns how many
+     * Release Managers were woken.
+     */
+    async noteLive(a: Available | null, s: DeployStatus | null) {
+      if (!deps.releaseLog) return 0;
+      const live = a?.deployed || ((s && (s.result === "deployed" || s.result === "rolled_back") && s.to_commit) || "") || process.env.BOSSMAN_COMMIT || "";
+      if (!z.string().regex(/^[0-9a-f]{40}$/i).safeParse(live).success) return 0;
+      const rows = await db.select({ id: companies.id }).from(companies);
+      for (const c of rows) await deps.releaseLog.note(c.id, live);
+      const how: ReleaseHow = !s ? "restarted" : s.result === "rolled_back" ? "rolled-back" : "deployed";
+      return deps.releaseLog.releaseManagerWakes(how);
     },
 
     /** The "Deploy latest" button. Returns the open decision, or says why there is none. */
