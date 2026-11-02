@@ -116,12 +116,15 @@ describe("the brief cursor (R83)", () => {
     ctx.setOnline(false);
     await ctx.scheduler.wake({ agentId: ctx.dev.id, reason: "assigned", ticketId: t.id });
     await ctx.scheduler.tick();
-    expect(ctx.commands).toHaveLength(0);
+    const devCommands = () => ctx.commands.filter((c) => c.agentId === ctx.dev.id);
+    expect(devCommands()).toHaveLength(0);
     expect(await cursor(ctx.dev.id)).toBeNull();
 
     ctx.setOnline(true);
     await ctx.scheduler.tick();
-    expect(ctx.commands).toHaveLength(1);
+    // A failed start now raises a card (BOS-314), which may wake the Scrum Master; only the Dev's
+    // own launch belongs to this test.
+    expect(devCommands()).toHaveLength(1);
     expect(await cursor(ctx.dev.id)).not.toBeNull();
   });
 
