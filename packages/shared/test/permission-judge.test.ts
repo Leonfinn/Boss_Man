@@ -182,3 +182,16 @@ describe("rules judge: own memory folder and secret dodges", () => {
     expect(judge(cmd).verdict).toBe("deny");
   });
 });
+
+describe("rules judge on very long input (round 6: slow pattern)", () => {
+  it.each(["echo $(mktemp " + "a ".repeat(50_000), "x=$(mktemp " + "-d ".repeat(50_000), "ls " + "$(mktemp ".repeat(20_000)])("denies and returns fast: %#", (cmd) => {
+    const t = Date.now();
+    const r = judgePermission("run", cmd);
+    expect(Date.now() - t).toBeLessThan(500);
+    expect(r.verdict).toBe("deny");
+    expect(r.row).toBe("tooLong");
+  });
+  it("still reads $(mktemp ...) in normal-size commands", () => {
+    expect(judgePermission("run", "f=$(mktemp /tmp/x.XXXX) && echo hi > $f").verdict).toBe("allow");
+  });
+});

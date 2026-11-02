@@ -7,7 +7,7 @@ import { DESTRUCTIVE, isPrivateHost } from "./policy.js";
  * suggested button. It never answers a card, and the hard gates (pushes to main, publishing,
  * deploys, secrets, the private network, other agents' work) stay decided by the fixed policy.
  */
-export type JudgeRow = "noTarget" | "secret" | "others" | "kills" | "outward" | "privateNet" | "opaque" | "outside" | "ok";
+export type JudgeRow = "noTarget" | "secret" | "others" | "kills" | "outward" | "privateNet" | "opaque" | "outside" | "tooLong" | "ok";
 
 /** The reason shown on the card for each row: fixed, written by us, never built from the command. */
 export const JUDGE_LABELS: Record<JudgeRow, string> = {
@@ -19,6 +19,7 @@ export const JUDGE_LABELS: Record<JudgeRow, string> = {
   privateNet: "It contacts the home network or the machine's metadata service",
   opaque: "It runs code it downloads or decodes, so what it does can't be read",
   outside: "It changes or deletes files outside its own folder and /tmp",
+  tooLong: "The command is too long to read safely",
   ok: "It stays in its own folder and /tmp, or only reads",
 };
 
@@ -32,6 +33,9 @@ const WORKSPACE = /(?:^|[\s"'=:(])(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|revie
 const WORKSPACE_PATH = /^(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\//;
 const LEADING_CD = /^\s*(?:cd|git\s+-C)\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/;
 
+/** Longest command the judge reads; longer ones are denied unread. */
+export const MAX_JUDGED_COMMAND = 10_000;
+
 const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allow" : "deny", row, reasonLabel: JUDGE_LABELS[row] });
 
 /**
@@ -44,6 +48,8 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  */
 export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string): JudgeReading {
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
+  // The patterns below are not built for huge input (and run on the server loop): refuse to read it.
+  if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
   const c = withoutOwnMemory(command, ownProject).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
   const ids = [...c.matchAll(WORKSPACE)].map((m) => m[1]!);
@@ -93,7 +99,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   // $(git rev-parse --git-dir ...) is the asking agent's own git folder and $(mktemp ...) lands in /tmp.
   const safeSubst = (x: string): string => x
     .replace(/\$\(\s*git\s+(?:-C\s+\S+\s+)?rev-parse\s+(?:--absolute-git-dir|--git-dir|--show-toplevel|--git-path\s+[\w./-]+)\s*\)/g, "OWNDIR")
-    .replace(/\$\(\s*mktemp\b[^)\x60$]*?(\/tmp\/[\w.-]*)?[^)\x60$]*\)/g, (_a, p?: string) => p ?? "/tmp/mk");
+    .replace(/\$\(\s*mktemp\b([^)\x60$]*)\)/g, (_a, args: string) => /\/tmp\/[\w.-]*/.exec(args)?.[0] ?? "/tmp/mk");
   const cs = safeSubst(c);
   const assigned0 = new Map([...cs.matchAll(/(?:^|[;&|\s])(\w+)=(['"]?)(OWNDIR|\/tmp\/[\w.-]*)\2(?=$|[\s;&|)])/g)].map((m) => [m[1]!, m[3]!] as const));
   const cs2 = cs.replace(/\$\(\s*dirname\s+['"]?\$\{?(\w+)\}?['"]?\s*\)/g, (all, n: string) => assigned0.get(n) ?? all);
