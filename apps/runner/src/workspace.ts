@@ -705,8 +705,8 @@ export class Workspaces {
       await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
       // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
       // say so, not report the branch clean (BOS-130).
-      const refs = async (ref: string) => {
-        const r = await this.gitCode(["rev-list", ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
+      const refs = async (ref: string, firstParent = false) => {
+        const r = await this.gitCode(["rev-list", ...(firstParent ? ["--first-parent"] : []), ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
         if (r.code !== 0) throw new Error(`git rev-list ${ref} failed (exit ${r.code}): ${r.stderr.slice(0, 500)}`);
         return r.stdout.split("\n").filter(Boolean);
       };
@@ -717,6 +717,9 @@ export class Workspaces {
       // A ticket whose branch is gone here has nothing to compare: there is nothing of it to merge.
       if (!mineRef) return { carried: [] };
       const mine = new Set(await refs(branchFor(spec.ticketId)));
+      // Commits on this branch's own first-parent line are its own work. If B shares one, B merged
+      // this ticket in (B builds on it), which isn't this ticket carrying B (BOS-365).
+      const own = new Set(await refs(branchFor(spec.ticketId), true));
       const found: CarriedResult["carried"] = [];
       for (const b of branches) {
         if (b.ticketId === spec.ticketId || b.branch === branchFor(spec.ticketId)) continue;
@@ -725,7 +728,7 @@ export class Workspaces {
           () => false,
         );
         if (!exists) continue;
-        if ((await refs(b.branch)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
+        if ((await refs(b.branch)).some((sha) => mine.has(sha) && !own.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
       }
       return { carried: found };
     });
