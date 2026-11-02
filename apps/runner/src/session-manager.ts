@@ -4,7 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -14,7 +14,7 @@ import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, Se
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { addonList, checkAddons } from "./addons.js";
-import { gitAuthEnv, type Workspaces } from "./workspace.js";
+import { gitAuthEnv, isClone, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -136,6 +136,23 @@ export const stderrTail = (stderr: string) =>
 // The add-ons' settings from the image (docs/12) go through too: without them an agent's agent-browser
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
 export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
+
+/** Claude Code's folder name for a project: its path with everything but letters and digits as "-". */
+const claudeProjectSlug = (p: string) => path.resolve(p).replace(/[^a-zA-Z0-9]/g, "-");
+
+/**
+ * Claude Code keeps a project's auto-memory under its config folder, keyed by the git repo's
+ * root. A worktree's root is the shared repo, so a project's tickets share one memory; a
+ * ticket's own clone (BOS-323) is its own root, so its memory folder is linked to the shared one.
+ * A real folder already there is left alone.
+ */
+export function linkSharedMemory(configDir: string, cwd: string, bare: string) {
+  const shared = path.join(configDir, "projects", claudeProjectSlug(bare), "memory");
+  const link = path.join(configDir, "projects", claudeProjectSlug(cwd), "memory");
+  mkdirSync(shared, { recursive: true });
+  mkdirSync(path.dirname(link), { recursive: true });
+  if (!lstatSync(link, { throwIfNoEntry: false })) symlinkSync(shared, link);
+}
 
 const require = createRequire(import.meta.url);
 /** OpenCode is its own ACP agent: `opencode acp`, from the opencode-ai npm package (the Dockerfile puts it on PATH). */
@@ -430,8 +447,8 @@ export class SessionManager {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: "This runner has no workspace directory configured." });
         return;
       }
+      const spec = cmd.workspace;
       try {
-        const spec = cmd.workspace;
         if (spec.review) cmd = { ...cmd, cwd: (await this.opts.workspaces.ensureReview(spec, secrets)).path };
         else {
           const ws = await this.opts.workspaces.ensure(spec, secrets);
@@ -441,6 +458,14 @@ export class SessionManager {
       } catch (err) {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't prepare the git workspace: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
         return;
+      }
+      if (cmd.agentKind === "claude" && isClone(cmd.cwd)) {
+        const configDir = env.CLAUDE_CONFIG_DIR ?? path.join(env.HOME ?? "", ".claude");
+        try {
+          linkSharedMemory(configDir, cmd.cwd, this.opts.workspaces.repoDir(spec.projectId));
+        } catch (err) {
+          emit({ type: "runner.log", level: "warn", message: `Couldn't link ticket ${spec.ticketId}'s copy to the project's shared Claude memory: ${String((err as Error)?.message ?? err).slice(0, 300)}` });
+        }
       }
     }
 
