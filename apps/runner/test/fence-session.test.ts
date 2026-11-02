@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
-import { claudeProjectSlug, levelFor, probeLandlock, type FenceLevel } from "../src/fence.js";
+import { claudeProjectSlug, levelFor, probeLandlock, runnerFence, type FenceLevel } from "../src/fence.js";
 import { SessionManager } from "../src/session-manager.js";
 import { Workspaces } from "../src/workspace.js";
 import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
@@ -43,7 +43,7 @@ async function reachRun(opts: { fence?: boolean; runnerLevel?: FenceLevel }) {
     resolveEnv: async () => ({ REACH_OUTSIDE: outside, REACH_SECRET: secret, REACH_SHARED_CLAUDE: path.join(sharedClaude, "other-agent-transcript.jsonl") }),
     adapterBins: { claude: FAKE_REACH },
     coordDir,
-    ...(opts.runnerLevel ? { fence: { level: opts.runnerLevel, agentsRoot, pnpmStore: path.join(root, "workspaces", ".pnpm-store") } } : {}),
+    ...(opts.runnerLevel ? { fence: runnerFence(opts.runnerLevel, path.join(root, "runner-data"), path.join(root, "workspaces")) } : {}),
     emit: (e) => {
       events.push(e);
       if (e.type === "run.ended") done();

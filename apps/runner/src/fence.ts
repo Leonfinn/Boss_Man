@@ -168,6 +168,14 @@ export function addGitConfig(env: NodeJS.ProcessEnv, key: string, value: string)
 }
 
 /**
+ * The runner's fence setting for its SessionManager: its self-tested level, each agent's home in
+ * the runner's data volume, and the pnpm store pnpm already uses at the workspaces volume's root.
+ */
+export function runnerFence(level: FenceLevel, dataDir: string, workspacesRoot: string) {
+  return { level, agentsRoot: path.join(dataDir, "agents"), pnpmStore: path.join(workspacesRoot, ".pnpm-store") };
+}
+
+/**
  * What this runner can fence, reported at start-up. The probe proves the helper end to end:
  * a fenced write inside its folder must work and one outside must be refused.
  */

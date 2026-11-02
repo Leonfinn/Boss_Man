@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { gitAuthEnv } from "../src/workspace.js";
-import { addGitConfig, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, probeLandlock, repoGrant, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
+import { addGitConfig, APP_ROOT, claudeProjectSlug, fencedCommand, fenceProfile, levelFor, probeLandlock, repoGrant, runnerFence, sandboxSelfTest, worktreeAdmin } from "../src/fence.js";
 
 const { abi } = probeLandlock();
 const live = levelFor(abi).level !== "unavailable";
@@ -65,6 +65,19 @@ describe("fence profile", () => {
 
   it("names Claude Code's project folder the way Claude Code does", () => {
     expect(claudeProjectSlug("/home/node/workspaces/repos/473754fd-edfe-4179-96d6-267ebd93e294.git")).toBe("-home-node-workspaces-repos-473754fd-edfe-4179-96d6-267ebd93e294-git");
+  });
+});
+
+describe("the runner's fence setting", () => {
+  it("puts agent homes in the data volume and uses the workspaces volume's pnpm store", () => {
+    expect(runnerFence("full", "/data", "/ws")).toEqual({ level: "full", agentsRoot: "/data/agents", pnpmStore: "/ws/.pnpm-store" });
+  });
+
+  // main.ts starts the daemon, so no test runs it. Without this setting every run asked to be
+  // fenced ran unfenced while hello still offered the fence (found building BOS-323).
+  it("is passed to the runner's SessionManager from its self-test", () => {
+    const main = readFileSync(path.join(import.meta.dirname, "..", "src", "main.ts"), "utf8");
+    expect(main).toMatch(/new SessionManager\(\{[\s\S]*?\n  fence: runnerFence\(sandbox\.level, dataDir, workspacesRoot\),[\s\S]*?\n\}\);/);
   });
 });
 
