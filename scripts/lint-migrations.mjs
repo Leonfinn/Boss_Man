@@ -62,11 +62,108 @@ export function newMigrations(dir) {
   return readdirSync(dir).filter((f) => /^\d{4}_.*\.sql$/.test(f) && Number(f.slice(0, 4)) > BASELINE).sort();
 }
 
+/** Matches a migration file name and anything after its number: "0075_name.sql", "drizzle/0075_name.sql". */
+const MIGRATION_FILE = /(?:^|\/)(\d{4})_([^/]+)\.sql$/;
+
+/**
+ * What one set of migration files says: the highest number, the file names by number, and the
+ * highest journal `when` (from `journalWhen`). Files come in as paths (a git name-status lists
+ * "dir/0075_x.sql").
+ */
+export function migrationSet(files, journalWhen = []) {
+  const byNumber = new Map();
+  const byTag = new Map();
+  let max = 0;
+  for (const file of files) {
+    const m = MIGRATION_FILE.exec(file);
+    if (!m) continue;
+    const num = Number(m[1]);
+    const tag = `${m[1]}_${m[2]}`;
+    if (!byNumber.has(num)) byNumber.set(num, []);
+    byNumber.get(num).push(tag);
+    byTag.set(tag, num);
+    if (num > max) max = num;
+  }
+  return { max, byNumber, byTag, maxWhen: journalWhen?.length ? Math.max(...journalWhen) : null };
+}
+
+/**
+ * The migration numbers already taken for a branch's new migrations (BOS-219). `mine` is old or
+ * changed migration files on the branch and `others` everything already on, or coming on, another
+ * branch. A number is taken when another branch uses it for a different migration file (an edit to
+ * the same file, like merging main in, is not a clash), or when the branch has a new journal entry
+ * no higher than one already on the default branch (drizzle would silently skip it).
+ */
+export function migrationClashes(mine, others) {
+  const clashes = [];
+  const seen = new Set();
+  const add = (number, why) => {
+    const key = `${number}:${why}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    clashes.push({ number, why });
+  };
+  const mineNums = migrationSet(mine.files, mine.when);
+  const otherNums = migrationSet(others.files, others.when);
+  for (const [num, tags] of mineNums.byNumber) {
+    if (num === 0) continue;
+    const theirTags = otherNums.byNumber.get(num) ?? [];
+    for (const tag of tags) if (theirTags.some((t) => t !== tag)) add(num, `${tag} shares its number with ${theirTags.filter((t) => t !== tag).join(", ")}`);
+  }
+  if (mineNums.maxWhen != null && otherNums.maxWhen != null && mineNums.max > otherNums.max && mineNums.maxWhen <= otherNums.maxWhen) {
+    // Another branch already has migrations the journal has applied: ours would sort beside them and be skipped.
+    for (const [num, tags] of mineNums.byNumber) if (num > otherNums.max) for (const tag of tags) add(num, `${tag} would be skipped: the journal's "when" (${mineNums.maxWhen}) isn't later than the one already applied (${otherNums.maxWhen})`);
+  }
+  return clashes.sort((a, b) => a.number - b.number);
+}
+
+/** The lowest number at or above `from` that none of the given file sets uses. */
+export function nextFreeNumber(sets, from) {
+  const taken = new Set();
+  for (const set of sets) for (const num of migrationSet(set.files, set.when).byNumber.keys()) taken.add(num);
+  let n = Math.max(0, from);
+  while (taken.has(n)) n++;
+  return n;
+}
+
+/**
+ * Two migration files with the same number can't both exist in one folder, but a merge can leave
+ * the folder with one of them and the journal with both, or two entries on the same number: a real
+ * clash to fix by hand (BOS-219). Returns "file: problem" strings.
+ */
+export function lintNumberClash(files, journal) {
+  const problems = [];
+  const nums = new Map();
+  for (const f of files) {
+    const m = MIGRATION_FILE.exec(f);
+    if (!m) continue;
+    const num = m[1];
+    if (!nums.has(num)) nums.set(num, []);
+    nums.get(num).push(f);
+  }
+  for (const [num, list] of nums) if (list.length > 1) problems.push(`${list.join(", ")}: number ${num} is used twice`);
+  const tagsByNum = new Map();
+  for (const e of journal.entries ?? []) {
+    const m = /^(\d{4})_/.exec(e.tag ?? "");
+    if (!m) continue;
+    if (!tagsByNum.has(m[1])) tagsByNum.set(m[1], []);
+    tagsByNum.get(m[1]).push(e.tag);
+  }
+  for (const [num, tags] of tagsByNum) if (tags.length > 1) problems.push(`_journal.json: number ${num} is used twice (${tags.join(", ")})`);
+  // The journal must list every migration above the baseline, or the server never applies one of them.
+  const onDisk = new Set([...nums.entries()].filter(([num]) => Number(num) > BASELINE).map(([, list]) => list[0].replace(/^.*\//, "").slice(0, -4)));
+  for (const e of journal.entries ?? []) if (Number((e.tag ?? "").slice(0, 4)) > BASELINE && !onDisk.has(e.tag)) problems.push(`_journal.json: entry "${e.tag}" has no ${e.tag}.sql`);
+  for (const tag of onDisk) if (!(journal.entries ?? []).some((e) => e.tag === tag)) problems.push(`${tag}.sql: not listed in _journal.json`);
+  return problems;
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const dir = process.argv[2] ?? "apps/server/drizzle";
   const files = newMigrations(dir);
+  const journal = JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8"));
   const problems = files.flatMap((f) => lintSql(f, readFileSync(join(dir, f), "utf8")));
-  problems.push(...lintJournal(JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8"))));
+  problems.push(...lintJournal(journal));
+  problems.push(...lintNumberClash(files, journal));
   if (problems.length) {
     console.error(`Migration lint failed:\n${problems.join("\n")}\nSee docs/10-migrations.md.`);
     process.exit(1);

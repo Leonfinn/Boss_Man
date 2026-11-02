@@ -35,7 +35,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 // ---------- Shapes the screens use ----------
 
 export type Agent = { id: string; companyId: string; name: string; role: "ceo" | "manager" | "worker"; agentKind: string; model: string | null; fundingSourceId: string | null; paused: boolean; starred: boolean; duty: string | null; title?: string | null; reviewKind?: ReviewKindName | null; template?: string | null; avatarAt?: string | null };
-export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
+export type Company = { id: string; name: string; mission: string | null; paused: boolean; goalCheckDays?: number; nudgesPerHour?: number; adviceTimeoutMinutes?: number; diskCapBytes?: number | null; ticketPrefix?: string | null; nextTicketNumber?: number; agents: Agent[]; projects?: { id: string; name: string; starred: boolean }[] };
 export type Project = {
   id: string;
   companyId: string;
@@ -187,6 +187,8 @@ export type Ticket = {
   /** A held wake's reset time and why, when routine work is paused by the quota hold. */
   quotaHeldUntil?: string | null;
   quotaHeldReason?: string | null;
+  /** The ticket can start now but its agent is held by the quota hold for other work (BOS-253). */
+  quotaHeldAgent?: boolean;
   /** In review with no agent able to review it, so the owner approves it on the ticket. */
   noReviewer?: boolean;
   /** Who an open agent review waits on and why, e.g. "Sam is busy on BOS-7". */
@@ -211,8 +213,20 @@ export type FundingStatus = {
   windowsSeen: string[];
   /** Per window: when it runs out at the recent rate (R78); null with no readings. */
   forecasts: Record<string, { utilization: number; resetsAt: string | null; perHour: number | null; runsOutAt: string | null; beforeReset: boolean } | null>;
-  /** Synthetic's own used/limit reading; null for other providers, null counts mean unknown. */
-  providerQuota?: { used: number | null; limit: number | null; renewsAt: string | null } | null;
+  /** Synthetic's own used/limit reading, cached on the server; null for other providers, null counts mean unknown. */
+  providerQuota?: {
+    used: number | null;
+    limit: number | null;
+    renewsAt: string | null;
+    /** "weekly" for the plan's weekly credits (the real measure, BOS-260); "requests" for the old request window. */
+    measure?: "weekly" | "requests";
+    /** Seconds since the reading was taken from Synthetic (BOS-239); null when there is none. */
+    ageSeconds: number | null;
+    /** Recent readings, newest first. */
+    history: Array<{ used: number; limit: number; renewsAt: string | null; takenAt: string }>;
+    /** The warnings the owner has had this period (80, 100). */
+    warned: number[];
+  } | null;
   /** The last 7 days, oldest first (UTC days). */
   daily: Array<{ day: string; runs: number; inputTokens: number; outputTokens: number; costMicros: number }>;
   /** The last 7 days per company, biggest first. */
@@ -253,6 +267,8 @@ export type RunRow = {
   wakeNote?: string | null;
   /** The ticket it was about without being on it (a nudge that named one). */
   runTicketId?: string | null;
+  /** That ticket's reference, e.g. "HOL-12", for the "Working on" headline (BOS-254). */
+  runTicketRef?: string | null;
   /** Tokens over the run, when the agent reported them (R67). */
   inputTokens?: number | null;
   outputTokens?: number | null;

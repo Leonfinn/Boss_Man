@@ -4,11 +4,11 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { agents, nudges, runs, wakes } from "../src/db/schema.js";
+import { agents, nudges, reviewRequests, runs, tickets, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -92,8 +92,9 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     await ceo.close();
     await c.scheduler.tick();
     const row = await c.latestRun(c.worker.id);
-    expect(row).toMatchObject({ ticketId: null, origin: "nudge", runTicketId: t.id });
-    expect((await card(c, c.worker.id)).run).toMatchObject({ origin: "nudge", originFrom: "CEO", runTicketId: t.id });
+    // A nudge that names exactly one ticket now starts the run on it (BOS-268), light as ever.
+    expect(row).toMatchObject({ ticketId: t.id, origin: "nudge" });
+    expect((await card(c, c.worker.id)).run).toMatchObject({ ticketId: t.id, origin: "nudge", originFrom: "CEO" });
   });
 
   it("shows ticketless runs on the board and counts them like the dashboard (BOS-155)", async () => {
@@ -145,7 +146,7 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     const b = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second" })).json() as { id: string };
     await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${a.id} "First": ready\n- ${b.id} "Second": ready` });
     await c.scheduler.tick();
-    // The run does not pick one ticket at wake time; the board shows it on both.
+    // Two tickets on one wake: the run is on neither, so neither card points at the wrong one (BOS-268).
     expect(await c.latestRun(c.worker.id)).toMatchObject({ ticketId: null, origin: "review requested", runTicketId: null });
     // One of the tickets merges while the reviewer is still running.
     await c.req("PATCH", `/api/tickets/${a.id}`, { state: "done" });
@@ -171,6 +172,80 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect(cards.find((x) => x.id === b.id)!.working).toEqual(["Engineer reviewing"]);
     expect(board.withoutTicket.map((r) => r.agent)).toEqual(["CEO"]);
     expect(board.workingAgents).toBe(2);
+  });
+
+  it("starts a review run on the one ticket it was woken to review (BOS-268)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Only one", assigneeAgentId: c.ceo.id })).json() as { id: string };
+    await c.db.update(tickets).set({ systemState: "review" }).where(eq(tickets.id, t.id));
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.worker.id, reason: "review requested", priority: 3, note: `- ${t.id} "Only one": ready` });
+    await c.scheduler.tick();
+    const row = await c.latestRun(c.worker.id);
+    expect(row).toMatchObject({ ticketId: t.id, origin: "review requested", runTicketId: null });
+    // The runs list headlines the ticket and keeps the wake reason underneath.
+    const listed = (await c.req("GET", "/api/runs")).json() as Array<{ id: string; ticketId: string | null; runTicketRef: string | null; reason: string | null }>;
+    expect(listed.find((x) => x.id === row.id)).toMatchObject({ ticketId: t.id, runTicketRef: expect.stringMatching(/-/), reason: "review requested" });
+    // A reviewer does not start the ticket: it is in review and stays there.
+    const [still] = await c.db.select().from(tickets).where(eq(tickets.id, t.id));
+    expect(still!.systemState).toBe("review");
+  });
+
+  it("starts a run on the one ticket any other wake names, and on none when it names several (BOS-268)", async () => {
+    const c = (ctx = await setup());
+    const a = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First" })).json() as { id: string };
+    const b = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second" })).json() as { id: string };
+    await c.scheduler.notify(c.worker.id, { reason: "watchdog escalation", note: `The watchdog hands you ticket ${a.id}.` });
+    await c.scheduler.tick();
+    expect(await c.latestRun(c.worker.id)).toMatchObject({ ticketId: a.id, origin: "watchdog escalation" });
+    await c.db.delete(runs);
+    // A housekeeping wake covering several tickets is genuinely ticketless.
+    await c.scheduler.notify(c.worker.id, { reason: "feedback", note: `Notes about ${a.id} and ${b.id}.` });
+    await c.scheduler.tick();
+    expect(await c.latestRun(c.worker.id)).toMatchObject({ ticketId: null, origin: "feedback" });
+  });
+
+  it("attaches a reviewer woken about several tickets when it reads one's diff (BOS-268)", async () => {
+    const c = (ctx = await setup());
+    const a = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "First", assigneeAgentId: c.ceo.id })).json() as { id: string };
+    const b = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Second", assigneeAgentId: c.ceo.id })).json() as { id: string };
+    // The Engineer holds an open code review of the second ticket and is woken about both, so its run starts on neither.
+    await c.db.update(tickets).set({ systemState: "review" }).where(inArray(tickets.id, [a.id, b.id]));
+    await c.db.insert(reviewRequests).values({ ticketId: b.id, kind: "code", reviewerAgentId: c.worker.id, round: 1 });
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: null, origin: "review requested", startedAt: new Date() });
+    const client = await agent(c, c.worker.id, runId);
+    const r = (await client.callTool({ name: "review", arguments: { action: "diff", ticketId: b.id } })) as { isError?: boolean; content: Array<{ text: string }> };
+    // The project has no repo, so the diff itself fails; touching the ticket is what this checks.
+    expect(r.content[0]!.text).toMatch(/no git repo/);
+    // Reading the diff made it the run's ticket, in the runs list too.
+    expect(await c.latestRun(c.worker.id)).toMatchObject({ id: runId, ticketId: b.id, origin: "review requested" });
+    const listed = (await c.req("GET", "/api/runs")).json() as Array<{ id: string; ticketId: string | null; runTicketRef: string | null }>;
+    expect(listed.find((x) => x.id === runId)).toMatchObject({ ticketId: b.id, runTicketRef: expect.stringMatching(/-/) });
+    // A ticket it holds no review of is not the reviewer's to pick up, whatever it is asked to read.
+    await c.db.update(runs).set({ ticketId: null }).where(eq(runs.id, runId));
+    const other = (await client.callTool({ name: "review", arguments: { action: "diff", ticketId: a.id } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(other.isError).toBeTruthy();
+    expect(other.content[0]!.text).toMatch(/Only your company/);
+    expect(await c.latestRun(c.worker.id)).toMatchObject({ id: runId, ticketId: null });
+    await client.close();
+  });
+
+  it("shows the ticket a ticketless run starts working on, and keeps its wake reason as a detail (BOS-254)", async () => {
+    const c = (ctx = await setup());
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Pick up the loose end", assigneeAgentId: c.worker.id })).json() as { id: string };
+    await c.work.updateTicket(t.id, { state: "ready", byAgentId: c.ceo.id });
+    // Woken for a housekeeping check with no ticket, then it finds real work on its own ticket.
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: null, origin: "checking an old card", startedAt: new Date() });
+    const client = await agent(c, c.worker.id, runId);
+    const r = (await client.callTool({ name: "set_ticket_state", arguments: { ticketId: t.id, state: "in_progress", summary: "Nothing of mine was stale; this needed doing." } })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(r.isError).toBeFalsy();
+    await client.close();
+    const row = await c.latestRun(c.worker.id);
+    expect(row).toMatchObject({ id: runId, ticketId: t.id, origin: "checking an old card" });
+    // The runs list now headlines the ticket and shows the reason underneath.
+    const listed = (await c.req("GET", "/api/runs")).json() as Array<{ id: string; ticketId: string | null; runTicketRef: string | null; origin: string | null }>;
+    expect(listed.find((x) => x.id === runId)).toMatchObject({ ticketId: t.id, runTicketRef: expect.stringMatching(/-/), origin: "checking an old card" });
   });
 
   it("says a scheduled wiki sweep was a sweep", async () => {

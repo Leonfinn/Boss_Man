@@ -598,6 +598,38 @@ export const quotaSamples = pgTable(
   (t) => [index("quota_samples_source_window_time").on(t.fundingSourceId, t.window, t.observedAt)],
 );
 
+/**
+ * One reading of Synthetic's own quota endpoint (BOS-239), per funding source. The newest row for a
+ * source is the current reading; older ones are the trend inside a period and are pruned after 30 days.
+ */
+export const providerQuotaReadings = pgTable(
+  "provider_quota_readings",
+  {
+    id: id(),
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    used: integer("used").notNull(),
+    limit: integer("limit_limit").notNull(),
+    renewsAt: timestamp("renews_at", { withTimezone: true }),
+    /** When the reading was taken from Synthetic (not when it was read from this table). */
+    takenAt: timestamp("taken_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("provider_quota_readings_source_time").on(t.fundingSourceId, t.takenAt)],
+);
+
+/** A warning the owner already had about a provider's quota, so the same one isn't repeated (BOS-239). */
+export const providerQuotaWarnings = pgTable(
+  "provider_quota_warnings",
+  {
+    fundingSourceId: uuid("funding_source_id").notNull().references(() => fundingSources.id, { onDelete: "cascade" }),
+    /** The period the warning is for, e.g. the renewal time, so a new period warns again. */
+    period: text("period").notNull(),
+    /** 80 or 100. */
+    threshold: integer("threshold").notNull(),
+    warnedAt: timestamp("warned_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.fundingSourceId, t.period, t.threshold] })],
+);
+
 /** "instance" covers every company (R53); its scope_id is the nil UUID. */
 export const budgetScope = pgEnum("budget_scope", ["company", "project", "agent", "instance"]);
 export const budgetWindow = pgEnum("budget_window", ["lifetime", "calendar_month", "billing_cycle", "rolling_days"]);
@@ -1520,4 +1552,6 @@ export const agentAvatars = pgTable("agent_avatars", {
   agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   bytes: bytea("bytes").notNull(),
   type: text("type").notNull(),
+  /** The ticket image the CEO picked (BOS-265): copies are shared by it, so agents sharing a picture keep one copy. Null for one the owner uploaded. */
+  imageId: uuid("image_id").references(() => ticketImages.id, { onDelete: "set null" }),
 });

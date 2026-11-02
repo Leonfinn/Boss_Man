@@ -8,7 +8,7 @@ import path from "node:path";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
-import { agents, runners, runs as runsTable, wakes } from "../db/schema.js";
+import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { ErrorBuffer } from "./error-buffer.js";
 
 export type ServerStatusDeps = {
@@ -21,6 +21,8 @@ export type ServerStatusDeps = {
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
   errors: ErrorBuffer;
+  /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
+  syntheticUsage?: (companyId: string) => Promise<unknown>;
   commit: string;
   startedAt: Date;
   now?: () => Date;
@@ -63,10 +65,13 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const at = now();
       const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
 
+      // The ticket each waiting wake is for, and whether it's Urgent, so an urgent wake that is
+      // waiting can be found and its reason read (BOS-253).
       const waiting = await db
-        .select({ id: wakes.id, reason: wakes.reason, statusReason: wakes.statusReason, createdAt: wakes.createdAt, agent: agents.name })
+        .select({ id: wakes.id, reason: wakes.reason, statusReason: wakes.statusReason, createdAt: wakes.createdAt, agent: agents.name, ticketId: wakes.ticketId, ticketUrgent: tickets.urgent })
         .from(wakes)
         .leftJoin(agents, eq(agents.id, wakes.agentId))
+        .leftJoin(tickets, eq(tickets.id, wakes.ticketId))
         .where(and(eq(wakes.companyId, companyId), inArray(wakes.status, ["queued", "deferred"])))
         .orderBy(wakes.createdAt)
         .limit(20);
@@ -123,7 +128,7 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           ? { connected: deps.isConnected(runner.id), lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion }
           : null,
         wakes: {
-          waiting: waiting.map((w) => ({ id: w.id, agent: w.agent, reason: w.reason, held: w.statusReason, waitingSeconds: ageSeconds(w.createdAt, at) })),
+          waiting: waiting.map((w) => ({ id: w.id, agent: w.agent, reason: w.reason, ticketId: w.ticketId, urgent: !!w.ticketUrgent, held: w.statusReason, waitingSeconds: ageSeconds(w.createdAt, at) })),
           failed: failedWakes.map((w) => ({ id: w.id, agent: w.agent, reason: w.reason, why: w.statusReason, at: w.createdAt.toISOString(), ageSeconds: ageSeconds(w.createdAt, at) })),
         },
         runs: {
@@ -134,6 +139,10 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // parameters or a stack. The buffer is server-wide, so lines with no company are counted,
         // not shown (security review round 2).
         errors: { count: deps.errors.count(companyId), recent: recentErrors, untagged: deps.errors.untagged() },
+        // The owner's own quota, so every company's CEO reads the same reading; the agents paid from
+        // it are scoped to this company (see funding.syntheticUsage). A failed reading is unknown,
+        // never an error, and never blocks this view.
+        syntheticUsage: deps.syntheticUsage ? await deps.syntheticUsage(companyId).catch(() => []) : [],
       };
     },
   };

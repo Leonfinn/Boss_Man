@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { runners, tickets, wakes } from "../src/db/schema.js";
+import { runners, runs, tickets, wakes } from "../src/db/schema.js";
 import { REVIEW_REASON } from "../src/services/scheduler.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -73,6 +73,19 @@ describe("git workspaces on the server (R38)", () => {
     const start = await review();
     expect(start.workspace).toEqual({ projectId: c.project.id, ticketId: t.id, repoUrl: "https://github.com/Leonfinn/customer-app.git", baseRef: "main", review: true });
     expect(start.prompt).toContain('your own copy of "Checkout error states"');
+  });
+
+  it("keeps the review copy when the reviewer is put on the one ticket it reviews (BOS-268)", async () => {
+    const c = (ctx = await setup());
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git" });
+    const t = (await c.req("POST", `/api/projects/${c.project.id}/tickets`, { title: "Checkout error states" })).json();
+    c.runners.connect(c.runnerRow.id, (cmd) => (c.sent.push(cmd), true), ["review-copy"]);
+    await c.db.insert(wakes).values({ companyId: c.company.id, agentId: c.ceo.id, reason: REVIEW_REASON, note: `- ${t.id} "Checkout error states": ready` });
+    await c.scheduler.tick();
+    const start = c.sent.filter((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start").at(-1)!;
+    // The run is on the ticket and still reads a copy, not the author's worktree.
+    expect((await c.db.select().from(runs).where(eq(runs.id, start.runId)))[0]).toMatchObject({ ticketId: t.id });
+    expect(start.workspace).toEqual({ projectId: c.project.id, ticketId: t.id, repoUrl: "https://github.com/Leonfinn/customer-app.git", baseRef: "main", review: true });
   });
 
   it("leaves projects without a repo in a plain directory", async () => {

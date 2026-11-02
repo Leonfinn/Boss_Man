@@ -59,3 +59,65 @@ test("journal: flags a when value not later than the entry before it", () => {
     assert.match(msg, /more than 20/);
   }
 });
+
+// BOS-219: migration numbers are shared between branches, so a new one must not take a number
+// another branch already has.
+import { lintNumberClash, migrationClashes, migrationSet, nextFreeNumber } from "./lint-migrations.mjs";
+
+const file = (n, name) => `drizzle/${String(n).padStart(4, "0")}_${name}.sql`;
+const journalEntry = (n, name) => `${String(n).padStart(4, "0")}_${name}`;
+
+test("migrationSet reads numbers, tags and the highest journal when from paths", () => {
+  const set = migrationSet([file(75, "a"), file(76, "b"), "README.md", "drizzle/meta/_journal.json"], [100, 200]);
+  assert.equal(set.max, 76);
+  assert.deepEqual(set.byNumber.get(75), ["0075_a"]);
+  assert.equal(set.maxWhen, 200);
+});
+
+test("a number taken on main is a clash", () => {
+  const mine = { files: [file(75, "mine")] };
+  const main = { files: ["0001_init.sql", file(75, "theirs")] };
+  const clashes = migrationClashes(mine, main);
+  assert.equal(clashes.length, 1);
+  assert.equal(clashes[0].number, 75);
+  assert.match(clashes[0].why, /0075_mine/);
+  assert.match(clashes[0].why, /0075_theirs/);
+});
+
+test("two open branches with the same number are told apart from one another", () => {
+  const mine = { files: [file(76, "a")] };
+  const other = { files: [file(76, "b")] };
+  const second = { files: [file(76, "c")] };
+  assert.deepEqual(migrationClashes(mine, other).map((c) => c.number), [76]);
+  assert.deepEqual(migrationClashes(mine, second).map((c) => c.number), [76]);
+  // The same file on both branches is not a clash: it is one migration that was merged in.
+  assert.deepEqual(migrationClashes(mine, { files: [file(76, "a")] }), []);
+});
+
+test("a new journal entry no later than the one on main would be skipped", () => {
+  const mine = { files: [file(76, "mine")], when: [500] };
+  const main = { files: [file(75, "theirs")], when: [500] };
+  const clashes = migrationClashes(mine, main);
+  assert.equal(clashes.length, 1);
+  assert.match(clashes[0].why, /skipped/);
+  // A journal that is later than main's is fine, even on a number main doesn't use.
+  assert.deepEqual(migrationClashes({ files: [file(76, "mine")], when: [501] }, main), []);
+  // A branch that only merged main in (no number above main's) has nothing to say.
+  assert.deepEqual(migrationClashes({ files: [file(75, "theirs")], when: [400] }, main), []);
+});
+
+test("nextFreeNumber skips every number any branch or main uses", () => {
+  const sets = [{ files: [file(75, "a"), file(77, "b")] }, { files: [file(76, "c")] }];
+  assert.equal(nextFreeNumber(sets, 75), 78);
+  assert.equal(nextFreeNumber(sets, 80), 80);
+});
+
+test("the lint fails two files, or two journal entries, on one number", () => {
+  const entries = (tags) => ({ entries: tags.map((tag, idx) => ({ idx, tag, when: 100 + idx })) });
+  assert.deepEqual(lintNumberClash([file(75, "a"), file(75, "b")], entries([journalEntry(75, "a")])), [`${file(75, "a")}, ${file(75, "b")}: number 0075 is used twice`]);
+  const [msg] = lintNumberClash([file(75, "a")], entries([journalEntry(75, "a"), journalEntry(75, "b")]));
+  assert.match(msg, /number 0075 is used twice \(0075_a, 0075_b\)/);
+  assert.deepEqual(lintNumberClash([file(75, "a")], entries([journalEntry(75, "a")])), []);
+  assert.match(lintNumberClash([file(75, "a")], entries([]))[0], /not listed in _journal.json/);
+  assert.match(lintNumberClash([], entries([journalEntry(75, "a")]))[0], /has no 0075_a.sql/);
+});

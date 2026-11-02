@@ -1,0 +1,2 @@
+ALTER TABLE "agent_avatars" ADD COLUMN "image_id" uuid;--> statement-breakpoint
+ALTER TABLE "agent_avatars" ADD CONSTRAINT "agent_avatars_image_id_ticket_images_id_fk" FOREIGN KEY ("image_id") REFERENCES "public"."ticket_images"("id") ON DELETE set null ON UPDATE no action;

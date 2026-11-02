@@ -82,7 +82,7 @@ You should see one commit line.
 
 If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
 
-**Is the repo still private?** (Only before the public launch.) Clone with a read-only deploy key instead: [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+**Older install with a deploy key?** It keeps working; see [docs/06, step 2](06-install-truenas.md#2-get-the-code).
 
 ## 3. Make the folders, the master key and the token file
 
@@ -276,7 +276,11 @@ Check it worked: the step shows a tick. Funding sources also live under **Settin
 
 ### Synthetic (OpenCode)
 
-Synthetic (synthetic.new) is an OpenCode provider. Add its key under **Settings > Secrets > Add** as **Synthetic API key**; it reaches agents as `SYNTHETIC_API_KEY`, and OpenCode lists the models as `synthetic/<model>` (for example `synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`). Under **Settings > Funding**, add a source with kind **Subscription (setup-token)** and provider **Synthetic** for a standard plan. The Funding page reads the Synthetic key you granted to the company and shows requests used of the plan's limit and when it renews. If Synthetic can't be reached the card says the quota is unknown; it never stops a run. Keys are never logged or shown after saving.
+Synthetic (synthetic.new) is an OpenCode provider. Add its key under **Settings > Secrets > Add** as **Synthetic API key**; it reaches agents as `SYNTHETIC_API_KEY`, and OpenCode lists the models as `synthetic/<model>` (for example `synthetic/hf:deepseek-ai/DeepSeek-V4.1-Flash-1017`). Under **Settings > Funding**, add a source with kind **Subscription (setup-token)** and provider **Synthetic** for a standard plan. The Funding page reads the Synthetic key you granted to the company and shows requests used of the plan's limit, the percentage, when it renews, and how use has moved within the current period.
+
+Boss Man checks the plan at most every 5 minutes, and again right after a run on an agent paid from Synthetic ends, then keeps the reading. The Funding page shows the stored reading rather than asking Synthetic every time you open it. If Synthetic can't be reached, the card keeps the last good reading and says how old it is (or says the quota is unknown if there has never been one); it never stops a run. Readings are kept for 30 days, so the card can show the trend for the period, then older ones are dropped.
+
+When use passes 80% of the limit you get one notification, and another when it reaches 100%. Each names when the plan renews and which agents are paid from Synthetic, and each is sent only once per period; the period is the renewal time rounded down to the hour, so if Synthetic reports a renewal time that shifts by a few minutes between readings you still get one warning, not two. Boss Man does not pause or slow any runs when the plan runs out: move less urgent work or wait for the renewal. The CEO can read the same numbers (used, limit, renewal, the reading's age, recent readings and the agents on it) from its server status in chats and runs; it sees only its own company's agents named, and any other company's agents on the same plan are counted but never named. Keys are never logged or shown after saving.
 
 ## 11. Hire a first agent
 
@@ -411,6 +415,15 @@ cd $B/src && docker compose logs --tail 100 server
 ```
 
 If a migration failed, don't edit the database by hand. Keep the log. Restore from a backup if you have one (`scripts/deploy.sh` keeps them in `$B`). Also check Postgres is healthy with `docker compose ps`.
+
+**Lock down backups made before this fix.**
+Backups written by current scripts are readable by their owner only (mode 600). Older ones may be readable by every user on the host and hold password hashes and sessions. Once, inside your backup folder (`$B` in this guide), run:
+
+```sh
+chmod 600 bossman-*.sql.gz restore-test-*.sql.gz
+```
+
+A pattern that matches no files prints an error; that is harmless.
 
 **The disk is filling up.**
 Check the host and Docker:

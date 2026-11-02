@@ -38,7 +38,7 @@ async function setup() {
   const emit = (event: RunnerEvent) => built.runners.ingest(runnerRow!, { seq: ++seq, at: clock().toISOString(), event });
   const ticket = async (body: Record<string, unknown>) => (await req("POST", `/api/projects/${project.id}/tickets`, body)).json() as { id: string };
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
-  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number };
+  const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
   return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
 }
@@ -370,7 +370,8 @@ describe("stalled runs (R32)", () => {
   it("attaches evidence to a quiet run: last step, runner state, and what it waits on", async () => {
     ctx = await setup();
     const { runId, ticket } = await launch();
-    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "in_progress" } } as unknown as RunnerEvent);
+    // A turn that ended: the runner said something last, and is not mid-command (BOS-217).
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "Run npm test", status: "completed" } } as unknown as RunnerEvent);
     ctx.advance(14 * 60_000);
     await ctx.sweep();
     const [row] = (await ctx.queue()) as Array<Row & { evidence: Record<string, any> }>;
@@ -402,6 +403,76 @@ describe("stalled runs (R32)", () => {
     expect((await ctx.sweep()).stalledRuns.open).toBe(0);
     // The paused agent outranks other rows.
     expect((await ctx.queue())[0]!.reasons[0]).toBe("An agent is paused until you answer");
+  });
+
+  it("closes the alert by itself, with the reason, when the run ends after it was raised (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    const endedAt = ctx.clock();
+    await ctx.emit({ type: "run.ended", runId, stopReason: "end_turn", error: null });
+    // No sweep: the event alone closes it.
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", dedupeKey: null, context: { withdrawn: { by: "system", note: `the run ended normally at ${endedAt.toISOString().slice(11, 16)}` } } });
+    expect((await ctx.db.select().from(activity)).some((a) => a.kind === "decision_withdrawn" && a.summary.includes('CEO has sent nothing') && a.summary.includes('ended normally'))).toBe(true);
+  });
+
+  it("closes the alert by itself when the run speaks again (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    expect(await ctx.queue()).toHaveLength(1);
+    // No sweep: the event alone closes it.
+    await ctx.emit({ type: "run.update", runId, update: { kind: "agent_message_chunk" } } as RunnerEvent);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system", note: "the run is active again" } } });
+  });
+
+  it("closes the alert on the next sweep too, for a run that ended without an event", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    ctx.advance(6 * 60_000);
+    await ctx.sweep();
+    // The server ended the run itself (e.g. the runner went away): the sweep closes the alert.
+    ctx.offline();
+    ctx.advance(35 * 60_000);
+    const res = await ctx.sweep();
+    expect(res.lostRuns).toBe(1);
+    expect(await ctx.queue()).toEqual([]);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.kind, "stalled_run"));
+    expect(d).toMatchObject({ status: "withdrawn", context: { withdrawn: { by: "system" } } });
+  });
+
+  it("doesn't raise the 5-minute alert while the run waits inside a long command, then does after 15 (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "pnpm check-all", status: "in_progress" } } as unknown as RunnerEvent);
+    ctx.advance(10 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    expect(await ctx.queue()).toEqual([]);
+    ctx.advance(6 * 60_000);
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
+    const [row] = await ctx.queue();
+    expect(row!.question).toContain("has sent nothing for 16 minutes");
+    expect(row!.question).toContain("It is still inside pnpm check-all, so it may just be a long command.");
+  });
+
+  it("doesn't raise the 5-minute alert while a connected runner is still answering pings mid-command (BOS-217)", async () => {
+    ctx = await setup();
+    const { runId } = await launch();
+    // A turn boundary is the last event; the runner keeps saying hello while it waits on its own child process.
+    await ctx.emit({ type: "run.update", runId, update: { kind: "tool_call", title: "bash", status: "pending" } } as unknown as RunnerEvent);
+    ctx.advance(10 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(0);
+    ctx.advance(6 * 60_000);
+    await ctx.db.update(runners).set({ lastSeenAt: ctx.clock() });
+    expect((await ctx.sweep()).stalledRuns.raised).toBe(1);
   });
 
   it("drops a run's open permission request from the queue when the run ends", async () => {
@@ -500,5 +571,26 @@ describe("the server ends runs it can't reach", () => {
     ctx.advance(3 * HOUR);
     expect((await ctx.sweep()).lostRuns).toBe(0);
     expect((await row(runId)).endedAt).toBeNull();
+  });
+
+  it("flags a run that has had no ticket for ten minutes to the Scrum Master, saying what woke it (BOS-254)", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    // A ticketless run going for eleven minutes, woken to check a stale card.
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "checking an old card", startedAt: new Date(ctx.clock().getTime() - 11 * 60_000), lastEventAt: new Date(ctx.clock().getTime() - 30_000) });
+    const res = await ctx.sweep();
+    expect(res.longTicketlessRuns.raised).toBe(1);
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.status, "open"));
+    expect(card!.question).toMatch(/CEO has been running for 11 minutes without a ticket .*checking an old card/);
+    // One open card per run, not one per sweep.
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
+  });
+
+  it("leaves a young ticketless run and the owner chat alone", async () => {
+    ctx = await setup();
+    await ctx.db.update(agents).set({ duty: "scrum_master" }).where(eq(agents.id, ctx.worker.id));
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.ceo.id, ticketId: null, origin: "wiki upkeep", startedAt: new Date(ctx.clock().getTime() - 5 * 60_000) });
+    await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: null, purpose: "chat", origin: "owner_chat", startedAt: new Date(ctx.clock().getTime() - 30 * 60_000) });
+    expect((await ctx.sweep()).longTicketlessRuns.raised).toBe(0);
   });
 });

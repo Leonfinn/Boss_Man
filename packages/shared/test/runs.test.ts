@@ -35,6 +35,12 @@ describe("what a run without a ticket was doing (BOS-118)", () => {
     expect(runLabel({ origin: "check due" }).text).toBe("A scheduled check");
   });
 
+  it("gives the stale-card check a plain name, old and new (BOS-254)", () => {
+    expect(runLabel({ origin: "checking an old card" }).text).toBe("Checking an old card");
+    // Wakes started before the rename still read as the same thing.
+    expect(runLabel({ origin: "stale request" }).text).toBe("Checking an old card");
+  });
+
   it("labels a decision, a chat answer and a review request", () => {
     expect(runLabel({ origin: "decision" }).text).toBe("Answering a decision");
     expect(runLabel({ origin: "decision answered" }).text).toBe("Your answer to its question");

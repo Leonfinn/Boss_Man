@@ -3,7 +3,7 @@ import { TASK_SIZES, windowLabel } from "@boss-man/shared";
 import { api, ApiError, RISKS, type Company, type Risk, type TicketDetail, type WorkspaceDiff } from "../api";
 import { RiskHelp, useRiskTiers } from "../components/RiskHelp";
 import { Markdown } from "../components/Markdown";
-import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 import { names, TicketReviews, useTicketReviews } from "../components/TicketReviews";
 import { TicketActivity } from "../components/TicketActivity";
 import { TicketLinks } from "../components/TicketLinks";
@@ -195,7 +195,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   const images = usePoll((signal) => api<TicketImage[]>(`/api/tickets/${id}/images`, { signal }), 30_000, `img-${id}`);
   const reviews = useTicketReviews(id);
   const t = ticket.data;
-  const img = useImageAttach(t?.companyId, (md) => setDraft((d) => withImage(d ?? "", md)), id);
+  const img = useImageAttach(t?.companyId, id);
   const agents = companies.find((c) => c.id === t?.companyId)?.agents ?? [];
 
   const patch = async (body: Record<string, unknown>) => {
@@ -250,7 +250,8 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
   };
   const saveDraft = async () => {
     if (draft === null) return;
-    await patch({ body: draft.trim() || null });
+    await patch({ body: withAttachments(draft, img.attached).trim() || null });
+    img.clear();
     setDraft(null);
   };
   const assign = (value: string) =>
@@ -429,7 +430,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
         <div className="card" role="status" style={{ marginBottom: 16, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: "1 1 320px" }}>
             <strong>Routine work is held until {when(t.quotaHeldUntil)}.</strong>{" "}
-            <span className="muted">{t.quotaHeldReason ? `${windowLabel(t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")).name} is nearly used up. ` : ""}You can run this one now, or mark it urgent so it always runs through the hold.</span>
+            <span className="muted">
+              {t.quotaHeldReason ? `${windowLabel(t.quotaHeldReason.replace(/^subscription /, "").replace(/ window nearly used up$/, "")).name} is nearly used up. ` : ""}
+              {t.quotaHeldAgent ? "This ticket is ready but its agent is held by other work. " : ""}You can run this one now, or mark it urgent so it always runs through the hold.
+            </span>
           </span>
           <button type="button" className="btn primary" disabled={busy} onClick={() => void runNow()}>
             Run now
@@ -480,7 +484,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                   onPaste={img.onPaste}
                   style={{ padding: "8px 12px", border: "1px solid var(--line-strong)", borderRadius: 8, font: "inherit", width: "100%" }}
                 />
-                <ImagePreviews text={draft} onChange={setDraft} />
+                <ImagePreviews attached={img.attached} onRemove={img.remove} />
                 {img.error && (
                   <p className="error" role="alert">
                     {img.error}
@@ -488,10 +492,10 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
                 )}
                 <div style={{ display: "flex", gap: 8 }}>
                   {img.button}
-                  <button type="button" className="btn primary" disabled={draft === (t.body ?? "")} onClick={() => void saveDraft()}>
+                  <button type="button" className="btn primary" disabled={draft === (t.body ?? "") && !img.attached.length} onClick={() => void saveDraft()}>
                     Save description
                   </button>
-                  <button type="button" className="btn" onClick={() => setDraft(null)}>
+                  <button type="button" className="btn" onClick={() => { img.clear(); setDraft(null); }}>
                     Cancel
                   </button>
                 </div>

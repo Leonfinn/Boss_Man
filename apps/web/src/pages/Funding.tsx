@@ -84,6 +84,40 @@ function ByCompany({ s }: { s: FundingStatus }) {
   );
 }
 
+/** "3m ago", "2h ago", "4d ago": how old a cached reading is, in plain words. */
+const ago = (seconds: number | null) => {
+  if (seconds === null) return "";
+  if (seconds < 60) return "just now";
+  if (seconds < 3_600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.round(seconds / 3_600)}h ago`;
+  return `${Math.round(seconds / 86_400)}d ago`;
+};
+
+/** "in 3 days", "in 5 hours": how long until the plan renews. */
+const until = (iso: string) => {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms)) return "";
+  if (ms <= 0) return "now";
+  if (ms < 3_600_000) return `in ${Math.round(ms / 60_000)} min`;
+  if (ms < 86_400_000) return `in ${Math.round(ms / 3_600_000)} hours`;
+  return `in ${Math.round(ms / 86_400_000)} days`;
+};
+
+/** The readings inside this period (the same renewal), oldest first: used counts over time. */
+function Trend({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
+  const rows = q.history.filter((h) => (h.renewsAt ?? "") === (q.renewsAt ?? "")).slice().reverse();
+  if (rows.length < 2) return null;
+  const first = rows[0]!;
+  const last = rows[rows.length - 1]!;
+  const step = last.used - first.used;
+  return (
+    <span className="muted" style={{ fontSize: 12 }}>
+      This period: {rows.length} readings, {first.used.toLocaleString()} → {last.used.toLocaleString()} ({step >= 0 ? "+" : ""}
+      {step.toLocaleString()} since {ago(Math.round((Date.now() - new Date(first.takenAt).getTime()) / 1000))})
+    </span>
+  );
+}
+
 /** The hold controls for a subscription: threshold, extra usage and which windows count (BOS-227). */
 function QuotaSettings({ s }: { s: FundingStatus }) {
   const [holdAt, setHoldAt] = useState(Math.round((s.source.quotaHoldAt ?? 0.95) * 100));
@@ -157,26 +191,47 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   );
 }
 
-/** Synthetic's own used/limit reading; an unreadable one is unknown, never an error. */
+/**
+ * Synthetic's own reading; an unreadable one is unknown, never an error. The plan spends its weekly
+ * credits, so that is what the bar shows when Synthetic reports them (BOS-260); the old request
+ * window is shown only when there is nothing weekly, and always labelled as that, never as usage.
+ */
 function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
-  if (q.used === null || q.limit === null) return <span className="muted">Quota unknown: Synthetic's quota service couldn't be reached just now.</span>;
+  if (q.used === null || q.limit === null)
+    return <span className="muted">Quota unknown: Synthetic's quota service couldn't be reached and there's no earlier reading yet.</span>;
   const fraction = q.limit > 0 ? q.used / q.limit : 0;
+  const weekly = (q.measure ?? "requests") === "weekly";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-        <span>Requests this period</span>
-        <span className="mono" style={{ color: fraction >= 0.9 ? "var(--amber-ink)" : undefined }}>
-          {q.used.toLocaleString()} of {q.limit.toLocaleString()}
+        <span>{weekly ? "Weekly credits" : "Requests this period"}</span>
+        <span className="mono" style={{ color: fraction >= 0.8 ? "var(--amber-ink)" : undefined }}>
+          {weekly ? `${pct(fraction)} used · ${100 - Math.round(fraction * 100)}% left` : `${q.used.toLocaleString()} of ${q.limit.toLocaleString()} · ${pct(fraction)}`}
         </span>
       </div>
-      <div className={`bar${fraction >= 0.9 ? " warn" : ""}`} aria-hidden="true">
+      <div className={`bar${fraction >= 0.8 ? " warn" : ""}`} aria-hidden="true">
         <span style={{ width: pct(Math.min(1, fraction)) }} />
       </div>
-      {q.renewsAt && (
+      {weekly ? (
         <span className="muted" style={{ fontSize: 12 }}>
-          Renews {when(q.renewsAt)}
+          Credits come back 2% at a time. Boss Man started reading weekly credits on 31 Oct; earlier readings in this list were the old request count.
         </span>
+      ) : (
+        <>
+          {q.renewsAt && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              Renews {when(q.renewsAt)} ({until(q.renewsAt)})
+            </span>
+          )}
+          <span className="muted" style={{ fontSize: 12 }}>
+            This is Synthetic's request window, which the weekly plan often doesn't use. Synthetic's API doesn't report weekly credits for this account, so this isn't total usage.
+          </span>
+        </>
       )}
+      <Trend q={q} />
+      <span className="muted" style={{ fontSize: 12 }}>
+        Checked {ago(q.ageSeconds)}{q.warned.length ? ` · you've been warned at ${q.warned.join("% and ")}%` : ""}
+      </span>
     </div>
   );
 }

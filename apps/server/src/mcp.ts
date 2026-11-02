@@ -24,7 +24,7 @@ import { RunError, type runsService } from "./services/runs.js";
 import { NOTHING_CHANGED, ReviewError, type reviewService } from "./services/review.js";
 import type { notificationsService } from "./services/notifications.js";
 import type { chaptersService } from "./services/chapters.js";
-import { WorkError, type workService } from "./services/work.js";
+import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, missingVerdicts, readVerdicts } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
@@ -92,6 +92,8 @@ export type McpHooks = {
   nudge?: (input: { runId: string; fromAgentId: string; to: string; ticketId?: string | null; why: string }) => Promise<{ ok: true; delivered: string } | { ok: false; error: string }>;
   /** Wakes an agent, e.g. the CEO for a note request. */
   wake?: (agentId: string, input: { reason: string; note: string }) => Promise<unknown>;
+  /** A run with no ticket touched one: record it as the run's ticket so the Runs list shows it (BOS-254). */
+  onRunTicket?: (ticketId: string, runId: string) => Promise<unknown>;
 };
 
 /** The ticket row for an agent, with its state note shown with its age (R85). */
@@ -179,6 +181,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
   if (skip?.size) server.registerTool = ((name: string, config: never, cb: never) => (skip.has(name) ? undefined : originalRegister(name, config, cb))) as never;
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
+  // A run that had no ticket now works on one: say so on the run (BOS-254). Never blocks the tool.
+  const noteRunTicket = (ticketId: string) => (scope.agentId ? Promise.resolve(hooks.onRunTicket?.(ticketId, scope.runId)).catch(() => undefined) : undefined);
 
   async function isManager() {
     const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
@@ -398,6 +402,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const when = inMinutes !== undefined ? new Date(Date.now() + inMinutes * 60_000) : new Date(at!);
       try {
         const u = await work.setMonitor(ticketId, { at: when, note, maxChecks, by: { agentId: scope.agentId, companyId: scope.companyId } });
+        await noteRunTicket(ticketId);
         return text(`You will be woken on ticket ${ticketId} at ${u.monitorAt!.toISOString()} to re-check (check ${u.monitorAttempts + 1} of ${u.monitorMax}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -438,6 +443,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (err instanceof TicketChatError) return fail(err.message);
         throw err;
       }
+      await noteRunTicket(ticketId);
       const [t] = await db.select({ title: tickets.title, watcher: tickets.watcherAgentId }).from(tickets).where(eq(tickets.id, ticketId));
       // A watcher's report reads as a status update (R80).
       const title = t?.watcher && t.watcher === scope.agentId ? `Status: "${t.title}"` : `Reply on "${t?.title ?? "a ticket"}"`;
@@ -501,7 +507,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // Don't ask again what the owner has already answered (BOS-123). A fresh reason lets it through.
       if (blocksTicketId) {
         const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, blocksTicketId));
-        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: scope.agentId, question });
+        const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [blocksTicketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question });
         if (earlier && !stillNeeded?.trim()) {
           return fail(`${quotedAnswer(earlier)}. It looks answered already, so this card wasn't raised. If it really still needs the owner, call raise_decision again with stillNeeded saying what has changed.`);
         }
@@ -721,7 +727,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         const asks = /\b(need(s)? you|your (approval|decision|answer|sign-?off)|waiting (on|for) you|blocked on you|over to you)\b/i.test(`${input.title} ${input.body ?? ""}`);
         if (asks && !input.stillNeeded?.trim()) {
           const blockers = await db.select({ id: ticketDependencies.blockerTicketId }).from(ticketDependencies).where(eq(ticketDependencies.blockedTicketId, input.ticketId));
-          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], askerAgentId: scope.agentId, question: `${input.title} ${input.body ?? ""}` });
+          const earlier = await recentOwnerAnswer(db, { companyId: scope.companyId, ticketIds: [input.ticketId, ...blockers.map((b) => b.id).filter((id): id is string => !!id)], includeMessages: false, decisionTypes: ["question"], question: `${input.title} ${input.body ?? ""}` });
           if (earlier) return fail(`${quotedAnswer(earlier)}. Check the live state before telling the owner they must act; if it really still needs them, pass stillNeeded saying what changed.`);
         }
       }
@@ -1123,6 +1129,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(`Overruled the ${input.kind} review. ${reviewOutcome(r)}`);
         }
         if (input.action === "diff") {
+          // Reading the diff counts as working on it: a reviewer woken about several tickets
+          // starts on none, and gets shown with the one it is on (BOS-268). Never blocks the tool.
+          await noteRunTicket(input.ticketId);
           const d = await review.diff(input.ticketId, scope.companyId);
           // Keep the agent's context in check: the file list always, the patch up to 60 KB.
           const files = d.files.map((f) => `${f.path} (+${f.added} -${f.removed})`).join("\n");
@@ -1133,6 +1142,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
           return text(`${checklist}Base ${d.baseCommit.slice(0, 12)}, ${d.commits.length} commit(s).\nFiles:\n${files || "(none)"}\n\n${patch}${d.truncated ? "\n[diff truncated by the runner]" : ""}`);
         }
         if (!input.verdict) return fail("Give the verdict.");
+        // A verdict on a ticket is touching it, like any other hook (BOS-268).
+        await noteRunTicket(input.ticketId);
         const r = await review.submit(input.ticketId, {
           verdict: input.verdict,
           comments: input.comments,
@@ -1175,7 +1186,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       "server_status",
       {
         description:
-          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, and recent server errors with secrets redacted. It changes nothing and shows no other company's tickets, runs or errors.",
+          "A read-only view of the server, for when you or the owner need to know what is actually running: the live commit and when it went live, whether this server leads, the state of your company's runner, wakes that are waiting or failed to start (with their age), the last run starts and failures with their reasons, the latest migration, recent server errors with secrets redacted, and the Synthetic plan's quota (syntheticUsage: which measure it is, used of the limit (the plan's weekly credits, which regenerate 2% at a time, or else the old request window), when it renews, how old the reading is, recent readings this period and which of your company's agents are paid from it, with the number of other companies' agents on the same plan but not their names). It changes nothing and shows no other company's tickets, runs or errors.",
         inputSchema: {},
       },
       async () => text(JSON.stringify(await serverStatus.status(scope.companyId))),
@@ -1587,6 +1598,67 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
     },
   );
 
+  // Renaming and picturing an agent (BOS-265): display changes only, so the id still ties every
+  // ticket, run, note and history row to them. Both are logged, notified and undoable on the
+  // Agents page, and a rename waits for the owner when they approve instruction changes too.
+  server.registerTool(
+    "rename_agent",
+    {
+      description:
+        "Rename an agent (CEO only), in chat and in your ticket runs: agent (a name or id), newName, and reason. Only the display name changes: their id, tickets, runs, notes and history stay with them. Refuses a name another agent in this company already uses, an empty name, or one over 80 characters; the CEO itself can't be renamed this way. Say why; the owner is told, gets a feed note, can undo it on the Agents page, and when they've asked to approve instruction changes the rename waits in Decisions. The reply lists other agents whose instructions or title still say the old name, so you can fix those with update_instructions.",
+      // No trim or min here: an empty or blank name gets the service's plain refusal, not a schema error.
+      inputSchema: { agent: z.string().trim().min(1).max(80), newName: z.string().max(200), reason: z.string().trim().min(1).max(2000) },
+    },
+    async ({ agent, newName, reason }) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can rename an agent.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), or(sql`lower(${agents.name}) = lower(${agent})`, sql`${agents.id}::text = ${agent}`)));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      try {
+        const r = await team.rename(scope.companyId, ceo, who.id, newName, reason);
+        const name = "applied" in r ? newName.trim() : who.name;
+        const lines = ["applied" in r ? `${who.name} is now ${name}. Their tickets, runs, notes and history stay with them.` : `The rename of ${who.name} to ${newName.trim()} is waiting for the owner's approval (decision ${r.decisionId}).`];
+        // Only once it lands: the old name is what colleagues quote, not the new one.
+        if ("applied" in r) {
+          const others = await team.colleaguesMentioning(scope.companyId, who.id, r.before);
+          lines.push(
+            others.length
+              ? `These still say ${r.before} in their instructions or title; update them with update_instructions:\n${others.map((o) => `- ${o.name} (${o.where})`).join("\n")}`
+              : `No other agent's instructions or title mention ${r.before}. Settings and the review policy store agent ids, so nothing there breaks.`,
+          );
+          lines.push(`New commits by ${name} carry their current name from their next run; the runner needs the latest update for that to show (the server sends it with each run).`);
+        }
+        return text(lines.join("\n\n"));
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
+  server.registerTool(
+    "set_agent_picture",
+    {
+      description:
+        "Set an agent's picture (CEO only), in chat and in your ticket runs, from an image already attached to one of your company's tickets (such as one the Graphics Designer made and attached with attach_image; any ticket read lists its image ids). Pass imageId, or clear to go back to the built-in portrait, and say why. PNG, JPEG or WebP only, 256 KB or smaller; another company's image or a document is refused. It shows on the Agents page, the board and the runs list, is logged, and the owner gets a feed note and can undo it on the Agents page.",
+      inputSchema: { agent: z.string().trim().min(1).max(80), imageId: z.string().uuid().optional(), clear: z.boolean().optional(), reason: z.string().trim().max(2000).optional() },
+    },
+    async ({ agent, imageId, clear, reason }) => {
+      const ceo = await ceoOnly();
+      if (!ceo) return fail("Only your company's CEO can set an agent's picture.");
+      if (!imageId && !clear) return fail("Give an imageId (an image on one of your tickets) or set clear to go back to the default picture.");
+      const [who] = await db.select({ id: agents.id, name: agents.name }).from(agents).where(and(eq(agents.companyId, scope.companyId), or(sql`lower(${agents.name}) = lower(${agent})`, sql`${agents.id}::text = ${agent}`)));
+      if (!who) return fail(`No agent called ${agent}. Use board to see who there is.`);
+      try {
+        const r = await team.setPicture(scope.companyId, ceo, who.id, { imageId: imageId ?? null, clear: !!clear }, reason);
+        return text(clear ? `${who.name}'s picture is back to the default.` : `${who.name} now has that picture. It shows on the Agents page, the board and the runs list.`);
+      } catch (err) {
+        if (err instanceof AgentError) return fail(err.message);
+        throw err;
+      }
+    },
+  );
+
   server.registerTool(
     "wiki",
     {
@@ -1698,6 +1770,8 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
   const resolveProject = (project?: string) => findProject(db, scope, project);
   const outsideTree = (ticketId: string | undefined) => treeRefusal(db, scope, ticketId);
   const chatRefusal = async () => (chat && !(await isManager()) ? "In chat only your CEO or a manager can move tickets. Offer the owner to create a ticket for the work, or nudge your CEO." : null);
+  // A run that had no ticket now works on one: say so on the run (BOS-254). Never blocks the tool.
+  const noteRunTicket = (ticketId: string) => (scope.agentId ? Promise.resolve(hooks.onRunTicket?.(ticketId, scope.runId)).catch(() => undefined) : undefined);
 
   server.registerTool(
     "update_ticket",
@@ -1744,6 +1818,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         const u = await work.updateTicket(ticketId, { byAgentId: scope.agentId, ...(assigneeId !== undefined ? { assigneeAgentId: assigneeId } : {}), ...(p ? { projectId: p.id } : {}), ...(featureId !== undefined ? { featureId } : {}), ...(parentTicketId !== undefined ? { parentTicketId } : {}), ...(title !== undefined ? { title } : {}), ...(body !== undefined ? { body } : {}), ...(noCode !== undefined ? { noCode } : {}), ...(urgent !== undefined ? { urgent } : {}), ...(size !== undefined ? { size } : {}) });
         const [me] = scope.agentId ? await db.select({ name: agents.name }).from(agents).where(eq(agents.id, scope.agentId)) : [];
         await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "reorganised", summary: `${me?.name ?? "An agent"} reorganised it${noCode === undefined ? "" : noCode ? " (marked no code)" : " (no longer marked no code)"}${urgent === undefined ? "" : urgent ? " (marked urgent)" : " (no longer urgent)"}${size === undefined ? "" : size === null ? " (size cleared)" : ` (size ${size})`}: ${reason}` });
+        await noteRunTicket(ticketId);
         return text(`Ticket ${ticketId} updated (version ${u.version}).`);
       } catch (err) {
         if (err instanceof WorkError) return fail(err.message);
@@ -1785,10 +1860,25 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         }
       }
       if ((blocked_until || blocked_reason) && state !== "blocked") return fail("blocked_until and blocked_reason only go with state blocked.");
-      if (blocked_reason && !blocked_until) return fail("blocked_reason goes with blocked_until: give the date and time you are waiting for.");
-      if (blocked_reason && /[\r\n]/.test(blocked_reason.trim())) return fail("blocked_reason must be one line.");
+      if (blocked_reason && !blocked_until) return fail("blocked_reason goes with blocked_until: give the date and time you are waiting for.");      if (blocked_reason && /[\r\n]/.test(blocked_reason.trim())) return fail("blocked_reason must be one line.");
       const until = blocked_until ? new Date(blocked_until) : null;
       if (until && until.getTime() <= Date.now()) return fail("blocked_until must be in the future.");
+      if (state === "in_progress") {
+        // A run can't start a ticket that still waits on unfinished work, or a Backlog ticket nobody
+        // handed it (BOS-254). The owner, the CEO and managers override.
+        const [current] = await db.select({ systemState: tickets.systemState, createdAt: tickets.createdAt, lastActivityAt: tickets.lastActivityAt }).from(tickets).where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
+        if (current && current.systemState !== "in_progress") {
+          const blockers = await db
+            .select({ ticketState: tickets.systemState, ticketTitle: tickets.title, engagementStatus: engagementsTable.status })
+            .from(ticketDependencies)
+            .leftJoin(tickets, eq(tickets.id, ticketDependencies.blockerTicketId))
+            .leftJoin(engagementsTable, eq(engagementsTable.id, ticketDependencies.blockerEngagementId))
+            .where(eq(ticketDependencies.blockedTicketId, ticketId));
+          const [me] = scope.agentId ? await db.select({ role: agents.role }).from(agents).where(eq(agents.id, scope.agentId)) : [];
+          const refusal = startRefusal(current, blockers, { agentId: scope.agentId, role: me?.role ?? null });
+          if (refusal) return fail(refusal);
+        }
+      }
       if (until && until.getTime() > Date.now() + BLOCKED_UNTIL_MAX_MS) return fail(`blocked_until can be at most ${BLOCKED_UNTIL_MAX_DAYS} days ahead. For a longer wait, block without a time and raise a decision for the owner.`);
       if ((state === "review" || state === "done" || state === "blocked") && !summary?.trim()) return fail(`Moving a ticket to ${state} needs a summary (up to 240 characters): what you did, or what you are waiting on. Call set_ticket_state again with summary.`);
       // With criteria on the ticket, moving to review is only allowed once the state note reports
@@ -1836,15 +1926,26 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
         return fail(`Nothing changed: the ticket changed since you last saw it (you had version ${expected_version}). It is now ${now.state}, assigned to ${now.assignee ?? "nobody"}, version ${now.version}, last changed ${now.changed.toISOString()}. Read it again with tickets, then decide whether to move it.`);
       }
       await record(db, { companyId: scope.companyId, agentId: scope.agentId, ticketId, kind: "state", summary: `-> ${state}${summary?.trim() ? `: ${summary.trim()}` : ""}${until ? ` (until ${until.toISOString().slice(0, 16).replace("T", " ")} UTC${blocked_reason?.trim() ? `: ${blocked_reason.trim()}` : ""})` : ""}`, at });
+      await noteRunTicket(ticketId);
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
       if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
       if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
-      return text(`Ticket ${ticketId} is now ${state}.${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      // The check that counts is at the merge, but telling the agent now saves it waiting hours to
+      // find out its migration number is taken (BOS-219). It never holds the move up.
+      const warn = state === "review" ? await migrationWarning(review, ticketId, scope.companyId) : "";
+      return text(`Ticket ${ticketId} is now ${state}.${warn}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
+}
+
+/** A short note for the agent, when the ticket's new migrations take a number another branch already has (BOS-219). */
+async function migrationWarning(review: Services["review"], ticketId: string, companyId: string): Promise<string> {
+  const m = await review.migrations(ticketId, companyId).catch(() => null);
+  if (!m?.needed) return "";
+  return `\n\nHeads up (BOS-219): a migration number is already taken: ${m.why.join("; ")}. Rename it to ${String(m.next).padStart(4, "0")} (and any others it moved) before this merges, set its journal entry's "when" later than the newest one already on the default branch, run the checks, and move the ticket back to review. The merge will send it back if it still clashes.${m.others.length ? ` Other numbers taken: ${m.others.join("; ")}.` : ""}`;
 }
 
 /** True when something open holds the ticket: an unanswered decision, an unfinished blocker ticket or an engagement. */

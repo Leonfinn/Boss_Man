@@ -2,11 +2,14 @@
 // notes about the same ticket (or anything waiting on it) are marked possibly out of date,
 // and the agent that wrote them is woken once to confirm or withdraw. A request the owner
 // has already answered is refused, quoting the earlier answer.
-import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { decisions, deploys, runs, ticketDependencies, ticketMessages, tickets } from "../db/schema.js";
 
 type DecisionRow = typeof decisions.$inferSelect;
+
+/** Why a stale-request wake starts a run (BOS-254): plain words, not "stale request". */
+export const STALE_REASON = "checking an old card";
 
 /** Wakes an agent; the scheduler's notify matches this shape. */
 export type WakeFn = (input: { agentId: string; reason: string; note: string; ticketId?: string | null; priority?: number }) => Promise<unknown>;
@@ -78,20 +81,39 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
   const flaggedTickets = noted.map((n) => n.id);
   if (flaggedTickets.length) await db.update(tickets).set({ stateNoteStaleAt: now }).where(inArray(tickets.id, flaggedTickets));
 
-  const open = await db.select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context }).from(decisions).where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), isNull(decisions.staleAt)));
-  const flagged: typeof open = [];
-  for (const d of open) {
-    const ids = await decisionTicketIds(db, d);
-    if (ids.some((id) => scope.includes(id))) flagged.push(d);
-  }
+  // A card's tickets are the ones its context names (ticketId, blockedTicketId) or blocks, plus for
+  // a permission or stall card the ticket of the run it names and for a deploy the ticket it
+  // deploys. All of that is resolved in SQL, so an owner action doesn't run a query per open card
+  // in the company (BOS-175); the per-card lookup below then confirms the matches. Compared as
+  // text, so a context value that isn't an id simply doesn't match rather than failing to cast.
+  const named = sql`${inArray(sql`(${decisions.context} ->> 'ticketId')`, scope)} or ${inArray(sql`(${decisions.context} ->> 'blockedTicketId')`, scope)}`;
+  const blocking = sql`exists (select 1 from ${ticketDependencies} where ${ticketDependencies.blockerDecisionId} = ${decisions.id} and ${inArray(ticketDependencies.blockedTicketId, scope)})`;
+  const runTicket = sql`exists (select 1 from ${runs} where ${runs.id}::text = (${decisions.context} ->> 'runId') and ${inArray(runs.ticketId, scope)})`;
+  const deployTicket = sql`exists (select 1 from ${deploys} where ${deploys.id}::text = (${decisions.context} ->> 'deployId') and ${inArray(deploys.ticketId, scope)})`;
+  // An engagement card names no ticket or card id, only an engagement; its tickets are the ones blocked
+  // by that engagement. Found in SQL too, or an owner action would stop marking it (BOS-175).
+  const engagementCard = sql`exists (select 1 from ${ticketDependencies} where ${ticketDependencies.blockerEngagementId}::text = (${decisions.context} ->> 'engagementId') and ${inArray(ticketDependencies.blockedTicketId, scope)})`;
+  const open = await db
+    .select({ id: decisions.id, raisedByAgentId: decisions.raisedByAgentId, context: decisions.context })
+    .from(decisions)
+    .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "open"), isNull(decisions.staleAt), or(named, blocking, runTicket, deployTicket, engagementCard)));
+  // The query above already picked out the cards about these tickets, so these are the flagged
+  // cards; no second lookup is needed (BOS-175).
+  const flagged = open;
   const flaggedDecisions = flagged.map((d) => d.id);
   if (flaggedDecisions.length) await db.update(decisions).set({ staleAt: now, staleReason: input.reason }).where(inArray(decisions.id, flaggedDecisions));
 
-  // One wake per agent, naming what changed and what to do about it.
+  // One wake per agent, naming what changed and what to do about it. Only an agent that actually
+  // holds a card or a state note the answer could have made out of date is woken (BOS-254): a
+  // ticket that merely waits on one in scope is flagged for its own note, but its assignee is not
+  // woken just for the wait, and a ticket with no note has nobody to wake.
   const skip = new Set(input.skipAgents?.filter((id): id is string => !!id) ?? []);
   // not state: built per call and thrown away.
   const targets = new Map<string, { ticketId: string | null }>();
   for (const d of flagged) if (d.raisedByAgentId && !skip.has(d.raisedByAgentId) && !targets.has(d.raisedByAgentId)) targets.set(d.raisedByAgentId, { ticketId: null });
+  // Woken only for a note or card of their own: `noted` is every flagged note (a dependent's own
+  // "waiting on it" note counts, it is really out of date), and `flagged` is every open card about
+  // anything in scope. Nobody is woken just for a ticket being listed downstream.
   for (const n of noted) if (n.assigneeAgentId && !skip.has(n.assigneeAgentId) && !targets.has(n.assigneeAgentId)) targets.set(n.assigneeAgentId, { ticketId: n.id });
   const woken: string[] = [];
   if (input.wake) {
@@ -99,11 +121,12 @@ export async function ownerActed(db: Db, input: { companyId: string; ticketIds: 
       const w = await input.wake({
         agentId,
         ticketId: target.ticketId,
-        reason: "stale request",
+        reason: STALE_REASON,
         note: [
           `The owner acted (${input.reason}), so a decision card or the state note you left may now be out of date.`,
           "Check the live state before you repeat anything to them: their latest answers, what's deployed, and whether the tickets involved are done.",
-          "If what you asked for is done, take the card back (a question card you raised can be withdrawn with withdraw_decision) and update the ticket's state note in this run. If it still needs them, say so plainly and don't repeat an old \"waiting on you\" note.",
+          "If what you asked for is done, take the card back (a question card you raised can be withdrawn with withdraw_decision) and update the ticket's state note in this run.",
+          "If nothing of yours is affected, end the run.",
         ].join("\n"),
       });
       if (!w || (typeof w === "object" && "status" in w && (w as { status?: string }).status === "dropped")) continue;
@@ -138,45 +161,71 @@ export function similarQuestion(a: string, b: string): boolean {
 
 /**
  * The latest thing the owner said or answered on these tickets recently, for the duplicate check.
- * Pass decisionTypes to count only the kinds that answer this sort of ask; pass askerAgentId and
- * question to count only the same agent's asks or ones close enough to be the same question, so an
- * unrelated answer (a permission click, say) never blocks a fresh ask (BOS-123).
+ * Pass decisionTypes to count only the kinds that answer this sort of ask; pass question to count
+ * only an ask close enough to be the same one, so a different question never blocks a fresh ask
+ * (BOS-123, BOS-175). Pass decisionId to ask about one card rather than the tickets.
  */
 export async function recentOwnerAnswer(db: Db, input: {
   companyId: string;
   ticketIds: string[];
   since?: Date;
-  /** Count what the owner wrote on the ticket as well as answered decisions; off for the duplicate-ask check. */
+  /** Count what the owner wrote on the ticket as well as answered decisions; off for the duplicate-ask check and when one card is named. */
   includeMessages?: boolean;
   /** Decision context types that count; default every kind. */
   decisionTypes?: string[];
-  /** Only a decision this agent raised, or one whose question closely matches `question`, counts. */
-  askerAgentId?: string | null;
+  /**
+   * Count only this card being settled (BOS-175), not any answer about these tickets: a reminder
+   * or a refusal asks about one card, and another card's answer or a plain message doesn't settle it.
+   */
+  decisionId?: string | null;
+  /** Only a decision whose question closely matches `question` counts, whoever asked it (BOS-175). */
   question?: string;
 }): Promise<OwnerAnswer | null> {
   const ids = [...new Set(input.ticketIds.filter((id): id is string => !!id))];
-  if (!ids.length) return null;
   const since = input.since ?? new Date(Date.now() - 7 * 86_400_000);
   const found: OwnerAnswer[] = [];
 
-  const answered = await db
-    .select({ id: decisions.id, context: decisions.context, question: decisions.question, answer: decisions.answer, answeredAt: decisions.answeredAt, raisedByAgentId: decisions.raisedByAgentId })
-    .from(decisions)
-    .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "answered"), gt(decisions.answeredAt, since)))
-    .orderBy(desc(decisions.answeredAt));
-  for (const d of answered) {
-    if (!d.answer || !d.answeredAt) continue;
+  // The ticket ids this card holds up are already known, so the check is one row read, no extra query.
+  const one = async (id: string | null) => {
+    if (!id) return null;
+    const [d] = await db
+      .select({ context: decisions.context, question: decisions.question, answer: decisions.answer, answeredAt: decisions.answeredAt })
+      .from(decisions)
+      .where(and(eq(decisions.id, id), eq(decisions.companyId, input.companyId), eq(decisions.status, "answered"), gt(decisions.answeredAt, since)))
+      .limit(1);
+    return d ?? null;
+  };
+
+  if (input.decisionId) {
+    const d = await one(input.decisionId);
+    if (!d?.answer || !d.answeredAt) return null;
     const type = (d.context as { type?: string } | null)?.type;
-    if (input.decisionTypes && !input.decisionTypes.includes(type ?? "")) continue;
-    if (input.question !== undefined) {
-      const sameAgent = !!input.askerAgentId && d.raisedByAgentId === input.askerAgentId;
-      if (!sameAgent && !similarQuestion(input.question, d.question)) continue;
+    if (input.decisionTypes && !input.decisionTypes.includes(type ?? "")) return null;
+    if (input.question !== undefined && !similarQuestion(input.question, d.question)) return null;
+    found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt });
+  } else if (ids.length) {
+    // A card is about a ticket when its context names it by id, or when it blocks one. Both filters
+    // run in SQL, so an owner action doesn't run one query per answered card (BOS-175). Compared as
+    // text, so a context value that isn't an id simply doesn't match rather than failing to cast.
+    const named = inArray(sql`(${decisions.context} ->> 'ticketId')`, ids);
+    const blocking = sql`exists (select 1 from ${ticketDependencies} where ${ticketDependencies.blockerDecisionId} = ${decisions.id} and ${inArray(ticketDependencies.blockedTicketId, ids)})`;
+    const answered = await db
+      .select({ id: decisions.id, context: decisions.context, question: decisions.question, answer: decisions.answer, answeredAt: decisions.answeredAt })
+      .from(decisions)
+      .where(and(eq(decisions.companyId, input.companyId), eq(decisions.status, "answered"), gt(decisions.answeredAt, since), or(named, blocking)))
+      .orderBy(desc(decisions.answeredAt));
+    for (const d of answered) {
+      if (!d.answer || !d.answeredAt) continue;
+      const type = (d.context as { type?: string } | null)?.type;
+      if (input.decisionTypes && !input.decisionTypes.includes(type ?? "")) continue;
+      // Similarity always applies, even to the same agent's ask (BOS-175): an answered question
+      // doesn't make every later, unrelated question from that agent a repeat.
+      if (input.question !== undefined && !similarQuestion(input.question, d.question)) continue;
+      found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt });
     }
-    const about = await decisionTicketIds(db, d);
-    if (about.some((id) => ids.includes(id))) found.push({ kind: "decision", question: d.question, answer: d.answer, at: d.answeredAt });
   }
 
-  if (input.includeMessages !== false) {
+  if (input.includeMessages !== false && !input.decisionId && ids.length) {
     const said = await db
       .select({ text: ticketMessages.text, at: ticketMessages.createdAt })
       .from(ticketMessages)
