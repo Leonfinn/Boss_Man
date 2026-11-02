@@ -2,7 +2,7 @@
 // then what only clones give: one ticket can't reach another's branch or plant config the runner
 // runs in another's copy, and the shared repo keeps the objects clones borrow.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -108,5 +108,97 @@ describe("per-ticket clones (BOS-323)", () => {
     expect(later.removed).toEqual([ids.b]);
     expect(existsSync(a.path)).toBe(true);
     expect(later.tickets.map((t) => t.ticketId)).toEqual([ids.a]);
+  });
+});
+
+describe("turning a ticket's worktree into a clone (BOS-323)", () => {
+  /** A ticket worked as a worktree: a commit, then uncommitted, staged, untracked and ignored files, and a turn checkpoint. */
+  async function workedWorktree() {
+    const url = remote();
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const as = (copies: string) => new Workspaces(root, { ...process.env, BOSSMAN_TICKET_COPIES: copies });
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: url, baseRef: "main" };
+    const old = as("worktree");
+    const w = await old.ensure(spec);
+    writeFileSync(path.join(w.path, ".gitignore"), "node_modules/\n");
+    git(w.path, "add", ".gitignore");
+    git(w.path, "commit", "-qm", "ignore packages");
+    writeFileSync(path.join(w.path, "README.md"), "edited\n");
+    writeFileSync(path.join(w.path, "staged.txt"), "staged\n");
+    git(w.path, "add", "staged.txt");
+    writeFileSync(path.join(w.path, "untracked.txt"), "untracked\n");
+    mkdirSync(path.join(w.path, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(w.path, "node_modules", "pkg", "index.js"), "installed\n");
+    await old.checkpoint(spec, "after a turn");
+    const repo = old.repoDir(ids.project);
+    const admin = path.resolve(w.path, readFileSync(path.join(w.path, ".git"), "utf8").replace("gitdir:", "").trim());
+    return { as, spec, w, repo, admin, head: git(w.path, "rev-parse", "HEAD") };
+  }
+
+  const expectEveryFileKept = (dir: string) => {
+    expect(readFileSync(path.join(dir, "README.md"), "utf8")).toBe("edited\n");
+    expect(readFileSync(path.join(dir, "staged.txt"), "utf8")).toBe("staged\n");
+    expect(readFileSync(path.join(dir, "untracked.txt"), "utf8")).toBe("untracked\n");
+    expect(readFileSync(path.join(dir, "node_modules", "pkg", "index.js"), "utf8")).toBe("installed\n");
+  };
+
+  it("keeps every file, the branch and the checkpoints, and lets go of the worktree", async () => {
+    const { as, spec, w, repo, admin, head } = await workedWorktree();
+    const ws = as("clone");
+    expect(await ws.ensure(spec)).toMatchObject({ path: w.path, created: false, branch: branchFor(ids.a) });
+    expect(isClone(w.path)).toBe(true);
+    expectEveryFileKept(w.path);
+    expect(git(w.path, "rev-parse", "HEAD")).toBe(head);
+    expect(git(w.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
+    // The only difference: what was staged is now just changed.
+    expect(git(w.path, "status", "--porcelain").split("\n").map((l) => l.trim()).sort()).toEqual(["?? staged.txt", "?? untracked.txt", "M README.md"]);
+    expect(existsSync(admin)).toBe(false);
+    expect(git(repo, "worktree", "list").split("\n")).toHaveLength(1);
+    expect((await ws.lastTurnDiff(spec)).turn).toMatchObject({ number: 1 });
+    // And it works as a clone from here on.
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "after the move");
+    expect(await ws.pushForReview(spec, "main")).toMatchObject({ status: "pushed" });
+    expect(git(spec.repoUrl, "log", "-1", "--format=%s", branchFor(ids.a))).toBe("after the move");
+  });
+
+  it("finishes a conversion cut short between moving the old .git aside and putting the new one in", async () => {
+    const { as, spec, w, repo } = await workedWorktree();
+    git(repo, "worktree", "lock", w.path);
+    renameSync(path.join(w.path, ".git"), path.join(w.path, ".git.bossman-converting"));
+    // Housekeeping leaves it alone meanwhile.
+    expect((await as("clone").housekeeping(Date.now() + 2 * 3_600_000)).removed).toEqual([]);
+    await as("clone").ensure(spec);
+    expect(isClone(w.path)).toBe(true);
+    expect(existsSync(path.join(w.path, ".git.bossman-converting"))).toBe(false);
+    expectEveryFileKept(w.path);
+  });
+
+  it("finishes a conversion cut short before the index was rebuilt", async () => {
+    const { as, spec, w, admin } = await workedWorktree();
+    const pointer = readFileSync(path.join(w.path, ".git"), "utf8");
+    await as("clone").ensure(spec);
+    // As if it stopped right after the swap: old .git aside, its admin folder still there, no index.
+    writeFileSync(path.join(w.path, ".git.bossman-converting"), pointer);
+    mkdirSync(admin, { recursive: true });
+    rmSync(path.join(w.path, ".git", "index"));
+    await as("clone").ensure(spec);
+    expect(existsSync(path.join(w.path, ".git.bossman-converting"))).toBe(false);
+    expect(existsSync(admin)).toBe(false);
+    expect(git(w.path, "status", "--porcelain")).not.toContain("D ");
+  });
+
+  it("leaves worktrees as they are while new copies are worktrees, and puts back one cut short", async () => {
+    const { as, spec, w, repo } = await workedWorktree();
+    await as("worktree").ensure(spec);
+    expect(isClone(w.path)).toBe(false);
+    git(repo, "worktree", "lock", w.path);
+    renameSync(path.join(w.path, ".git"), path.join(w.path, ".git.bossman-converting"));
+    await as("worktree").ensure(spec);
+    expect(isClone(w.path)).toBe(false);
+    expect(git(w.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(branchFor(ids.a));
+    expectEveryFileKept(w.path);
+    // Unlocked again, so releasing it works as before.
+    expect(await as("worktree").release(spec)).toEqual({ savedPatch: true });
   });
 });

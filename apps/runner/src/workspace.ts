@@ -63,7 +63,7 @@ function copyProject(dir: string): string | null {
       return "";
     }
   };
-  const target = isClone(dir) ? read(path.join(gitPath, "objects", "info", "alternates")).split("\n")[0]?.trim() : read(gitPath).match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+  const target = isClone(dir) ? read(path.join(gitPath, "objects", "info", "alternates")).split("\n")[0]?.trim() : (read(gitPath) || read(path.join(dir, ".git.bossman-converting"))).match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
   if (!target || !existsSync(target)) return null;
   return target.match(/repos\/([^/]+)\.git\/(?:worktrees\/|objects$)/)?.[1] ?? null;
 }
@@ -147,18 +147,16 @@ export class Workspaces {
   private newCopiesAreClones = () => this.baseEnv.BOSSMAN_TICKET_COPIES === "clone";
 
   /**
-   * A new copy of the shared repo at commit: a clone that borrows the shared repo's objects (no
-   * copy of history) and gets origin's branches and tags as they were last fetched, so
-   * origin/<default> is current without a network call. On branch, or detached when branch is
-   * null. Built beside dir and moved into place, so a half-made copy is never taken for one.
+   * An empty clone of the shared repo at tmp, with nothing checked out: it borrows the shared
+   * repo's objects (no copy of history) and gets origin's branches and tags as they were last
+   * fetched, so origin/<default> is current without a network call.
    */
-  private async makeClone(repo: string, dir: string, commit: string, branch: string | null) {
+  private async initClone(repo: string, tmp: string) {
     // Clones borrow objects the shared repo might otherwise prune once nothing there points at them.
     await this.git(["config", "gc.pruneExpire", "never"], { cwd: repo });
     const url = await this.git(["config", "--get", "remote.origin.url"], { cwd: repo });
-    const tmp = path.join(path.dirname(dir), `.${path.basename(dir)}.new`);
     rmSync(tmp, { recursive: true, force: true });
-    mkdirSync(path.dirname(dir), { recursive: true });
+    mkdirSync(path.dirname(tmp), { recursive: true });
     await this.git(["init", "--quiet", tmp]);
     writeFileSync(path.join(tmp, ".git", "objects", "info", "alternates"), `${path.join(repo, "objects")}\n`);
     await this.git(["remote", "add", "origin", url], { cwd: tmp });
@@ -166,12 +164,57 @@ export class Workspaces {
     await this.git(["remote", "add", "shared", repo], { cwd: tmp });
     await this.git(["config", "remote.shared.fetch", "+refs/heads/bossman/*:refs/remotes/shared/bossman/*"], { cwd: tmp });
     await this.git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", repo, "+refs/remotes/origin/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], { cwd: tmp });
-    if (branch) {
-      await this.git(["update-ref", `refs/heads/${branch}`, commit], { cwd: tmp });
-      await this.git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], { cwd: tmp });
-    } else await this.git(["update-ref", "--no-deref", "HEAD", commit], { cwd: tmp });
+  }
+
+  /** Points a clone's HEAD at commit: on branch, or detached when branch is null. Nothing is checked out. */
+  private async setHead(dir: string, commit: string, branch: string | null) {
+    if (!branch) return void (await this.git(["update-ref", "--no-deref", "HEAD", commit], { cwd: dir }));
+    await this.git(["update-ref", `refs/heads/${branch}`, commit], { cwd: dir });
+    await this.git(["symbolic-ref", "HEAD", `refs/heads/${branch}`], { cwd: dir });
+  }
+
+  /** Where a copy is built before it's moved into place, so a half-made copy is never taken for one. */
+  private buildDir = (dir: string) => path.join(path.dirname(dir), `.${path.basename(dir)}.new`);
+
+  /** A new copy of the shared repo at commit, as a clone: on branch, or detached when branch is null. */
+  private async makeClone(repo: string, dir: string, commit: string, branch: string | null) {
+    const tmp = this.buildDir(dir);
+    await this.initClone(repo, tmp);
+    await this.setHead(tmp, commit, branch);
     await this.git(["reset", "--hard", "--quiet"], { cwd: tmp });
     renameSync(tmp, dir);
+  }
+
+  /**
+   * Turns a ticket's worktree into its own clone in place, keeping every file: committed,
+   * uncommitted, untracked and ignored (installed packages too). Only the .git file is swapped for
+   * a clone's .git folder and the index rebuilt from HEAD, so staged changes become unstaged. The
+   * old .git file is kept aside until the end; a conversion cut short is finished (or undone, if
+   * the new .git never arrived) next time. Callers hold the repo lock.
+   */
+  private async convertToClone(repo: string, dir: string) {
+    const gitPath = path.join(dir, ".git");
+    const aside = path.join(dir, ".git.bossman-converting");
+    if (existsSync(aside) && !existsSync(gitPath)) renameSync(aside, gitPath);
+    if (!isClone(dir)) {
+      const admin = readFileSync(gitPath, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+      if (!admin || path.dirname(path.resolve(dir, admin)) !== path.join(repo, "worktrees")) throw new Error(`${dir} isn't a worktree of ${repo}.`);
+      const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
+      const branch = await this.git(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir }).catch(() => null);
+      const tmp = this.buildDir(dir);
+      await this.initClone(repo, tmp);
+      await this.setHead(tmp, head, branch);
+      // Locked, so a worktree prune can't drop its admin folder while the .git file is aside.
+      await this.gitCode(["worktree", "lock", "--reason", "turning into a clone (BOS-323)", dir], { cwd: repo });
+      renameSync(gitPath, aside);
+      renameSync(path.join(tmp, ".git"), gitPath);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+    if (!existsSync(aside)) return;
+    await this.git(["reset", "--quiet"], { cwd: dir });
+    const admin = readFileSync(aside, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+    if (admin && path.dirname(path.resolve(dir, admin)) === path.join(repo, "worktrees")) rmSync(path.resolve(dir, admin), { recursive: true, force: true });
+    rmSync(aside);
   }
 
   /** A new copy for a ticket: a clone or a worktree, as configured. */
@@ -210,7 +253,13 @@ export class Workspaces {
 
       await this.cloneIfMissing(spec, auth);
 
-      if (existsSync(path.join(dir, ".git"))) {
+      // A conversion cut short leaves the old .git aside; it's finished or undone below.
+      if (existsSync(path.join(dir, ".git")) || existsSync(path.join(dir, ".git.bossman-converting"))) {
+        if (!this.newCopiesAreClones() && !existsSync(path.join(dir, ".git"))) {
+          renameSync(path.join(dir, ".git.bossman-converting"), path.join(dir, ".git"));
+          await this.gitCode(["worktree", "unlock", dir], { cwd: repo });
+        }
+        if (this.newCopiesAreClones() || isClone(dir)) await this.convertToClone(repo, dir);
         const baseCommit = await this.git(["config", "--get", baseKey], { cwd: repo }).catch(() => "");
         return { path: dir, branch, baseCommit, created: false, restoredPatch: false };
       }
