@@ -165,7 +165,8 @@ export class Workspaces {
    * agent can rewrite to point at another project.
    */
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string>; repo?: string; reads?: string[] } = {}) {
-    if (this.fenceCloneGit && opts.cwd && isClone(opts.cwd)) return this.fencedGit(args, opts.cwd, opts.repo, opts.env, opts.reads);
+    // A clone is always fenced. So is any ticket folder of a runner that makes clones, whatever its .git now is: an agent that swaps the clone's .git for a pointer at a git dir it controls would otherwise move the runner's git out of the fence.
+    if (this.fenceCloneGit && opts.cwd && (isClone(opts.cwd) || (opts.repo && this.newCopiesAreClones()))) return this.fencedGit(args, opts.cwd, opts.repo, opts.env, opts.reads);
     const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(opts.env) };
     const { stdout } = await run("git", args, { cwd: opts.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
@@ -282,8 +283,8 @@ export class Workspaces {
     if (!isClone(dir)) {
       const admin = readFileSync(gitPath, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
       if (!admin || path.dirname(path.resolve(dir, admin)) !== path.join(repo, "worktrees")) throw new Error(`${dir} isn't a worktree of ${repo}.`);
-      const head = await this.git(["rev-parse", "HEAD"], { cwd: dir });
-      const branch = await this.git(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir }).catch(() => null);
+      const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
+      const branch = await this.git(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir, repo }).catch(() => null);
       const tmp = this.buildDir(dir);
       await this.initClone(repo, tmp);
       await this.setHead(repo, tmp, head, branch);

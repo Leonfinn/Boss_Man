@@ -3,7 +3,7 @@
 // names (a clean filter, an fsmonitor) still runs for the runner's git there, so it's held to the
 // clone; and an agent fenced in a clone can't write the shared repo at all. Needs Landlock.
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -86,6 +86,32 @@ describe.skipIf(!live)("the runner's git in a clone, fenced (BOS-323)", () => {
     const { ws, spec, dir } = await ticket(false);
     const { out: outside } = await lifecycle(ws, spec, dir, () => plant(dir));
     expect(existsSync(path.join(outside, "filter"))).toBe(true);
+  });
+
+  // Jane's finding on BOS-321: an agent swaps its clone's `.git` for a pointer at a git dir it controls (outside the clone)
+  // whose config names a filter; the runner's git, discovering the repo from the folder, must not run it outside the fence.
+  async function pointed(fenced: boolean) {
+    const { ws, spec, dir } = await ticket(fenced);
+    const outside = mkdtempSync(path.join(tmpdir(), "bm-outside-"));
+    const evilGit = path.join(mkdtempSync(path.join(tmpdir(), "bm-evil-")), "git");
+    cpSync(path.join(dir, ".git"), evilGit, { recursive: true });
+    git(dir, "--git-dir", evilGit, "config", "core.worktree", dir);
+    git(dir, "--git-dir", evilGit, "config", "filter.planted.clean", `sh -c 'touch ${outside}/filter; cat'`);
+    writeFileSync(path.join(evilGit, "info", "attributes"), "* filter=planted\n");
+    writeFileSync(path.join(dir, "left.txt"), "uncommitted\n");
+    rmSync(path.join(dir, ".git"), { recursive: true, force: true });
+    writeFileSync(path.join(dir, ".git"), `gitdir: ${evilGit}\n`);
+    await ws.checkpoint(spec, "after a turn").catch(() => undefined);
+    await ws.diff(spec).catch(() => undefined);
+    return outside;
+  }
+
+  it("holds the runner's git to the fence when the clone's .git is swapped for a pointer to a git dir the agent controls", async () => {
+    expect(readdirSync(await pointed(true))).toEqual([]);
+  });
+
+  it("(control) the same swapped pointer runs the planted filter when the runner's git isn't fenced", async () => {
+    expect(existsSync(path.join(await pointed(false), "filter"))).toBe(true);
   });
 
   it("refuses git in a clone without the shared repo to fence it with", async () => {
