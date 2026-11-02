@@ -184,7 +184,8 @@ export function journalProblems(base: JournalEntry[], merged: JournalEntry[], no
 /** The entries of the journal at `ref`, or none when it has no readable one. */
 export async function journalAt(git: GitCode, ref: string): Promise<JournalEntry[]> {
   const files = (await git(["ls-tree", "-r", "-z", "--name-only", ref])).stdout.split("\0");
-  const file = files.find((p) => /(^|\/)drizzle\/meta\/_journal\.json$/.test(p));
+  // Several matches: the shallowest one is the real journal; a stray copy deeper in the tree can't shadow it.
+  const file = files.filter((p) => /(^|\/)drizzle\/meta\/_journal\.json$/.test(p)).sort((x, y) => x.split("/").length - y.split("/").length)[0];
   if (!file) return [];
   const shown = await git(["show", `${ref}:${file}`]);
   if (shown.code !== 0) return [];

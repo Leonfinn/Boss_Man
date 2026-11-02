@@ -626,6 +626,10 @@ export class Workspaces {
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        // Same journal rule as the plain merge (BOS-360): a refused branch builds and pushes nothing.
+        const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
+        const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
+        if (problems.length) return { status: "migration_journal" as const, problems };
         if (refused && refused.targetSha === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${refused.stderr.slice(0, 500)}`);
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         if (!checked || tried.tree !== checked.tree) {
