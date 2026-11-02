@@ -44,6 +44,13 @@ async function setup(opts: { deployer?: boolean } = {}) {
 }
 
 describe("self-deploy (docs/09-self-deploy.md)", () => {
+  it("tells the owner a refused runner update is only a note, in plain words (BOS-364)", async () => {
+    const c = (ctx = await setup());
+    await c.status({ id: randomUUID(), target: "runner", result: "rejected", message: "The runners were not updated. Nothing is broken and nothing needs doing now.", to_commit: B, ended: "2026-10-20T12:03:00Z" });
+    await c.selfDeploy.sync();
+    expect((await c.db.select().from(notifications))[0]).toMatchObject({ level: "note", title: expect.stringContaining("Runner update not started") });
+  });
+
   it("does not offer again a commit the host just refused as no longer the tip, until the host rewrites the offer", async () => {
     const c = (ctx = await setup());
     await c.status({ id: randomUUID(), result: "rejected", message: "Rejected: not the tip of main.", to_commit: B, ended: "2026-10-20T12:03:00Z" });
