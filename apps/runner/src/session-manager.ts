@@ -552,7 +552,9 @@ export class SessionManager {
         emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't prepare the git workspace: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
         return;
       }
-      if (cmd.agentKind === "claude" && isClone(cmd.cwd)) {
+      // A fenced run links it in the agent's own home instead (fenceRun).
+      const fencing = cmd.fence && (this.opts.fence?.level ?? "unavailable") !== "unavailable";
+      if (cmd.agentKind === "claude" && isClone(cmd.cwd) && !fencing) {
         const configDir = env.CLAUDE_CONFIG_DIR ?? path.join(env.HOME ?? "", ".claude");
         try {
           linkSharedMemory(configDir, cmd.cwd, this.opts.workspaces.repoDir(spec.projectId));

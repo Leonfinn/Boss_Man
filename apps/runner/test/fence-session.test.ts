@@ -183,7 +183,7 @@ describe.skipIf(!live)("Claude Code inside the fence (stub model)", () => {
     await stub.close();
   });
 
-  it("works a ticket in its git worktree and keeps the project's shared memory", async () => {
+  it.each(["worktree", "clone"] as const)("works a ticket in its git %s and keeps the project's shared memory", async (copies) => {
     const remote = mkdtempSync(path.join(tmpdir(), "bm-remote-"));
     const g = (args: string[], cwd = remote) => execFileSync("git", args, { cwd, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" }, encoding: "utf8" }).trim();
     g(["init", "-q", "-b", "main"]);
@@ -191,7 +191,8 @@ describe.skipIf(!live)("Claude Code inside the fence (stub model)", () => {
     g(["add", "."]);
     g(["commit", "-qm", "init"]);
     const root = mkdtempSync(path.join(tmpdir(), "bm-fence-claude-"));
-    const workspaces = new Workspaces(path.join(root, "workspaces"));
+    const workspaces = new Workspaces(path.join(root, "workspaces"), { ...process.env, BOSSMAN_TICKET_COPIES: copies });
+    workspaces.fenceCloneGit = true;
     const sharedClaude = path.join(root, "shared-claude");
     const agentsRoot = path.join(root, "agents");
     const projectId = randomUUID();
@@ -235,9 +236,11 @@ describe.skipIf(!live)("Claude Code inside the fence (stub model)", () => {
     // Claude Code's state went to the agent's own folder, not the shared one.
     expect(existsSync(path.join(agentsRoot, agentId, ".claude", "projects"))).toBe(true);
     expect(existsSync(path.join(sharedClaude, "projects", claudeProjectSlug(workspaces.ticketDir(ticketId))))).toBe(false);
-    // The project's auto-memory is still the shared folder.
+    // The project's auto-memory is still the shared folder, linked under Claude's key for the copy:
+    // the shared repo for a worktree, the clone itself for a clone (BOS-323).
     const slug = claudeProjectSlug(workspaces.repoDir(projectId));
-    expect(readlinkSync(path.join(agentsRoot, agentId, ".claude", "projects", slug, "memory"))).toBe(path.join(sharedClaude, "projects", slug, "memory"));
+    const key = claudeProjectSlug(copies === "clone" ? workspaces.ticketDir(ticketId) : workspaces.repoDir(projectId));
+    expect(readlinkSync(path.join(agentsRoot, agentId, ".claude", "projects", key, "memory"))).toBe(path.join(sharedClaude, "projects", slug, "memory"));
     expect(stubLog.some((l) => l.step === "final")).toBe(true);
   }, 120_000);
 });
