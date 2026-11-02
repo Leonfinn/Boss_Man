@@ -216,6 +216,27 @@ describe("workspace clean-up (R54)", () => {
   });
 });
 
+describe("the git author a rename asks for (BOS-265)", () => {
+  it("signs a turn's checkpoint with the agent's current name, and keeps Boss Man's own commits as Boss Man", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const spec = { projectId: ids.project, ticketId: ids.a, repoUrl: r.dir, baseRef: "main" };
+    const w = await ws.ensure(spec);
+    writeFileSync(path.join(w.path, "a.txt"), "a\n");
+    await ws.checkpoint(spec, "after a turn", "Zippy");
+    const head = git(ws.repoDir(ids.project), "rev-parse", "refs/bossman/checkpoints/" + ids.a + "/000001");
+    expect(git(ws.repoDir(ids.project), "log", "-1", "--format=%an <%ae>|%cn", head)).toBe("Zippy <bossman@localhost>|Zippy");
+    // No name sent (an older server), or a blank one: Boss Man signs, never an empty author.
+    writeFileSync(path.join(w.path, "b.txt"), "b\n");
+    await ws.checkpoint(spec, "after a turn", "  ");
+    const next = git(ws.repoDir(ids.project), "rev-parse", "refs/bossman/checkpoints/" + ids.a + "/000002");
+    expect(git(ws.repoDir(ids.project), "log", "-1", "--format=%an", next)).toBe("Boss Man");
+    // A reviewer's copy is Boss Man's snapshot of the work, not the agent's commit.
+    const rev = await ws.ensureReview(spec);
+    expect(git(ws.repoDir(ids.project), "log", "-1", "--format=%an %s", rev.commit)).toBe("Boss Man Boss Man review copy");
+  });
+});
+
 describe("turn checkpoints (R39)", () => {
   it("records each turn under private refs without touching the agent's branch or index, and diffs the last turn", async () => {
     const r = remote();

@@ -104,7 +104,7 @@ export const agents = pgTable(
     duty: text("duty"),
     /**
      * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
-     * migration 0083 moved every use into the review policy, and it is read only for a leftover
+     * migration 0084 moved every use into the review policy, and it is read only for a leftover
      * "marked" cell. Kept one release so a rollback has it; drop it after.
      */
     reviewKind: text("review_kind"),
@@ -1556,4 +1556,6 @@ export const agentAvatars = pgTable("agent_avatars", {
   agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   bytes: bytea("bytes").notNull(),
   type: text("type").notNull(),
+  /** The ticket image the CEO picked (BOS-265): copies are shared by it, so agents sharing a picture keep one copy. Null for one the owner uploaded. */
+  imageId: uuid("image_id").references(() => ticketImages.id, { onDelete: "set null" }),
 });
