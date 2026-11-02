@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluatePermission } from "@bossman/shared";
+import { evaluatePermission } from "@boss-man/shared";
 import { createPermissionLog } from "../src/services/permission-log.js";
 
 const base = { companyId: "c1", runId: "r1", agentId: "a1", ticketId: "t1", title: "Bash: ls", kind: "execute" };
