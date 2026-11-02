@@ -717,9 +717,6 @@ export class Workspaces {
       // A ticket whose branch is gone here has nothing to compare: there is nothing of it to merge.
       if (!mineRef) return { carried: [] };
       const mine = new Set(await refs(branchFor(spec.ticketId)));
-      // Commits on this branch's own first-parent line are its own work. If B shares one, B merged
-      // this ticket in (B builds on it), which isn't this ticket carrying B (BOS-365).
-      const own = new Set(await refs(branchFor(spec.ticketId), true));
       const found: CarriedResult["carried"] = [];
       for (const b of branches) {
         if (b.ticketId === spec.ticketId || b.branch === branchFor(spec.ticketId)) continue;
@@ -728,7 +725,9 @@ export class Workspaces {
           () => false,
         );
         if (!exists) continue;
-        if ((await refs(b.branch)).some((sha) => mine.has(sha) && !own.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
+        // B is carried when this branch holds a commit on B's own first-parent line (B's work).
+        // Commits B has only by merging this ticket in are on this ticket's side, not B's line (BOS-365).
+        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
       }
       return { carried: found };
     });
