@@ -607,6 +607,8 @@ export class Workspaces {
     let checked: { commit: string; tree: string; targetSha: string; branchSha: string } | null = null;
     let checkedMs = 0;
     let checks = 0;
+    // A push that failed against this target sha. If the target is still there next round, the push was refused for good.
+    let refused: { targetSha: string; stderr: string } | null = null;
     for (let round = 0; round < 8; round++) {
       // Build the merge commit under the lock; push it at once if its tree is already checked.
       const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string; targetSha: string; branchSha: string }> => {
@@ -617,6 +619,7 @@ export class Workspaces {
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        if (refused && refused.targetSha === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${refused.stderr.slice(0, 500)}`);
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         if (!checked || tried.tree !== checked.tree) {
           dir = path.join(base, `${round}-${Date.now().toString(36)}`);
@@ -631,7 +634,9 @@ export class Workspaces {
         const toPush = same ? checked.commit : commit;
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${toPush}:refs/heads/${target}`], { cwd: repo, env: auth });
         if (pushed.code === 0) return { status: "merged", commit: toPush, checked: { sha: checked.commit, tree: tried.tree, ms: checkedMs } };
-        // Rejected: the target moved again. Build once more; the tree decides whether it is checked again.
+        // Rejected: either the target moved again, or the push is refused for good (protected branch, bad token,
+        // hook). The next round tells them apart: if the target sha is unchanged, it throws git's message.
+        refused = { targetSha: tried.targetSha, stderr: pushed.stderr };
         return { status: "check", commit: "", tree: "", targetSha: "", branchSha: "" };
       });
       if (built.status !== "check") return built;

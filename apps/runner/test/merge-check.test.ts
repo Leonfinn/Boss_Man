@@ -116,4 +116,13 @@ describe("two branches that each pass alone (F6)", () => {
     expect(r).toMatchObject({ status: "check_failed", result: { timedOut: true } });
     expect(existsSync(ws.mergeCheckDir(ids.t))).toBe(false);
   });
+
+  it("a push the origin refuses for good throws git's message instead of looping", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "b.txt", "b\n");
+    const hook = path.join(o.url, "hooks", "pre-receive");
+    writeFileSync(hook, "#!/bin/sh\necho protected branch >&2\nexit 1\n", { mode: 0o755 });
+    await expect(ws.merge(spec, "main", "Merge B", {}, { commands: ["true"] })).rejects.toThrow(/Couldn.t push the merge to main/);
+    expect(existsSync(ws.mergeCheckDir(ids.t))).toBe(false);
+  });
 });
