@@ -9,7 +9,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 unset BOSSMAN_CHECK_CHILD BOSSMAN_CHECK_ATTEMPTS BOSSMAN_CHECK_BUDGET_SECONDS BOSSMAN_CHECK_BODY
 export BOSSMAN_CHECK_RETRY_SECONDS=0 BOSSMAN_CHECK_STORE=off
 # Also drop the merge gate's and user's settings, which would change what the cases below mean. check-all.sh sets CHILD for its child; if we run inside a check-all run the stubbed runs must still go through the retry loop.
-unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT
+unset BOSSMAN_CHECK_CHILD BOSSMAN_MERGE_CHECK BOSSMAN_CHECK_FORCE CHECK_ALL_SLOTS CHECK_ALL_LOCK_WAIT CLAUDECODE BOSSMAN_AGENT_SESSION CHECK_ALL_FORCE
 runs() { grep -c . "$t/count" 2>/dev/null || true; }
 
 # run <expected rc> <expected runs> <label> <stub body> [dir] [command]
@@ -29,6 +29,14 @@ run 0 2 "flaky then pass" 'echo x >>"$COUNT"; if [ "$(grep -c . "$COUNT")" -lt 2
 run 3 1 "no retry when another run would blow the budget" 'echo x >>"$COUNT"; sleep 2; echo "Error: spawn EAGAIN"; exit 3' "$here/.." "env BOSSMAN_CHECK_BUDGET_SECONDS=1 ./scripts/check-all.sh"
 run 0 1 "relative path from scripts/" 'echo x >>"$COUNT"' "$here" ./check-all.sh
 run 0 1 "bash check-all.sh from scripts/" 'echo x >>"$COUNT"' "$here" "bash check-all.sh"
+
+# Agent sessions: a hand run is refused (exit 2, nothing runs) unless forced; the merge gate and humans are unaffected.
+agent_msg="Full check runs at the merge gate. Run scripts/check-quick.sh for your branch instead, or set CHECK_ALL_FORCE=1 if the CEO asked you to."
+run 2 0 "refused inside an agent session" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 ./scripts/check-all.sh"
+grep -qF "$agent_msg" "$t/out" || fail "agent refusal message missing: $(cat "$t/out")"
+run 2 0 "refused for the runner's session marker" 'echo x >>"$COUNT"' "$here/.." "env BOSSMAN_AGENT_SESSION=1 ./scripts/check-all.sh"
+run 0 1 "CHECK_ALL_FORCE=1 overrides in an agent session" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 CHECK_ALL_FORCE=1 ./scripts/check-all.sh"
+run 0 1 "merge gate runs even if the marker is set" 'echo x >>"$COUNT"' "$here/.." "env CLAUDECODE=1 BOSSMAN_MERGE_CHECK=1 ./scripts/check-all.sh"
 
 # The result store: a pass is kept and reused on identical content, the merge gate never reuses it, failures are not reused.
 # Needs a clean git checkout, so test in a scratch repo holding a copy of the script.
