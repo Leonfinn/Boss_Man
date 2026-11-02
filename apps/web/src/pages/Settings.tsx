@@ -1130,6 +1130,7 @@ export function Watchdog({ company }: { company: Company }) {
       return "Saved.";
     });
   const on = status.settings.enabled;
+  const recordOnly = status.settings.recordOnly;
   return (
     <Section id="watchdog-h" title="Watchdog">
       <p className="muted" style={{ fontSize: 14 }}>
@@ -1141,9 +1142,19 @@ export function Watchdog({ company }: { company: Company }) {
           : status.trippedAt && !on
           ? `Switched itself off ${when(status.trippedAt)}: ${status.trippedReason}. Look at its recent actions, then switch it back on.`
           : on
-            ? `On. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
+            ? `On${recordOnly ? " (record only: it writes down what it would do and reaches nobody)" : ""}. Last check ${status.lastSweepAt ? when(status.lastSweepAt) : "not yet"} · ${status.openFlags} open issue${status.openFlags === 1 ? "" : "s"}.`
             : "Off."}
       </p>
+      {/* Record-only mode (BOS-166): a rehearsal day, written down and sent to nobody. */}
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <input id="wd-record" type="checkbox" checked={recordOnly} onChange={(e) => void save({ recordOnly: e.target.checked })} style={{ marginTop: 4 }} />
+        <label htmlFor="wd-record" style={{ maxWidth: 720 }}>
+          <strong>Record only (rehearse)</strong>:{" "}
+          <span className="muted">
+            The watchdog still checks the board and keeps its warnings up to date, but it writes down what it would have done and reaches nobody: no wake, nudge, assignment, escalation or reminder to you, and its hourly limits aren’t used. The log and the daily summary mark these as not sent. Untick this to let it act again from the next check.
+          </span>
+        </label>
+      </div>
       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <label htmlFor="wd-sm">Scrum Master</label>
         <select id="wd-sm" value={sm} onChange={(e) => setSm(e.target.value)}>
@@ -1388,6 +1399,43 @@ function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => v
           Save
         </button>
       </div>
+      {act.view}
+    </Section>
+  );
+}
+
+/** The company's workspace disk cap (R54, BOS-274): over it, the owner hears once a day; nothing is stopped. */
+export function WorkspaceDisk({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const [gb, setGb] = useState(company.diskCapBytes != null ? String(+(company.diskCapBytes / 1024 ** 3).toFixed(1)) : "");
+  const act = useAction();
+  const n = Number(gb);
+  const valid = Number.isInteger(n) && n >= 1 && n <= 100_000;
+  return (
+    <Section id="workspace-disk-h" title="Workspace disk">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Each ticket keeps its working files on the runner's disk until it has been done for a while. When the company's workspaces grow past this cap, Boss Man tells you once a day with the biggest ones named. It is a warning only: it never stops runs or refuses new workspaces. Worktrees of tickets done more than 7 days ago are released automatically.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="disk-cap">Disk cap (GB)</label>
+        <input id="disk-cap" type="number" min={1} max={100000} step={1} placeholder="20" value={gb} onChange={(e) => setGb(e.target.value)} style={{ width: 100 }} />
+        <button
+          type="button"
+          className="btn"
+          disabled={act.busy || !valid}
+          onClick={() =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { diskCapGb: n } });
+              onChanged();
+              return "Saved. It applies at the next hourly clean-up.";
+            })
+          }
+        >
+          Save
+        </button>
+      </div>
+      <p className="muted" style={{ fontSize: 13 }}>
+        {company.diskCapBytes != null ? `Currently ${(company.diskCapBytes / 1024 ** 3).toFixed(1)} GB.` : "Currently the server default, 20 GB."}
+      </p>
       {act.view}
     </Section>
   );
@@ -1969,6 +2017,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <TicketPrefix company={company} onChanged={onChanged} />
             <GoalCheck company={company} onChanged={onChanged} />
             <NudgeCap company={company} onChanged={onChanged} />
+            <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />

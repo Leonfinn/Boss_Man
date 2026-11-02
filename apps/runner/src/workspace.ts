@@ -14,7 +14,8 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync,
 import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { CHECK_TOOLS, detectChecks, type DetectResult, type DiskReport, type MergeResult, type PushResult, type VerifyResult, type WorkspaceDiff, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
+import { checkMigrations } from "./migrations.js";
 
 const run = promisify(execFile);
 const VERIFY_KILL_GRACE_MS = 2000;
@@ -57,6 +58,36 @@ export async function diskUsage(target: string): Promise<number> {
   return total;
 }
 
+/**
+ * Settings for every git call the runner makes itself. A repo's own config can name a hook folder
+ * or a filesystem monitor, and both run programs, so a shared repo could otherwise run code inside
+ * the daemon. GIT_CONFIG_* sits above the repo's config file, so it wins.
+ */
+export const SAFE_GIT_ENV = {
+  GIT_CONFIG_COUNT: "2",
+  GIT_CONFIG_KEY_0: "core.hooksPath",
+  GIT_CONFIG_VALUE_0: "/dev/null",
+  GIT_CONFIG_KEY_1: "core.fsmonitor",
+  GIT_CONFIG_VALUE_1: "false",
+  GIT_CONFIG_NOSYSTEM: "1",
+} as const;
+
+/**
+ * SAFE_GIT_ENV plus the caller's own env. GIT_CONFIG_* entries are numbered, so a caller's entries
+ * (the auth header from gitAuthEnv) are renumbered after ours instead of overwriting them.
+ */
+export function safeGitEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const own = Number(SAFE_GIT_ENV.GIT_CONFIG_COUNT);
+  const n = Number(extra.GIT_CONFIG_COUNT) || 0;
+  const env: Record<string, string> = { ...extra, ...SAFE_GIT_ENV };
+  for (let i = 0; i < n; i++) {
+    env[`GIT_CONFIG_KEY_${own + i}`] = extra[`GIT_CONFIG_KEY_${i}`] ?? "";
+    env[`GIT_CONFIG_VALUE_${own + i}`] = extra[`GIT_CONFIG_VALUE_${i}`] ?? "";
+  }
+  env.GIT_CONFIG_COUNT = String(own + n);
+  return env;
+}
+
 export class Workspaces {
   private readonly locks = new Map<string, Promise<unknown>>();
 
@@ -70,8 +101,18 @@ export class Workspaces {
   reviewDir = (ticketId: string) => path.join(this.root, "reviews", ticketId);
   patchFile = (ticketId: string) => path.join(this.root, "patches", `${ticketId}.patch`);
 
+  /**
+   * Who its commits say made them. The agent's current display name (sent with each run,
+   * BOS-265), so a rename shows at once; Boss Man's own commits (checkpoints, a review copy, a
+   * merge) are always Boss Man, since they aren't the agent's work.
+   */
+  private authorEnv(by?: string) {
+    const name = by?.trim().slice(0, 200) || "Boss Man";
+    return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: "bossman@localhost" };
+  }
+
   private async git(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...opts.env };
+    const env = { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, HTTPS_PROXY: this.baseEnv.HTTPS_PROXY, NO_PROXY: this.baseEnv.NO_PROXY, ...safeGitEnv(opts.env) };
     const { stdout } = await run("git", args, { cwd: opts.cwd, env: env as NodeJS.ProcessEnv, maxBuffer: 64 * 1024 * 1024 });
     return stdout.trim();
   }
@@ -229,7 +270,7 @@ export class Workspaces {
       await this.git(["read-tree", "HEAD"], { cwd: dir, env });
       await this.git(["add", "-A"], { cwd: dir, env });
       const tree = await this.git(["write-tree"], { cwd: dir, env });
-      const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
+      const who = this.authorEnv();
       return await this.git(["commit-tree", tree, "-p", "HEAD", "-m", "Boss Man review copy"], { cwd: dir, env: who });
     } finally {
       rmSync(index, { force: true });
@@ -285,7 +326,7 @@ export class Workspaces {
     } else {
       const repo = this.repoDir(spec.projectId);
       if (!existsSync(repo)) throw new Error("This runner has no copy of that project's repo.");
-      const { stdout } = await run("git", ["show", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME } as NodeJS.ProcessEnv }).catch(() => {
+      const { stdout } = await run("git", ["show", `${branchFor(spec.ticketId)}:${rel}`], { cwd: repo, encoding: "buffer", maxBuffer: 64 * 1024 * 1024, env: { PATH: this.baseEnv.PATH, HOME: this.baseEnv.HOME, ...SAFE_GIT_ENV } as NodeJS.ProcessEnv }).catch(() => {
         throw new Error(`There's no ${rel} on that ticket's branch.`);
       });
       data = stdout as unknown as Buffer;
@@ -367,7 +408,7 @@ export class Workspaces {
    * are used, so the agent's branch, index and working files are untouched. Nothing is
    * recorded when nothing changed since the last checkpoint.
    */
-  async checkpoint(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, label: string): Promise<{ turn: number; commit: string; files: number } | null> {
+  async checkpoint(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, label: string, by?: string): Promise<{ turn: number; commit: string; files: number } | null> {
     const dir = this.ticketDir(spec.ticketId);
     if (!existsSync(path.join(dir, ".git"))) return null;
     const index = path.join(this.root, "tmp", `${spec.ticketId}.checkpoint.index`);
@@ -381,8 +422,7 @@ export class Workspaces {
       const last = list[list.length - 1];
       const parent = last?.commit ?? (await this.git(["rev-parse", "HEAD"], { cwd: dir }));
       if ((await this.git(["rev-parse", `${parent}^{tree}`], { cwd: dir })) === tree) return null;
-      const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
-      const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: dir, env: who });
+      const commit = await this.git(["commit-tree", tree, "-p", parent, "-m", `Boss Man checkpoint: ${label}`], { cwd: dir, env: this.authorEnv(by) });
       const turn = (last?.n ?? 0) + 1;
       await this.git(["update-ref", `${this.checkpointPrefix(spec.ticketId)}${String(turn).padStart(6, "0")}`, commit], { cwd: dir });
       const files = await this.git(["diff", "--name-only", parent, commit], { cwd: dir });
@@ -427,10 +467,24 @@ export class Workspaces {
   }
 
   /**
+   * Says whether the ticket's new migration numbers are free (BOS-219), against the default branch
+   * and the other open branches. Read-only on the bare clone: nothing is checked out or run, and a
+   * branch it can't read gives "couldn't say" rather than stopping the ticket.
+   */
+  async migrations(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, others: string[], secrets: Record<string, string | undefined> = {}): Promise<MigrationsResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(repo)) return { needed: null, reason: "This runner has no copy of the repository yet, so there was nothing to compare." };
+      return checkMigrations((args) => this.gitCode(args, { cwd: repo, env: auth }), repo, { branch: branchFor(spec.ticketId), target, others });
+    });
+  }
+
+  /**
    * Runs the ticket's check (e.g. "pnpm test") in its worktree (R47). Output is kept to the
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
-  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS): Promise<VerifyResult> {
+  async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS, queueMaxMs = VERIFY_QUEUE_MAX_MS): Promise<VerifyResult> {
     const dir = await this.reopen(spec);
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
@@ -450,8 +504,18 @@ export class Workspaces {
         }
       };
       let tail = "";
+      // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
+      let queued = false;
+      let slotTaken = false;
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
+        if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
+          slotTaken = true;
+          arm(timeoutMs);
+        } else if (!queued && !slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
+          queued = true;
+          arm(queueMaxMs);
+        }
       };
       child.stdout.setEncoding("utf8");
       child.stderr.setEncoding("utf8");
@@ -468,11 +532,16 @@ export class Workspaces {
         killGroup("SIGKILL"); // strays left behind by a check that has already exited
         resolve({ ok: !timedOut && exitCode === 0, exitCode: timedOut ? null : exitCode, timedOut, output: tail, ms: Date.now() - started });
       };
-      const timer = setTimeout(() => {
-        timedOut = true;
-        killGroup("SIGTERM");
-        hardKill = setTimeout(() => finish(null), VERIFY_KILL_GRACE_MS);
-      }, timeoutMs);
+      let timer: NodeJS.Timeout;
+      const arm = (ms: number) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          timedOut = true;
+          killGroup("SIGTERM");
+          hardKill = setTimeout(() => finish(null), VERIFY_KILL_GRACE_MS);
+        }, ms);
+      };
+      arm(timeoutMs);
       child.on("error", (err) => {
         tail += String(err.message);
         finish(null);
@@ -502,7 +571,7 @@ export class Workspaces {
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
         const { tree, targetSha, branchSha } = tried;
-        const who = { GIT_AUTHOR_NAME: "Boss Man", GIT_AUTHOR_EMAIL: "bossman@localhost", GIT_COMMITTER_NAME: "Boss Man", GIT_COMMITTER_EMAIL: "bossman@localhost" };
+        const who = this.authorEnv();
         const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
         if (pushed.code === 0) return { status: "merged", commit };
@@ -527,6 +596,46 @@ export class Workspaces {
     }
     if (tried.code !== 0) throw new Error(`git merge-tree failed (exit ${tried.code}): ${tried.stderr.slice(0, 500)}`);
     return { status: "clean" as const, tree: tried.stdout.split("\n")[0]!, targetSha, branchSha };
+  }
+
+  /**
+   * Which other tickets' unmerged commits this ticket's branch carries (BOS-130): for another
+   * ticket's branch B, its commits not yet on origin/target, and which of those this branch has.
+   * A commit on this branch that only reached it by merging B means B was carried in; missing
+   * branches are skipped, so a released branch on origin isn't known here and can't be checked.
+   */
+  async carried(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, branches: Array<{ ticketId: string; branch: string }>, secrets: Record<string, string | undefined> = {}): Promise<CarriedResult> {
+    const auth = gitAuthEnv(secrets);
+    return this.withRepoLock(spec.projectId, async () => {
+      const repo = this.repoDir(spec.projectId);
+      if (!existsSync(path.join(repo, "HEAD"))) throw new Error("This runner has no copy of that project's repo.");
+      await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
+      // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
+      // say so, not report the branch clean (BOS-130).
+      const refs = async (ref: string) => {
+        const r = await this.gitCode(["rev-list", ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
+        if (r.code !== 0) throw new Error(`git rev-list ${ref} failed (exit ${r.code}): ${r.stderr.slice(0, 500)}`);
+        return r.stdout.split("\n").filter(Boolean);
+      };
+      const mineRef = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${branchFor(spec.ticketId)}^{commit}`], { cwd: repo }).then(
+        () => true,
+        () => false,
+      );
+      // A ticket whose branch is gone here has nothing to compare: there is nothing of it to merge.
+      if (!mineRef) return { carried: [] };
+      const mine = new Set(await refs(branchFor(spec.ticketId)));
+      const found: CarriedResult["carried"] = [];
+      for (const b of branches) {
+        if (b.ticketId === spec.ticketId || b.branch === branchFor(spec.ticketId)) continue;
+        const exists = await this.git(["rev-parse", "--verify", "--quiet", `refs/heads/${b.branch}^{commit}`], { cwd: repo }).then(
+          () => true,
+          () => false,
+        );
+        if (!exists) continue;
+        if ((await refs(b.branch)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
+      }
+      return { carried: found };
+    });
   }
 
   /**

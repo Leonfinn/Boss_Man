@@ -83,6 +83,8 @@ export const RunnerCommand = z.discriminatedUnion("type", [
     runId: Uuid,
     agentId: Uuid,
     agentKind: z.string(),
+    /** The agent's display name now, for the git author of any commit the run makes (BOS-265); an older runner ignores it and uses "Boss Man". */
+    agentName: z.string().min(1).max(200).optional(),
     model: z.string().nullable(),
     /** The agent's thinking level (THINKING_LEVELS); an older runner ignores it. */
     thinking: z.string().optional(),
@@ -122,12 +124,26 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   z.object({ type: z.literal("workspace.image"), requestId: z.string(), ticketId: Uuid, path: z.string().min(1).max(500) }),
   /** Runs the ticket's check in its worktree (R47). */
   z.object({ type: z.literal("workspace.verify"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, command: z.string().min(1) }),
+  /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
+  z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
   z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
   z.object({ type: z.literal("workspace.push"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1) }),
+  /**
+   * Which other open tickets' unmerged commits this ticket's branch carries (BOS-130), so a merge
+   * can't put code on the target that nobody approved yet.
+   */
+  z.object({
+    type: z.literal("workspace.carried"),
+    requestId: z.string(),
+    projectId: Uuid,
+    ticketId: Uuid,
+    target: z.string().min(1),
+    branches: z.array(z.object({ ticketId: Uuid, branch: z.string().min(1) })).max(500),
+  }),
   /** Prove the company's Claude setup-token works with one tiny prompt (R58). The runner fetches the token itself. */
   z.object({ type: z.literal("credential.check"), requestId: z.string() }),
   /** Ask an agent kind for its model list without sending a prompt: a throwaway ACP session, closed at once. */
@@ -141,6 +157,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;
 
+/** Harness name to exact version, e.g. { "claude-code": "2.1.0" }. */
+export const HarnessVersions = z.record(z.string().max(40), z.string().max(60));
+export type HarnessVersions = z.infer<typeof HarnessVersions>;
+
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
   /**
@@ -152,6 +172,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
+    harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
@@ -164,8 +186,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). */
-export const RUNNER_FEATURES = ["review-copy", "addons"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -196,15 +218,23 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
-/** How long the runner lets a ticket's check run (R47), and how long the server waits for its answer (a minute longer). */
+/**
+ * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
+ * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for
+ * the answer a minute longer than both.
+ */
 export const VERIFY_TIMEOUT_MS = 30 * 60_000;
-export const VERIFY_ASK_TIMEOUT_MS = VERIFY_TIMEOUT_MS + 60_000;
+export const VERIFY_QUEUE_MAX_MS = 3 * 60 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_MAX_MS + VERIFY_TIMEOUT_MS + 60_000;
+/** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the 30-minute clock at the second. */
+export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
+export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
 /**
  * How long an approved ticket can go without any activity before its merge is treated as stopped:
- * longer than the server waits for a merge check, so a check still running is never mistaken for one
- * that died. The unmerged-approvals sweep and the merge card's stale marker both use it.
+ * longer than a check runs, so a check still running is never mistaken for one that died. A check waiting
+ * in the queue beats every minute (whileActive), so it can wait for hours without tripping this. The unmerged-approvals sweep and the merge card's stale marker both use it.
  */
-export const MERGE_MISSED_AFTER_MS = VERIFY_ASK_TIMEOUT_MS + 5 * 60_000;
+export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 
 /** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };
@@ -215,5 +245,21 @@ export type MergeResult =
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] };
 
+/** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
+export type CarriedTicket = { ticketId: string; branch: string };
+
+/** The answer to workspace.carried: the other tickets whose unmerged commits this branch has. */
+export type CarriedResult = { carried: CarriedTicket[] };
+
 /** The outcome of pushing a ticket's branch for a pull request (R59). */
 export type PushResult = { status: "pushed"; branch: string; commit: string } | { status: "already_merged"; commit: string } | { status: "conflicts"; files: string[] } | { status: "uncommitted"; files: string[] };
+
+/**
+ * Whether a ticket's new migrations take a number another branch already has (BOS-219).
+ * `needed: false` means the branch is fine, `needed: true` gives the number to move to now, and
+ * `needed: null` means the check couldn't say (fetch the branch, or say why): it never blocks work.
+ */
+export type MigrationsResult =
+  | { needed: false; reason: string }
+  | { needed: true; number: number; next: number; why: string[]; others: string[] }
+  | { needed: null; reason: string };

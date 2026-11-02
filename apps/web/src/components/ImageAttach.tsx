@@ -1,5 +1,6 @@
-// Pasting or picking images and files for a text box. Each is uploaded straight away and its Markdown goes into
-// the text: ![name](/api/ticket-images/<id>) for a picture, [📎 name](...) for a file. The pages show them and
+// Pasting or picking images and files for a text box. Each is uploaded straight away and kept as an
+// attachment: ![name](/api/ticket-images/<id>) for a picture, [📎 name](...) for a file. It shows as a
+// preview under the box, and the links go into the text only when it is sent. The pages show them and
 // agents open them with open_attachment.
 import { useRef, useState, type ClipboardEvent } from "react";
 import { api } from "../api";
@@ -15,12 +16,23 @@ function base64(file: Blob): Promise<string> {
   });
 }
 
-/** Adds a line to a text box's value: the image's Markdown on its own line. */
+/** The line a sent message carries for each attachment: the image's Markdown or the file's link. */
 export const withImage = (text: string, markdown: string) => `${text}${text && !text.endsWith("\n") ? "\n" : ""}${markdown}\n`;
 
-export function useImageAttach(companyId: string | undefined, insert: (markdown: string) => void, ticketId?: string) {
+/** The text to send: what was typed, then a line for each attachment still attached, in the order attached. */
+export function withAttachments(text: string, attachments: string[]) {
+  return attachments.reduce((t, markdown) => withImage(t, markdown), text);
+}
+
+/** "![name](/api/ticket-images/<id>)" for a picture; the name is the part that shows. */
+export function attachmentName(markdown: string) {
+  return markdown.match(/^!?\[([^\]]*)\]/)?.[1] ?? "file";
+}
+
+export function useImageAttach(companyId: string | undefined, ticketId?: string) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [attached, setAttached] = useState<string[]>([]);
   const input = useRef<HTMLInputElement>(null);
   const upload = async (files: File[]) => {
     if (!companyId || !files.length) return;
@@ -30,7 +42,7 @@ export function useImageAttach(companyId: string | undefined, insert: (markdown:
       for (const f of files) {
         if (f.size > MAX_BYTES) throw new Error(`${f.name || "That file"} is over 10 MB.`);
         const r = await api<{ markdown: string }>(`/api/companies/${companyId}/images`, { method: "POST", body: { data: await base64(f), ...(f.name ? { name: f.name } : {}), ...(ticketId ? { ticketId } : {}) } });
-        insert(r.markdown);
+        setAttached((all) => [...all, r.markdown]);
       }
     } catch (err) {
       setError((err as Error).message);
@@ -45,6 +57,8 @@ export function useImageAttach(companyId: string | undefined, insert: (markdown:
     if (!e.clipboardData.getData("text/plain")) e.preventDefault();
     void upload(files);
   };
+  const remove = (markdown: string) => setAttached((all) => all.filter((m) => m !== markdown));
+  const clear = () => setAttached([]);
   const button = (
     <>
       <button type="button" className="btn" disabled={busy || !companyId} onClick={() => input.current?.click()} title="Or paste a screenshot into the text">
@@ -63,28 +77,30 @@ export function useImageAttach(companyId: string | undefined, insert: (markdown:
       />
     </>
   );
-  return { onPaste, button, error, busy };
+  return { onPaste, button, error, busy, attached, remove, clear, setAttached };
 }
 
 const ATTACHED = /(!?)\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)\n?/g;
 
-/** What's attached in a text box's text, pictures as thumbnails and files by name, each with Remove. */
-export function ImagePreviews({ text, onChange }: { text: string; onChange: (text: string) => void }) {
-  const found = [...text.matchAll(ATTACHED)];
-  if (!found.length) return null;
+/** What's attached to a text box, pictures as thumbnails and files by name, each with Remove. */
+export function ImagePreviews({ attached, onRemove }: { attached: string[]; onRemove: (markdown: string) => void }) {
+  if (!attached.length) return null;
   return (
     <div className="image-previews">
       <div className="image-thumbs">
-        {found.map((m, i) => (
-          <figure key={`${m[3]}-${i}`}>
-            {m[1] ? <img src={m[3]} alt={m[2] || "image"} /> : <span className="file-chip">{m[2]}</span>}
-            <button type="button" className="btn small" onClick={() => onChange(text.replace(m[0], ""))}>
-              Remove
-            </button>
-          </figure>
-        ))}
+        {attached.map((markdown, i) => {
+          const m = [...markdown.matchAll(ATTACHED)][0];
+          if (!m) return null;
+          return (
+            <figure key={`${markdown}-${i}`}>
+              {m[1] ? <img src={m[3]} alt={m[2] || "image"} /> : <span className="file-chip">{m[2]}</span>}
+              <button type="button" className="btn small" onClick={() => onRemove(markdown)}>
+                Remove
+              </button>
+            </figure>
+          );
+        })}
       </div>
-      <small className="muted">In the text, each attachment is a line ending in /api/ticket-images/…). Leave it there: it shows as the picture or file once sent.</small>
     </div>
   );
 }

@@ -13,6 +13,8 @@ export type SmAction = {
   createdAt: string;
   undoable: boolean;
   undoneAt: string | null;
+  /** A record-only entry (BOS-166): what the watchdog would have done. Nothing was sent. */
+  recorded?: boolean;
   after: { refused?: string } | null;
   targetName?: string | null;
   targetIsCeo?: boolean;
@@ -83,6 +85,7 @@ export function ScrumMasterLog({ companyId, ticketId, heading }: { companyId: st
       <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
         <strong style={{ fontWeight: 600 }}>{actionHeading(a)}</strong>
         {a.issueStatus && <span className={`tag ${a.issueStatus === "open" ? "green" : "grey"}`}>{a.issueStatus === "open" ? "Open" : "Settled"}</span>}
+        {a.recorded && <span className="tag amber">Not sent</span>}
         {a.after?.refused && <span className="tag amber">Refused</span>}
         {a.undoneAt && <span className="tag">Undone</span>}
         <span className="muted" style={{ fontSize: 13, marginLeft: "auto" }}>
@@ -92,7 +95,7 @@ export function ScrumMasterLog({ companyId, ticketId, heading }: { companyId: st
       <p style={{ margin: "4px 0" }}>{a.reason}</p>
       <div style={{ display: "flex", gap: 12, fontSize: 13 }}>
         {!ticketId && a.ticketId && <a href={`#/tickets/${a.ticketId}`}>Open the ticket</a>}
-        {a.undoable && !a.undoneAt && (
+        {a.undoable && !a.undoneAt && !a.recorded && (
           <button type="button" className="link" disabled={busy === a.id} onClick={() => void undo(a.id)}>
             {busy === a.id ? "Undoing…" : "Undo"}
           </button>

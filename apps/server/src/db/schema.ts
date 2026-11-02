@@ -147,6 +147,8 @@ export const runners = pgTable("runners", {
   companyId: uuid("company_id").notNull().unique().references(() => companies.id, { onDelete: "cascade" }),
   tokenHash: text("token_hash").notNull(),
   imageVersion: text("image_version"),
+  /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
+  harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
@@ -1552,4 +1554,6 @@ export const agentAvatars = pgTable("agent_avatars", {
   agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   bytes: bytea("bytes").notNull(),
   type: text("type").notNull(),
+  /** The ticket image the CEO picked (BOS-265): copies are shared by it, so agents sharing a picture keep one copy. Null for one the owner uploaded. */
+  imageId: uuid("image_id").references(() => ticketImages.id, { onDelete: "set null" }),
 });
