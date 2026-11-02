@@ -1247,7 +1247,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'advise'"
+          "default": "'watch'"
         },
         "watchdog": {
           "name": "watchdog",

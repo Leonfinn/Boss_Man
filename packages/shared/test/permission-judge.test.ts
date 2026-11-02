@@ -154,6 +154,27 @@ describe("rules judge: own memory folder and secret dodges", () => {
   ])("denies a write outside its folder: %s", (cmd) => {
     expect(judge(cmd).verdict).toBe("deny");
   });
+  // CEO round 5: a variable that can't be resolved is a deny; one set in the same command is read.
+  it.each([
+    "echo x >> $X/.bashrc",
+    "cp a $XDG_CONFIG_HOME/git/config",
+    "X=/etc; echo x > $X/profile",
+    'cp a "$(echo /etc)/x"',
+    "cp --target-directory=/usr/local/bin a",
+    "cp -t/usr/local/bin a",
+    "dd if=a of=/etc/x",
+    "echo x >> /home/node/.bashrc",
+    "mv a /home/node/.bashrc",
+    "tee -a ~/.profile < a",
+    "printf x > ~/.config/git/config",
+    "git config --system core.editor x",
+    'echo x > "$(git rev-parse --git-dir)/../../x"',
+  ])("denies an unresolved or hidden write target: %s", (cmd) => {
+    expect(judge(cmd).verdict).toBe("deny");
+  });
+  it.each(["D=/tmp/w; echo x > $D/o", "f=out.txt; echo x > $f", 'echo x > "$(git rev-parse --git-dir)/log"', 'd=$(mktemp -d); echo x > $d/o'])("allows a variable that resolves inside /tmp or the folder: %s", (cmd) => {
+    expect(judge(cmd).verdict).toBe("allow");
+  });
   it.each(["echo x > /tmp/out.txt", "cp a /tmp/b", "echo x > notes.txt", "ls 2>/dev/null > /dev/null", `echo x >> ${mem}/a.md`])("still allows an in-folder write: %s", (cmd) => {
     expect(judge(cmd).verdict).toBe("allow");
   });

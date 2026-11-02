@@ -1373,7 +1373,7 @@ function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: ()
 /** How the rules judge advises on permission cards (BOS-337). It only picks the suggested button; it never answers a card. */
 function PermissionJudgeSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const act = useAction();
-  const mode = company.permissionJudge ?? "advise";
+  const mode = company.permissionJudge ?? "watch";
   return (
     <Section id="permission-judge-h" title="Advice on permission cards">
       <p className="muted" style={{ fontSize: 14 }}>

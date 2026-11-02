@@ -55,7 +55,13 @@ afterEach(async () => {
 const setMode = (permissionJudge: string) => ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { permissionJudge });
 
 describe("rules judge setting (BOS-337)", () => {
-  it("is on by default: the judge's verdict is the suggested button and its fixed reason is on the card", async () => {
+  it("watch is the default: the older rule still suggests, the judge's reading is only recorded", async () => {
+    const w = await ctx.ask(OLD_DENY_JUDGE_ALLOW);
+    expect(w).toMatchObject({ recommendedOption: "Deny", context: { judge: { mode: "watch", verdict: "allow" } } });
+  });
+
+  it("advise: the judge's verdict is the suggested button and its fixed reason is on the card", async () => {
+    await setMode("advise");
     const a = await ctx.ask(OLD_DENY_JUDGE_ALLOW);
     expect(a).toMatchObject({ recommendedOption: "Allow once", context: { judge: { mode: "advise", verdict: "allow", row: "ok" } } });
     const b = await ctx.ask(OLD_ALLOW_JUDGE_DENY);
