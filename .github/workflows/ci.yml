@@ -94,6 +94,8 @@ jobs:
         run: docker build -f apps/runner/Dockerfile --build-arg BOSSMAN_IMAGE_VERSION=ci -t boss-man-runner:ci .
       - name: Build the launcher image
         run: docker build -f apps/launcher/Dockerfile -t boss-man-launcher:current .
+      - name: Build the netguard image
+        run: docker build -f apps/netguard/Dockerfile -t boss-man-netguard:current .
       - name: Runner image has Claude Code, git and the runner
         run: |
           docker run --rm --entrypoint claude boss-man-runner:ci --version

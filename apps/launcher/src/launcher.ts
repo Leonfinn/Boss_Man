@@ -5,7 +5,7 @@ import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, netguardName, netguardSpec, NETGUARD_LABEL, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -32,6 +32,22 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     return c;
   }
 
+  /** The slug's network guard, if there is one; a container of that name that isn't ours is refused. */
+  async function guardOf(slug: string) {
+    const g = await docker.inspect(netguardName(slug));
+    if (!g) return null;
+    const labels = g.Config.Labels ?? {};
+    if (labels[NETGUARD_LABEL] !== "1" || labels[COMPANY_LABEL] !== slug) throw new LauncherError(409, `A container called ${netguardName(slug)} exists that the launcher didn't make; it won't touch it.`);
+    return g;
+  }
+
+  /** (Re)starts the guard in the runner's network namespace. It must follow every runner start, because a restart makes a new namespace. */
+  async function guard(slug: string, runnerId: string) {
+    const old = await guardOf(slug);
+    if (old) await docker.remove(old.Id);
+    await docker.start(await docker.create(netguardName(slug), netguardSpec(cfg, slug, runnerId)));
+  }
+
   async function create(slug: string) {
     // Every bind source must exist first: Docker would make a missing one owned by root, which the runner can't write.
     for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
@@ -39,6 +55,13 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     if (old) await docker.remove(old.Id);
     const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
     await docker.start(id);
+    try {
+      await guard(slug, id);
+    } catch (err) {
+      // No guard, no runner: a runner that can reach the private networks must not be left running.
+      await docker.remove(id).catch(() => undefined);
+      throw err;
+    }
     return id;
   }
 
@@ -59,12 +82,15 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       const c = await ours(slug);
       if (!c) throw new LauncherError(404, "There's no runner for that company.");
       await docker.restart(c.Id);
+      await guard(slug, c.Id);
       return { slug, id: c.Id };
     },
 
     /** Stops and removes the runner and its token. Its workspaces, journal and sessions stay. */
     async remove(slug: string) {
       const c = await ours(slug);
+      const g = await guardOf(slug);
+      if (g) await docker.remove(g.Id);
       if (c) await docker.remove(c.Id);
       rmSync(tokenFile(cfg, slug), { force: true });
       return { slug, removed: !!c };
@@ -76,6 +102,26 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
       return all
         .filter((c) => SLUG.test(c.Labels[COMPANY_LABEL] ?? "") && c.Names.includes(`/${containerName(c.Labels[COMPANY_LABEL]!)}`))
         .map((c) => ({ slug: c.Labels[COMPANY_LABEL]!, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current }));
+    },
+
+    /**
+     * Makes sure every running runner has a running guard that started after it. A runner that
+     * restarted on its own (a crash, Docker coming back) has a new network namespace the old
+     * guard isn't in. Returns the companies whose guard it started again. Runs at start and then on a timer.
+     */
+    async reconcileGuards() {
+      const fixed: string[] = [];
+      for (const r of await this.list()) {
+        if (r.state !== "running") continue;
+        const c = await ours(r.slug);
+        if (!c) continue;
+        const g = await guardOf(r.slug);
+        const fresh = g && g.State.Status === "running" && new Date(g.State.StartedAt ?? 0).getTime() >= new Date(c.State.StartedAt ?? 0).getTime();
+        if (fresh) continue;
+        await guard(r.slug, c.Id);
+        fixed.push(r.slug);
+      }
+      return fixed;
     },
 
     /** One company's runner again on the current image, with its own token: how a drain swaps runners one by one. // leader-only (the server decides when) */

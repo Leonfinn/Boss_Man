@@ -47,6 +47,45 @@ settings="$(docker inspect "$runner" --format '{{.Config.User}} {{json .HostConf
 echo "Runner settings: $settings"
 [[ "$settings" == '1000:1000 ["ALL"] false boss-man_default ["no-new-privileges:true"] 4096 1' ]]
 
+# Network guard (BOS-324): the runner reaches the server, but not the database or the network gateway (IPv4 or IPv6).
+# curl exits 7 when it can't connect: that is the guard's answer; a reachable port gives another code.
+guard="boss-man-netguard-ci-co"
+guard_settings="$(docker inspect "$guard" --format '{{json .HostConfig.CapAdd}} {{json .HostConfig.CapDrop}} {{.HostConfig.Privileged}} {{.HostConfig.ReadonlyRootfs}}')"
+[[ "$guard_settings" == '["NET_ADMIN"] ["ALL"] false true' ]]
+[[ "$(docker inspect "$runner" --format '{{json .HostConfig.CapAdd}}')" == '[]' ]]
+gateway="$(docker network inspect boss-man_default --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}')"
+# curl -g keeps the brackets of an IPv6 address; the runner image has getent from libc.
+db_addrs="$(docker exec "$runner" getent ahosts db | awk '{print $1}' | sort -u)"
+echo "Gateways: $gateway; db addresses: $db_addrs"
+[[ -n "$db_addrs" ]]
+blocked() { local code=0; docker exec "$runner" curl -g -s -m 8 -o /dev/null "$1" || code=$?; [[ "$code" == 7 ]]; }
+reached() { local code=0; docker exec "$runner" curl -g -s -m 8 -o /dev/null "$1" || code=$?; [[ "$code" != 7 && "$code" != 28 ]]; }
+# Each line ends in "|| return 1": the loop below calls this inside an &&, where set -e is off.
+check_guard() {
+  local a g
+  reached "http://server:3100/api/health" || return 1
+  for a in $db_addrs; do
+    if [[ "$a" == *:* ]]; then blocked "http://[$a]:5432/" || return 1; else blocked "http://$a:5432/" || return 1; fi
+  done
+  for g in $gateway; do
+    if [[ "$g" == *:* ]]; then blocked "http://[$g]:3100/" || return 1; else blocked "http://$g:3100/" || return 1; fi
+  done
+  blocked "http://192.168.1.1/" || return 1
+  blocked "http://169.254.169.254/" || return 1
+  blocked "http://[fd00::1]/" || return 1
+}
+check_guard
+echo "Network guard: server reachable; database, gateway and private ranges blocked."
+
+# A runner that restarts by itself gets a new network namespace; the launcher puts the guard back within seconds.
+docker restart "$runner" >/dev/null
+for _ in $(seq 30); do
+  if docker exec "$runner" true 2>/dev/null && check_guard 2>/dev/null; then restored=1; break; fi
+  sleep 3
+done
+[[ "${restored:-0}" == 1 ]] || { echo "The guard didn't come back after the runner restarted" >&2; docker compose logs launcher 2>&1 | tail -30; exit 1; }
+echo "Network guard: back in place after a restart."
+
 # The launcher publishes no ports.
 [[ -z "$(docker compose port launcher 3105 2>/dev/null || true)" ]]
 

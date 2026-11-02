@@ -139,6 +139,20 @@ services:
     mem_limit: 128m
     pids_limit: 64
 
+  # Only here so `docker compose build` makes boss-man-netguard:current, which the launcher starts
+  # beside each runner (BOS-324) to block private networks. It exits at once if run.
+  netguard:
+    build:
+      context: .
+      dockerfile: apps/netguard/Dockerfile
+    image: boss-man-netguard:current
+    profiles: ["launcher"]
+    restart: "no"
+    command: ["--build-only"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+
   runner-app-co:
     <<: *runner
     secrets:

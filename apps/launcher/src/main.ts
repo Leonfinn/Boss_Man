@@ -44,6 +44,14 @@ if (key.length < 32) {
 
 const server = launcherServer(api, key);
 server.listen(Number(env.PORT ?? 3105), "0.0.0.0", () => console.log(JSON.stringify({ at: new Date().toISOString(), msg: "launcher listening", network: cfg.network })));
+// The network guard (BOS-324) must be in the runner's namespace: check at start and every 5 seconds.
+const reconcile = () =>
+  api.reconcileGuards().then(
+    (fixed) => fixed.length && console.log(JSON.stringify({ at: new Date().toISOString(), msg: "network guard started again", companies: fixed })),
+    (err: unknown) => console.error(JSON.stringify({ at: new Date().toISOString(), msg: "network guard check failed", error: String((err as Error)?.message ?? err) })),
+  );
+void reconcile();
+setInterval(() => void reconcile(), 5_000).unref();
 const stop = () => server.close(() => process.exit(0));
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
