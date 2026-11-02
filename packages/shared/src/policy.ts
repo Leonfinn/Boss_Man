@@ -170,7 +170,7 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
 const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-][\w.+@-]*\/)*(?:node_modules|dist|build|coverage|out|target)\/?)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 
 /** find -delete rooted at one plain /tmp entry: kept Allow as BOS-111 pinned it. Root must be one level, quoted patterns kept simple. */
-const FIND_TMP_DELETE = /^find\s+\/tmp\/[A-Za-z0-9._+@-]+(?:\s+-(?:name|iname|type|path|mindepth|maxdepth|mtime|mmin|newer|empty|print)(?:\s+'[^']*'|"[^"]*"|\S+)?)*\s+-delete$/;
+const FIND_TMP_DELETE = /^find\s+\/tmp\/[A-Za-z0-9._+@-]+(?:\s+-(?:name|iname|type|path|mindepth|maxdepth|mtime|mmin|newer|empty|print)(?:\s+(?:'[^']*'|[\w.*?-]+))?)*\s+-delete$/;
 
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
@@ -196,6 +196,8 @@ export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const scratch = explainCommand(cmd).scratch;
   if (scratch && !scratch.unchecked.length) return "allow";
   if (!hits.length) return "allow";
+  // A shell still runs $( ), backticks and <( ) inside double quotes, which `run` blanked out, so the pieces below can't be judged without seeing them (security round 2).
+  if (/\$\(|`|[<>]\(/.test(cmd)) return "deny";
   if (hits.some((h) => !/^(?:rm|find)\b/i.test(h)) || /(^|[\s;&|(])cd\s/.test(run)) return "deny";
   const destructive = new RegExp(DESTRUCTIVE, "i");
   const pieces = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
