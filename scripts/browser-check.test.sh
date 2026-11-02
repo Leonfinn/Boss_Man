@@ -2,7 +2,7 @@
 # Checks browser-check.sh with a stub in place of Chromium (BOSSMAN_CHROMIUM); needs no browser or Docker.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
+srv=""; t="$(mktemp -d)"; trap '[ -z "$srv" ] || kill "$srv" 2>/dev/null || true; rm -rf "$t"' EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 unset BOSSMAN_CHECK_HOST BOSSMAN_CHROMIUM
 cat >"$t/chromium" <<'STUB'
