@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -104,7 +104,7 @@ export const agents = pgTable(
     duty: text("duty"),
     /**
      * Deprecated (BOS-198): the old agent-page mark as one kind's reviewer. Nothing writes it now;
-     * migration 0093 moved every use into the review policy, and it is read only for a leftover
+     * migration 0094 moved every use into the review policy, and it is read only for a leftover
      * "marked" cell. Kept one release so a rollback has it; drop it after.
      */
     reviewKind: text("review_kind"),
@@ -159,6 +159,9 @@ export const runners = pgTable("runners", {
   diskCheckedAt: timestamp("disk_checked_at", { withTimezone: true }),
   /** The runner's last report on its add-ons (docs/12); null until it reports one. */
   addons: jsonb("addons").$type<AddonReport[]>(),
+  /** What the runner can fence agents with, from its start-up self-test (BOS-321); null until it reports. */
+  sandbox: jsonb("sandbox").$type<SandboxReport>(),
+  sandboxCheckedAt: timestamp("sandbox_checked_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 

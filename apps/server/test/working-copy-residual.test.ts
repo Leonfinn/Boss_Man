@@ -81,12 +81,32 @@ describe("a dropped CEO wake can't leave a permission card with nobody woken (fi
   });
 
   it("a wake dropped anyway sends the card straight to the owner, not to an empty rung", async () => {
-    // The CEO has already had its 6 ticketless starts this hour (another reason's, so the new
-    // "decision" wake doesn't just join one of them).
-    for (let i = 0; i < 6; i++) {
-      await ctx.db.insert(wakes).values({ companyId: ctx.companyId, agentId: ctx.ceo.id, ticketId: null, reason: "chased", note: `earlier ${i}`, priority: 2, causationDepth: 0, status: "queued" });
-    }
-    // No ticket on this run, so the wake is ticketless: it IS dropped by the limit.
+    // BOS-272 made the "decision" reason exempt from the ticketless cap, and no other guard in
+    // wake() can drop a run-less CEO wake, so force the drop where the scheduler records it: any
+    // new "decision" wake row for the CEO is stored as dropped. This is what a refused wake looks like.
+    const dropping = await setup((raw) =>
+      new Proxy(raw, {
+        get(t, p) {
+          const v = (t as unknown as Record<PropertyKey, unknown>)[p];
+          if (p !== "insert") return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+          return (table: unknown) => {
+            const b = (v as (x: unknown) => { values: (x: unknown) => unknown }).call(t, table);
+            if (table !== wakes) return b;
+            return new Proxy(b, {
+              get(bt, bp) {
+                const bv = (bt as unknown as Record<PropertyKey, unknown>)[bp];
+                if (bp !== "values") return typeof bv === "function" ? (bv as (...a: unknown[]) => unknown).bind(bt) : bv;
+                return (vals: unknown) => {
+                  const row = vals as { reason?: string; status?: string };
+                  return (bt as unknown as { values: (x: unknown) => unknown }).values(row.reason === "decision" ? { ...row, status: "dropped", statusReason: "refused by the scheduler" } : vals);
+                };
+              },
+            });
+          };
+        },
+      }),
+    );
+    ctx = dropping;
     const { d } = await ctx.ask("rm -rf /tmp/bos159-cache");
     expect(d).not.toBeNull();
     const after = await reload(d!.id);
