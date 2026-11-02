@@ -154,6 +154,14 @@ export function reviewService(
   let wake: NotifyHook | null = null;
   // shortcut: in memory, so a server restart mid-landing forgets the status (the ticket itself is unaffected); upgrade to a column if owners need it to survive restarts.
   const landings = new Map<string, LandingStatus>();
+  // When each ticket's merge last said it was alive (BOS-362). The merge sweep reads this, not the ticket's
+  // activity, which chat and chases also bump: talk must not hold a merge retry back, and a running merge must.
+  // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
+  const landingBeat = new Map<string, number>();
+  const beatNow = (ticketId: string) => {
+    landingBeat.set(ticketId, Date.now());
+    return db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+  };
 
   async function ticketWithRepo(ticketId: string, companyId?: string) {
     const [row] = await db
@@ -606,6 +614,11 @@ export function reviewService(
       return { ...status, stale: await landingStale(ticketId) };
     },
 
+    /** True while a merge for this ticket has said it is alive within the merge window (a check or lock wait under way). */
+    landingActive(ticketId: string): boolean {
+      return Date.now() - (landingBeat.get(ticketId) ?? 0) <= MERGE_MISSED_AFTER_MS;
+    },
+
     /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */
     async claimLanding(ticketId: string, reviewer: string): Promise<string> {
       const existing = landings.get(ticketId);
@@ -620,7 +633,7 @@ export function reviewService(
       landings.set(ticketId, { state: "running", startedAt, command: null, startedBy: reviewer });
       // A ticket can sit in review for hours before its last reviewer approves. Count the merge itself as
       // activity now, so the very first poll of a fresh merge is never judged stale from that quiet spell.
-      await db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+      await beatNow(ticketId);
       return startedAt;
     },
 
@@ -706,7 +719,7 @@ export function reviewService(
           }
           const pause = LOCK_RETRY_BASE_MS * 2 ** (attempt - 1);
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `${LOCK_RETRY_TEXT} (try ${attempt} of ${LOCK_RETRY_ATTEMPTS}, next in ${Math.max(1, Math.round(pause / 60_000))} min). Nothing failed; no need to run it by hand.` });
-          const beat = setInterval(() => void db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId)).catch(() => undefined), MERGE_ACTIVITY_MS);
+          const beat = setInterval(() => void beatNow(ticketId).catch(() => undefined), MERGE_ACTIVITY_MS);
           beat.unref?.();
           try {
             await new Promise((resolve) => setTimeout(resolve, pause));
@@ -748,7 +761,7 @@ export function reviewService(
         .limit(1);
       if (signoff) throw new ReviewError(409, "The owner's sign-off for this ticket is still waiting, so nothing was merged. Answer that card first.");
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
-      const touch = () => db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+      const touch = () => beatNow(ticketId);
       await touch();
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });

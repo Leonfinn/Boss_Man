@@ -291,6 +291,8 @@ export async function raiseMergeStuck(db: Db, t: { id: string; title: string; co
   if (ticket?.systemState === "done") return [];
   // A ticket only ever has one open merge card: a new reason replaces the older card (BOS-149).
   await clearMergeCards(db, t.id, { by: "system", note: `Replaced by a newer merge card: ${why}`, at: new Date().toISOString() });
+  // An answered card keeps its key (the column is unique), which would swallow this insert silently (BOS-362).
+  await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, `merge-stuck:${t.id}`), ne(decisions.status, "open")));
   // GitHub's own words when the token can't change .github/workflows/.
   const fix = /without [`']?workflows?[`']? (scope|permission)/i.test(why)
     ? " To fix it: on GitHub, edit the company's git token and set Repository permissions → Workflows to Read and write (a classic token needs the workflow scope), then Run the check again. The token itself doesn't change."
