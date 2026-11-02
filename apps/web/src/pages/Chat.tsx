@@ -7,7 +7,7 @@ import { NEWLINE_KEY_HINT, useCoarsePointer, usePoll } from "../hooks";
 import { when } from "./Runs";
 import { StarButton } from "./Agents";
 import { Avatar } from "../components/Avatar";
-import { ImagePreviews, useImageAttach, withImage } from "../components/ImageAttach";
+import { ImagePreviews, useImageAttach, withAttachments } from "../components/ImageAttach";
 
 type Message = { id: string; role: "owner" | "assistant" | "system"; text: string; createdAt: string };
 type Chat = { agentId: string; items: Message[]; state: string };
@@ -87,7 +87,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
     `${company?.id ?? "none"}/${current?.id ?? "none"}`,
   );
   const [text, setText] = useState("");
-  const img = useImageAttach(company?.id, (md) => setText((t) => withImage(t, md)));
+  const img = useImageAttach(company?.id);
   const [error, setError] = useState<string | null>(null);
   const [seen, setSeen] = useState(readSeen);
   const end = useRef<HTMLDivElement>(null);
@@ -108,10 +108,14 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
   const ceo = team.find((t) => t.role === "ceo");
   const send = (e?: FormEvent, to = current, body = text) => {
     e?.preventDefault();
-    if (!company || !to || !body.trim()) return;
-    void api(`/api/companies/${company.id}/chat`, { method: "POST", body: { text: body.trim(), agentId: to.id } }).then(
+    // From the box, the attachment links go on when sending; a message passed in whole (Ask the CEO) is sent as it is.
+    const fromBox = body === text && to === current;
+    const outgoing = fromBox ? withAttachments(body, img.attached) : body;
+    if (!company || !to || !outgoing.trim()) return;
+    void api(`/api/companies/${company.id}/chat`, { method: "POST", body: { text: outgoing.trim(), agentId: to.id } }).then(
       () => {
         setText("");
+        if (fromBox) img.clear();
         setError(null);
         setBusy(true);
         threads.reload();
@@ -224,12 +228,12 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
                     Ask the CEO
                   </button>
                 )}
-                <button className="btn primary" type="submit" disabled={!text.trim() || img.busy}>
+                <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
                   Send
                 </button>
               </form>
               <div style={{ padding: "0 20px" }}>
-                <ImagePreviews text={text} onChange={setText} />
+                <ImagePreviews attached={img.attached} onRemove={img.remove} />
               </div>
               {img.error && (
                 <p className="error" role="alert" style={{ padding: "0 20px 14px" }}>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, evaluatePermission, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -24,6 +24,19 @@ describe("evaluatePermission defaults", () => {
   it("allows Boss Man's own MCP tools for Claude and Codex naming", () => {
     expect(evaluatePermission({ title: "mcp__bossman__create_ticket", kind: "other", rawInput: {} }, []).outcome).toBe("allow");
     expect(evaluatePermission({ title: "mcp.bossman.create_ticket", kind: "execute", rawInput: {} }, []).outcome).toBe("allow");
+  });
+
+  it("allows Boss Man's own tools in each harness's spelling (BOS-292)", () => {
+    for (const title of ["bossman_set_ticket_state", "Tool: bossman/wiki", "bossman: decisions", "Bossman - wiki", "mcp:bossman:wiki", " mcp__Bossman__wiki"]) {
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, title).toBe("allow");
+      expect(isBossmanTool(title), title).toBe(true);
+    }
+  });
+
+  it("still asks about other tools, including lookalike server names (BOS-292)", () => {
+    for (const title of ["mcp__other__wiki", "bossmanager_x", "mcp__bossman2__x", "mcp__other__bossman__x", "Tool: other/bossman_x", "bossman", null]) {
+      expect(evaluatePermission({ title, kind: "other", rawInput: {} }, []).outcome, String(title)).toBe("owner");
+    }
   });
 
   it("sends destructive commands to the owner", () => {
@@ -595,5 +608,53 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
   it("pins the verdict for shred and find -delete (finding 4)", () => {
     expect(recommendedVerdict(exec("shred /tmp/a"))).toBe("deny");
     expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
+  });
+});
+
+describe("company rules and Boss Man's own tools (BOS-292)", () => {
+  // The live company rule that caught every request from about 01:00 UTC on 1 Nov.
+  const toCeo = [{ name: "All agent permission requests go to the CEO first", match: { kinds: ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"] }, outcome: "ceo" as const }];
+  const tool = (title: string) => ({ title, kind: "other", rawInput: {} });
+
+  it("a catch-all company rule that routes to the CEO doesn't catch Boss Man's own tools", () => {
+    for (const t of ["mcp__bossman__ticket_reply", "mcp__bossman__decisions", "mcp__bossman__set_ticket_state", "mcp__bossman__wiki"]) {
+      expect(evaluatePermission(tool(t), toCeo), t).toEqual({ outcome: "allow", rule: "Boss Man's own tools" });
+    }
+  });
+
+  it("the same company rule still catches other tools and commands", () => {
+    expect(evaluatePermission(tool("mcp__other__thing"), toCeo).outcome).toBe("ceo");
+    expect(evaluatePermission({ title: "git status", kind: "execute", rawInput: { command: "git status" } }, toCeo).outcome).toBe("ceo");
+  });
+
+  it("a company rule can still deny a Boss Man tool", () => {
+    const deny = [{ name: "No wiki writes", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "deny" as const }];
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), deny)).toEqual({ outcome: "deny", rule: "No wiki writes" });
+  });
+
+  it("a command titled like a Boss Man tool is still checked as a command (security review)", () => {
+    const exec = (cmd: string) => ({ title: cmd, kind: "execute", rawInput: { command: cmd } });
+    const cases = [
+      exec("bossman_x; rm -rf /srv/precious"),
+      exec("bossman.sh && git push --force origin main"),
+      exec("Bossman - x; docker system prune -a"),
+      // OpenCode-style: an agent-written description as the title, the real command in rawInput.
+      { title: "bossman: wiki", kind: "execute", rawInput: { command: "rm -rf /srv/x" } },
+      // kind "other" with a command is still a command.
+      { title: "bossman_x", kind: "other", rawInput: { command: "rm -rf /srv/x" } },
+    ];
+    for (const info of cases) {
+      expect(isBossmanCall(info), info.title).toBe(false);
+      expect(evaluatePermission(info, []).outcome, info.title).toBe("owner");
+      expect(evaluatePermission(info, toCeo).outcome, info.title).toBe("ceo");
+    }
+    // A Boss Man title on an edit, delete, move or fetch isn't a board tool either.
+    for (const kind of ["edit", "delete", "move", "fetch"]) expect(isBossmanCall({ title: "mcp__bossman__wiki", kind, rawInput: {} }), kind).toBe(false);
+    expect(isBossmanCall(tool("mcp__bossman__wiki"))).toBe(true);
+  });
+
+  it("a company allow rule that matches a Boss Man tool is honoured", () => {
+    const allow = [{ name: "Wiki is fine", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "allow" as const }, ...toCeo];
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), allow)).toEqual({ outcome: "allow", rule: "Wiki is fine" });
   });
 });

@@ -66,15 +66,13 @@ function ByCompany({ s }: { s: FundingStatus }) {
   if (!rows.length) return null;
   const sub = s.source.kind === "subscription";
   return (
-    <div>
-      <span className="muted" style={{ fontSize: 13 }}>
-        Last 7 days, by company
-      </span>
-      <ul style={{ listStyle: "none", margin: "4px 0 0", padding: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 13 }}>
+    <div className="by-company">
+      <span className="muted">Last 7 days, by company</span>
+      <ul>
         {rows.map((r) => (
-          <li key={r.companyId} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+          <li key={r.companyId}>
             <span>{r.name}</span>
-            <span className="mono">
+            <span className="mono nowrap">
               {sub ? `${compact(r.tokens)} tokens` : usd(r.costMicros)} · {r.runs} run{r.runs === 1 ? "" : "s"}
             </span>
           </li>
@@ -140,14 +138,17 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
       <span style={{ fontWeight: 600, fontSize: 13 }}>When the subscription is nearly used up</span>
-      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-        <span style={{ flex: 1 }}>Hold routine work at</span>
-        <input aria-label="Hold routine work at this percentage" type="number" min={80} max={100} value={holdAt} onChange={(e) => setHoldAt(Math.max(80, Math.min(100, Number(e.target.value) || 95)))} style={{ width: 70 }} />
-        <span>%</span>
+      {/* Each label sits above its control: side by side they crush the label and push the select out of the card. */}
+      <label className="field-stack">
+        <span>Hold routine work at</span>
+        <span className="field-inline">
+          <input aria-label="Hold routine work at this percentage" type="number" min={80} max={100} value={holdAt} onChange={(e) => setHoldAt(Math.max(80, Math.min(100, Number(e.target.value) || 95)))} style={{ width: 96 }} />
+          <span>%</span>
+        </span>
       </label>
-      <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
-        <span style={{ flex: 1 }}>I have extra usage</span>
-        <select aria-label="Extra usage" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
+      <label className="field-stack">
+        <span>I have extra usage</span>
+        <select aria-label="Extra usage" className="fill" value={overage} onChange={(e) => setOverage(e.target.value as "pause" | "urgent" | "all")}>
           <option value="pause">Hold everything at the limit (urgent tickets run until then)</option>
           <option value="urgent">Keep urgent work running past the limit</option>
           <option value="all">Keep all work running</option>
@@ -166,12 +167,12 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
           {windows.map((w) => {
             const latest = s.quota.find((q) => q.window === w);
             return (
-              <label key={w} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+              <label key={w} className="window-hold">
                 <input type="checkbox" checked={!off.includes(w)} onChange={(e) => toggle(w, e.target.checked)} />
-                <span style={{ flex: 1 }}>
+                <span>
                   Can trigger the hold: {windowLabel(w).name} <span className="mono">({w})</span>
                 </span>
-                {latest && <span className="mono muted">{pct(latest.utilization)}</span>}
+                {latest && <span className="mono muted pct">{pct(latest.utilization)}</span>}
               </label>
             );
           })}
@@ -191,26 +192,42 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   );
 }
 
-/** Synthetic's own used/limit reading; an unreadable one is unknown, never an error. */
+/**
+ * Synthetic's own reading; an unreadable one is unknown, never an error. The plan spends its weekly
+ * credits, so that is what the bar shows when Synthetic reports them (BOS-260); the old request
+ * window is shown only when there is nothing weekly, and always labelled as that, never as usage.
+ */
 function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota"]> }) {
   if (q.used === null || q.limit === null)
     return <span className="muted">Quota unknown: Synthetic's quota service couldn't be reached and there's no earlier reading yet.</span>;
   const fraction = q.limit > 0 ? q.used / q.limit : 0;
+  const weekly = (q.measure ?? "requests") === "weekly";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-        <span>Requests this period</span>
+        <span>{weekly ? "Weekly credits" : "Requests this period"}</span>
         <span className="mono" style={{ color: fraction >= 0.8 ? "var(--amber-ink)" : undefined }}>
-          {q.used.toLocaleString()} of {q.limit.toLocaleString()} · {pct(fraction)}
+          {weekly ? `${pct(fraction)} used · ${100 - Math.round(fraction * 100)}% left` : `${q.used.toLocaleString()} of ${q.limit.toLocaleString()} · ${pct(fraction)}`}
         </span>
       </div>
       <div className={`bar${fraction >= 0.8 ? " warn" : ""}`} aria-hidden="true">
         <span style={{ width: pct(Math.min(1, fraction)) }} />
       </div>
-      {q.renewsAt && (
+      {weekly ? (
         <span className="muted" style={{ fontSize: 12 }}>
-          Renews {when(q.renewsAt)} ({until(q.renewsAt)})
+          Credits come back 2% at a time. Boss Man started reading weekly credits on 31 Oct; earlier readings in this list were the old request count.
         </span>
+      ) : (
+        <>
+          {q.renewsAt && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              Renews {when(q.renewsAt)} ({until(q.renewsAt)})
+            </span>
+          )}
+          <span className="muted" style={{ fontSize: 12 }}>
+            This is Synthetic's request window, which the weekly plan often doesn't use. Synthetic's API doesn't report weekly credits for this account, so this isn't total usage.
+          </span>
+        </>
       )}
       <Trend q={q} />
       <span className="muted" style={{ fontSize: 12 }}>
@@ -223,12 +240,10 @@ function ProviderQuotaBlock({ q }: { q: NonNullable<FundingStatus["providerQuota
 function SourceCard({ s }: { s: FundingStatus }) {
   const kind = s.source.kind === "api_credit" ? "API credit" : s.source.kind === "subscription" ? "Subscription" : s.source.kind === "api_payg" ? "API, pay as you go" : s.source.kind;
   return (
-    <section className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }} aria-labelledby={`fs-${s.source.id}`}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-        <h2 id={`fs-${s.source.id}`} style={{ fontSize: 15, fontWeight: 600 }}>
-          {s.source.name}
-        </h2>
-        <span className="muted" style={{ fontSize: 12 }}>
+    <section className="card source-card" aria-labelledby={`fs-${s.source.id}`}>
+      <div className="source-head">
+        <h2 id={`fs-${s.source.id}`}>{s.source.name}</h2>
+        <span className="muted">
           {kind} · {s.source.provider}
         </span>
       </div>

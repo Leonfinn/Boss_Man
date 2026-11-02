@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
+import { commandProblem, parseStep } from "../src/services/steps.js";
 import { companies, decisions, notifications, projects, tickets, wakes } from "../src/db/schema.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -19,6 +20,8 @@ afterEach(async () => {
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 const C = "c".repeat(40);
+// What the host reports about itself (BOS-269): a deliberately non-default install, blue/green with green live.
+const LAYOUT = { srcDir: "/srv/bm/src", deployerDir: "/srv/bm/deployer", bluegreen: true, liveColour: "green" };
 
 async function setup(opts: { deployer?: boolean } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "bm-deployer-"));
@@ -205,11 +208,11 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
 
   it("leaves an owner to-do with the steps, the check and the rollback when a hand-apply change is approved", async () => {
     const c = (ctx = await setup());
-    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"] });
+    await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"], ...LAYOUT });
     await c.selfDeploy.sync();
     const [d] = await c.open();
     expect(d).toMatchObject({ options: ["Approve", "Not now"], context: { infra: true } });
-    expect(d!.question).toContain("scripts/deploy.sh");
+    expect(d!.question).toContain("applied by hand");
     // Only the server's deployment files changed: no deployer copy or runner update is needed (BOS-218).
     expect((d!.context as { update: { handEffect?: string; needsDeployerCopy?: boolean; needsRunnerUpdate?: boolean } }).update).toMatchObject({ handEffect: "server", needsDeployerCopy: false, needsRunnerUpdate: false });
     expect((await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Approve" })).statusCode).toBe(200);
@@ -227,22 +230,103 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect(steps.join("\n")).not.toContain("origin/main");
     expect(todo!.context).toMatchObject({ check: expect.stringContaining(B.slice(0, 8)), rollback: expect.stringContaining(A) });
     expect(todo!.question).toContain("waiting for you to apply it by hand");
-    // Every command is written in full, with the install's absolute folders.
-    expect(steps.join("\n")).toContain("/mnt/NVME_Apps/Container_files/boss-man/src");
+    // Every command is written in full, with the folders the host reported.
+    expect(steps.join("\n")).toContain("cd /srv/bm/src && git checkout main");
     // This change touches neither the deployer nor the launcher.
     expect(steps.join("\n")).toContain("host-deployer.sh didn't change; no copy needed.");
     expect(steps.join("\n")).not.toContain("chown root:root");
     expect(steps.join("\n")).not.toContain("docker compose build launcher");
     // The card still checks that the new server took charge, and how to recover it.
-    expect(steps.join("\n")).toContain("grep reverse_proxy /mnt/NVME_Apps/Container_files/boss-man/deployer/proxy/active.caddy");
-    expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-<colour>");
+    expect(steps.join("\n")).toContain("docker compose kill -s SIGUSR2 server-green");
     expect(todo!.context).toMatchObject({ check: expect.stringContaining("Server: Role reads leader") });
-    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("/mnt/NVME_Apps/Container_files/boss-man/src") });
+    expect(todo!.context).toMatchObject({ rollback: expect.stringContaining("cd /srv/bm/src && git checkout " + A) });
+  });
+
+  describe("hand-apply cards (BOS-269)", () => {
+    const stepsOf = async (c: Awaited<ReturnType<typeof setup>>, over: Record<string, unknown>) => {
+      await c.available({ infraPaths: ["docker-compose.yml"], paths: ["docker-compose.yml"], ...over });
+      await c.selfDeploy.sync();
+      const [d] = await c.open();
+      return d!.context as { handSteps?: string[]; rollback?: string; infra?: boolean; update?: { needsRunnerUpdate?: boolean } };
+    };
+    const commands = (texts: string[]) => texts.flatMap((t) => parseStep(t)).filter((p) => p.type === "command").map((p) => p.text);
+
+    it("uses the folders the host reports and never the guide's", async () => {
+      const c = (ctx = await setup());
+      const x = await stepsOf(c, { ...LAYOUT, bluegreen: false });
+      const text = [...x.handSteps!, x.rollback!].join("\n");
+      expect(text).toContain("cd /srv/bm/src && scripts/deploy.sh --commit " + B);
+      expect(text).not.toContain("rebuild-live.sh");
+      expect(text).not.toContain("/mnt/NVME_Apps");
+      expect(x.rollback).toContain("scripts/deploy.sh --rollback");
+    });
+
+    it("picks rebuild-live.sh on blue/green and uses the reported live colour", async () => {
+      const c = (ctx = await setup());
+      const x = await stepsOf(c, LAYOUT);
+      const cmds = commands(x.handSteps!);
+      expect(cmds).toContain("cd /srv/bm/src && scripts/rebuild-live.sh");
+      expect(cmds.some((k) => k.startsWith("cd /srv/bm/src && docker compose exec -T server-green "))).toBe(true);
+      expect(cmds.join("\n")).not.toContain("scripts/deploy.sh");
+      expect(x.rollback).toContain("scripts/rebuild-live.sh");
+    });
+
+    it("says plainly when the folder or layout is not reported, and prints no guessed command", async () => {
+      const c = (ctx = await setup());
+      const x = await stepsOf(c, {}); // an older host script reports neither
+      const text = [...x.handSteps!, x.rollback!].join("\n");
+      expect(commands(x.handSteps!)).toEqual([]);
+      expect(text).not.toContain("```");
+      expect(text).not.toContain("/mnt/NVME_Apps");
+      expect(text).toContain("can't tell where it is installed");
+      expect(text).toContain("can't tell whether this install runs blue/green");
+      expect(x.rollback).toContain("no command is shown");
+    });
+
+    it("does not print a folder that is unsafe to paste", async () => {
+      const c = (ctx = await setup());
+      const x = await stepsOf(c, { ...LAYOUT, srcDir: "/srv/my bm/src; rm -rf /" });
+      expect(commands(x.handSteps!).join("\n")).not.toContain("rm -rf");
+      expect(x.handSteps!.join("\n")).toContain("can't tell where it is installed");
+    });
+
+    it("adds the rebuild-the-runners step only when the runner changed, and the card agrees", async () => {
+      const c = (ctx = await setup());
+      const no = await stepsOf(c, LAYOUT);
+      expect(no.handSteps!.join("\n")).not.toContain("Build and update runners");
+      expect(no.update!.needsRunnerUpdate).toBe(false);
+      await c.db.delete(decisions);
+      const yes = await stepsOf(c, { ...LAYOUT, runnerChanged: true, paths: ["docker-compose.yml", "apps/runner/Dockerfile"] });
+      expect(yes.handSteps!.join("\n")).toContain("Build and update runners");
+      expect(yes.update!.needsRunnerUpdate).toBe(true);
+    });
+
+    it("does not need applying by hand for a build-only script such as the icon generator", async () => {
+      const c = (ctx = await setup());
+      // The host decides infraPaths; make-app-icons.mjs is not on its list, so it arrives as an ordinary change.
+      await c.available({ infraPaths: [], paths: ["scripts/make-app-icons.mjs", "apps/web/public/icon.png"] });
+      await c.selfDeploy.sync();
+      const [d] = await c.open();
+      expect(d!.options).toEqual(["Deploy", "Not now"]);
+      expect((d!.context as { infra?: boolean }).infra).toBeUndefined();
+    });
+
+    it("renders every command as its own block holding only the command", async () => {
+      const c = (ctx = await setup());
+      const x = await stepsOf(c, { ...LAYOUT, infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"], runnerChanged: true });
+      const all = [...x.handSteps!, x.rollback!];
+      const cmds = commands(all);
+      expect(cmds.length).toBeGreaterThan(4);
+      for (const k of cmds) expect(commandProblem(k)).toBeNull();
+      // Each fenced block is exactly one command; no command text is left in the sentences.
+      for (const t of all) for (const p of parseStep(t)) if (p.type === "text") expect(p.text).not.toMatch(/\b(?:cd \/|scripts\/|docker compose|git (?:checkout|merge))/);
+      expect(all.join("\n").match(/```sh\n/g)!.length).toBe(cmds.length);
+    });
   });
 
   it("copies host-deployer.sh and rebuilds the launcher only when the change touches them", async () => {
     const c = (ctx = await setup());
-    await c.available({ infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"] });
+    await c.available({ infraPaths: ["scripts/host-deployer.sh"], paths: ["scripts/host-deployer.sh", "apps/launcher/src/main.ts"], ...LAYOUT });
     await c.selfDeploy.sync();
     const [d] = await c.open();
     // The deployer is the only deployment file touched, so hand-applying only needs the copy (BOS-218).
@@ -253,7 +337,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     const steps = (todo!.context as { steps: string[] }).steps;
     const text = steps.join("\n");
     expect(text).toContain(
-      "cp /mnt/NVME_Apps/Container_files/boss-man/src/scripts/host-deployer.sh /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh && chown root:root /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh && chmod 750 /mnt/NVME_Apps/Container_files/boss-man/deployer/host-deployer.sh",
+      "cp /srv/bm/src/scripts/host-deployer.sh /srv/bm/deployer/host-deployer.sh && chown root:root /srv/bm/deployer/host-deployer.sh && chmod 750 /srv/bm/deployer/host-deployer.sh",
     );
     expect(text).not.toContain("host-deployer.sh didn't change");
     expect(text).toContain("docker compose build launcher && docker compose up -d --no-deps launcher");

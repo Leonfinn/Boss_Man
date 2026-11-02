@@ -85,3 +85,17 @@ export function usePoll<T>(load: (signal: AbortSignal) => Promise<T>, everyMs: n
 
   return { data, error, reload };
 }
+
+/** True while the window matches a media query; false on the server or in an old browser. */
+export function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => (typeof window === "undefined" || !window.matchMedia ? false : window.matchMedia(query).matches));
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mql = window.matchMedia(query);
+    const on = () => setMatches(mql.matches);
+    on();
+    mql.addEventListener("change", on);
+    return () => mql.removeEventListener("change", on);
+  }, [query]);
+  return matches;
+}
