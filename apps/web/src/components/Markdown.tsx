@@ -3,6 +3,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ReactNode } from "react";
+import { EnlargeableImage } from "./Lightbox";
 
 // [[slug]] and [[slug#Section]] become links to that wiki page when the company is known.
 const wikiLinks = (text: string, companyId: string) =>
@@ -41,6 +42,8 @@ export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?
                 {children}
               </a>
             ),
+          // A picture opens enlarged over the page rather than in a new window (BOS-330).
+          img: ({ src, alt }) => <EnlargeableImage src={typeof src === "string" ? src : undefined} alt={typeof alt === "string" ? alt : undefined} />,
           table: ({ children }) => (
             <div className="md-table">
               <table>{children}</table>
