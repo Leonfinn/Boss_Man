@@ -121,6 +121,14 @@ describe("explainCommand", () => {
 });
 
 describe("explainPermission", () => {
+  it("names the file in OpenCode's edit requests (BOS-318)", () => {
+    // OpenCode sends its permission metadata as rawInput: { filepath, diff } for an edit, { files: [...] } for a patch.
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { filepath: "/work/src/a.ts", diff: "@@" } }, "A").summary).toBe("Change the file /work/src/a.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/work/a.ts", relativePath: "a.ts" }] } }, "A").summary).toBe("Change the file a.ts.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: { files: [{ filePath: "/w/a.ts" }, { filePath: "/w/b.ts" }] } }, "A").summary).toBe("Change 2 files.");
+    expect(explainPermission({ title: "edit", kind: "edit", rawInput: {} }, "A").summary).toBe("Change (no name given).");
+  });
+
   it("titles commands and keeps only a short single-line reason", () => {
     const r = explainPermission({ title: "x", kind: "execute", rawInput: { command: "ls", description: `Look\naround ${"a".repeat(300)}` } }, "Wiki Maintainer");
     expect(r.title).toBe("Wiki Maintainer wants to run a command");

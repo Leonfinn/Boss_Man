@@ -656,6 +656,14 @@ const text = (o: unknown, ...keys: string[]) => {
   return null;
 };
 
+/** OpenCode's multi-file edit (apply_patch) lists its files as `files: [{ filePath, relativePath }]`; name one, or count them. */
+function patchFiles(o: unknown): string | null {
+  const files = (o as { files?: unknown } | null)?.files;
+  if (!Array.isArray(files)) return null;
+  const names = files.map((f) => text(f, "relativePath", "filePath")).filter((n): n is string => !!n);
+  return names.length === 1 ? names[0]! : names.length > 1 ? `${names.length} files` : null;
+}
+
 /** The whole card: plain title, effect line, and the agent's own reason if it gave one. */
 export function explainPermission(info: PermissionInfo, agent: string): PermissionExplanation {
   const command = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);
@@ -665,9 +673,9 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
     return { title: `${agent} wants to run a command`, ...x, command, reason, ...(x.effect === "reads" ? {} : { alwaysNote: "Boss Man doesn't offer 'always' for commands that change, delete, push or use the network." }) };
   }
   const t = TOOL[info.kind ?? ""];
-  const target = text(info.rawInput, "file_path", "filePath", "path", "url") ?? (info.kind === "search" ? text(info.rawInput, "pattern", "query") : null);
+  const target = text(info.rawInput, "file_path", "filePath", "filepath", "path", "url") ?? patchFiles(info.rawInput) ?? (info.kind === "search" ? text(info.rawInput, "pattern", "query") : null);
   if (!t) return { title: `${agent} wants to use a tool`, summary: `Uses the tool "${info.title ?? "unnamed"}", which Boss Man doesn't recognise.`, effect: "unknown", reason };
-  const noun = t.verb === "Fetch" ? "" : t.verb === "Search" ? " for" : " the file";
+  const noun = t.verb === "Fetch" || /^\d+ files$/.test(target ?? "") ? "" : t.verb === "Search" ? " for" : " the file";
   return { title: `${agent} wants to ${t.what}`, summary: `${t.verb}${target ? `${noun} ${target}` : ` (no name given)`}.`, effect: t.effect, reason };
 }
 
