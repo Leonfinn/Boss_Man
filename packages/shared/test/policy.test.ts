@@ -91,6 +91,17 @@ describe("evaluatePermission defaults", () => {
     expect(evaluatePermission({ title: "git push origin main", kind: "other", rawInput: { command: "git push origin main" } }, []).outcome).toBe("owner");
   });
 
+  it("keeps a request that names a path with the owner, e.g. OpenCode's external_directory (BOS-295 security review)", () => {
+    const oc = { title: "/home/x", kind: "other", rawInput: { filepath: "/home/x/a", parentDir: "/home/x" } };
+    expect(evaluatePermission(oc, []).outcome).toBe("owner");
+    expect(evaluatePermission({ title: "x", kind: null, rawInput: { file_path: "/etc/passwd" } }, []).outcome).toBe("owner");
+  });
+
+  it("warns on lookalikes with separators or non-ASCII letters (BOS-295 security review)", () => {
+    for (const t of ["mcp__boss_man__wiki", "mcp__boss-man__wiki", "mcp__bоssman__wiki"]) expect(looksLikeBossmanTool(t)).toBe(true);
+    expect(looksLikeBossmanTool("mcp__scrapling__get")).toBe(false);
+  });
+
   it("applies an owner rule to an unrecognised tool before the default (BOS-295)", () => {
     const rule = { name: "Allow frobnicator", match: { titlePattern: "^mcp__frobnicator__" }, outcome: "allow" as const };
     expect(evaluatePermission({ title: "mcp__frobnicator__run", kind: "other", rawInput: {} }, [rule])).toMatchObject({ outcome: "allow", rule: "Allow frobnicator" });
