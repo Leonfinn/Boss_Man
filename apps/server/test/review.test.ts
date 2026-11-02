@@ -284,6 +284,45 @@ describe("landing an approved ticket (R46, R47)", () => {
     expect(w!.note).toContain("expected 1000 got 100");
   });
 
+  describe("checking the merged result (BOS-313)", () => {
+    const sha = "d".repeat(40);
+    const merged = { status: "merged", commit: sha, checked: { sha, tree: "e".repeat(40), ms: 5 } };
+
+    it("with the setting on, sends the checks in the merge ask, runs no separate check and saves the checked commit", async () => {
+      const c = (ctx = await setup({ answers: { merge: merged } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      expect((await c.req("PUT", "/api/settings/check-merged-result", { on: true })).json()).toEqual({ on: true });
+      expect((await approve(c)).json()).toMatchObject({ outcome: "merged" });
+      expect(c.sent.some((x) => x.type === "workspace.verify")).toBe(false);
+      expect(c.sent.find((x) => x.type === "workspace.merge")).toMatchObject({ checks: ["pnpm test"] });
+      expect(await state(c)).toMatchObject({ systemState: "done", mergeCommit: sha, checkedCommit: sha });
+      const rows = await c.db.select().from(checkResults).where(eq(checkResults.ticketId, c.ticket.id));
+      expect(rows).toMatchObject([{ sha, kind: "verify", passed: true }]);
+    });
+
+    it("with the setting off, keeps today's calls: a separate check and a merge without checks", async () => {
+      const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      expect((await approve(c)).json()).toMatchObject({ outcome: "merged" });
+      expect(c.sent.some((x) => x.type === "workspace.verify")).toBe(true);
+      expect(c.sent.find((x) => x.type === "workspace.merge")).not.toHaveProperty("checks");
+      expect((await state(c)).checkedCommit).toBeNull();
+    });
+
+    it("sends the ticket back when the merged result fails its check, and records the failure", async () => {
+      const result = { ok: false, exitCode: 1, timedOut: false, output: "FAIL clash", ms: 50 };
+      const c = (ctx = await setup({ answers: { merge: { status: "check_failed", command: "pnpm test", result } } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+      await c.req("PUT", "/api/settings/check-merged-result", { on: true });
+      expect((await approve(c)).json()).toMatchObject({ outcome: "verify_failed" });
+      expect(await state(c)).toMatchObject({ systemState: "in_progress", mergeCommit: null, checkedCommit: null });
+      const [w] = await c.db.select().from(wakes);
+      expect(w!.note).toContain("FAIL clash");
+      const rows = await c.db.select().from(checkResults).where(eq(checkResults.ticketId, c.ticket.id));
+      expect(rows).toMatchObject([{ kind: "verify", passed: false }]);
+    });
+  });
+
   it("tells a killed check from a failed one", () => {
     const v = (o: Partial<{ timedOut: boolean; exitCode: number | null; output: string }>) => ({ timedOut: false, exitCode: 1, output: "", ...o });
     expect(checkNeverFinished(v({ timedOut: true }))).toBe("timed_out");
