@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { judgePermission } from "../src/index.js";
+import { isJudgeable, judgePermission } from "../src/index.js";
 
 interface Case { id: string; set: "eval" | "attack" | "holdout"; stratum: string; question: string; command: string | null; expected: "allow" | "deny"; studyPrototype: { verdict: string } }
 const cases = (JSON.parse(readFileSync(new URL("./fixtures/permission-judge-cases.json", import.meta.url), "utf8")) as { cases: Case[] }).cases;
@@ -187,9 +187,10 @@ describe("rules judge on very long input (round 6: slow pattern)", () => {
   it.each(["echo $(mktemp " + "a ".repeat(50_000), "x=$(mktemp " + "-d ".repeat(50_000), "ls " + "$(mktemp ".repeat(20_000)])("denies and returns fast: %#", (cmd) => {
     const t = Date.now();
     const r = judgePermission("run", cmd);
-    expect(Date.now() - t).toBeLessThan(500);
+    expect(Date.now() - t).toBeLessThan(50);
     expect(r.verdict).toBe("deny");
     expect(r.row).toBe("tooLong");
+    expect(isJudgeable(cmd)).toBe(false);
   });
   it("still reads $(mktemp ...) in normal-size commands", () => {
     expect(judgePermission("run", "f=$(mktemp /tmp/x.XXXX) && echo hi > $f").verdict).toBe("allow");

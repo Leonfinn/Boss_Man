@@ -33,8 +33,9 @@ const WORKSPACE = /(?:^|[\s"'=:(])(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|revie
 const WORKSPACE_PATH = /^(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\//;
 const LEADING_CD = /^\s*(?:cd|git\s+-C)\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/;
 
-/** Longest command the judge reads; longer ones are denied unread. */
+/** Longest command the judge reads; longer ones are not judged. */
 export const MAX_JUDGED_COMMAND = 10_000;
+export const isJudgeable = (command: string | null): boolean => !command || command.length <= MAX_JUDGED_COMMAND;
 
 const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allow" : "deny", row, reasonLabel: JUDGE_LABELS[row] });
 
@@ -48,7 +49,7 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  */
 export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string): JudgeReading {
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
-  // The patterns below are not built for huge input (and run on the server loop): refuse to read it.
+  // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
   // Text written to a file by cat/tee is data, not commands: drop those heredoc bodies (interpreter heredocs stay, they run).
   const c = withoutOwnMemory(command, ownProject).replace(/((?:\bcat|\btee)\b[^\n]*?<<-?\s*(['"]?)(\w+)\2[^\n]*\n)([\s\S]*?)\n\3(?=\n|$)/g, (_m, head: string, _q, end: string) => head + end);
