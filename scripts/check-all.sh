@@ -44,6 +44,21 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   else
     key=""
   fi
+  # A signal ends the run with a visible trace: stop the child (which frees its queue place), write the line to the
+  # log and the result store, and exit non-zero. Without this a killed check just vanished and the agent waited for nothing.
+  child=""
+  on_signal() {
+    local name=$1
+    trap '' TERM INT HUP
+    if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi
+    sleep 0.2  # let tee drain before the line is added
+    echo "check-all: killed by signal $name" | tee -a "$log"
+    record killed "$((128 + $2))"
+    exit "$((128 + $2))"
+  }
+  trap 'on_signal TERM 15' TERM
+  trap 'on_signal INT 2' INT
+  trap 'on_signal HUP 1' HUP
   # record <status> <exit code>: keep the result and the full log; a pass is what later runs reuse.
   record() {
     [ -n "$key" ] || return 0
@@ -59,7 +74,11 @@ if [ -z "${BOSSMAN_CHECK_CHILD:-}" ]; then
   [ -z "$key" ] || echo "check-all: the result and log of this run will be kept in $STORE/$key.{json,log}"
   for ((n = 1; n <= attempts; n++)); do
     rc=0; : >"$began_file"; attempt_start=$SECONDS
-    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" 2>&1 | tee "$log" || rc=${PIPESTATUS[0]}
+    # The child runs in the background and we wait for it, so a signal reaches the trap at once instead of after the child.
+    BOSSMAN_CHECK_CHILD=1 BOSSMAN_CHECK_STORE="$STORE" CHECK_ALL_STARTED_FILE="$began_file" bash "$self" > >(tee "$log") 2>&1 &
+    child=$!
+    wait "$child" || rc=$?
+    wait 2>/dev/null || true  # let tee finish writing the log
     # Exit 75: nothing ran (gave up waiting for a slot), so there is no result to keep.
     if [ "$rc" -eq 0 ]; then record pass 0; exit 0; fi
     # Each retry re-runs everything, so only retry if another run of this length still fits the budget.
@@ -105,6 +124,8 @@ if command -v flock >/dev/null; then
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
   { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
   trap 'rm -f "$qfile"' EXIT
+  # Killed while waiting: leave the queue and stop the checks' children, so the place and the slot are free for the next one.
+  trap 'rm -f "$qfile"; pkill -TERM -P $ 2>/dev/null || true; exit 143' TERM INT HUP
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
