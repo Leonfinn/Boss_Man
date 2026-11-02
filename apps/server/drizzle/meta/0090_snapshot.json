@@ -1,6 +1,6 @@
 {
-  "id": "8b947075-e443-4bff-8715-44e1c926aa41",
-  "prevId": "9ebe906c-4191-49d8-918d-beb29c3eb2be",
+  "id": "eea47ee9-ab49-4065-9952-8e5026a2e58b",
+  "prevId": "215bf1e6-9b49-4846-a038-823f2f545234",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1401,7 +1401,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -5715,6 +5715,12 @@
         "image_version": {
           "name": "image_version",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "harness_versions": {
+          "name": "harness_versions",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },
