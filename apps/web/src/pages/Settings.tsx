@@ -1103,7 +1103,7 @@ const WATCHDOG_LIMITS: Array<{ key: keyof WatchdogSettings; label: string; unit:
   { key: "maxCeoAlertsPerHour", label: "Most alerts sent to the CEO per hour", unit: "alerts" },
   { key: "silentSteerMinutes", label: "Ask a silent run for a status after", unit: "minutes" },
   { key: "silentFlagMinutes", label: "Flag a silent run to the Scrum Master after", unit: "minutes" },
-  { key: "unprovenHours", label: "Flag an unproven cause ("likely") after", unit: "hours" },
+  { key: "unprovenHours", label: "Flag an unproven cause ('likely') after", unit: "hours" },
 ];
 
 /** The Scrum Master watchdog (BOS-58): who it wakes, its limits, its safety cap, and a test against past days. */
