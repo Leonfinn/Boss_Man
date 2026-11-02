@@ -3,6 +3,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
+import { sandboxSelfTest } from "./fence.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
@@ -26,6 +27,11 @@ const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
 const coordDir = path.join(workspacesRoot, ".bossman-coord");
 mkdirSync(coordDir, { recursive: true });
 const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
+// What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
+// decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
+const sandbox = sandboxSelfTest();
+log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
+
 let connection: RunnerConnection;
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
@@ -63,6 +69,7 @@ connection = new RunnerConnection({
 const interrupted = sessions.recoverInterrupted();
 if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) for recovery`);
 connection.start();
+connection.emit({ type: "runner.sandbox", report: sandbox });
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled
 // like any event, so it reaches the server once the connection is up.
