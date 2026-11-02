@@ -164,9 +164,11 @@ describe("alwaysChoices", () => {
     expect(ask("ls '(a|b).txt'; rm -rf /")).not.toBe("r");
     expect(ask("ls aXb.txt")).not.toBe("r");
   });
-  it("offers a company-wide kind rule for plain tools, and no rule can lift the destructive gate", () => {
-    const [c] = choices("Read", "read", { file_path: "a" });
-    expect(c!.label).toBe("Always allow agents to read files");
+  it("offers no Always choice for file reads or edits (any path, secrets included), and no rule can lift the destructive gate", () => {
+    expect(choices("Read", "read", { file_path: "a" })).toEqual([]);
+    expect(choices("Read", "read", { file_path: "/root/.ssh/id_rsa" })).toEqual([]);
+    expect(choices("Edit", "edit", { file_path: "/etc/passwd" })).toEqual([]);
+    expect(choices("WebFetch", "fetch", { url: "https://x.dev" }).map((x) => x.label)).toEqual(["Always allow agents to fetch web pages"]);
     const rule = [{ name: "all", match: { kinds: ["execute"], safeOnly: true }, outcome: "allow" as const }];
     const run = (command: string) => evaluatePermission({ title: command, kind: "execute", rawInput: { command } }, rule);
     expect(run("rm -rf /srv/dist").outcome).toBe("owner");

@@ -92,6 +92,15 @@ describe("Always allow on a permission card (BOS-294)", () => {
     expect(await ctx.rules()).toHaveLength(0);
   });
 
+  it("refuses a kind-wide file read or edit rule, even from a card raised before they were withdrawn", async () => {
+    const card = await ctx.ask(ctx.dev.id, MD);
+    const label = "Always allow agents to read files";
+    const context = { ...(card!.context as object), always: [{ label, name: "Allow agents to read files", what: "read files", match: { kinds: ["read"], safeOnly: true } }] };
+    await ctx.db.update(decisions).set({ context }).where(eq(decisions.id, card!.id));
+    const res = await ctx.answer(card!.id, label);
+    expect(res.statusCode).toBe(422);
+    expect(await ctx.rules()).toHaveLength(0);
+  });
   it("never lets the CEO save a standing rule", async () => {
     const card = await ctx.ask(ctx.dev.id, MD);
     await expect(ctx.decisions.answer(card!.id, ALWAYS, { settledBy: { agentId: ctx.co.ceo.id }, by: "ceo" })).rejects.toBeInstanceOf(AnswerError);

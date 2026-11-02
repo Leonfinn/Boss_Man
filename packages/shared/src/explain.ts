@@ -686,7 +686,8 @@ export function explainPermission(info: PermissionInfo, agent: string): Permissi
 /** Paths and words that point at secrets; a command naming one never gets an Always choice. */
 const SECRET_HINT = /(?:^|[\/\s=~])(?:\.ssh|\.aws|\.gnupg|\.netrc|\.npmrc|\.pgpass|\.docker\/config|\.env(?:\.\S*)?|id_(?:rsa|ed25519|ecdsa|dsa))(?:\W|$)|secret|passw(?:or)?d|credential|token|api[_-]?key|private[_-]?key|\.pem\b|\.p12\b|\.key\b|environ\b/i;
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const KIND_RULE: Record<string, string> = { read: "read files", edit: "change files", fetch: "fetch web pages" };
+// File reads and edits get no Always choice: a kind-wide rule can't name a safe path, so it would cover secrets and files outside the checkout (BOS-294 security review).
+const KIND_RULE: Record<string, string> = { fetch: "fetch web pages" };
 
 /**
  * The standing rules offered for a request, narrowest first. Shell commands only when they

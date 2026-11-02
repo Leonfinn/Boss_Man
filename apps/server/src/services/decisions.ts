@@ -1794,6 +1794,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (scope !== "agent" && scope !== "company") throw new AnswerError("The scope must be this agent or every agent.");
         const asker = (ctx as Extract<DecisionContext, { type: "permission" }>).alwaysAgent;
         if (scope === "agent" && !asker) throw new AnswerError("This request has no known agent, so the rule can only cover every agent.");
+        // Cards raised before file rules were withdrawn may still carry a kind-wide read/edit choice; never save it.
+        if (!always.match.commandPattern && !always.match.titlePattern && always.match.kinds?.some((k) => k === "read" || k === "edit")) throw new AnswerError("That rule is no longer offered: it would cover files Boss Man can't check. Use Allow once.");
         const condition: PolicyMatch = { ...always.match, safeOnly: true, ...(scope === "agent" ? { agentIds: [asker!.id] } : {}) };
         const problems = ruleProblems(condition);
         if (problems.length) throw new AnswerError(`That rule can't be saved: ${problems.join(" ")}`);
