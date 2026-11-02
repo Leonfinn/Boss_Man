@@ -68,6 +68,7 @@ export class Workspaces {
 
   repoDir = (projectId: string) => path.join(this.root, "repos", `${projectId}.git`);
   ticketDir = (ticketId: string) => path.join(this.root, "tickets", ticketId);
+  mergeCheckDir = (ticketId: string) => path.join(this.root, "merge-checks", ticketId);
   reviewDir = (ticketId: string) => path.join(this.root, "reviews", ticketId);
   patchFile = (ticketId: string) => path.join(this.root, "patches", `${ticketId}.patch`);
 
@@ -455,7 +456,11 @@ export class Workspaces {
    * last 8 KB. It runs without the company's secrets: a check shouldn't need them.
    */
   async verify(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, command: string, timeoutMs = VERIFY_TIMEOUT_MS): Promise<VerifyResult> {
-    const dir = await this.reopen(spec);
+    return this.runCheck(await this.reopen(spec), command, timeoutMs);
+  }
+
+  /** One check command in a folder: its own process group, output kept to the last 8 KB. */
+  private runCheck(dir: string, command: string, timeoutMs: number): Promise<VerifyResult> {
     const started = Date.now();
     return new Promise<VerifyResult>((resolve) => {
       // Own process group, so a timeout can take down pnpm, tsc, vitest and their workers, not just the shell.
@@ -512,7 +517,8 @@ export class Workspaces {
    * worktree can't be touched. If the target moved meanwhile, the push is rejected and the
    * merge is tried once more.
    */
-  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}): Promise<MergeResult> {
+  async merge(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined> = {}, checks: { commands: string[]; timeoutMs?: number } | null = null): Promise<MergeResult> {
+    if (checks?.commands.length) return this.mergeChecked(spec, target, message, secrets, checks.commands, checks.timeoutMs ?? VERIFY_TIMEOUT_MS);
     const auth = gitAuthEnv(secrets);
     return this.withRepoLock(spec.projectId, async () => {
       const repo = this.repoDir(spec.projectId);
@@ -533,6 +539,76 @@ export class Workspaces {
         if (attempt === 1) throw new Error(`Couldn't push the merge to ${target}: ${pushed.stderr.slice(0, 500)}`);
       }
       throw new Error("unreachable");
+    });
+  }
+
+  /**
+   * Merges like merge(), but checks the merge commit itself before pushing it (BOS-313, F6).
+   * Two branches that each pass alone can break the target together, so the check runs on a
+   * temporary detached worktree of the commit that will be pushed, and exactly that commit is
+   * pushed. The repo lock is held only to build and to push, not during the check. If the target
+   * moved meanwhile, the merge is built again: an unchanged merged tree keeps the earlier check,
+   * a changed one is checked again (three checks at most, then main_moved so the caller retries).
+   */
+  private async mergeChecked(spec: Pick<WorkspaceSpec, "projectId" | "ticketId">, target: string, message: string, secrets: Record<string, string | undefined>, commands: string[], timeoutMs: number): Promise<MergeResult> {
+    const auth = gitAuthEnv(secrets);
+    const repo = this.repoDir(spec.projectId);
+    const branch = `refs/heads/${branchFor(spec.ticketId)}`;
+    const dir = this.mergeCheckDir(spec.ticketId);
+    let checkedTree: string | null = null;
+    let checkedMs = 0;
+    let checks = 0;
+    for (let round = 0; round < 8; round++) {
+      // Build the merge commit under the lock; push it at once if its tree is already checked.
+      const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string }> => {
+        const ticketDir = this.ticketDir(spec.ticketId);
+        if (existsSync(path.join(ticketDir, ".git"))) {
+          const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
+          if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+        }
+        const tried = await this.tryMerge(repo, branch, target, auth);
+        if (tried.status !== "clean") return tried;
+        const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
+        if (tried.tree !== checkedTree) {
+          // A leftover from a run that died is cleared before its folder is reused.
+          rmSync(dir, { recursive: true, force: true });
+          await this.git(["worktree", "prune"], { cwd: repo });
+          mkdirSync(path.dirname(dir), { recursive: true });
+          await this.git(["worktree", "add", "--quiet", "--detach", dir, commit], { cwd: repo });
+          return { status: "check", commit, tree: tried.tree };
+        }
+        const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
+        if (pushed.code === 0) return { status: "merged", commit, checked: { sha: commit, tree: tried.tree, ms: checkedMs } };
+        // Rejected: the target moved again. Build once more; the tree decides whether it is checked again.
+        return { status: "check", commit: "", tree: "" };
+      });
+      if (built.status !== "check") return built;
+      if (!built.commit) continue;
+      if (checks >= 3) {
+        await this.dropMergeCheck(spec.projectId, dir);
+        return { status: "main_moved" };
+      }
+      checks++;
+      try {
+        for (const command of commands) {
+          const result = await this.runCheck(dir, command, timeoutMs);
+          checkedMs += result.ms;
+          if (!result.ok) return { status: "check_failed", command, result };
+        }
+      } finally {
+        await this.dropMergeCheck(spec.projectId, dir);
+      }
+      checkedTree = built.tree;
+    }
+    throw new Error(`Couldn't push the merge to ${target}: it kept moving.`);
+  }
+
+  private async dropMergeCheck(projectId: string, dir: string) {
+    const repo = this.repoDir(projectId);
+    await this.withRepoLock(projectId, async () => {
+      await this.git(["worktree", "remove", "--force", dir], { cwd: repo }).catch(() => undefined);
+      rmSync(dir, { recursive: true, force: true });
+      await this.git(["worktree", "prune"], { cwd: repo }).catch(() => undefined);
     });
   }
 
