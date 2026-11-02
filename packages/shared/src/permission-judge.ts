@@ -78,6 +78,27 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Writes and deletes outside its own folder and /tmp.
   // A write to a shared checkout, or after a cd into someone else's folder, is outside its own folder.
   if (/\bsed\s+-i\b|>>?|\btee\b|\bcp\b|\bmv\b|\brm\b/.test(c) && /\/workspaces\/repos\//.test(c)) return result("outside");
+  // Any write must land in /tmp, the agent's own ticket folder, /dev/null or its own memory folder. Shared startup and
+  // settings files (~/.bashrc, ~/.gitconfig, /etc/..., /usr/local/bin/...) are not the agent's to change.
+  if (/\bgit\s+config\s+(?:-\S+\s+)*--(global|system|file|worktree)\b/.test(c)) return result("outside");
+  const writeOk = (t: string): boolean => {
+    const p = t.replace(/^['"]+|['"]+$/g, "");
+    if (p === "MEMORY_PATH" || p === "/dev/null" || /^\/dev\/(stdout|stderr|fd\/\d+)$/.test(p)) return true;
+    if (p.includes("..")) return false;
+    if (/^\/tmp(\/|$)/.test(p)) return true;
+    return !!own && new RegExp(`^/[\\w./@+-]*/${own}(/|$)`).test(p);
+  };
+  const ABS = /^['"]*(?:~|\$\{?HOME\}?|\/)/;
+  const assigned = new Map([...c.matchAll(/(?:^|[;&|\s])(\w+)=(['"]?)(\/[^\s'";|&)]*)\2/g)].map((m) => [m[1]!, m[3]!] as const));
+  const resolve = (t: string): string => t.replace(/^(['"]*)\$\{?(\w+)\}?/, (all, q: string, name: string) => (assigned.has(name) ? q + assigned.get(name)! : all));
+  // A sed script is not a path (unless it can write one: `w /file`).
+  const forTargets = c.replace(/(\bsed\s+(?:-\S+\s+)*)('[^']*'|"[^"]*")/g, (all, head: string, script: string) => (/[wWe]\s*(\/|~|\$)/.test(script) ? all : head + "SCRIPT"));
+  const writeTargets: string[] = [];
+  for (const m of forTargets.matchAll(/>>?\s*(['"]?(?:~|\$\{?\w+\}?|\/)[^\s'";|&)<>]*)/g)) writeTargets.push(resolve(m[1]!));
+  for (const m of forTargets.matchAll(/\b(?:cp|mv|tee|ln|install|touch|chmod|chown|truncate|dd|rsync|sed\s+-i\S*|perl\s+-pi\S*)\b([^;&|\n]*)/g)) {
+    for (const tok of m[1]!.split(/\s+/).map(resolve)) if (ABS.test(tok)) writeTargets.push(tok.replace(/^of=/, ""));
+  }
+  if (writeTargets.some((t) => !writeOk(t) && !(/^['"]*\$\{?\w+/.test(t) && !/^['"]*\$\{?HOME\b/.test(t)))) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
