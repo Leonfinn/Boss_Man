@@ -3,6 +3,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
+import { runnerFence, sandboxSelfTest } from "./fence.js";
 import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
@@ -21,7 +22,17 @@ mkdirSync(dataDir, { recursive: true });
 const journal = new Journal(path.join(dataDir, "journal.jsonl"));
 const log = (m: string) => console.log(`[runner] ${m}`);
 
-const workspaces = new Workspaces(env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces");
+const workspacesRoot = env.BOSSMAN_WORKSPACES ?? "/home/node/workspaces";
+// check-all.sh's queue, slot locks and results: one folder that every session, fenced or not, and
+// the merge check share, so checks still take turns (BOS-321).
+const coordDir = path.join(workspacesRoot, ".bossman-coord");
+mkdirSync(coordDir, { recursive: true });
+const workspaces = new Workspaces(workspacesRoot, process.env, coordDir);
+// What this host can fence agents with (DR-004, BOS-321): reported to the server below, and it
+// decides whether a run asked to be fenced can be. Each agent's own home lives in the data volume.
+const sandbox = sandboxSelfTest();
+log(`agent fence: ${sandbox.level} (Landlock ABI ${sandbox.landlockAbi}${sandbox.errno ? `, ${sandbox.errno}` : ""}${sandbox.missing.length ? `; missing: ${sandbox.missing.join(", ")}` : ""})`);
+
 let connection: RunnerConnection;
 const sessions = new SessionManager({
   mcpUrl: env.BOSSMAN_MCP_URL ?? `${httpBase}/mcp`,
@@ -35,6 +46,8 @@ const sessions = new SessionManager({
   workspaces,
   reply: (requestId, result) => connection.reply(requestId, result),
   checkClaude: (credentials) => checkClaude(credentials),
+  coordDir,
+  fence: runnerFence(sandbox.level, dataDir, workspacesRoot),
   resolveCompanyEnv: async (purpose) => {
     const res = await fetch(`${httpBase}/api/runner/env?purpose=${purpose}`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -59,6 +72,7 @@ connection = new RunnerConnection({
 const interrupted = sessions.recoverInterrupted();
 if (interrupted.length) log(`reported ${interrupted.length} interrupted run(s) for recovery`);
 connection.start();
+connection.emit({ type: "runner.sandbox", report: sandbox });
 
 // Workspace clean-up and disk use (R54): at start-up, then hourly. The report is journalled
 // like any event, so it reaches the server once the connection is up.
