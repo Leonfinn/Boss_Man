@@ -11,9 +11,13 @@ export type PermissionInfo = {
   /** ACP tool kind: read, edit, delete, move, search, execute, think, fetch, other. */
   kind: string | null;
   rawInput: unknown;
+  /** The agent asking, for rules limited to certain agents (PolicyMatch.agentIds). */
+  agentId?: string | null;
 };
 
 export type PolicyMatch = {
+  /** Only matches a request from one of these agents. A rule without it covers every agent. */
+  agentIds?: string[];
   kinds?: string[];
   /** Regular expression tested against the shell command, when there is one. */
   commandPattern?: string;
@@ -85,6 +89,7 @@ export const TOOL_KINDS = ["read", "edit", "delete", "move", "search", "execute"
 export function ruleProblems(match: PolicyMatch): string[] {
   const problems: string[] = [];
   if (!match.kinds?.length && !match.commandPattern && !match.titlePattern && !match.scratchOnly) problems.push("Give the rule at least one condition: tool kinds, a command pattern or a title pattern.");
+  if (match.agentIds && (!Array.isArray(match.agentIds) || !match.agentIds.length || match.agentIds.length > 50 || !match.agentIds.every((a) => typeof a === "string" && a.length > 0 && a.length <= 64))) problems.push("An agent condition needs between 1 and 50 agent ids.");
   for (const k of match.kinds ?? []) if (!(TOOL_KINDS as readonly string[]).includes(k)) problems.push(`"${k}" isn't a tool kind. Use: ${TOOL_KINDS.join(", ")}.`);
   for (const [label, p] of [["command pattern", match.commandPattern], ["title pattern", match.titlePattern]] as const) {
     if (p == null) continue;
@@ -113,6 +118,7 @@ function safeRegex(pattern: string): RegExp | null {
 export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
   // OpenCode asks about some shell commands (e.g. outside its folder) with kind "other"; a command is still a command.
   const kind = (!info.kind || info.kind === "other") && commandOf(info.rawInput) ? "execute" : info.kind;
+  if (rule.agentIds && !(info.agentId && rule.agentIds.includes(info.agentId))) return false;
   if (rule.kinds && !(kind && rule.kinds.includes(kind))) return false;
   if (rule.commandPattern) {
     const cmd = commandOf(info.rawInput) ?? (info.kind === "execute" ? info.title : null);

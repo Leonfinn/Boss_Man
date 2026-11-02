@@ -166,7 +166,7 @@ describe("alwaysChoices", () => {
   });
   it("offers a company-wide kind rule for plain tools, and no rule can lift the destructive gate", () => {
     const [c] = choices("Read", "read", { file_path: "a" });
-    expect(c!.label).toBe("Always allow every agent in this company to read files");
+    expect(c!.label).toBe("Always allow agents to read files");
     const rule = [{ name: "all", match: { kinds: ["execute"], safeOnly: true }, outcome: "allow" as const }];
     const run = (command: string) => evaluatePermission({ title: command, kind: "execute", rawInput: { command } }, rule);
     expect(run("rm -rf /srv/dist").outcome).toBe("owner");

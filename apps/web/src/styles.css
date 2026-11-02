@@ -152,7 +152,7 @@ p { margin: 0; }
 .decision .rec { font-size: 14px; background: var(--accent-soft); border-radius: 6px; padding: 8px 12px; }
 .decision .rec strong { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; color: var(--link); margin-right: 6px; }
 .decision .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-@media (max-width: 520px) { .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
+@media (max-width: 520px) { .decision .actions { flex-direction: column; } .decision .actions .btn { width: 100%; } .decision { grid-template-columns: 1fr; } .decision .score { flex-direction: row; align-items: center; padding: 14px 16px 0; } .decision .body { padding: 10px 16px 16px; } }
 
 /* ---------- Board ---------- */
 .board-scroll { overflow-x: auto; padding-bottom: 8px; }

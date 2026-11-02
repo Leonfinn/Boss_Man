@@ -4,8 +4,8 @@ import { api, type Company } from "../api";
 import { usePoll } from "../hooks";
 
 type Outcome = "allow" | "ceo" | "owner" | "deny";
-type Match = { kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; workingCopyOnly?: boolean };
-type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number };
+type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; workingCopyOnly?: boolean };
+type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null };
 type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }> };
 
 const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"];
@@ -22,11 +22,13 @@ const outcomeTag = (o: Outcome) => {
 
 function describeMatch(m: Match) {
   const parts: string[] = [];
+  if (m.agentIds?.length) parts.unshift(`the request is from one named agent`);
   if (m.kinds?.length) parts.push(`tool kind is ${m.kinds.join(" or ")}`);
   if (m.commandPattern) parts.push(`command matches /${m.commandPattern}/`);
   if (m.titlePattern) parts.push(`title matches /${m.titlePattern}/`);
   if (m.scratchOnly) parts.push("everything it changes or deletes is in /tmp");
   if (m.workingCopyOnly) parts.push("its deletes are plain paths in the agent's own working copy (or /tmp)");
+  if (m.safeOnly) parts.push("it is not a destructive or pushing command");
   return parts.join(" and ");
 }
 
@@ -42,6 +44,11 @@ function RuleRows({ rules, onMove, onChange, onDelete }: { rules: Rule[]; onMove
             <p className="mono muted" style={{ fontSize: 12.5, overflowWrap: "anywhere" }}>
               When {describeMatch(r.match)}
             </p>
+            {r.createdBy && (
+              <p className="muted" style={{ fontSize: 12.5 }}>
+                Made by {r.createdBy}{r.createdAt ? ` on ${new Date(r.createdAt).toLocaleString()}` : ""}{r.sourceDecisionId ? " from a decision card (see Decisions, answered)" : ""}. Remove it with the button on this row.
+              </p>
+            )}
           </div>
           <select aria-label={`Outcome of ${r.name}`} value={r.outcome} onChange={(e) => onChange(r, e.target.value as Outcome)}>
             {OUTCOMES.map((o) => (

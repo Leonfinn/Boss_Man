@@ -749,6 +749,10 @@ export const policyRules = pgTable("policy_rules", {
   condition: jsonb("condition").notNull().default({}),
   outcome: policyOutcome("outcome").notNull(),
   position: integer("position").notNull().default(0),
+  /** Who made the rule, when and from which card (BOS-294). Null on rules made before these were recorded. */
+  createdAt: timestamp("created_at", { withTimezone: true }),
+  createdBy: text("created_by"),
+  sourceDecisionId: uuid("source_decision_id").references(() => decisions.id, { onDelete: "set null" }),
 });
 
 // ---------- Loop guards (R49, R50) ----------

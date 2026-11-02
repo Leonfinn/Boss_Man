@@ -190,8 +190,8 @@ describe("permission requests through the policy engine", () => {
     const rules = await ctx.db.select().from(policyRules).where(eq(policyRules.companyId, ctx.homelab.company.id)).orderBy(policyRules.position);
     expect(rules).toHaveLength(2);
     expect(rules[0]).toMatchObject({ name: "No crawl4ai JS", position: 0 });
-    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true } });
-    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool \(from a request on \d+ \w+\)$/);
+    expect(rules[1]).toMatchObject({ outcome: "allow", position: 1, condition: { titlePattern: "^mcp__crawl4ai__md$", safeOnly: true, agentIds: [ctx.homelab.ceo.id] } });
+    expect(rules[1]!.name).toMatch(/^Allow crawl4ai's md tool for CEO \(from a request on \d+ \w+\)$/);
 
     ask("r2", "mcp__crawl4ai__md");
     await waitFor(() => commands.length, (n) => n === 2);
