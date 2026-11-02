@@ -6,6 +6,16 @@ set -euo pipefail
 self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 cd "$(dirname "$self")/.."
 
+# Only the merge gate runs the full check. Inside an agent session (Claude Code sets CLAUDECODE; the runner's own
+# sessions may set BOSSMAN_AGENT_SESSION) a hand run is refused, because it fills the one-slot queue for hours.
+# The merge gate (BOSSMAN_MERGE_CHECK, which also runs with a bare environment) and humans are unaffected;
+# CHECK_ALL_FORCE=1 overrides, for when the CEO asked for a full run.
+if [ -z "${BOSSMAN_CHECK_CHILD:-}" ] && [ -z "${BOSSMAN_MERGE_CHECK:-}" ] && [ -z "${CHECK_ALL_FORCE:-}" ] \
+  && { [ -n "${CLAUDECODE:-}" ] || [ -n "${BOSSMAN_AGENT_SESSION:-}" ]; }; then
+  echo "Full check runs at the merge gate. Run scripts/check-quick.sh for your branch instead, or set CHECK_ALL_FORCE=1 if the CEO asked you to." >&2
+  exit 2
+fi
+
 # Where finished runs are kept (result + full log), keyed by the git tree of the checked-out files, so a check that
 # already passed on identical content is not run again. /var/tmp survives between runs; "off" switches the store off.
 STORE="${BOSSMAN_CHECK_STORE:-/var/tmp/bossman-check-results}"
