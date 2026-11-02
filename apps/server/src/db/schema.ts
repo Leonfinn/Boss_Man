@@ -287,6 +287,8 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
+    checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
     pullRequestUrl: text("pull_request_url"),
     pullRequestNumber: integer("pull_request_number"),

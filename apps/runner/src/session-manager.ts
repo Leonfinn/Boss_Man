@@ -350,7 +350,7 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets),
+                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),
