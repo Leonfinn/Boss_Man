@@ -53,7 +53,11 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     for (const d of stalledAlerts) await record(db, { companyId: d.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at });
     await db
       .update(decisions)
-      .set({ status: "withdrawn", dedupeKey: null })
+      .set({
+        status: "withdrawn",
+        dedupeKey: null,
+        context: sql`jsonb_set(${decisions.context}, '{withdrawn}', ${JSON.stringify({ by: "system", note: "The agent finished before this was answered, so there is nothing left to approve. No action needed.", at: at.toISOString() })}::jsonb, true)`,
+      })
       .where(and(eq(decisions.status, "open"), eq(decisions.kind, "permission"), sql`${decisions.context}->>'runId' = ${runId}`));
     if (ended && ended.purpose !== "chat") await record(db, { companyId: ended.companyId, agentId: ended.agentId, ticketId: ended.ticketId, kind: "run_ended", summary: `Run ended: ${ended.outcome ?? "ended"}`, at });
     return ended;

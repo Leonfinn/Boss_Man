@@ -8,6 +8,14 @@ export class ApiError extends Error {
   }
 }
 
+/** What a failed request means in plain words, for when the server sent no message of its own. */
+export function plainStatus(status: number, error?: unknown): string {
+  if (status === 502 || status === 503 || status === 504) return "Boss Man is restarting or switching versions for a moment, so your click was not received. Nothing was changed; try again in a few seconds.";
+  if (status === 404 && error === "not_open") return "This card was already closed, so there is nothing more to do here.";
+  if (status === 401) return "You have been signed out. Sign in again, then repeat that.";
+  return typeof error === "string" && error ? error : `Something went wrong (code ${status}). Nothing needs doing from you; try again, and tell the CEO if it keeps happening.`;
+}
+
 export async function api<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   let res: Response;
   try {
@@ -23,11 +31,16 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     throw new ApiError(0, "Can't reach the Boss Man server.");
   }
   const text = await res.text();
-  const data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  let data: Record<string, unknown> = {};
+  try {
+    data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    // A proxy's own error page, not JSON: fall through to the plain message for the status.
+  }
   if (!res.ok) {
     // A rejected secret lists what's wrong with it; other errors carry a message.
     const problems = Array.isArray(data.problems) ? (data.problems as string[]).join(" ") : null;
-    throw new ApiError(res.status, problems ?? String(data.message ?? data.error ?? `HTTP ${res.status}`));
+    throw new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)));
   }
   return data as T;
 }

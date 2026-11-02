@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, runners, wakes } from "../src/db/schema.js";
+import { decisions, runners, runs, wakes } from "../src/db/schema.js";
 import { issueRunToken } from "../src/mcp.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -107,5 +107,34 @@ describe("undelivered permission verdicts (R22)", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(c.sent.at(-1)).toEqual({ type: "permission.decide", runId: c.runId, requestId: "req-1", verdict: "allow" });
     expect(((await c.db.select().from(decisions).where(eq(decisions.id, perm!.id)))[0]!.context as { delivered?: boolean }).delivered).toBe(true);
+  });
+});
+
+describe("permission cards whose run has ended (BOS-342)", () => {
+  const request = (runId: string) => ({ type: "run.permission_request" as const, runId, requestId: "req-1", title: "git push", kind: "execute" as const, rawInput: { command: "git push origin main" }, optionKinds: ["allow_once", "reject_once"] });
+
+  it("takes an open card off the owner's queue by itself when its run ends, with a plain note", async () => {
+    const c = (ctx = await setup());
+    await c.emit(request(c.runId));
+    const [perm] = await c.db.select().from(decisions).where(eq(decisions.kind, "permission"));
+    expect(perm!.status).toBe("open");
+    await c.emit({ type: "run.ended", runId: c.runId, stopReason: "end_turn", error: null });
+    await new Promise((r) => setTimeout(r, 50));
+    const [after] = await c.db.select().from(decisions).where(eq(decisions.id, perm!.id));
+    expect(after!.status, JSON.stringify(after!.context)).toBe("withdrawn");
+    expect((after!.context as { withdrawn?: { note: string } }).withdrawn?.note).toMatch(/agent finished/);
+  });
+
+  it("answering such a card never errors and doesn't raise an 'offline runner' alarm", async () => {
+    const c = (ctx = await setup());
+    await c.emit(request(c.runId));
+    const [perm] = await c.db.select().from(decisions).where(eq(decisions.kind, "permission"));
+    // The run has ended in the database, but the card is still open (the end event was missed).
+    await c.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.id, c.runId));
+    c.offline();
+    const res = await c.req("POST", `/api/decisions/${perm!.id}/answer`, { answer: "Allow once" });
+    expect(res.statusCode).toBe(200);
+    expect((await c.db.select().from(decisions)).filter((d) => d.kind === "question")).toHaveLength(0);
+    expect(((await c.db.select().from(decisions).where(eq(decisions.id, perm!.id)))[0]!.context as { delivered?: unknown }).delivered).toBe("run_ended");
   });
 });
