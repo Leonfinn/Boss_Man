@@ -140,10 +140,10 @@ describe("scheduler", () => {
 
   it("caps an agent's runs with no ticket, but never the owner's own (R68)", async () => {
     ctx = await setup();
-    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: `d${i}` });
-    const seventh = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d6" });
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `d${i}` });
+    const seventh = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "d6" });
     expect(seventh).toMatchObject({ status: "dropped", statusReason: "more than 6 wakes with no ticket in an hour" });
-    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d7" });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "d7" });
     // The owner hears once, not for every dropped wake.
     const alerts = (await ctx.db.select().from(decisions)).filter((d) => /with no ticket/.test(d.question));
     expect(alerts).toHaveLength(1);
@@ -155,11 +155,23 @@ describe("scheduler", () => {
 
   it("never counts or drops the watchdog's sweep wake against the no-ticket limit", async () => {
     ctx = await setup();
-    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: `d${i}` });
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `d${i}` });
     expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "watchdog", note: "sweep" })).toMatchObject({ status: "queued" });
     // The sweeps don't use up the agent's other no-ticket wakes either.
-    const other = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d6" });
+    const other = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "d6" });
     expect(other).toMatchObject({ status: "dropped" });
+  });
+
+  it("never caps the CEO's 'decision' wakes (cards) at the no-ticket limit (BOS-272)", async () => {
+    ctx = await setup();
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `t${i}` });
+    // Past the ticketless cap, a card for the CEO (a permission request or an alert) still queues;
+    // on the old code it was dropped, so the card skipped the CEO and landed on the owner.
+    const card = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", priority: 3, note: "A decision is waiting for you." });
+    expect(card).toMatchObject({ status: "queued" });
+    // Card wakes don't use up the agent's other no-ticket wakes either way.
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "t6" })).toMatchObject({ status: "dropped" });
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", priority: 3, note: "Another card." })).toMatchObject({ status: "queued" });
   });
 
   it("defers when a pausing budget is exceeded, failing closed", async () => {

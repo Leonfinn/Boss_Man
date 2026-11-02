@@ -33,7 +33,7 @@ psql_db() { docker compose exec -T db psql -v ON_ERROR_STOP=1 -U bossman -d "$1"
 if ((FRESH)); then
   # Named outside bossman-*.sql.gz on purpose: deploy backups are pruned to the newest 14 by that name, and a test must not push one out.
   FILE="$BACKUP_DIR/restore-test-$(date +%F-%H%M%S).sql.gz"
-  docker compose exec -T db pg_dump -U bossman bossman | gzip >"$FILE.partial" || { rm -f "$FILE.partial"; die "The backup failed."; }
+  (umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$FILE.partial") || { rm -f "$FILE.partial"; die "The backup failed."; }
   mv "$FILE.partial" "$FILE"
 fi
 if [[ -z $FILE ]]; then

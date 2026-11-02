@@ -46,7 +46,9 @@ if [[ -e $CONF ]]; then
   source "$CONF"
 fi
 INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
-INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
+# Files that change how Boss Man runs or deploys. Build-only scripts (make-app-icons, check-*, test-*, lint-migrations, backups) are not on it (BOS-269);
+# docs/09-self-deploy.md lists the same files.
+INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
 NOT_INFRA='^deploy/penpot\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
@@ -112,7 +114,7 @@ finish() { # result message [backup]: record the outcome, tell the owner, stop
   exit 0
 }
 
-# The newest commit on main as the remote says it, read with the deploy key. Empty if unreachable.
+# The newest commit on main as the remote says it, read over whatever origin uses (https for a public repo, or an older install's deploy key). Empty if unreachable.
 remote_tip() { g ls-remote origin refs/heads/main 2>/dev/null | awk '$2 == "refs/heads/main" { print $1 }' || true; }
 
 # Tells the server what is waiting (when main is ahead of what runs), so it can raise the decision.
@@ -149,8 +151,13 @@ refresh_available() {
     if [[ $p =~ $INFRA && ! $p =~ $NOT_INFRA ]] && ((ni < 50)); then ilist+="${ilist:+, }$(jstr "$p")"; ni=$((ni + 1)); fi
     if [[ $p =~ $RUNNER_PATHS ]]; then runner=true; fi
   done <"$paths"
-  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s}' \
-    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" >"$f.tmp"
+  # What this install really looks like, so the owner's hand-apply steps never guess a folder (BOS-269).
+  local srcdir deployerdir bg=false colour=""
+  srcdir="$(cd "$REPO" 2>/dev/null && pwd)" || srcdir=""
+  deployerdir="$(cd "$D" 2>/dev/null && pwd)" || deployerdir=""
+  if bluegreen_enabled; then bg=true; colour="$(live_colour 2>/dev/null)" || colour=""; fi
+  printf '{"version": 1, "checkedAt": %s, "deployed": %s, "tip": %s, "commits": %s, "paths": [%s], "infraPaths": [%s], "runnerChanged": %s, "srcDir": %s, "deployerDir": %s, "bluegreen": %s, "liveColour": %s}' \
+    "$(jstr "$(now)")" "$(jstr "$head")" "$(jstr "$tip")" "$clist" "$plist" "$ilist" "$runner" "$(jstr "$srcdir")" "$(jstr "$deployerdir")" "$bg" "$(jstr "$colour")" >"$f.tmp"
   chmod 644 "$f.tmp"; mv "$f.tmp" "$f"
 }
 
@@ -244,7 +251,7 @@ backup_database() {
   local dir="${BOSSMAN_BACKUP_DIR:-$D/..}" old f
   mkdir -p "$dir"
   BG_BACKUP="$dir/bossman-$(date +%F-%H%M).sql.gz"
-  compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial" || { rm -f "$BG_BACKUP.partial"; return 1; }
+  (umask 077; compose exec -T db pg_dump -U bossman bossman | gzip >"$BG_BACKUP.partial") || { rm -f "$BG_BACKUP.partial"; return 1; }
   { [[ -s $BG_BACKUP.partial ]] && gzip -t "$BG_BACKUP.partial"; } || { rm -f "$BG_BACKUP.partial"; return 1; }
   mv "$BG_BACKUP.partial" "$BG_BACKUP"
   # Same retention as deploy.sh: only bossman-*.sql.gz, newest 14 kept.
