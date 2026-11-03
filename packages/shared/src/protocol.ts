@@ -154,7 +154,7 @@ export const RunnerCommand = z.discriminatedUnion("type", [
   /** Whether the ticket's new migration numbers are free (BOS-219), against the default branch and these other branches. */
   z.object({ type: z.literal("workspace.migrations"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), others: z.array(z.string().min(1)).max(50) }),
   /** Merges the ticket's branch into a named target (R46). */
-  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1) }),
+  z.object({ type: z.literal("workspace.merge"), requestId: z.string(), projectId: Uuid, ticketId: Uuid, target: z.string().min(1), message: z.string().min(1), checks: z.array(z.string().min(1)).max(5).optional() }),
   /** Propose merge checks from the repo's files on its default branch, and say which tools the runner has (R57). */
   z.object({ type: z.literal("workspace.detect"), requestId: z.string(), projectId: Uuid, repoUrl: z.string().min(1), baseRef: z.string().min(1) }),
   /** Push the ticket's branch for a pull request into target, after the same checks as a merge (R59). */
@@ -268,9 +268,14 @@ export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools:
 
 /** The outcome of merging a ticket's branch (R46). */
 export type MergeResult =
-  | { status: "merged" | "already_merged"; commit: string }
+  | { status: "merged"; commit: string; checked?: { sha: string; tree: string; ms: number } }
+  | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
-  | { status: "uncommitted"; files: string[] };
+  | { status: "uncommitted"; files: string[] }
+  /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
+  | { status: "check_failed"; command: string; result: VerifyResult }
+  /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
+  | { status: "main_moved" };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
 export type CarriedTicket = { ticketId: string; branch: string };
