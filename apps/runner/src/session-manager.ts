@@ -272,7 +272,10 @@ export class SessionManager {
         return;
       }
       case "permission.decide":
-        this.runs.get(command.runId)?.pendingPermissions.get(command.requestId)?.(command.verdict);
+        // A verdict for a request that is no longer waiting (the run was cancelled or ended, or the runner restarted) reaches nothing: say so, so a card that was answered but never ran can be traced.
+        const settle = this.runs.get(command.runId)?.pendingPermissions.get(command.requestId);
+        if (settle) settle(command.verdict);
+        else this.opts.emit({ type: "runner.log", level: "warn", message: `A "${command.verdict}" verdict for permission request ${command.requestId} of run ${command.runId} arrived, but nothing is waiting for it.` });
         return;
       case "workspace.release":
         void this.opts.workspaces
@@ -633,6 +636,7 @@ export class SessionManager {
         kind: req.toolCall.kind ?? null,
         rawInput,
         optionKinds: req.options.map((o) => o.kind),
+        ...(id ? { toolCallId: id.slice(0, 200) } : {}),
         ...(detail ? { detail } : {}),
       });
       return verdict;
