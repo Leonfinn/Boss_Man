@@ -1473,6 +1473,10 @@ function StandingRules({ company, onChanged }: { company: Company; onChanged: ()
           </div>
         </>
       )}
+      {act.view}
+    </Section>
+  );
+}
 
 /** How the rules judge advises on permission cards (BOS-337). It only picks the suggested button; it never answers a card. */
 function PermissionJudgeSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
