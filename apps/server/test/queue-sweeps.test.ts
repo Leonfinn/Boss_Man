@@ -260,6 +260,21 @@ describe("stale blockers (R21)", () => {
     expect(await ctx.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: ctx.worker.id, ticketId: tls.id, reason: "unblocked" })]);
   });
 
+  it("withdraws the row once the blocked ticket is done, and flags only the live pairs (BOS-409)", async () => {
+    ctx = await setup();
+    const a = await blockedPair(ctx.ceo.id);
+    const other = await ctx.ticket({ title: "Get certs", assigneeAgentId: ctx.ceo.id });
+    const waiting = await ctx.ticket({ title: "Ship site", state: "blocked", assigneeAgentId: ctx.worker.id });
+    await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: other.id });
+    ctx.advance(25 * HOUR);
+    expect((await ctx.sweep()).staleBlockers).toEqual({ open: 2, raised: 2 });
+    await ctx.req("PATCH", `/api/tickets/${a.tls.id}`, { state: "done" });
+    expect((await ctx.sweep()).staleBlockers).toEqual({ open: 1, raised: 0 });
+    const open = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "stale_blocker"), eq(decisions.status, "open")));
+    expect(open).toHaveLength(1);
+    expect(open[0]!.question).toContain("Get certs");
+  });
+
   it("withdraws the row once the blocker is done", async () => {
     ctx = await setup();
     const { domain } = await blockedPair(ctx.ceo.id);
