@@ -34,6 +34,26 @@ describe("links to wiki pages from a ticket", () => {
     expect(screen.getByText(/then the rest\./)).toBeTruthy();
   });
 
+  it("keeps the page name when a full wiki link is followed by a space or a new line (BOS-356)", () => {
+    const id = "8c7f803d-8266-4cae-b17b-79e289142018";
+    const href = `#/wiki/${id}/my-page`;
+    const link = (text: string) => {
+      const { unmount } = render(<p>{linked(text, id)}</p>);
+      expect(screen.getByRole("link").getAttribute("href")).toBe(href);
+      unmount();
+    };
+    link(`See ${href} and then some more.`);
+    link(`See ${href}\nnext line`);
+    link(`${href})`);
+  });
+
+  it("leaves an empty [x]() as plain text, with no link to an empty address (BOS-356)", () => {
+    render(<p>{linked("See [x]() here and [task](#/tickets/8c7f803d-8266-4cae-b17b-79e289142018).", "c1")}</p>);
+    expect(screen.getByText(/\[x\]\(\)/)).toBeTruthy();
+    expect(screen.queryAllByRole("link")).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "task" }).getAttribute("href")).toBe("#/tickets/8c7f803d-8266-4cae-b17b-79e289142018");
+  });
+
   it("takes this company's id in front of a short page name, and leaves another company's unlinked (BOS-356)", () => {
     const mine = "c1";
     const theirs = "8c7f803d-8266-4cae-b17b-79e289142018";

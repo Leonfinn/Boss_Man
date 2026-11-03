@@ -24,7 +24,7 @@ export function linked(text: string, wikiCompanyId?: string): ReactNode {
   let at = 0;
   // [[slug]] and [[slug#Section]] link to the company's wiki page when the company is known. A full
   // #/wiki/<company>/<slug> address keeps its page name too, since the wiki tool writes links that way.
-  for (const m of text.matchAll(/(!?)\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)|\[([^\]]+)\]\(((?:#[\/][a-z]+\/[0-9a-f-]{36}|#[\/]wiki\/[0-9a-f-]{36}\/[^\s)\]]*)?)\)|`?(#[\/][a-z]+(?:\/[0-9a-f-]{36})?(?:\/[^\s`]*?(?=[.,;:!?)\]]|$))?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
+  for (const m of text.matchAll(/(!?)\[([^\]]*)\]\((\/api\/ticket-images\/[0-9a-f-]{36})\)|\[([^\]]+)\]\(((?:#[\/][a-z]+\/[0-9a-f-]{36}|#[\/]wiki\/[0-9a-f-]{36}\/[^\s)\]]*))\)|`?(#[\/][a-z]+(?:\/[0-9a-f-]{36})?(?:\/[^\s`]*?(?=[.,;:!?)\s\]]|$))?)`?|\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g)) {
     // A pasted image shows as a thumbnail that opens full size.
     if (m[3]) {
       out.push(
