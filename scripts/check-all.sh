@@ -129,7 +129,7 @@ if command -v flock >/dev/null; then
   { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
   trap 'rm -f "$qfile"' EXIT
   # Killed while waiting: leave the queue and stop the checks' children, so the place and the slot are free for the next one.
-  trap 'rm -f "$qfile"; pkill -TERM -P $ 2>/dev/null || true; exit 143' TERM INT HUP
+  trap 'rm -f "$qfile"; pkill -TERM -P $$ 2>/dev/null || true; exit 143' TERM INT HUP
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
