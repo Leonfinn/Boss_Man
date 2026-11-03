@@ -491,6 +491,26 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     expect(recommendedVerdict(exec("find /tmp/x.y -name '*.log' -delete"))).toBe("allow");
   });
 
+  it("does not suggest Allow when an option comes before a package runner's subcommand (BOS-165 security round 4)", () => {
+    // Security review: the round-3 check read the literal second word, so any leading option got past it.
+    for (const c of [
+      "rm -rf /tmp/a && pnpm --silent dlx rimraf /home/node",
+      "rm -rf /tmp/a && pnpm -C /home/node exec rimraf .",
+      "rm -rf /tmp/a && npm --yes exec -- rimraf /home/node",
+      "rm -rf /tmp/a && yarn -s dlx rimraf /home/node",
+      "rm -rf /tmp/a && pnpm --filter x --silent exec -- rm -rf /home/node",
+      "rm -rf /tmp/a && npm --prefix=/home/node exec -- rimraf .",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    // An ordinary project script, options or not, still reads as Allow so the fix doesn't over-correct.
+    for (const c of [
+      "rm -rf /tmp/a && pnpm install",
+      "rm -rf /tmp/a && pnpm run build",
+      "rm -rf /tmp/a && pnpm --silent run build",
+      "rm -rf /tmp/a && pnpm -C packages/shared test",
+      "rm -rf /tmp/a && npm --prefix web ci",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+  });
+
   it("gives no /tmp note to a command that sets a variable (security round 11)", () => {
     for (const c of [
       "export PATH=/tmp/x && ls /tmp",

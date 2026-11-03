@@ -43,8 +43,17 @@ const GIT_NETWORK = new Set(["fetch", "pull", "clone", "ls-remote", "submodule"]
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 const PKG = new Set(["npm", "pnpm", "yarn"]);
 const PKG_INSTALL = new Set(["install", "i", "add", "ci", "remove", "uninstall"]);
-/** Package-manager subcommands that run any program on any folder, so they are not the project's own scripts. */
-const PKG_RUNNERS = new Set(["dlx", "exec", "x", "create", "init", "link", "unlink", "publish", "config", "set", "cache", "store"]);
+/** Package-manager options that take the next word as their value, so it isn't the subcommand. */
+const PKG_VALUE_OPTS = /^(?:-C|--dir|--prefix|--cwd|--filter|--workspace|-w|--registry|--reporter|--silent|-s|--loglevel)$/;
+/**
+ * Package-manager subcommands that are the project's own work (an install, its scripts and the
+ * project's build/test/lint), so their writes belong to the project and never aim at a named
+ * target. An allow-list, not a denylist (BOS-165 security round 4): anything else — dlx, exec,
+ * create, publish, an unknown subcommand — runs a program on any folder, so it is not exempt.
+ * Found by skipping leading options and their values, so `pnpm --silent dlx …` is not mistaken
+ * for a run of the `--silent` "script".
+ */
+const PKG_SCRIPTS = new Set(["install", "i", "add", "ci", "remove", "uninstall", "run", "run-script", "build", "test", "t", "typecheck", "lint", "start"]);
 
 /** Paths the owner will recognise, in friendly words. */
 const FRIENDLY: Array<[RegExp, string]> = [
@@ -466,20 +475,43 @@ export function tempCleanup(command: string): boolean {
 }
 
 /**
+ * The subcommand a package-manager segment runs (BOS-165 security round 4): the first word after
+ * the program that isn't an option or an option's value, found the way the git branch finds its
+ * subcommand. `pnpm --silent dlx rimraf …` reads "dlx", not "--silent", so a leading option can
+ * no longer smuggle a program runner past PKG_SCRIPTS. Empty when there is none.
+ */
+function pkgSubcommand(seg: string): string {
+  const words = seg.trim().split(/\s+/).slice(1);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w.startsWith("-")) {
+      // A short cluster (-sC path) or a --opt=value carries its own value; otherwise an option
+      // that takes the next word (pnpm -C /home/node exec) swallows it.
+      if (!w.includes("=") && PKG_VALUE_OPTS.test(w)) i++;
+      continue;
+    }
+    return w;
+  }
+  return "";
+}
+
+/**
  * True when the command could change or delete something whose target isn't an absolute path
  * under /tmp (BOS-165). recommendedVerdict relaxes Deny for a vouched /tmp delete; this is the
  * other half of that relax, so it never whitewashes the rest of the command (cp -t /home, a
  * redirect to /home/word, an option that carries the real target). Every segment must be one
  * scratchSafe vouches for, and a change's or delete's every target — options' values included,
- * hence the safe check — must normalize to under /tmp. An install is exempt: its writes are the
- * project's node_modules, not a named target it could aim elsewhere.
+ * hence the safe check — must normalize to under /tmp. An install or a package-manager script is
+ * exempt: its writes are the project's node_modules, not a named target it could aim elsewhere.
  */
 export function writesBeyondTmp(command: string): boolean {
   for (const seg of segments(command)) {
     const p = explainSegment(seg);
-    // An install or a package-manager run (pnpm build) is exempt: its writes are the project's
-    // own folders (node_modules, dist), not a named target it could aim at /home.
-    if (p.install || (PKG.has(p.program ?? "") && !PKG_RUNNERS.has(seg.trim().split(/\s+/)[1] ?? ""))) continue;
+    // An install or a project script (pnpm build, pnpm --silent run test) is exempt: its writes
+    // are the project's own folders (node_modules, dist), not a named target it could aim at
+    // /home. Anything else a package manager is asked to run (dlx, exec, create) is exempt only
+    // when its subcommand is on the allow-list, found past any leading options (round 4).
+    if (p.install || (PKG.has(p.program ?? "") && PKG_SCRIPTS.has(pkgSubcommand(seg)))) continue;
     if (!p.safe) return true;
     const targets = [...p.targets, ...(p.writes ?? [])];
     if ((p.effect === "changes" || p.effect === "deletes") && !targets.length) return true;
