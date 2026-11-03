@@ -1,4 +1,6 @@
 // The browser talks to the server's JSON API on the same origin, with the session cookie.
+import { sharedGet } from "./shared-get";
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -16,7 +18,18 @@ export function plainStatus(status: number, error?: unknown): string {
   return typeof error === "string" && error ? error : `Something went wrong (code ${status}). Nothing needs doing from you; try again, and tell the CEO if it keeps happening.`;
 }
 
+function readOnly(init: { method?: string; body?: unknown }) {
+  return (init.method ?? "GET") === "GET" && init.body === undefined;
+}
+
 export async function api<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
+  // Two hooks polling the same read share one request and its result (BOS-408).
+  if (readOnly(init)) return sharedGet(path, (signal) => apiOnce<T>(path, { ...init, signal }));
+  return apiOnce<T>(path, init);
+}
+
+/** One request, no sharing: what `api` sends for a write, or a path nothing else should join. */
+export async function apiOnce<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   let res: Response;
   try {
     res = await fetch(path, {

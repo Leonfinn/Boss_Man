@@ -7,7 +7,7 @@ const exec = (command: string) => ({ title: command, kind: "execute", rawInput: 
 describe("the /tmp-only switch", () => {
   it("allows commands that only work in /tmp when on, and still asks when off", () => {
     for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && cp -r src /tmp/a", "find /tmp/x -delete"]) {
-      expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toEqual({ outcome: "allow", rule: SCRATCH_RULE.name });
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toMatchObject({ outcome: "allow", rule: SCRATCH_RULE.name });
     }
     expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("ceo");
     expect(evaluatePermission(exec("rm -rf /tmp/fp2/x"), []).outcome).toBe("owner");
@@ -57,13 +57,13 @@ describe("evaluatePermission defaults", () => {
 
   it("treats a shell command asked about as kind other like any shell command", () => {
     const other = (command: string) => ({ title: command, kind: "other", rawInput: { command } });
-    expect(evaluatePermission(other("cd /tmp/opencode/bm && git grep -n brief"), [])).toEqual({ outcome: "allow", rule: "Other shell commands" });
+    expect(evaluatePermission(other("cd /tmp/opencode/bm && git grep -n brief"), [])).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
     expect(evaluatePermission(other("git push origin main"), []).outcome).toBe("owner");
     expect(evaluatePermission({ title: "mcp__scrapling__get", kind: "other", rawInput: { url: "https://example.com" } }, []).outcome).toBe("owner");
   });
 
   it("falls through to the owner for unknown kinds", () => {
-    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toEqual({ outcome: "owner", rule: "No rule matched" });
+    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "owner", rule: "No rule matched" });
   });
 
   it("company rules win over defaults, first match first", () => {
@@ -71,7 +71,7 @@ describe("evaluatePermission defaults", () => {
       { name: "Homelab may restart containers", match: { commandPattern: String.raw`^docker\s+restart\b` }, outcome: "allow" as const },
       { name: "No curl", match: { commandPattern: String.raw`\bcurl\b` }, outcome: "deny" as const },
     ];
-    expect(evaluatePermission(exec("docker restart web"), rules)).toEqual({ outcome: "allow", rule: "Homelab may restart containers" });
+    expect(evaluatePermission(exec("docker restart web"), rules)).toMatchObject({ outcome: "allow", rule: "Homelab may restart containers" });
     expect(evaluatePermission(exec("curl https://example.com"), rules).outcome).toBe("deny");
   });
 
@@ -141,7 +141,7 @@ describe("temp-file cleanup (BOS-111)", () => {
       // A `;` between chains does not break it: each write stays in the && chain of its own delete.
       "rm -rf /tmp/a && mkdir /tmp/a; rm -rf /tmp/b && mkdir /tmp/b",
     ]) {
-      expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+      expect(route(c), c).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
     }
   });
@@ -284,7 +284,7 @@ describe("temp-file cleanup (BOS-111)", () => {
   });
 
   it("lets the company's own rules win", () => {
-    expect(route("rm -rf /tmp/a")).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(route("rm -rf /tmp/a")).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
     const mine = [{ name: "Owner sees every rm", match: { commandPattern: "\\brm\\b" }, outcome: "owner" as const }];
     expect(evaluatePermission(exec("rm -rf /tmp/a"), mine).outcome).toBe("owner");
   });
@@ -328,7 +328,7 @@ describe("working-copy cleanup (BOS-120)", () => {
       // A /tmp entry deleted on its own earlier in the && chain may still be written to.
       ["rm -rf /tmp/x && rm -rf dist && mkdir /tmp/x", ["dist"], ["/tmp/x"]],
     ] as const) {
-      expect(route(c), c).toEqual({ outcome: "ceo", rule: WORKING_COPY_RULE });
+      expect(route(c), c).toMatchObject({ outcome: "ceo", rule: WORKING_COPY_RULE });
       expect(cleanupScope(c), c).toEqual({ workingCopy: files, tmp });
       // Not temp cleanup: the server checks the run has a checkout before it recommends Allow.
       expect(tempCleanup(c), c).toBe(false);
@@ -399,20 +399,20 @@ describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
       "rm -rf /tmp/a && git worktree remove --force /tmp/lnk",
     ]) {
       expect(tempCleanup(c), c).toBe(false);
-      expect(route(c), c).toEqual(OWNER);
+      expect(route(c), c).toMatchObject(OWNER);
     }
   });
 
   it("still sends the ticket's example to the CEO with Allow, and the unprovable ones to the owner with Deny", () => {
     const example = "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
     expect(tempCleanup(example)).toBe(true);
-    expect(route(example)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(route(example)).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
     expect(recommendedVerdict(exec(example))).toBe("allow");
     for (const c of ["rm -rf /tmp/../home", "rm -rf /tmp/$X", "rm -rf /tmp /home", "rm -rf /tmp/a /home/node/x"]) {
-      expect(route(c), c).toEqual(OWNER);
+      expect(route(c), c).toMatchObject(OWNER);
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
     }
-    for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(route(c), c).toEqual(OWNER);
+    for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(route(c), c).toMatchObject(OWNER);
   });
 
   // Found in the BOS-126 run: a glob inside /tmp was recommended Allow, because the command counted as /tmp-only work.
@@ -425,7 +425,7 @@ describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
   // "rm /tmp/a -rf" is a plain /tmp cleanup; routing it to the owner is a deliberately conservative side effect of the widened pattern.
   it("pins the widened destructive pattern: flags after the file, and find -delete, go to the owner with Deny", () => {
     for (const c of ["rm file -rf", "rm a.txt -rf", "rm /tmp/a -rf", "find . -name x -delete", "find /tmp -name x -delete"]) {
-      expect(route(c), c).toEqual(OWNER);
+      expect(route(c), c).toMatchObject(OWNER);
       expect(tempCleanup(c), c).toBe(false);
     }
     for (const c of ["rm file -rf", "find . -name x -delete"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
@@ -545,7 +545,7 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
       "rm -rf /tmp/a && cd /tmp/a && pnpm install",
       "rm -rf /tmp/a && cd /tmp/a && pnpm install > /tmp/a.log 2>&1",
     ]) {
-      expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+      expect(route(c), c).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
     }
     expect(explainCommand(own).scratch).toBeUndefined();
@@ -587,7 +587,7 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
   it("pins the route of a command whose only delete is a /tmp entry (finding 2)", () => {
     // Checked out into the same /tmp entry first, the install log is a plain temp cleanup: CEO first, Allow.
     const c = "rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && pnpm install > /tmp/a.log 2>&1";
-    expect(route(c)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(route(c)).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
     expect(recommendedVerdict(exec(c))).toBe("allow");
     // Known limit: an install outside the checkout still goes to the owner. It must stay off the CEO route either way.
     const bare = "rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1";
@@ -622,7 +622,7 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
 
   it("a catch-all company rule that routes to the CEO doesn't catch Boss Man's own tools", () => {
     for (const t of ["mcp__bossman__ticket_reply", "mcp__bossman__decisions", "mcp__bossman__set_ticket_state", "mcp__bossman__wiki"]) {
-      expect(evaluatePermission(tool(t), toCeo), t).toEqual({ outcome: "allow", rule: "Boss Man's own tools" });
+      expect(evaluatePermission(tool(t), toCeo), t).toMatchObject({ outcome: "allow", rule: "Boss Man's own tools" });
     }
   });
 
@@ -633,7 +633,7 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
 
   it("a company rule can still deny a Boss Man tool", () => {
     const deny = [{ name: "No wiki writes", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "deny" as const }];
-    expect(evaluatePermission(tool("mcp__bossman__wiki"), deny)).toEqual({ outcome: "deny", rule: "No wiki writes" });
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), deny)).toMatchObject({ outcome: "deny", rule: "No wiki writes" });
   });
 
   it("a command titled like a Boss Man tool is still checked as a command (security review)", () => {
@@ -659,7 +659,7 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
 
   it("a company allow rule that matches a Boss Man tool is honoured", () => {
     const allow = [{ name: "Wiki is fine", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "allow" as const }, ...toCeo];
-    expect(evaluatePermission(tool("mcp__bossman__wiki"), allow)).toEqual({ outcome: "allow", rule: "Wiki is fine" });
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), allow)).toMatchObject({ outcome: "allow", rule: "Wiki is fine" });
   });
 });
 
@@ -717,7 +717,10 @@ describe("the ordered permission table (BOS-307)", () => {
   });
 
   it("the test screen and the live path give the same answer", () => {
-    for (const [, info] of cases) expect(evaluatePermission(info, catchAll("ceo"))).toEqual({ outcome: "allow", rule: decidePermission(info, catchAll("ceo")).rule });
+    for (const [, info] of cases) {
+      const d = decidePermission(info, catchAll("ceo"));
+      expect(evaluatePermission(info, catchAll("ceo"))).toEqual({ outcome: d.outcome, rule: d.rule, position: d.row });
+    }
   });
 
   it("row 5 vs row 7: the owner's order between an allow and an ask rule is kept (Freddy, Jane round 1)", () => {

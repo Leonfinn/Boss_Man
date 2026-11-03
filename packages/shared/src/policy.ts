@@ -233,9 +233,10 @@ export function shadowedRoutingRules<T extends PolicyRuleSpec>(rules: T[]): T[] 
   return rules.filter((r) => (r.outcome === "ceo" || r.outcome === "owner") && (!r.match.kinds?.length || r.match.kinds.some((k) => covered.has(k))));
 }
 
-export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string } {
-  const { outcome, rule } = decidePermission(info, rules);
-  return { outcome, rule };
+/** The table applied for callers that log the position or only read the outcome. `position` is the deciding row (0 when nothing in the table matched); it replaces the old list index BOS-306 logged. */
+export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string; position: number } {
+  const { outcome, rule, row } = decidePermission(info, rules);
+  return { outcome, rule, position: outcome === "owner" && row === 8 ? 0 : row };
 }
 
 /** Build output directly in the agent's working folder (node_modules, dist…): one component only, no trailing slash. rm -rf NAME/ follows a symlink as if NAME were its target (BOS-150), and a deeper path such as dist/x still follows a symlinked dist, so `rm -rf dist` is the only shape vouched for. */

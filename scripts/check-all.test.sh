@@ -122,6 +122,31 @@ if command -v flock >/dev/null; then
   [ -z "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "gave-up check left its queue entry"
   kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
 
+  # BOS-370: a merge check with no CHECK_ALL_LOCK_WAIT keeps waiting while the queue moves (the slot's holder changes)...
+  hold 1 7; h1=$!; hold 2 7; h2=$!; sleep 0.3
+  ( for i in 1 2 3 4 5 6; do echo "$i $i" >"$t/lock.holder.1"; sleep 1; done ) & mover=$!
+  out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_STUCK_AFTER=3) || fail "moving queue: expected to keep waiting and get in, got: $out"
+  grep -q "lock held" <<<"$out" || fail "moving queue: lock not acquired: $out"
+  wait "$h1" "$h2" "$mover"
+  # ...and gives up, saying so, only when the same holder sits there past the bound (a dead holder that never lets go).
+  hold 1 8; h1=$!; hold 2 8; h2=$!; sleep 0.3
+  echo "999999 1" >"$t/lock.holder.1"
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_STUCK_AFTER=2) || rc=$?
+  [ "$rc" = 75 ] || fail "stuck queue: expected exit 75, got $rc: $out"
+  grep -q "gave up waiting for the heavy-phase lock.*made no progress for 1 min" <<<"$out" || fail "stuck queue: not said plainly: $out"
+  kill "$h1" "$h2" 2>/dev/null || true; wait "$h1" "$h2" 2>/dev/null || true
+  rm -f "$t"/lock.holder.*
+
+  # A long wait does not cost a live check its place: an old entry is dropped only when nobody has touched it for 2 h.
+  mkdir -p "$t/lock.queue"
+  : >"$t/lock.queue/0-1000000000000000000-$$"                       # live pid, old name, fresh file: keeps its place
+  : >"$t/lock.queue/0-1000000000000000001-$$"; touch -d '3 hours ago' "$t/lock.queue/0-1000000000000000001-$$"  # untouched for 3 h: dropped
+  hold 1 4; h1=$!; sleep 0.3
+  rc=0; out=$(lock env BOSSMAN_MERGE_CHECK=1 CHECK_ALL_LOCK_WAIT=2) || rc=$?
+  grep -q "place 2 of 2" <<<"$out" || fail "old live entry: expected place 2 of 2 (one entry kept, one dropped): $out"
+  rm -f "$t"/lock.queue/*
+  kill "$h1" 2>/dev/null || true; wait "$h1" 2>/dev/null || true
+
   # A hand-run check does not give up on its own: it waits past the time that stops a merge check, then gets in.
   hold 1 4; h1=$!; hold 2 4; h2=$!; sleep 0.3
   out=$(lock env CHECK_ALL_LOCK_WAIT=0) || fail "hand-run wait: expected success, got: $out"
@@ -163,8 +188,8 @@ if command -v flock >/dev/null; then
   [ "$rc" = 75 ] || fail "default slots: expected one slot (exit 75), got $rc: $out"
   wait "$h1"
 
-  # A queue entry older than 2 h is dropped even when its pid is alive (a reused pid of a killed waiter).
-  mkdir -p "$t/lock.queue"; : >"$t/lock.queue/1-1000000000000000000-$$"
+  # A queue entry nobody has touched for 2 h is dropped even when its pid is alive (a reused pid of a killed waiter).
+  mkdir -p "$t/lock.queue"; : >"$t/lock.queue/1-1000000000000000000-$$"; touch -d "3 hours ago" "$t/lock.queue/1-1000000000000000000-$$"
   hold 1 2; h1=$!; sleep 0.3
   out=$(lock env) || fail "stale waiter: expected success, got: $out"
   grep -q "lock held" <<<"$out" || fail "stale waiter blocked the queue: $out"
