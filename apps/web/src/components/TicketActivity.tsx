@@ -3,7 +3,7 @@
 // happens; finished runs fold their steps away. The box at the bottom talks to the agent: into
 // its live run (after the current turn, or interrupting it), or as a new run.
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { systemAuthor } from "@boss-man/shared";
+import { systemAuthor, ticketRef } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
@@ -111,7 +111,9 @@ function reviewMarks(reviews: TicketReview[]) {
   return marks;
 }
 
-export function TicketActivity({ ticketId, companyId, assignee, assigneeId = null, agents = [], reviews = null }: { ticketId: string; companyId?: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null }) {
+export function TicketActivity({ ticketId, companyId, assignee, assigneeId = null, agents = [], reviews = null, ticketNumber = null, prefix = null }: { ticketId: string; companyId?: string; assignee: string | null; assigneeId?: string | null; agents?: Agent[]; reviews?: TicketReview[] | null; ticketNumber?: number | null; prefix?: string | null }) {
+  // Ticket references in the feed link to their ticket; this ticket is BOS-n (BOS-358).
+  const refCtx = { prefix, selfId: ticketId, tickets: ticketNumber ? [{ id: ticketId, number: ticketNumber, prefix }] : [] };
   const [busy, setBusy] = useState(false);
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
@@ -184,11 +186,11 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
                 const { summary, details } = m!.author === "agent" ? splitDetails(m!.text) : { summary: m!.text, details: null };
                 return (
                   <>
-                    <p>{linked(summary, companyId)}</p>
+                    <p>{linked(summary, companyId, refCtx)}</p>
                     {details && (
                       <details>
                         <summary>Details</summary>
-                        <p>{linked(details, companyId)}</p>
+                        <p>{linked(details, companyId, refCtx)}</p>
                       </details>
                     )}
                   </>
