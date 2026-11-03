@@ -62,7 +62,7 @@ const hhmm = (d: Date) => d.toISOString().slice(11, 16);
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -222,6 +222,8 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       // A finished ticket needs no alert about its run, and neither does one waiting on the owner.
       const eligible = !waiting.has(run.run.id) && !!run.runnerId && run.ticketState !== "done";
       if (!eligible || idle < limits.stallAfterMs) return { idle, stalled: false };
+      // A run that has said nothing yet, on a runner that has only just come back, is queued behind the others: wait.
+      if (!run.run.lastEventAt && opts.runnerSettling?.(run.runnerId!)) return { idle, stalled: false };
       if (!withBusyChecks) return { idle, stalled: true };
       const command = await busyInCommand(run.run.id);
       if (command) {
@@ -432,18 +434,24 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.mergeMissedAfterMs))));
+      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
     let raised = 0;
     for (const ticket of stuck) {
       const rows = await latestRows(db, ticket.id);
       if (!rows.length || evaluate(rows) !== "passed") continue;
+      // Quiet is measured from the last approval, and a merge that is alive holds the sweep back. Chat, chases
+      // and note refreshes on the ticket don't count: they used to postpone the retry for good (BOS-362).
+      if (opts.landingActive?.(ticket.id)) continue;
+      const approvedAt = Math.max(...rows.map((r) => (r.decidedAt ?? r.createdAt).getTime()));
+      if (approvedAt > t.getTime() - limits.mergeMissedAfterMs) continue;
       const [signoff] = await db
         .select({ id: decisions.id })
         .from(ticketDependencies)
         .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
         .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
       if (signoff) continue;
-      const [asked] = await db.select({ id: decisions.id }).from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${ticket.id}`));
+      // Only an open card counts: an answered or withdrawn one must not stop the sweep (BOS-362).
+      const [asked] = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticket.id}`), eq(decisions.status, "open")));
       if (asked) continue;
       if (opts.retryLand && !retried.has(ticket.id)) {
         retried.add(ticket.id);
