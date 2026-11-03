@@ -24,7 +24,9 @@ Words used here: `$BOSSMAN_HOME` is the folder that holds Boss Man on a host. In
 | Penpot (only if you use it) | `scripts/backup-penpot.sh`, restore its database and assets | Open Penpot, see the project list |
 | GitHub deploy access | The new host gets its **own new** deploy key; remove the old one at the end | `git ls-remote` works from the new host |
 
-**State of BOS-241 and BOS-242 when this was written (31 Oct 2026):** both are not merged yet. The folder names above are taken from their branches (`deploy/tailscale.yml`, `deploy/ntfy.yml`). If either has changed by the time you move, trust the merged `docs/20-https-tailscale.md` and `docs/06-install-truenas.md` section 10 over this table. If you do not run Tailscale or ntfy, skip those rows.
+**Update (3 Nov 2026):** BOS-241 (ntfy) and BOS-242 (Tailscale) have both merged. The folders are confirmed on main: `$BOSSMAN_DATA/tailscale` (`deploy/tailscale.yml`) and `$NTFY_DATA`, default `$BOSSMAN_DATA/ntfy` (`deploy/ntfy.yml`). If you do not run Tailscale or ntfy, skip those rows.
+
+**Two more checks for the new host:** (1) the live commit can be behind main, so check out the commit shown by Boss Man's server status, not just the main tip; (2) runners now filter network access per container (`docs/20-netguard.md`, which relies on Landlock), so confirm the new host's kernel supports what that page needs before you rely on it. On a Proxmox VM this is the guest kernel; how to check is on that page, and I have not verified it on your hardware.
 
 ## 2. Hard-coded host values that break on a new box
 
