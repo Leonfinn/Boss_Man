@@ -713,8 +713,8 @@ export class Workspaces {
       await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
       // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
       // say so, not report the branch clean (BOS-130).
-      const refs = async (ref: string) => {
-        const r = await this.gitCode(["rev-list", ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
+      const refs = async (ref: string, firstParent = false) => {
+        const r = await this.gitCode(["rev-list", ...(firstParent ? ["--first-parent"] : []), ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
         if (r.code !== 0) throw new Error(`git rev-list ${ref} failed (exit ${r.code}): ${r.stderr.slice(0, 500)}`);
         return r.stdout.split("\n").filter(Boolean);
       };
@@ -733,7 +733,9 @@ export class Workspaces {
           () => false,
         );
         if (!exists) continue;
-        if ((await refs(b.branch)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
+        // B is carried when this branch holds a commit on B's own first-parent line (B's work).
+        // Commits B has only by merging this ticket in are on this ticket's side, not B's line (BOS-365).
+        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
       }
       return { carried: found };
     });
