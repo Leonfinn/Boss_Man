@@ -283,6 +283,39 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     });
   });
 
+  describe("12. Rex's and Jane's round 6 (git allow-list, every $ word an unknown program)", () => {
+    denies([
+      "git $(echo config) core.fsmonitor /tmp/x",
+      "git `echo config` core.fsmonitor x",
+      "git config$IFS core.x y",
+      "git conf${x}ig a b",
+      "git ${X:-config} core.x y",
+      "c=config; git $c core.x y",
+      "git -c alias.x='!sh -c id' x",
+      "git commit -m x -c core.fsmonitor=y",
+      "git log $(git config core.fsmonitor /tmp/x)",
+      `git commit -m "$(git config core.fsmonitor /tmp/x)"`,
+      "git diff --output=/home/node/.bashrc",
+      "git log --output=/home/node/.bashrc",
+      "git remote set-url origin x",
+      `"$@" -c "open('/home/node/.bashrc','w')"`,
+      `set -- python3; $1 -c "open('/home/node/.bashrc','w')"`,
+      `\${py:-python3} -c "open('/home/node/.bashrc','w')"`,
+      `\${py[0]} -c "open('/home/node/.bashrc','w')"`,
+      `cat /tmp/a.py | \${py:-python3}`,
+      `echo $($py -c "open('/home/node/.bashrc','w')")`,
+      `export X=$($py -c "open('/home/node/.bashrc','w')")`,
+      "echo `$py -c \"open('/home/node/.bashrc','w')\"`",
+    ]);
+    allows([
+      "git status --short | head",
+      "git merge-tree --write-tree --name-only origin/main HEAD | tail -5",
+      "git log --oneline $(git merge-base HEAD origin/main)..HEAD",
+      `git commit -m 'update $HOME config (x)'`,
+      "f=apps/a.json; git diff --stat -- $f",
+    ]);
+  });
+
   describe("11. Jane's round 12", () => {
     denies([
       "g''it config core.fsmonitor /tmp/x",

@@ -93,22 +93,9 @@ export function judgePermission(question: string, command: string | null, ownFol
   // `git -C dir config`), the git config environment variables, and npm-family config/global installs.
   // Every `git config` write is refused (worktrees share the repo config, so core.fsmonitor / sshCommand / alias.x '!..'
   // would run in other agents' git); only the explicit read forms pass.
-  // Allow-list, linear, per command segment: if the segment mentions git and (quotes and backslashes removed) has a word
-  // `config`, it must be exactly `git config --get…` / `git config --list` with no other option. Over-denial is fine.
-  for (const segment of c.split(/[;&|\n]/)) {
-    // Delete every quote and backslash from the whole segment first, so `g''it con"fi"g` reads as `git config`.
-    const flat = segment.replace(/['"\\]/g, "");
-    // A `$`, `${`, `$(` or backtick next to git (or next to the text `config`) can build the subcommand at run time
-    // (`c=config; git $c`, `git ${X:-config}`, `git$IFS config`), so it is refused unless the subcommand is a literal safe one.
-    if (/\$|\x60/.test(flat) && (/^\s*(?:\w+=\S*\s+|sudo\s+|env\s+)*git\b|git[$\x60{]|config/.test(flat))
-      && !/^git (?:commit|log|add|status|diff|show|checkout|switch|branch|tag|stash|merge|rebase|rev-parse|grep|push|pull|fetch) /.test(segment.trim())) return result("outside");
-    if (!/(?:^|\s)config(?:\s|$)/.test(flat) || !(/git/.test(flat) || /\$|\x60/.test(flat))) continue;
-    const raw = segment.trim();
-    // A literal `git <subcommand>` that cannot set config (no -c before it): `config` is only text in its arguments.
-    if (/^git (?:commit|log|add|status|diff|show|checkout|switch|branch|tag|stash|merge|rebase|rev-parse|grep|push|pull|fetch) /.test(raw)) continue;
-    const pureRead = /^git config (?:--get(?:-all|-regexp|-urlmatch)? [\w.-]+|--list)$/.test(raw);
-    if (!pureRead) return result("outside");
-  }
+  // Allow-list: a command that starts with git passes only as one of a short list of literal subcommands (no `$`, backtick,
+  // `-c` or `--output` in its arguments) or the read-only config forms; everything else that starts with git is Deny.
+  if (gitDenied(c)) return result("outside");
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
   if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
   // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
@@ -210,6 +197,42 @@ export function judgePermission(question: string, command: string | null, ownFol
     }
   }
   return result("ok");
+}
+
+/** Literal git subcommands that cannot write config or run a program of the agent's choosing. */
+const GIT_SAFE = /^git (?:-C \S+ |--no-pager )*(?:commit|log|add|status|diff|show|checkout|switch|branch|tag|stash|merge|merge-base|merge-tree|rebase|rev-parse|rev-list|grep|push|pull|fetch|ls-tree|ls-files|ls-remote|check-ignore|worktree|archive|clone|rm|mv|reset|restore|cherry-pick|blame|describe|shortlog|cat-file|for-each-ref|show-ref|symbolic-ref|diff-tree|name-rev|reflog|clean|init|apply|am|remote -v)(?:\s|$)/;
+const GIT_READ = /^git (?:config (?:--get(?:-all|-regexp|-urlmatch)? [\w.-]+|--list)|--version)$/;
+const GIT_WRAPPER = /^(?:\w+=\S*|sudo|env|xargs|time|nohup|exec|command|nice|timeout|-\S*|\d+)$/;
+
+/** True when a command that starts with git (after ;, |, $(, (, or a backtick) is not on the allow-list. */
+function gitDenied(c: string): boolean {
+  // A variable set exactly once to a plain path-like value (not an option) is read as that value.
+  const plain = new Map<string, string>();
+  for (const m of c.matchAll(/(?:^|[;&|\s])(\w+)=([\w./@+][\w./@+-]*)(?=$|[\s;&|)])/g)) plain.set(m[1]!, plain.has(m[1]!) ? "$" : m[2]!);
+  for (const m of c.matchAll(/(?:^|[;&|\s])(\w+)\+?=/g)) if (plain.has(m[1]!) && (c.match(new RegExp(`(?:^|[;&|\\s])${m[1]!}\\+?=`, "g")) ?? []).length > 1) plain.set(m[1]!, "$");
+  const known = (x: string): string => x.replace(/\$\{?(\w+)\}?/g, (all, n: string) => { const v = plain.get(n); return v !== undefined && v !== "$" ? v : all; });
+  c = known(c);
+  for (const seg of c.split(/[;&|\n]/)) {
+    const parts = seg.split(/\$\(|[()\x60]/);
+    for (let i = 0; i < parts.length; i++) {
+      const raw = parts[i]!.trim();
+      // Quotes and backslashes removed, so `g''it` reads as `git`; the allow-list below still needs the raw text.
+      const words = raw.replace(/['"\\]/g, "").split(/\s+/).filter(Boolean);
+      let k = 0;
+      while (k < words.length && GIT_WRAPPER.test(words[k]!)) k++;
+      const head = words[k];
+      if (head === undefined) continue;
+      // An unknown program with arguments (`$g config x y`) could be git.
+      if (i === 0 && /^(?:\$[\w{(@*#?!$]|\x60)/.test(head) && words.length - k > 1 && (!head.includes("/") || /\/git$/.test(head))) return true;
+      if (!/^(?:[\w./-]*\/)?git(?:[$\x60{].*)?$/.test(head)) continue;
+      if (GIT_READ.test(raw)) continue;
+      // A substitution after the git word (`git log $(...)`) counts against it, except a plain `$(git <subcommand> ...)`, which is
+      // read as its own command; single-quoted text and escaped \$ or backticks are literal.
+      const text = (i === 0 ? seg : raw).replace(/'[^']*'/g, "''").replace(/\\[$`]/g, "").replace(/\$\(\s*git [^$`()]*\)/g, "");
+      if (!GIT_SAFE.test(raw) || /[$\x60]/.test(text) || /(?:^|\s)-c|--output|--config-env|--exec-path|--upload-pack|--receive-pack|\s--exec\b/.test(text)) return true;
+    }
+  }
+  return false;
 }
 
 /** Where a `cd` / `pushd` may go: /tmp, the own folder, or a sub-folder of where it already is. */
@@ -343,7 +366,9 @@ function toolTargets(c: string): string[] {
  * option, `-` or a heredoc anywhere in its segment, or it receives a pipe. The command word is found after assignment
  * prefixes and wrappers (exec, command, env, timeout, nice, xargs, then, do, `{`, `(`...). Linear: one pass over the words.
  */
-function variableCommandWord(c: string): boolean {
+function variableCommandWord(c: string, inner = false): boolean {
+  // Second pass: the text inside every `$(...)`, `(...)` and backtick is read as its own segment, whatever the outer command is.
+  if (!inner && variableCommandWord(c.replace(/\$\(|[()\x60]/g, ";"), true)) return true;
   const parts = c.split(/(\|&|&&|\|\||[;&|\n])/);
   const safeHead = /^(?:echo|printf|ls|cat|cd|test|\[|rm|cp|mv|mkdir|touch|for|read|export|local|unset|git|pnpm|npm)$/;
   for (let i = 0; i < parts.length; i += 2) {
@@ -355,7 +380,7 @@ function variableCommandWord(c: string): boolean {
     // A variable word anywhere in the segment is an unknown program unless the segment starts with a known command
     // that merely takes it as an argument.
     if (head === undefined || safeHead.test(head)) continue;
-    const at = words.findIndex((w, j) => j >= k && /^\$\{?[A-Za-z_]\w*\}?$|^\$\(|^\x60/.test(w));
+    const at = words.findIndex((w, j) => j >= k && /^\$\{?[A-Za-z_]\w*\}?$|^\$[\d@*#?!$({]|^\x60/.test(w));
     if (at < 0) continue;
     const piped = i >= 2 && (parts[i - 1] === "|" || parts[i - 1] === "|&");
     // Any option, a redirect or heredoc into it, or a pipe: deny. Over-denial is fine.
