@@ -4,12 +4,13 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
 import type { Db } from "../db/client.js";
 import { linkedSlugs } from "./wiki.js";
+import { pickAccount } from "./claude-accounts.js";
 import { activity, agents, companies, costEvents, decisions, engagements, fundingSources, mcpServers, projects, nudges, quotaSamples, runners, runs, secretGrantAgents, secretGrants, settings, skillProposals, ticketArtifacts, ticketDependencies, ticketMessages, tickets, wakes, wikiPages, workflowColumns } from "../db/schema.js";
 import { cut, issueRunToken, TREE_REASON } from "../mcp.js";
 export { TREE_REASON };
@@ -234,6 +235,16 @@ export function schedulerService(
     return !full.some((s) => s.utilization >= 1) && !samples.some((s) => s.overageInUse);
   }
 
+  /** For the hold notice: when no other Claude account can take over, how to swap by hand (BOS-383). */
+  async function swapAdvice(source: typeof fundingSources.$inferSelect) {
+    if (source.provider !== "anthropic") return "";
+    const pool = await claudeAccounts(source);
+    for (const other of pool.filter((p) => p.id !== source.id)) {
+      if (holdingWindows(other, await latestQuotaWindows(other.id), now()).length === 0) return ` New runs move to ${other.name} automatically.`;
+    }
+    return " To keep agents working on a second Claude plan now: Settings → Secrets → the Claude token → Rotate, paste the second plan's token. It moves every agent in the company at once; runs already going finish on the first plan. To undo, Rotate back to the first token (keep it saved elsewhere: Boss Man never shows it again). Or add the second plan on the Funding page so new runs switch by themselves.";
+  }
+
   /**
    * Tells the owner, once, when routine work stops or starts again, and once when extra-usage
    * credits begin being spent. Safe to run on every pass.
@@ -259,7 +270,7 @@ export function schedulerService(
             companyId: null,
             level: "flag",
             title: `Routine work paused${reset}`,
-            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. ${stillRuns}`,
+            body: `${source.name}'s ${windowLabel(first.window).name} is at ${Math.round(first.utilization * 100)}%. ${stillRuns}${await swapAdvice(source)}`,
             link: "#/funding",
           })
           .catch((err) => deps.log?.(`quota hold notification failed: ${(err as Error).message}`));
@@ -715,7 +726,37 @@ export function schedulerService(
     return t?.repoUrl ? { ...t, repoUrl: t.repoUrl } : null;
   }
 
-  async function launch(w: typeof wakes.$inferSelect): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
+  /** The owner's ranked Claude subscriptions in order, when this source is one of them (BOS-383). */
+  async function claudeAccounts(source: typeof fundingSources.$inferSelect) {
+    if (source.fallbackRank == null) return [];
+    const rows = await db.select().from(fundingSources).where(and(eq(fundingSources.kind, "subscription"), eq(fundingSources.provider, "anthropic"), isNotNull(fundingSources.fallbackRank)));
+    return rows.sort((a, b) => (a.fallbackRank ?? 0) - (b.fallbackRank ?? 0));
+  }
+
+  /** Tells the owner, quietly, when new runs move to another account or back; remembered in settings so each change is told once. */
+  async function noteActiveAccount(activeId: string, pool: (typeof fundingSources.$inferSelect)[]) {
+    if (pool.length < 2) return;
+    const key = "claude-active-account";
+    const [row] = await db.select().from(settings).where(eq(settings.key, key));
+    const before = typeof row?.value === "string" ? row.value : null;
+    if (before === activeId) return;
+    await db.insert(settings).values({ key, value: activeId }).onConflictDoUpdate({ target: settings.key, set: { value: activeId } });
+    const now = pool.find((p) => p.id === activeId);
+    const was = pool.find((p) => p.id === before);
+    // The first ever choice is not a switch.
+    if (!before || !now || !deps.notifyOwner) return;
+    await deps
+      .notifyOwner({
+        companyId: null,
+        level: "note",
+        title: `New runs now use ${now.name}`,
+        body: was ? `${was.name} is ${now.fallbackRank! < (was.fallbackRank ?? 0) ? "back under its limit again" : "at its limit"}, so new runs go to ${now.name}. Runs already going finish on the account they started on.` : `New runs go to ${now.name}.`,
+        link: "#/funding",
+      })
+      .catch((err) => deps.log?.(`claude account notice failed: ${(err as Error).message}`));
+  }
+
+  async function launch(w: typeof wakes.$inferSelect, onSource?: string): Promise<{ ok: true } | { ok: false; reason: string } | { ok: false; claimed: true }> {
     const [agent] = await db.select().from(agents).where(eq(agents.id, w.agentId));
     const [company] = await db.select().from(companies).where(eq(companies.id, w.companyId));
     const [runner] = await db.select().from(runners).where(eq(runners.companyId, w.companyId));
@@ -759,7 +800,7 @@ export function schedulerService(
     // the wrong ticket.
     const origin = w.reason;
     const aboutTicket = onTicket ? null : w.reason === "nudge" ? await ticketNamedIn(w.note, w.companyId) : null;
-    await db.insert(runs).values({ id: runId, companyId: w.companyId, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
+    await db.insert(runs).values({ id: runId, companyId: w.companyId, fundingSourceId: onSource ?? null, agentId: w.agentId, ticketId: runTicketId, engagementId: ticket?.engagementId ?? null, chapterId: chapter?.chapterId ?? null, purpose: chat ? "chat" : null, origin, runTicketId: aboutTicket, model: agent.model, startedAt: now() });
     if (chat) await chat.claim(w.companyId, w.agentId, runId);
     const mcpToken = await issueRunToken(db, { companyId: w.companyId, agentId: w.agentId, runId });
     if (w.deployId) await deps.deploys?.bindRun(w.deployId, runId);
@@ -786,7 +827,7 @@ export function schedulerService(
       agentName: agent.name,
       model: agent.model,
       ...(agent.thinking ? { thinking: agent.thinking } : {}),
-      fundingSourceId: agent.fundingSourceId,
+      fundingSourceId: onSource ?? agent.fundingSourceId,
       cwd: chat ? chat.cwd(w.companyId, w.agentId) : path.posix.join(workspaceRoot, w.ticketId ?? agent.id),
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
       ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
@@ -1311,22 +1352,44 @@ export function schedulerService(
         // check: under the default "pause" it is held at the limit, so nothing spends unapproved
         // extra usage (BOS-253).
         const [urgentTicket] = w.ticketId ? await db.select({ urgent: tickets.urgent }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
-        if (agent?.fundingSourceId && (w.priority < limits.highPriority || !!urgentTicket?.urgent)) {
+        const holdApplies = w.priority < limits.highPriority || !!urgentTicket?.urgent;
+        let onSource: string | undefined;
+        if (agent?.fundingSourceId) {
           const [source] = await db.select().from(fundingSources).where(eq(fundingSources.id, agent.fundingSourceId));
           if (source?.kind === "subscription") {
-            const samples = await latestQuotaWindows(source.id);
-            const full = holdingWindows(source, samples, t);
-            // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
-            // the limit itself, so the default "pause" never spends unapproved extra usage.
-            if (!quotaPasses(source, full, samples, !!urgentTicket?.urgent)) {
-              const until = full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null);
-              await defer(`subscription ${full.map((s) => s.window).join(", ")} window nearly used up`, until);
+            // An agent on one of the owner's ranked Claude subscriptions goes to the first one with
+            // room (BOS-383); an agent on any other source is checked against its own as before.
+            const pool = source.fallbackRank != null && source.provider === "anthropic" ? await claudeAccounts(source) : [];
+            // An account after the first with no login (its secret was deleted) would silently run on the company's default token, so it counts as unavailable.
+            const usable = pool.filter((a, i) => i === 0 || a.secretId);
+            const accounts = usable.length ? usable : [source];
+            const checked: { source: typeof source; rank: number; passes: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
+            for (const a of accounts) {
+              const samples = await latestQuotaWindows(a.id);
+              const full = holdingWindows(a, samples, t);
+              // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
+              // the limit itself, so the default "pause" never spends unapproved extra usage.
+              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), full });
+            }
+            const picked = pickAccount(checked);
+            if (holdApplies && !picked) {
+              // Every account is full: wait for the one that frees up first.
+              const resets = checked.map((c) => c.full.reduce<Date | null>((m, s) => (s.resetsAt && (!m || s.resetsAt > m) ? s.resetsAt : m), null));
+              const until = resets.reduce<Date | null>((m, r) => (r && (!m || r < m) ? r : m), null);
+              const first = checked[0]!;
+              await defer(`subscription ${first.full.map((s) => s.window).join(", ")} window nearly used up`, until);
               continue;
+            }
+            if (pool.length) {
+              // High-priority work that skips the hold still lands on a account with room, else the agent's own.
+              const chosenId = (picked ?? source).id;
+              onSource = chosenId;
+              await noteActiveAccount(chosenId, pool);
             }
           }
         }
 
-        const launched = await launch(w);
+        const launched = await launch(w, onSource);
         if (!launched.ok) {
           // Another pass already took it; leave its state alone.
           if ("claimed" in launched) continue;
