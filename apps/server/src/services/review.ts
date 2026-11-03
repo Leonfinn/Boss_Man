@@ -54,7 +54,15 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
  * scripts/check-all.sh exits 75 with this wording before any step runs, so nothing the agent wrote failed.
  */
 export function checkWaitedForLock(v: { exitCode: number | null; output: string }): boolean {
-  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock/.test(v.output);
+  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock/.test(v.output) && !checkQueueStuck(v);
+}
+/**
+ * True when the queue itself stood still (BOS-370): a merge check keeps its place while the queue moves, and gives up
+ * only when its place and the slot holders have not changed for longer than a check runs. Retrying would only wait
+ * again, so the owner is told at once.
+ */
+export function checkQueueStuck(v: { exitCode: number | null; output: string }): boolean {
+  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock[^\n]*the queue made no progress for (\d+) min/.test(v.output);
 }
 /** Tries a merge check that only timed out on the lock this many times, pausing LOCK_RETRY_BASE_MS, then double, between them. */
 export const LOCK_RETRY_ATTEMPTS = 6;
@@ -889,6 +897,12 @@ export function reviewService(
       const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
         // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
         if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
+        if (checkQueueStuck(v)) {
+          const mins = /no progress for (\d+) min/.exec(v.output)?.[1] ?? "60";
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The check queue made no progress for ${mins} minutes (the same check held the slot); the merge check gave up and it's in your Decisions.` });
+          await raiseCheckStuck(db, t, command, `was stopped: the check queue made no progress for ${mins} minutes, because the check holding the slot never finished`, v.output);
+          return { outcome: "check_stuck", delivered: null, detail: v };
+        }
         const never: InfraCause | null = (v as { noAnswer?: boolean }).noAnswer ? "no_answer" : checkNeverFinished(v);
         if (never) {
           const reason = INFRA_CAUSE_TEXT[never](v.ms);

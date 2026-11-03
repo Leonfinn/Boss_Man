@@ -5,7 +5,7 @@ import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
-import { checkNeverFinished, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
+import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, INFRA_RETRY_ATTEMPTS, LOCK_RETRY_ATTEMPTS, setInfraRetryBase, setLockRetryBase, landingText } from "../src/services/review.js";
 import { supersedeSignoffs } from "../src/services/decisions.js";
 import { MERGE_CHECK_LIMIT_KEY } from "../src/services/check-gate.js";
 import { settings } from "../src/db/schema.js";
@@ -399,6 +399,26 @@ describe("landing an approved ticket (R46, R47)", () => {
       expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
       expect(await c.db.select().from(wakes)).toHaveLength(0);
       expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("shared lock");
+    }, 30_000);
+
+    // BOS-370: a queue that stood still is not retried; the card says so plainly.
+    const noProgress = { ok: false, exitCode: 75, timedOut: false, output: "check-all: gave up waiting for the heavy-phase lock /tmp/x.lock: the queue made no progress for 60 min (place 3 of 9; the check holding the slot has not changed)", ms: 3_700_000 };
+
+    it("tells a queue that stood still from a plain lock wait", () => {
+      expect(checkQueueStuck(noProgress)).toBe(true);
+      expect(checkWaitedForLock(noProgress)).toBe(false);
+      expect(checkQueueStuck(gaveUp)).toBe(false);
+    });
+
+    it("asks the owner at once, without retrying, when the queue made no progress", async () => {
+      setLockRetryBase(1);
+      const c = (ctx = await setup({ answers: { verify: noProgress } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "scripts/check-all.sh" });
+      await approveAndWait(c.req, c.ticket.id);
+      await landed(c);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
+      expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("made no progress for 60 minutes");
     }, 30_000);
   });
 

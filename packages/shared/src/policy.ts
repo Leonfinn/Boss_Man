@@ -179,18 +179,19 @@ export function reachesPrivateNetwork(info: PermissionInfo): boolean {
   });
 }
 
-export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string } {
+export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string; position: number } {
   // Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
-  if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD };
+  if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD, position: 0 };
   // Boss Man's own tools are checked per call by the server (role and company), so a broad company
   // rule that routes requests to the CEO or the owner must not catch them (BOS-292): that sent every
   // board-tool call to a card. A company rule can still deny one.
   const ownTool = isBossmanCall(info);
-  for (const rule of [...rules, ...DEFAULT_POLICY]) {
-    if (ownTool && rule.outcome !== "deny" && rule.outcome !== "allow" && rules.includes(rule)) continue;
-    if (matches(rule.match, info)) return { outcome: rule.outcome, rule: rule.name };
+  const all = [...rules, ...DEFAULT_POLICY];
+  for (const [i, rule] of all.entries()) {
+    if (ownTool && rule.outcome !== "deny" && rule.outcome !== "allow" && i < rules.length) continue;
+    if (matches(rule.match, info)) return { outcome: rule.outcome, rule: rule.name, position: i + 1 };
   }
-  return { outcome: "owner", rule: "No rule matched" };
+  return { outcome: "owner", rule: "No rule matched", position: 0 };
 }
 
 /** Build output directly in the agent's working folder (node_modules, dist…): one component only, no trailing slash. rm -rf NAME/ follows a symlink as if NAME were its target (BOS-150), and a deeper path such as dist/x still follows a symlinked dist, so `rm -rf dist` is the only shape vouched for. */
