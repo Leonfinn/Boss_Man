@@ -33,6 +33,7 @@ import {
   untrusted,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -114,7 +115,7 @@ export type DeployUpdate = {
 };
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; /** The whole tool input, normalised, so only an exact repeat matches this card (BOS-376). */ toolInput?: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled; /** A repeat of a command this run already had an Allow once for (BOS-376): the card answered at once, with sameAs. */ settledByRepeat?: { sameAs: string; at: string }; /** A repeat of the same command in the same run, settled from this card when its answer arrives (BOS-376). */ repeats?: Array<{ requestId: string; runnerId: string; at: string; settled?: "allow" | "deny" }> }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -433,7 +434,13 @@ function fileList(files: string[], max: number): string {
 }
 
 /** The rules judge's reading of a permission card, kept on it (BOS-337). In watch mode it is only recorded; in advise mode it also picked the suggested button. */
-export type JudgeNote = { mode: Exclude<PermissionJudgeMode, "off">; verdict: JudgeReading["verdict"]; row: JudgeReading["row"]; reason: string };
+export type JudgeNote = { mode: Exclude<PermissionJudgeMode, "off">; verdict: JudgeReading["verdict"]; row: JudgeReading["row"]; reason: string; /** The model second opinion (BOS-338), asked only when the rules judge allows. Pending until it answers or fails (at most 5 s). */ second?: SecondNote };
+
+/** What the model second opinion said (BOS-338). "failed" means the rules judge decided alone; `reason` is the model's one line, cleaned, or why it failed. */
+export type SecondNote = { state: "pending" } | { state: "allow" } | { state: "deny"; reason: string } | { state: "failed"; reason: string };
+
+/** Asks the company's model, if it has one switched on (BOS-338). */
+export type SecondOpinionHook = { enabled: (companyId: string) => Promise<boolean>; ask: (companyId: string, card: SecondOpinionCard) => Promise<SecondOpinionResult> };
 
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
 
@@ -487,6 +494,44 @@ function ceoCanHandle(d: { kind: string; context: unknown; raisedByAgentId: stri
 
 const ALLOW = "Allow once";
 const DENY = "Deny";
+
+/**
+ * How long an Allow once covers a repeat of the same command in the same run (BOS-376). A harness can
+ * report one ask twice (a retry, or the command and the folder it reaches into); both should be answered
+ * by the one click. Long enough for a retry or a late replay, short enough that the agent's own next,
+ * deliberate run of the same command is a new question.
+ */
+export const REPEAT_ANSWER_MS = 5 * 60_000;
+
+/**
+ * A stable text of a tool call's whole input, so two asks are the same one only when every field matches
+ * (BOS-376 security review): a fetch pointed at a public page and the same tool pointed at a home-network
+ * address are different requests, even though the tool and command look alike. Keys are sorted, so the
+ * order the harness wrote them in doesn't matter.
+ */
+function inputFingerprint(rawInput: unknown): string {
+  const stable = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(stable);
+    if (v && typeof v === "object") {
+      return Object.fromEntries(Object.keys(v as Record<string, unknown>).sort().map((k) => [k, stable((v as Record<string, unknown>)[k])]));
+    }
+    return v;
+  };
+  try {
+    return JSON.stringify(stable(rawInput ?? null));
+  } catch {
+    return String(rawInput);
+  }
+}
+
+/**
+ * Same tool ask: the same title and an identical full input, so the answer to one can cover the other
+ * (BOS-376). Matching on the title and command alone let a fetch of a private address reuse an Allow once
+ * given for a public one (security review), so the whole input must match.
+ */
+function sameAsk(a: { toolTitle?: string | null; toolInput?: string }, b: { title?: string | null; fingerprint: string }): boolean {
+  return (a.toolTitle ?? null) === (b.title ?? null) && a.toolInput === b.fingerprint;
+}
 
 type WakeHook = (input: { agentId: string; reason: string; ticketId?: string | null; note?: string | null; priority?: number }) => Promise<unknown>;
 
@@ -553,6 +598,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
+  let secondOpinion: SecondOpinionHook | null = null;
+  // Second opinions still being asked, so a shutdown or a test can wait for them. Not kept: lost on restart, harmless because
+  // expireSecondOpinions (the advice sweep) settles any card still pending past the deadline as "failed".
+  const secondInFlight = new Set<Promise<void>>();
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
   let onModelChange: ModelChangeHook | null = null;
@@ -797,6 +846,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** Wakes the company's CEO, or the agent a plan was put to, to answer a decision (R19). */
+  /**
+   * Records the model's second opinion on a card (BOS-338). Only `judge.second` is written (jsonb_set), so an
+   * answer saved meanwhile isn't overwritten. In advise mode an open card's suggestion becomes Allow when the
+   * model allowed or failed (the rules judge, which allowed, decides alone), and stays Deny when it denied.
+   */
+  async function settleSecondOpinion(decisionId: string, r: SecondOpinionResult) {
+    const note: SecondNote = "failed" in r ? { state: "failed", reason: r.failed } : r.verdict === "deny" ? { state: "deny", reason: r.reason } : { state: "allow" };
+    const suggest = note.state === "deny" ? DENY : ALLOW;
+    await db
+      .update(decisions)
+      .set({
+        context: sql`jsonb_set(${decisions.context}, '{judge,second}', ${JSON.stringify(note)}::jsonb)`,
+        recommendedOption: sql`CASE WHEN ${decisions.status} = 'open' AND ${decisions.context} #>> '{judge,mode}' = 'advise' THEN ${suggest} ELSE ${decisions.recommendedOption} END`,
+      })
+      .where(and(eq(decisions.id, decisionId), sql`${decisions.context} #>> '{judge,second,state}' = 'pending'`));
+    if (note.state === "failed") log(`second opinion for decision ${decisionId} failed (${note.reason}); the rules judge decided alone`);
+  }
+
   async function tellCeo(companyId: string, question: string, agentId?: string) {
     const [ceo] = agentId ? [{ id: agentId }] : await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
     if (ceo && wake) await wake({ agentId: ceo.id, reason: "decision", note: `A decision is waiting for you: ${question}\nUse the decisions tool to read it and answer.` });
@@ -989,6 +1056,60 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return subject ? (await openSibling(d, subject)) !== null : false;
   }
 
+  /**
+   * What this run already decided about the same tool ask (same title and command), for a repeat that
+   * comes back as a new request (BOS-376). An Allow once within the last few minutes settles the repeat;
+   * a Deny, now or inside that window, means the repeat is a new card. Null when this run has said
+   * nothing about this exact ask, or the ask moved to the CEO or a rule since.
+   */
+  async function repeatAnswer(event: PermissionEvent, fingerprint: string): Promise<{ allow: string | null; denied: boolean }> {
+    const since = new Date(now().getTime() - REPEAT_ANSWER_MS);
+    const rows = await db
+      .select({ id: decisions.id, answer: decisions.answer, context: decisions.context, answeredAt: decisions.answeredAt })
+      .from(decisions)
+      .where(
+        and(
+          eq(decisions.kind, "permission"),
+          eq(decisions.status, "answered"),
+          inArray(decisions.answer, [ALLOW, DENY]),
+          sql`${decisions.context}->>'runId' = ${event.runId}`,
+          sql`${decisions.context}->'plan' is null`,
+        ),
+      );
+    let allow: string | null = null;
+    for (const r of rows) {
+      const ctx = r.context as Extract<DecisionContext, { type: "permission" }>;
+      if (!sameAsk(ctx, { title: event.title, fingerprint })) continue;
+      if (r.answer === DENY) return { allow: null, denied: true };
+      if (r.answeredAt && r.answeredAt >= since) allow = r.id;
+    }
+    return { allow, denied: false };
+  }
+
+  /**
+   * An Allow once this run gave for the same command within the last few minutes, for a request whose own
+   * card is gone (a runner that replays after a restart): the answer on the card is still the answer to
+   * the same command (BOS-376). Older than that is a new question, and a Deny is never read here.
+   */
+  async function allowedCommandOnRun(runId: string, event: PermissionEvent, fingerprint: string): Promise<string | null> {
+    const since = new Date(now().getTime() - REPEAT_ANSWER_MS);
+    const rows = await db
+      .select({ id: decisions.id, context: decisions.context, answeredAt: decisions.answeredAt })
+      .from(decisions)
+      .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), eq(decisions.answer, ALLOW), sql`${decisions.context}->>'runId' = ${runId}`, sql`${decisions.context}->'plan' is null`))
+      .orderBy(desc(decisions.answeredAt));
+    return rows.find((r) => r.answeredAt !== null && r.answeredAt >= since && sameAsk(r.context as Extract<DecisionContext, { type: "permission" }>, { title: event.title, fingerprint }))?.id ?? null;
+  }
+
+  /** Another open card asks the same thing of the same run: a repeat waiting for the answer to the first (BOS-376). */
+  async function openSameAsk(event: PermissionEvent, fingerprint: string): Promise<typeof decisions.$inferSelect | null> {
+    const rows = await db
+      .select()
+      .from(decisions)
+      .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open"), sql`${decisions.context}->>'runId' = ${event.runId}`, sql`${decisions.context}->'plan' is null`));
+    return rows.find((d) => sameAsk(d.context as Extract<DecisionContext, { type: "permission" }>, { title: event.title, fingerprint })) ?? null;
+  }
+
   /** The id of a card already answered Allow for this same tool call (same run, same call id, same title), if any. */
   async function allowedSameToolCall(event: PermissionEvent): Promise<string | null> {
     const rows = await db
@@ -999,7 +1120,6 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   return {
-    /** Called for every permission request a runner reports. */
     async onPermissionRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
       // An agent asking to leave plan mode is presenting its plan for approval (R40).
       if (event.kind === "switch_mode") {
@@ -1019,6 +1139,33 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       if (outcome !== "allow" && outcome !== "deny" && event.toolCallId) {
         const earlier = await allowedSameToolCall(event);
         if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+      }
+      // BOS-376: the same tool call can come back as a new request (a harness retry, or a second run of the
+      // same call). It is the same question: the Allow once this run already got settles it, and a Deny this
+      // run already got means it is a fresh card, never an Allow.
+      // This runs only when the rules would raise a card (BOS-376 security review): it must never override
+      // a rule's denial or the private-network block, both of which the rules engine returns as deny above.
+      // Two asks are the same only when the run, the tool title and the whole input match, so a fetch of a
+      // home-network address can't reuse the Allow once given for a public one.
+      if (event.kind !== "switch_mode" && outcome !== "allow" && outcome !== "deny") {
+        const fingerprint = inputFingerprint(event.rawInput);
+        // A repeat of a card still waiting rides on it: one card, and the answer settles both.
+        const waiting = await openSameAsk(event, fingerprint);
+        if (waiting) {
+          const ctx = waiting.context as Extract<DecisionContext, { type: "permission" }>;
+          const repeats = [...(ctx.repeats ?? []), { requestId: event.requestId, runnerId: runner.id, at: now().toISOString() }].slice(-20);
+          // The card says a repeat rides on it, so the human sees one question, not two (BOS-376).
+          const note = `The same request was asked again as request ${event.requestId}: one answer covers both.`;
+          const question = waiting.question.includes(note) ? waiting.question : `${waiting.question}\n${note}`;
+          await db.update(decisions).set({ context: { ...ctx, repeats }, question }).where(eq(decisions.id, waiting.id));
+          return { outcome: "ceo" as const, rule: "A repeat of a card already waiting", decisionId: waiting.id };
+        }
+        const decided = await repeatAnswer(event, fingerprint);
+        if (decided.allow && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) {
+          const [shown] = await db.select({ context: decisions.context }).from(decisions).where(eq(decisions.id, decided.allow));
+          await db.update(decisions).set({ context: { ...(shown?.context as object), settledByRepeat: { sameAs: decided.allow, at: now().toISOString() } } as DecisionContext }).where(eq(decisions.id, decided.allow));
+          return { outcome: "allow" as const, rule: `Same request as decision ${decided.allow}, already allowed`, decisionId: null };
+        }
       }
       if (outcome === "allow" || outcome === "deny") {
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
@@ -1091,9 +1238,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const judgeMode = company?.mode ?? "watch";
       const judgedCommand = commandOf(info.rawInput);
       // Very long commands are not judged (the old recommendation stays): the patterns are not built for them and this runs on the server loop.
-      const reading = judgeMode === "off" || !isJudgeable(judgedCommand) ? null : judgePermission(`${explain.title}. ${explain.summary}`, judgedCommand, run?.ticketId ?? undefined, workspaceRoot && (run?.ticketId ?? run?.agentId) ? `${workspaceRoot}/${run?.ticketId ?? run?.agentId}`.replace(/[^A-Za-z0-9]/g, "-") : undefined);
-      const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel } : undefined;
-      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, ...(event.toolCallId ? { toolCallId: event.toolCallId, toolTitle: event.title } : {}), explain, ...(judge ? { judge } : {}), ...(always.length ? { always } : {}) };
+      const reading = judgeMode === "off" || !isJudgeable(judgedCommand) ? null : judgePermission(`${explain.title}. ${explain.summary}`, judgedCommand, run?.ticketId ?? undefined, workspaceRoot && (run?.ticketId ?? run?.agentId) ? `${workspaceRoot}/${run?.ticketId ?? run?.agentId}`.replace(/[^A-Za-z0-9]/g, "-") : undefined, workspaceRoot);
+      // The model second opinion (BOS-338) is asked only when the rules judge allows: it can only make a card stricter.
+      const askSecond = !!reading && reading.verdict === "allow" && judgeMode !== "off" && !!secondOpinion && (await secondOpinion.enabled(runner.companyId).catch(() => false));
+      const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel, ...(askSecond ? { second: { state: "pending" as const } } : {}) } : undefined;
+      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}), toolTitle: event.title, toolInput: inputFingerprint(event.rawInput), explain, ...(judge ? { judge } : {}), ...(always.length ? { always } : {}) };
       // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
       const stored = { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) };
       const [row] = await db
@@ -1108,7 +1257,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           options: [ALLOW, ...always.map((a) => a.label), DENY],
           // The same allow-list as everywhere else: build output is Allow, source or anything else is
           // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).
-          recommendedOption: (judge?.mode === "advise" ? judge.verdict : recommendedVerdict(info)) === "allow" ? ALLOW : DENY,
+          // While the second opinion is pending the card suggests Deny: it is advised Allow only once both judges allow (or the model fails, and the rules judge decides alone).
+          recommendedOption: (judge?.mode === "advise" ? (judge.second?.state === "pending" ? "deny" : judge.verdict) : recommendedVerdict(info)) === "allow" ? ALLOW : DENY,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
@@ -1116,6 +1266,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
+      // Asked in the background: the runner's events wait on this function, and a slow model must not hold up every agent's events.
+      if (row && askSecond && secondOpinion) {
+        const ownTicket = run?.ticketId ?? null;
+        const p = secondOpinion
+          .ask(runner.companyId, { question: `${explain.title}. ${explain.summary}`, command: judgedCommand, ownTicket })
+          .then((r) => settleSecondOpinion(row.id, r))
+          .catch((err) => log(`second opinion for decision ${row.id} could not be recorded: ${(err as Error).message}`))
+          .finally(() => secondInFlight.delete(p));
+        secondInFlight.add(p);
+      }
       if (row && ceoId && "ladder" in stored && stored.ladder) {
         await wakeLadderCeo(runner.companyId, row, stored as typeof stored & { ladder: Ladder }, ceoId, [
           `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
@@ -1215,7 +1375,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           .where(and(eq(runnerEvents.runnerId, runner.id), eq(runnerEvents.type, "run.permission_request"), sql`${runnerEvents.payload}->>'requestId' = ${p.requestId}`, sql`${runnerEvents.payload}->>'runId' = ${p.runId}`))
           .limit(1);
         if (!ev) continue;
-        const r = await this.onPermissionRequest(runner, ev.payload as PermissionEvent);
+        const payload = ev.payload as PermissionEvent;
+        const fingerprint = inputFingerprint(payload.rawInput);
+        // A repeat of the same request this run was already allowed (BOS-376): the old answer reaches the
+        // runner again, and the ask gets no second card. Only when the rules would instead raise a card: a
+        // replayed request the rules deny (a home-network fetch) must still be denied, never allowed by an
+        // earlier Allow for a different request (security review).
+        const info: PermissionInfo = { title: payload.title, kind: payload.kind, rawInput: payload.rawInput };
+        const { outcome } = evaluatePermission(info, await rulesFor(runner.companyId));
+        const mayRepeat = outcome !== "allow" && outcome !== "deny";
+        const allowed = mayRepeat ? await allowedCommandOnRun(p.runId, payload, fingerprint) : null;
+        if (allowed && send(runner.id, { type: "permission.decide", runId: p.runId, requestId: p.requestId, verdict: "allow" })) {
+          resent++;
+          continue;
+        }
+        // A request that never got a row of its own because its first card is still open (BOS-376): it
+        // rides on that card, so the runner waits for the same answer, not a new decision.
+        if (mayRepeat && (await openSameAsk(payload, fingerprint))) continue;
+        const r = await this.onPermissionRequest(runner, payload);
         if (r && (r.outcome === "allow" || r.outcome === "deny")) resent++;
       }
       return resent;
@@ -1286,6 +1463,29 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setLoopHooks(hooks: LoopHooks) {
       loopHooks = hooks;
+    },
+
+    /** The model second opinion on permission cards (BOS-338). */
+    setSecondOpinion(hook: SecondOpinionHook) {
+      secondOpinion = hook;
+    },
+
+    /**
+     * A card whose second opinion is still pending well past the 5 s deadline lost its asker (a restart or a
+     * blue/green swap): it is settled as failed, so the rules judge decides alone (BOS-338).
+     */
+    async expireSecondOpinions() {
+      const stale = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open"), sql`${decisions.context} #>> '{judge,second,state}' = 'pending'`, sql`${decisions.createdAt} < ${new Date(now().getTime() - 60_000).toISOString()}::timestamptz`));
+      for (const d of stale) await settleSecondOpinion(d.id, { failed: "Boss Man restarted before the model answered" });
+      return stale.length;
+    },
+
+    /** Waits for second opinions still being asked (shutdown, tests). Each takes at most the 5 s deadline. */
+    async drainSecondOpinions() {
+      while (secondInFlight.size) await Promise.all([...secondInFlight]);
     },
 
     setWakeHook(hook: WakeHook) {
@@ -1820,6 +2020,10 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       await validate(d, answer, extra);
       if (handOff) return handToCeo(d);
       const ctx = d.context as DecisionContext;
+      // What came in while the card was open, so every later write keeps it (BOS-376). Once the answer is
+      // known each repeat is marked settled, and every later write keeps those marks (so a delivery that
+      // fails and is re-sent doesn't lose the audit of what this one answer settled).
+      let repeatsNow = ctx.type === "permission" ? ctx.repeats : undefined;
       if (ctx.type === "model_change" && answer === MODEL_EDIT && !extra.modelConfig) throw new AnswerError("Edit needs the harness, provider, model and paid-from you want.");
       if (ctx.type === "team_plan" && extra.picks?.some((i) => !Number.isInteger(i) || i < 0 || i >= ctx.hires.length)) throw new AnswerError("That hire isn't in the plan.");
       // "Allow always" answers this request and adds a rule after the company's own rules, so an owner's deny still wins.
@@ -1857,6 +2061,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         })
         .where(and(eq(decisions.id, id), eq(decisions.status, "open"), eq(decisions.tier, d.tier), ...(extra.by === "ceo" ? [sql`${decisions.context}->'advice'->>'state' = 'asking'`] : [])))
         .returning({ id: decisions.id });
+      // A repeat of this command waited on this card (BOS-376): an Allow once settles it too, and a Deny
+      // never turns into one. The card keeps what settled, so the audit shows the repeat.
+      if (closed && ctx.type === "permission" && repeatsNow?.length) {
+        const say = answer === ALLOW || answer === APPROVE_PLAN ? "allow" : "deny";
+        // Do not ignore the send result (BOS-376 review): a repeat whose runner has dropped off is not
+        // settled yet, so it is left unmarked and a reconnect resend still answers it. Only mark a repeat
+        // settled once its answer has actually been sent.
+        repeatsNow = repeatsNow.map((r) => (send(r.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: r.requestId, verdict: say }) ? { ...r, settled: say } : r));
+        await db.update(decisions).set({ context: { ...ctx, repeats: repeatsNow } as DecisionContext }).where(eq(decisions.id, id));
+      }
       if (!closed) return null;
 
       // Whatever else we told the owner about these tickets may now be out of date (BOS-123).
@@ -1875,8 +2089,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Watch mode (BOS-337): the judge's reading next to what the human chose, so the owner can see how often they agree before turning advice on. The reading is also kept on the decision row.
       if (ctx.type === "permission" && ctx.judge) {
         const human = answer === ALLOW || answer === APPROVE_PLAN ? "allow" : "deny";
-        log(`permission judge (${ctx.judge.mode}): decision ${id} judge=${ctx.judge.verdict} (${ctx.judge.row}) human=${human}${human === ctx.judge.verdict ? "" : " DISAGREE"}`);
+        // With a second opinion (BOS-338) the combined advice is what is compared: Allow only when both allowed.
+        const second = ctx.judge.second;
+        const combined = second?.state === "deny" ? "deny" : ctx.judge.verdict;
+        const secondPart = second ? ` second=${second.state}${second.state === "failed" ? ` (${second.reason})` : ""}` : "";
+        log(`permission judge (${ctx.judge.mode}): decision ${id} judge=${ctx.judge.verdict} (${ctx.judge.row})${secondPart} human=${human}${human === combined ? "" : " DISAGREE"}`);
       }
+      // The audit says how many repeats this one answer settled (BOS-376).
+      if (ctx.type === "permission" && repeatsNow?.length) log(`permission decision ${id} settled ${repeatsNow.length} repeat(s) of the same command`);
 
       let delivered: boolean | null = null;
       let endedHere = false;
@@ -1896,10 +2116,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             interrupt: false,
           });
         }
+        const [permRun] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, ctx.runId));
         delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: allowed ? "allow" : "deny" });
-        if (!delivered) {
+        if (!delivered && permRun?.endedAt) {
+          // The agent has finished, so there is nothing to deliver to: record that and don't alarm the owner (BOS-342).
+          await db.update(decisions).set({ context: { ...ctx, ...(repeatsNow ? { repeats: repeatsNow } : {}), delivered: "run_ended" } }).where(eq(decisions.id, id));
+        } else if (!delivered) {
           // Never fail silently (R22): flag it, and re-send when the runner reconnects.
-          await db.update(decisions).set({ context: { ...ctx, delivered: false } }).where(eq(decisions.id, id));
+          await db.update(decisions).set({ context: { ...ctx, repeats: repeatsNow, delivered: false } }).where(eq(decisions.id, id));
           await db
             .insert(decisions)
             .values({

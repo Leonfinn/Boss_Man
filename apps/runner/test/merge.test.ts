@@ -153,6 +153,17 @@ describe("verify before done (R47)", () => {
     expect(await ws.verify(spec, "echo 'check-all: waiting for a free check slot'; echo 'check-all: slot taken, running the checks'; sleep 5", 300, 5000)).toMatchObject({ ok: false, timedOut: true });
   });
 
+  it("keeps a queued check alive while its place changes, and stops one whose place stands still (BOS-370)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const line = (p: number) => `echo 'check-all: waiting for a free check slot (place ${p} of 4, 1 run at once)'`;
+    // 900 ms in the queue against a 300 ms limit: fine, because the place moves every 200 ms.
+    const moving = await ws.verify(spec, `${line(4)}; sleep 0.2; ${line(3)}; sleep 0.2; ${line(2)}; sleep 0.2; ${line(1)}; sleep 0.2; echo 'check-all: slot taken, running the checks'`, 5000, 300);
+    expect(moving).toMatchObject({ ok: true, timedOut: false });
+    // The same place printed again and again is no progress.
+    expect(await ws.verify(spec, `${line(3)}; sleep 0.2; ${line(3)}; sleep 0.2; ${line(3)}; sleep 5`, 5000, 300)).toMatchObject({ ok: false, timedOut: true });
+  });
+
   it("kills the whole process group on timeout, including grandchildren that ignore SIGTERM", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
@@ -300,6 +311,28 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     writeFileSync(path.join(b.path, "b2.txt"), "b2\n");
     git(b.path, "add", ".");
     git(b.path, "commit", "-qm", "b2");
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
+  });
+
+  it("counts a branch this ticket was fast-forwarded onto, even after the branch merged this ticket back in (BOS-340)", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    // 1. B commits its own work.
+    writeFileSync(path.join(b.path, "b1.txt"), "b1\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b1");
+    // 2. This ticket (A) is reset to main, fast-forwarded onto B, then commits its own work.
+    git(w.path, "reset", "-q", "--hard", "main");
+    git(w.path, "merge", "--ff-only", `bossman/${bId}`);
+    writeFileSync(path.join(w.path, "a2.txt"), "a2\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "a2");
+    // 3. B merges A in with a merge commit.
+    git(b.path, "merge", "--no-ff", "--no-edit", `bossman/${ids.t}`);
+    // 4. A still holds B's commit, so B is carried.
     const hit = { ticketId: bId, branch: `bossman/${bId}` };
     expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
   });
