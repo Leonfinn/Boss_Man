@@ -547,6 +547,33 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect(await state(c)).toMatchObject({ systemState: "review" });
   });
 
+  it("lands an approved ticket together with the one that holds all of it (fast-forward case, BOS-372)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Inner work");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    expect(await state(c)).toMatchObject({ systemState: "done" });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, other.id)))[0]).toMatchObject({ systemState: "done" });
+  });
+
+  it("never lands a carried ticket that isn't approved, even when this branch holds all of it (BOS-372)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Unfinished work");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "pending" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, other.id)))[0]).toMatchObject({ systemState: "review" });
+  });
+
+  it("refuses an approved carried ticket this branch holds only part of (BOS-372)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Inner work");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: false }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
+  });
+
   it("merges when the other ticket is done, so its work is on the target already", async () => {
     const c = (ctx = await setup());
     const other = await otherTicket(c, "Permission gate");

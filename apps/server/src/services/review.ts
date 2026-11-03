@@ -216,6 +216,7 @@ export function reviewService(
     const others = (await otherOpenBranches(t)).filter((o): o is typeof o & { branch: string } => !!o.branch && o.branch !== t.branch);
     if (!others.length) return [];
     let ids: string[];
+    let contained = new Set<string>();
     if (deps.runners.can(runnerId, "carried-check")) {
       let r: { carried?: CarriedTicket[] };
       try {
@@ -233,11 +234,30 @@ export function reviewService(
       }
       if (!Array.isArray(r.carried)) throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged. Try approving it again.");
       ids = r.carried.map((c) => c.ticketId);
+      contained = new Set(r.carried.filter((c) => c.contained).map((c) => c.ticketId));
     } else {
       // An older runner: the host's pull requests are the only other answer, and they must give one.
       ids = await carriedOnHost(t, gitHost, gitApiBase, others);
     }
-    return others.filter((o) => ids.includes(o.ticketId)).map((o) => ({ ticketId: o.ticketId, branch: o.branch, title: o.title, risk: o.risk }));
+    return others.filter((o) => ids.includes(o.ticketId)).map((o) => ({ ticketId: o.ticketId, branch: o.branch, title: o.title, risk: o.risk, contained: contained.has(o.ticketId) }));
+  }
+
+  /**
+   * Whether a carried ticket is already fully approved and only waiting to merge (BOS-372): in review, every
+   * review passed, and no owner sign-off open. Its work is then reviewed, so a branch holding all of it may
+   * land it too. Anything less (still in review rounds, sent back, awaiting the owner) stays a refusal.
+   */
+  async function approvedAndWaiting(ticketId: string): Promise<boolean> {
+    const [c] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+    if (!c || c.systemState !== "review") return false;
+    const rows = await latestRows(db, ticketId);
+    if (!rows.length || evaluate(rows) !== "passed") return false;
+    const [signoff] = await db
+      .select({ id: decisions.id })
+      .from(ticketDependencies)
+      .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+      .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
+    return !signoff;
   }
 
   /**
@@ -812,6 +832,10 @@ export function reviewService(
         const r = await refuseUnchecked(t, err);
         return { outcome: r.outcome, delivered: r.delivered, detail: r.detail };
       }
+      // Approved tickets whose whole branch this one holds (the fast-forward case, BOS-372) land together with it.
+      const together: CarriedInfo[] = [];
+      for (const c of carried) if (c.contained && (await approvedAndWaiting(c.ticketId))) together.push(c);
+      carried = carried.filter((c) => !together.includes(c));
       if (carried.length) {
         const r = await refuseCarried(t, carried, { reviewerAgentId: null });
         return { outcome: "carried", delivered: r.delivered ?? null, detail: r.detail };
@@ -922,6 +946,10 @@ export function reviewService(
       }
       await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
       await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
+      for (const c of together) {
+        await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
+        await deps.work.updateTicket(c.ticketId, { state: "done", outcome: "completed", overLimit: true });
+      }
       return { outcome: "merged", delivered: null, detail: m };
     },
 
