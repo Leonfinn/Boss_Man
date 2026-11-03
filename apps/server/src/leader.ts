@@ -59,15 +59,23 @@ export type LeaderOptions = {
 const LATE_MS = 500;
 /** A query keeps getting fresh windows while the loop keeps freezing, but not for ever. */
 const MAX_REARMS = 5;
+/**
+ * However the freezes fall, a query on the lock connection is given up after this much wall-clock time, and a
+ * heartbeat that old steps down at once. It must stay well under the session's idle_session_timeout (30 s): if the
+ * heartbeat never reached Postgres, Postgres may end the session and hand the lock on after 30 s, and by then this
+ * server must have stopped acting as the leader.
+ */
+export const MAX_OUTSTANDING_MS = 15_000;
 
 class QueryTimeout extends Error {}
 
 /**
  * Waits for `p` for `ms` of time in which this process could actually run. When the timer fires it first yields
  * once (setImmediate runs after the poll phase), so a reply already sitting in the socket is read before we judge.
- * A timer that fired late means the event loop was blocked: the query gets a fresh window rather than a miss.
+ * A timer that fired late means the event loop was blocked: the query gets a fresh window rather than a miss,
+ * up to MAX_REARMS times and never past `maxTotalMs` of wall-clock time since `since`.
  */
-export function withinFairTime<T>(p: Promise<T>, ms: number, onLate?: (lateMs: number) => void): Promise<T> {
+export function withinFairTime<T>(p: Promise<T>, ms: number, onLate?: (lateMs: number) => void, since = performance.now(), maxTotalMs = MAX_OUTSTANDING_MS): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let done = false;
     let timer: NodeJS.Timeout | null = null;
@@ -78,7 +86,7 @@ export function withinFairTime<T>(p: Promise<T>, ms: number, onLate?: (lateMs: n
         const late = performance.now() - due;
         setImmediate(() => {
           if (done) return;
-          if (late > LATE_MS && rearms < MAX_REARMS) {
+          if (late > LATE_MS && rearms < MAX_REARMS && performance.now() + ms - since <= maxTotalMs) {
             rearms++;
             onLate?.(late);
             return arm();
@@ -127,6 +135,7 @@ export function createLeader(opts: LeaderOptions = {}): Leader {
   let lastErr = "";
   // The heartbeat still waiting for its reply, and how many heartbeats in a row have had none.
   let beat: Promise<unknown> | null = null;
+  let beatSince = 0;
   let misses = 0;
 
   const run = async (cbs: (() => void | Promise<void>)[], what: string) => {
@@ -159,13 +168,17 @@ export function createLeader(opts: LeaderOptions = {}): Leader {
       });
       b.catch(() => {}); // read below; a dropped connection's late rejection must not go unhandled
       beat = b;
+      beatSince = performance.now();
     }
     try {
-      await query("heartbeat", beat);
+      await withinFairTime(beat, queryTimeoutMs, late("heartbeat"), beatSince);
     } catch (err) {
       if (!(err instanceof QueryTimeout)) throw err;
       misses++;
-      log(`LEADER: heartbeat miss ${misses} of ${maxMisses}: ${err.message}`);
+      const age = performance.now() - beatSince;
+      log(`LEADER: heartbeat miss ${misses} of ${maxMisses}: ${err.message} (waiting ${Math.round(age)} ms in all)`);
+      // Too old to trust, however the misses were counted: see MAX_OUTSTANDING_MS.
+      if (age >= MAX_OUTSTANDING_MS) return false;
       return misses < maxMisses;
     }
     if (misses) log(`LEADER: heartbeat answered again after ${misses} miss(es)`);
@@ -195,7 +208,7 @@ export function createLeader(opts: LeaderOptions = {}): Leader {
       }
       if (!contesting) return;
       client ??= await connect();
-      const r = await query("lock attempt",client.query<{ ok: boolean }>("select pg_try_advisory_lock($1) as ok", [LEADER_LOCK_KEY]));
+      const r = await query("lock attempt", client.query<{ ok: boolean }>("select pg_try_advisory_lock($1) as ok", [LEADER_LOCK_KEY]));
       if (!r.rows[0]?.ok) return;
       held = true;
       log("LEADER: *** this server is now the LEADER (holds the lock) ***");

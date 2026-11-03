@@ -10,7 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { createLeader, type Leader } from "../src/leader.js";
+import { performance } from "node:perf_hooks";
+import { createLeader, MAX_OUTSTANDING_MS, withinFairTime, type Leader } from "../src/leader.js";
 
 type FakePg = { url: string; set(mode: "normal" | "hang" | "trap" | "kill"): void; freezeDuringHeartbeat(ms: number): Promise<void>; close(): Promise<number> };
 
@@ -157,5 +158,28 @@ describe("leader heartbeat and server freezes (BOS-432)", () => {
     expect(worst.memory.rssMb).toBeGreaterThan(0);
     expect(worst.runnerSockets).toBe(1);
     expect(typeof worst.inFlight).toBe("number");
+  });
+});
+
+describe("withinFairTime (BOS-432)", () => {
+  const never = new Promise<never>(() => {});
+  it("a timer that fired late because of a freeze gives a fresh window, not a timeout", async () => {
+    let lates = 0;
+    const p = withinFairTime(never, 200, () => void lates++);
+    p.catch(() => {});
+    block(1000);
+    await sleep(100);
+    expect(lates).toBe(1);
+    await expect(p).rejects.toThrow(/no reply in 200 ms/); // the fresh window has no freeze in it
+  });
+
+  it("but never past the wall-clock cap, so a stale leader can't outlive Postgres's idle_session_timeout", async () => {
+    let lates = 0;
+    const p = withinFairTime(never, 200, () => void lates++, performance.now() - (MAX_OUTSTANDING_MS - 100));
+    p.catch(() => {});
+    block(1000);
+    await expect(p).rejects.toThrow(/no reply/);
+    expect(lates).toBe(0);
+    expect(MAX_OUTSTANDING_MS).toBeLessThan(30_000 / 2 + 1); // idle_session_timeout is 30 s
   });
 });
