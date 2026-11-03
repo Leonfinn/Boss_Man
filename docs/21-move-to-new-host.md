@@ -75,6 +75,8 @@ docker compose version
 git --version && flock --version | head -1 && curl --version | head -1
 ```
 
+**Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. On 3 Nov 2026 the live commit is 8eaa7cbd, which equals main; other merges may still change it before stage 3, so the stage 3 and 4 cards confirm the final commit.
+
 Make a deploy key for this host (separate from the old host's), add it as a read-only deploy key in the GitHub repository settings, then clone. The key steps are `docs/06-install-truenas.md` step 2; use `$BOSSMAN_HOME` for the folder.
 
 Check the Docker socket group, for `BOSSMAN_DOCKER_GID` in `.env`:
@@ -117,7 +119,7 @@ It must end with a line starting `OK:`. The script was written to compare the re
 
 ### Stage 3: final backup and stop (on the OLD host)
 
-1. In Boss Man, pause the agents and wait until no run is in progress. Stop the deployer's scheduled job in whatever scheduler the host uses (**Unconfirmed per host**).
+1. **Wait for the CEO's message "all runs ended, merges frozen" before stopping anything.** The CEO winds the agents down. There is no single "pause everything" button in Boss Man; the only pause control is the per-agent Pause button on the Agents page, and you do not need to press it. Then stop the deployer's scheduled job in whatever scheduler the host uses (**Unconfirmed per host**).
 2. Take a backup and write down its table counts:
 
 ```sh
@@ -152,7 +154,7 @@ It must show `"role":"leader"`. Ticket and migration counts must equal the numbe
 
 ### Stage 5: switch over
 
-With Tailscale state copied, `docker compose up -d tailscale server` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Update the addresses you use. Then the checks listed in step 5 of section 3 run from Boss Man.
+**The old host's Tailscale must already be stopped (stage 3, step 4) before the new one starts**: two machines with the same Tailscale identity fight for the name and break the address. Confirm with `docker compose ps` on the old host that Tailscale is not running. With Tailscale state copied, `docker compose up -d tailscale server` brings the same machine name up (`docs/20-https-tailscale.md`, "Backing up and moving to a new host"). Update the addresses you use. Then the checks listed in step 5 of section 3 run from Boss Man.
 
 ### Stage 6: retire the old host
 
