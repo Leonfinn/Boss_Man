@@ -482,7 +482,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     afterEach(() => vi.useRealTimers());
     const target = (d: { context: unknown }) => d.context as { target: string; commit: string };
 
-    async function deployedInTrial() {
+    async function deployedInTrial(over: Record<string, unknown> = {}) {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date("2026-11-03T01:00:00Z"));
       const c = (ctx = await setup());
@@ -495,7 +495,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       const [server] = (await c.open()).filter((d) => target(d).target === "server");
       await c.req("POST", `/api/decisions/${server!.id}/answer`, { answer: "Deploy" });
       await rm(path.join(c.dir, "inbox", "request.json"));
-      await c.status({ id: server!.id, result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z" });
+      await c.status({ id: server!.id, result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z", ...over });
       await c.available({ deployed: B, tip: B, runnerChanged: true });
       await c.selfDeploy.sync();
       return { c, early: early!, server: server! };
@@ -504,14 +504,66 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     it("holds the runner offer until the trial is over, and refuses the button and a runner card during it", async () => {
       const { c, early } = await deployedInTrial();
       expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(0);
-      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("15-minute trial");
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("standby window");
       const r = await c.req("POST", `/api/decisions/${early.id}/answer`, { answer: "Update runners" });
       expect(r.statusCode).toBeGreaterThanOrEqual(400);
-      expect(r.json().message ?? r.body).toContain("15-minute trial");
+      expect(r.json().message ?? r.body).toContain("standby window");
       // After the trial (900 s soak + 120 s margin), still on B: the runner card appears by itself.
       vi.setSystemTime(new Date("2026-11-03T01:18:01Z"));
       await c.selfDeploy.sync();
       expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
+    });
+
+    const runnerCards = async (c: Awaited<ReturnType<typeof setup>>, commit: string) => (await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === commit);
+
+    it("takes the window from the host's status file, not from the server's own environment (BOS-401)", async () => {
+      vi.stubEnv("BOSSMAN_SOAK_SECONDS", "9999");
+      try {
+        const { c } = await deployedInTrial({ soak_seconds: "60" });
+        // 60 s window + 120 s margin from 01:01:00 = 01:04:00; the env value would hold it for hours.
+        vi.setSystemTime(new Date("2026-11-03T01:03:30Z"));
+        await c.selfDeploy.sync();
+        expect(await runnerCards(c, B)).toHaveLength(0);
+        vi.setSystemTime(new Date("2026-11-03T01:04:30Z"));
+        await c.selfDeploy.sync();
+        expect(await runnerCards(c, B)).toHaveLength(1);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("holds the runner update after a server update that has no self-deploy decision: a rollback, a hand-apply (BOS-401)", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-03T01:00:00Z"));
+      const c = (ctx = await setup());
+      await c.available({ deployed: A, tip: A });
+      await c.req("POST", "/api/self-deploy/update-runners");
+      const [early] = await c.open();
+      // The host reports a server update nobody asked for through a decision (empty id).
+      await c.status({ id: "", result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z", soak_seconds: "300" });
+      await c.available({ deployed: B, tip: B });
+      await c.selfDeploy.sync();
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("standby window");
+      const r = await c.req("POST", `/api/decisions/${early!.id}/answer`, { answer: "Update runners" });
+      expect(r.statusCode).toBeGreaterThanOrEqual(400);
+      // After 300 s + 120 s the hold is over and the button works again.
+      vi.setSystemTime(new Date("2026-11-03T01:08:30Z"));
+      await c.selfDeploy.sync();
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().decisionId).toBeTruthy();
+    });
+
+    it("keeps an older held runner update when a newer server update lands inside the window (BOS-401)", async () => {
+      const { c } = await deployedInTrial();
+      // A second server update to C, 5 minutes in, with no runner change of its own.
+      vi.setSystemTime(new Date("2026-11-03T01:06:00Z"));
+      await c.status({ id: "", result: "deployed", message: "Switched in.", from_commit: B, to_commit: C, ended: "2026-11-03T01:06:00Z" });
+      await c.available({ deployed: C, tip: C });
+      await c.selfDeploy.sync();
+      vi.setSystemTime(new Date("2026-11-03T01:25:00Z"));
+      await c.selfDeploy.sync();
+      const cards = (await c.open()).filter((d) => target(d).target === "runner");
+      expect(cards).toHaveLength(1);
+      expect(cards[0]!.context).toMatchObject({ commit: C, fromCommit: A });
     });
 
     it("withdraws runner cards and drops the held offer when the server is switched back", async () => {

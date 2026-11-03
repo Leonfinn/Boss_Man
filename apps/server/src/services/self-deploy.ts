@@ -44,6 +44,8 @@ const Status = z.object({
   started: z.string(),
   ended: z.string(),
   backup: z.string().default(""),
+  // The host's own standby window in seconds (BOS-401). The shell writes every value as a string; an older host omits it.
+  soak_seconds: z.union([z.number(), z.string()]).optional(),
 });
 export type DeployStatus = z.infer<typeof Status>;
 
@@ -279,12 +281,16 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
   // once that trial is over and the server is still on that commit; until then it is held here.
   const RUNNER_DUE = "self_deploy_runner_due";
   const LAST_SERVER = "self_deploy_last_server";
-  type RunnerDue = { commit: string; fromCommit: string; after: string };
-  type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
-  const trialMs = () => {
-    const soak = Number(process.env.BOSSMAN_SOAK_SECONDS);
-    return ((Number.isFinite(soak) && soak >= 0 ? soak : 900) + 120) * 1000;
+  /** `offer`: the runner needs updating once the window is over; without it the hold only blocks (a row from before BOS-401 is an offer). */
+  type RunnerDue = { commit: string; fromCommit: string; after: string; offer?: boolean };
+  const DEFAULT_SOAK_SECONDS = 900;
+  /** The window the host reported for this deploy; 900 (the host's default) when absent or not a sane number. */
+  const soakSeconds = (s: DeployStatus) => {
+    const raw = s.soak_seconds;
+    const n = typeof raw === "string" ? (raw.trim() === "" ? NaN : Number(raw)) : raw;
+    return typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 86400 ? Math.floor(n) : DEFAULT_SOAK_SECONDS;
   };
+  type LastServer = { result: DeployStatus["result"]; from: string; to: string; ended: string };
   async function getSetting<T>(key: string): Promise<T | null> {
     const [row] = await db.select().from(settings).where(eq(settings.key, key));
     return (row?.value as T | undefined) ?? null;
@@ -298,12 +304,13 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
     return due && Date.now() < Date.parse(due.after) ? due : null;
   }
-  const TRIAL_MESSAGE = "The server update is still in its 15-minute trial, so the runners can't be updated yet. Boss Man offers the runner update by itself when the trial ends.";
+  const TRIAL_MESSAGE = "The server update is still in its standby window, so the runners can't be updated yet. Boss Man offers the runner update by itself when the window ends.";
   /** Raises the held runner update once its trial is over, if the server is still on that commit; otherwise drops it quietly. */
   async function releaseRunnerDue(a: Available | null) {
     const due = await getSetting<RunnerDue>(RUNNER_DUE);
     if (!due || Date.now() < Date.parse(due.after)) return;
     await putSetting(RUNNER_DUE, null);
+    if (due.offer === false) return;
     const last = await getSetting<LastServer>(LAST_SERVER);
     if (last?.result === "deployed" && last.to === due.commit && a?.deployed === due.commit) await raise("runner", due.commit, due.fromCommit, a);
     else deps.log?.(`self-deploy: runner update for ${short(due.commit)} dropped; the server is not on it after its trial`);
@@ -335,14 +342,18 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
         for (const o of await openFor("runner")) await db.update(decisions).set({ status: "withdrawn", answeredAt: new Date(), dedupeKey: null }).where(eq(decisions.id, o.id));
       }
     }
+    // Every way a server update can end "deployed" starts a standby window (deploy latest, hand-apply and a rollback have no self_deploy decision), so the hold is set here, not on the decision path.
+    if (s.target === "server" && s.result === "deployed") {
+      const ended = Date.parse(s.ended);
+      const old = await getSetting<RunnerDue>(RUNNER_DUE);
+      const wants = ctx?.type === "self_deploy" && !!ctx.runnerChanged;
+      // A newer server update inside the window must not drop the older commit's runner change: keep its range and its offer.
+      const held = old && old.offer !== false;
+      await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: old ? old.fromCommit : s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + (soakSeconds(s) + 120) * 1000).toISOString(), offer: wants || !!held } satisfies RunnerDue);
+    }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });
-      // The server is deployed; the runners are a separate question, held until the server's trial is over.
-      if (s.target === "server" && s.result === "deployed" && ctx.runnerChanged) {
-        const ended = Date.parse(s.ended);
-        await putSetting(RUNNER_DUE, { commit: s.to_commit, fromCommit: s.from_commit, after: new Date((Number.isFinite(ended) ? ended : Date.now()) + trialMs()).toISOString() } satisfies RunnerDue);
-      }
     }
   }
 
