@@ -944,10 +944,10 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                               {d.context.alwaysAgent && (
                                 <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
                                   <legend style={{ fontWeight: 600, marginBottom: 4 }}>If you press an Always button, it covers</legend>
-                                  <label style={{ display: "block" }}>
+                                  <label style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
                                     <input type="radio" name={`always-scope-${d.id}`} checked={(alwaysScopes[d.id] ?? "agent") === "agent"} onChange={() => setAlwaysScopes((s) => ({ ...s, [d.id]: "agent" }))} /> {d.context.alwaysAgent.name} only
                                   </label>
-                                  <label style={{ display: "block" }}>
+                                  <label style={{ display: "flex", flexDirection: "row", alignItems: "center", gap: 8 }}>
                                     <input type="radio" name={`always-scope-${d.id}`} checked={alwaysScopes[d.id] === "company"} onChange={() => setAlwaysScopes((s) => ({ ...s, [d.id]: "company" }))} /> Every agent in this company
                                   </label>
                                 </fieldset>
