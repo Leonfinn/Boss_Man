@@ -291,6 +291,30 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
 }
 
 /**
+ * One open sign-off card per ticket (BOS-446): a new review round closes the older "Merge it, or send it back?"
+ * cards, and the ticket's wait on them. Returns how many were closed.
+ */
+export async function supersedeSignoffs(db: Db, ticketId: string, withdrawal: Withdrawal) {
+  const rows = await db
+    .select()
+    .from(decisions)
+    .where(and(eq(decisions.status, "open"), sql`${decisions.context}->>'type' = 'risk_review'`, sql`${decisions.context}->>'ticketId' = ${ticketId}`));
+  let cleared = 0;
+  for (const r of rows) {
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: new Date(withdrawal.at), dedupeKey: null, context: { ...(r.context as object), withdrawn: withdrawal } })
+      .where(and(eq(decisions.id, r.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (done) {
+      cleared++;
+      await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, r.id));
+    }
+  }
+  return cleared;
+}
+
+/**
  * An approved ticket whose merge didn't finish: the merge failed (runner gone, a reply timed out) or the
  * server stopped mid-way. The owner tries again or sends it back; "Run the check again" re-runs the whole merge.
  */
@@ -2249,6 +2273,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       } else if (ctx.type === "risk_review") {
         await db.delete(ticketDependencies).where(eq(ticketDependencies.blockerDecisionId, id));
+        // The sign-off is answered: any "sign-off still waiting" retry card for this ticket is stale now (BOS-446), and the merge starts below.
+        await clearMergeCards(db, ctx.ticketId, { by: "system", note: "The owner's sign-off was answered, so this retry card is no longer needed.", at: new Date().toISOString() });
         if (answer === APPROVE_MERGE) await loopHooks?.land(ctx.ticketId, "the owner");
         else await loopHooks?.sendBack(ctx.ticketId, `The owner sent this back.${extra.note ? ` ${extra.note}` : ""}`, "the owner");
       } else if (ctx.type === "check_stuck") {
