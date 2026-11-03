@@ -33,7 +33,8 @@ type Word = {
   quoted: boolean;
 };
 
-type Cmd = { words: Word[]; stdin: Word[]; piped: boolean; nested: boolean };
+/** named: the command began with `function` or `coproc`, so `NAME { … }` is a body, not a program and its arguments. */
+type Cmd = { words: Word[]; stdin: Word[]; piped: boolean; nested: boolean; named?: boolean };
 
 const MAX_DEPTH = 6;
 const KEYWORDS = new Set("if then else elif fi do done while until for case esac select ! { } coproc function".split(" "));
@@ -114,7 +115,9 @@ function parse(src: string): { cmds: Cmd[]; unparsed: boolean } {
       if (redirect === "here") cmd.stdin.push(w);
       else if (redirect === "file") {
         // A redirect's target isn't one of the command's words.
-      } else if (!(cmd.words.length === 0 && !quoted && KEYWORDS.has(word))) cmd.words.push(w);
+      } else if (cmd.words.length === 0 && !quoted && KEYWORDS.has(word)) {
+        if (word === "function" || word === "coproc") cmd.named = true;
+      } else cmd.words.push(w);
       redirect = null;
       word = "";
       started = dynamic = lead = split = quoted = brace = glob = false;
@@ -433,12 +436,19 @@ export function commandRisks(command: string | string[]): Risk[] {
     function judge(cmd: Cmd, depth: number, bulk: boolean) {
       let w = cmd.words;
       let wrapped = false;
+      let named = !!cmd.named;
       for (let hops = 0; hops < 12; hops++) {
         while (w.length && /^[A-Za-z_]\w*\+?=/.test(w[0]!.text)) w = w.slice(1);
         // A keyword after a wrapper (time { rm …; }, time ! rm …) starts the command that follows it.
-        while (w.length && !w[0]!.quoted && KEYWORDS.has(w[0]!.text)) w = w.slice(1);
+        while (w.length && !w[0]!.quoted && KEYWORDS.has(w[0]!.text)) {
+          if (w[0]!.text === "function" || w[0]!.text === "coproc") named = true;
+          w = w.slice(1);
+        }
         // `function f { rm …; }` and `coproc f { rm …; }` reach here as `f { rm …`: the body starts after the `{`.
-        if (w.length > 2 && !w[1]!.quoted && w[1]!.text === "{") w = w.slice(2);
+        // Only after one of those keywords: elsewhere a second word `{` is just an argument, and
+        // `truncate { -s0 x` runs truncate (BOS-116 round 15, Jane).
+        if (named && w.length > 2 && !w[1]!.quoted && w[1]!.text === "{") w = w.slice(2);
+        named = false;
         const first = w[0];
         if (!first) return;
         const all = w;
