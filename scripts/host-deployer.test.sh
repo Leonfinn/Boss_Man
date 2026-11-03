@@ -188,7 +188,7 @@ rm -f "$D/state/last-server"
 
 # 8. Runner updates: only to the deployed commit; never needs the tip.
 head="$(git -C "$T/src" rev-parse HEAD)"
-req runner "$c3"; host; has "$D/outbox/status.json" "only to the commit that is deployed"
+req runner "$c3"; host; has "$D/outbox/status.json" "Nothing is broken and nothing needs doing now"
 req runner "$head"; host
 [[ $(status result) == deployed && $(status target) == runner ]] || fail "runner status"
 has "$STUB_LOG" "update-runner.sh"
