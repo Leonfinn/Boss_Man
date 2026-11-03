@@ -10,6 +10,7 @@ import { openPglite } from "../src/db/client.js";
 import { agents, decisions, reviewRequests, runs, tickets, wakes } from "../src/db/schema.js";
 import { REVIEW_REASON } from "../src/services/scheduler.js";
 import { STATUS_REASON } from "../src/services/progress.js";
+import { reviewAskPattern, reviewAskPrefix } from "../src/services/review-kinds.js";
 
 const MIN = 60_000;
 let ctx: Awaited<ReturnType<typeof setup>>;
@@ -178,5 +179,14 @@ describe("a cause left unproven", () => {
     await ctx.ticket("Proven", { stateNote: "Cause confirmed: the cache.", stateNoteAt: new Date(Date.now() - 5 * 60 * MIN) });
     await ctx.ticket("In review", { systemState: "review", stateNote: "Unconfirmed.", stateNoteAt: new Date(Date.now() - 5 * 60 * MIN) });
     expect(await ctx.sweeps.run()).toMatchObject({ progress: { unproven: 0 } });
+  });
+});
+
+describe("the review wake note format", () => {
+  it("names the ticket so the progress sweep's match keeps working if the note changes", () => {
+    expect(reviewAskPrefix("abc-123")).toBe("- abc-123 ");
+    expect(reviewAskPattern("abc-123")).toBe("- abc-123 %");
+    const note = `${reviewAskPrefix("abc-123")}"Needs review": half done`;
+    expect(note).toContain(reviewAskPrefix("abc-123"));
   });
 });
