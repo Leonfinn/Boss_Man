@@ -61,11 +61,19 @@ Downtime is only steps 3 to 5, about 30 to 60 minutes, mainly the final data cop
 
 ## 4. The commands
 
-Run all commands as root in the checkout (`$BOSSMAN_HOME/src`) unless a step says otherwise. They are the repository's own commands; paths in angle brackets are yours.
+Run all commands in the checkout (`$BOSSMAN_HOME/src`) unless a step says otherwise, as root or with `sudo` in front of commands that need it (the folder and ownership steps do). They are the repository's own commands; paths in angle brackets are yours.
 
 ### Stage 1: prepare the new host
 
-Install Docker with the Compose plugin and git, flock and curl using the host's own instructions. **Unconfirmed per host**; find out the supported way from Docker's install page for your distribution, then check:
+**If the host already runs Docker** (for example a VM you set up earlier, possibly with other containers on it), do not install or reinstall anything yet. First see what is there, and change nothing:
+
+```sh
+docker ps --format '{{.Names}}\t{{.Ports}}'
+```
+
+Boss Man needs these host ports free (defaults; `.env` can change them): 3101 for the app, plus Penpot's and ntfy's ports if you use them. If one is taken, pick another in `.env` (`BOSSMAN_BIND`) rather than stopping the other container. Docker's default network range can also clash with your LAN; `docker network ls` shows what exists.
+
+Then check which of the tools below are already installed, and install only the missing ones. Otherwise, install Docker with the Compose plugin and git, flock and curl using the host's own instructions. **Unconfirmed per host**; find out the supported way from Docker's install page for your distribution, then check:
 
 ```sh
 docker compose version
@@ -75,7 +83,7 @@ docker compose version
 git --version && flock --version | head -1 && curl --version | head -1
 ```
 
-**Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. On 3 Nov 2026 the live commit is 8eaa7cbd, which equals main; other merges may still change it before stage 3, so the stage 3 and 4 cards confirm the final commit.
+**Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. On 3 Nov 2026 the live commit is 2d5e3035; other merges may still change it before stage 3, so the stage 3 and 4 cards confirm the final commit.
 
 Make a deploy key for this host (separate from the old host's), add it as a read-only deploy key in the GitHub repository settings, then clone. The key steps are `docs/06-install-truenas.md` step 2; use `$BOSSMAN_HOME` for the folder.
 
@@ -92,7 +100,7 @@ mkdir -p "$BOSSMAN_HOME/data/postgres" "$BOSSMAN_HOME/data/companies" "$BOSSMAN_
 ```
 
 ```sh
-chown -R 1000:1000 "$BOSSMAN_HOME/data/companies" "$BOSSMAN_HOME/src/secrets" && chmod 700 "$BOSSMAN_HOME/src/secrets"
+sudo chown -R 1000:1000 "$BOSSMAN_HOME/data/companies" "$BOSSMAN_HOME/src/secrets" && sudo chmod 700 "$BOSSMAN_HOME/src/secrets"
 ```
 
 Write `.env` by copying the old host's and changing only: `BOSSMAN_DATA`, `BOSSMAN_BIND`, `BOSSMAN_PORTAL_URL`, `BOSSMAN_DOCKER_GID`, `PENPOT_*` if used. Keep `POSTGRES_PASSWORD` the same as the old host's. Do not start the stack yet.
