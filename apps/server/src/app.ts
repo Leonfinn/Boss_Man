@@ -87,8 +87,13 @@ export type AppOptions = {
   db: Db;
   master: MasterKey;
   liveValidator?: LiveValidator;
-  /** Mark cookies Secure. Turn off only for plain-HTTP local development. */
-  secureCookies?: boolean;
+  /**
+   * Mark cookies Secure: true always (default), false never (plain-HTTP development), or "auto" to
+   * decide per request from req.protocol, which is https only behind a trusted proxy (BOS-242).
+   */
+  secureCookies?: boolean | "auto";
+  /** Exact addresses of the proxies whose X-Forwarded-* headers are believed (BOS-242). Never "true". */
+  trustedProxies?: string[];
   logger?: boolean;
   /** Quiet time before a wiki page is embedded after a write. Default 30s. */
   semanticDebounceMs?: number;
@@ -176,7 +181,8 @@ async function serveWeb(app: FastifyInstance, root: string) {
 
 export async function buildApp(opts: AppOptions) {
   const { db, master } = opts;
-  const app = Fastify({ logger: opts.logger ?? false });
+  // Trust only the exact proxy addresses given (the Tailscale Serve hop), never every hop.
+  const app = Fastify({ logger: opts.logger ?? false, trustProxy: opts.trustedProxies?.length ? opts.trustedProxies : false });
   // Keep recent server errors for the CEO's server_status tool (BOS-224), redacted.
   const errorBuffer = createErrorBuffer();
   const logError = app.log.error.bind(app.log);
@@ -391,6 +397,7 @@ export async function buildApp(opts: AppOptions) {
     if (event.type === "run.quota") void quotaWatch(event.fundingSourceId).catch((err) => app.log.error({ err }, "quota forecast failed"));
     // What each agent kind offers, for the model picker (R60).
     if (event.type === "runner.models") void models.record(runner.companyId, event.agentKind, event.models).catch((err) => app.log.error({ err, companyId: runner.companyId }, "model list failed"));
+    if (event.type === "runner.sandbox") void runners.recordSandbox(runner.id, event.report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "sandbox report failed"));
     if (event.type === "runner.disk") {
       const { type: _type, ...report } = event;
       void disk.onReport(runner, report, (opts.now ?? (() => new Date()))()).catch((err) => app.log.error({ err, companyId: runner.companyId }, "disk report handling failed"));
@@ -434,6 +441,7 @@ export async function buildApp(opts: AppOptions) {
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
+    landingActive: (ticketId) => review.landingActive(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
@@ -452,6 +460,7 @@ export async function buildApp(opts: AppOptions) {
     withdrawDecision: (id) => decisionsSvc.withdrawSkill(id),
     tell: (agentId, note) => scheduler.notify(agentId, { reason: "skill decided", note, priority: 2 }),
     closeReview: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "cancelled", stateNote }),
+    closeReviewDone: (ticketId, stateNote) => work.updateTicket(ticketId, { state: "done", outcome: "completed", stateNote }),
     now: opts.now,
   });
   decisionsSvc.setSkillHook((ctx, companyId, answer, by) => skillProposals.decide(companyId, ctx.proposalId, answer, by));
@@ -535,7 +544,10 @@ export async function buildApp(opts: AppOptions) {
     return reply.code(500).send({ error: "internal_error" });
   });
 
-  async function startSession(reply: FastifyReply, ownerId: string) {
+  /** Secure flag for one request: see AppOptions.secureCookies. */
+  const cookieSecure = (req: FastifyRequest) => (opts.secureCookies === "auto" ? req.protocol === "https" : opts.secureCookies ?? true);
+
+  async function startSession(req: FastifyRequest, reply: FastifyReply, ownerId: string) {
     const token = newSessionToken();
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 86_400_000);
     await db.insert(sessions).values({ tokenHash: hashToken(token), ownerId, expiresAt });
@@ -543,7 +555,7 @@ export async function buildApp(opts: AppOptions) {
       path: "/",
       httpOnly: true,
       sameSite: "strict",
-      secure: opts.secureCookies ?? true,
+      secure: cookieSecure(req),
       expires: expiresAt,
     });
   }
@@ -593,7 +605,7 @@ export async function buildApp(opts: AppOptions) {
     const [row] = await db.select({ n: count() }).from(owners);
     if ((row?.n ?? 0) > 0) return reply.code(409).send({ error: "already_set_up" });
     const [owner] = await db.insert(owners).values({ username: body.username, passwordHash: await hashPassword(body.password) }).returning();
-    await startSession(reply, owner!.id);
+    await startSession(req, reply, owner!.id);
     return reply.code(201).send({ username: owner!.username });
   });
 
@@ -614,7 +626,7 @@ export async function buildApp(opts: AppOptions) {
       return reply.code(401).send({ error: "wrong_username_or_password" });
     }
     logins.succeeded(req.ip, body.username);
-    await startSession(reply, owner.id);
+    await startSession(req, reply, owner.id);
     return { username: owner.username };
   });
 
@@ -842,6 +854,9 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key: "run_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
       return runLimits();
     });
+    // BOS-313: check the merged result before pushing it (off by default while it rolls out).
+    owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
+    owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
       return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null };
@@ -944,7 +959,7 @@ export async function buildApp(opts: AppOptions) {
       const [r] = await db.select().from(runnersTable).where(eq(runnersTable.companyId, id));
       const launcher = await launch.status(id);
       if (!r) return { registered: false, launcher };
-      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, launcher };
+      return { registered: true, runnerId: r.id, connected: runners.isConnected(r.id), lastSeenAt: r.lastSeenAt, imageVersion: r.imageVersion, diskUsedBytes: r.diskUsedBytes, diskCheckedAt: r.diskCheckedAt, addons: r.addons, sandbox: r.sandbox, sandboxCheckedAt: r.sandboxCheckedAt, launcher };
     });
 
     // The runner's container through the launcher (R55): start or reconnect (a new token), restart, stop.
@@ -983,10 +998,12 @@ export async function buildApp(opts: AppOptions) {
       const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
       if (!c) return reply.code(404).send({ error: "not_found" });
       const [row] = await db.insert(mcpServers).values({ ...b, companyId: id }).onConflictDoNothing().returning();
+      if (row) void launch.syncAllow(id);
       return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });
     });
     owner.delete("/api/mcp-servers/:id", async (req, reply) => {
-      const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id });
+      const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id, companyId: mcpServers.companyId });
+      if (row) void launch.syncAllow(row.companyId);
       return row ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
     });
 

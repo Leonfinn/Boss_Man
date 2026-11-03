@@ -4,7 +4,7 @@
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -14,6 +14,7 @@ import type { McpServer, RequestPermissionRequest, RequestPermissionResponse, Se
 import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
 import { probeModels } from "./models-probe.js";
 import { addonList, checkAddons } from "./addons.js";
+import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
 import { gitAuthEnv, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
@@ -42,6 +43,14 @@ export type SessionManagerOptions = {
   reply?: (requestId: string, result: { ok: true; data: unknown } | { ok: false; error: string }) => void;
   /** Runs the setup-token check (R58), given only the token. */
   checkClaude?: (credentials: Record<string, string>) => Promise<{ ok: boolean; message: string }>;
+  /**
+   * The agent fence (DR-004, BOS-321), for runs started with fence: this runner's level from its
+   * self-test, where each agent's own home goes, and the shared pnpm store. Without it, or on an
+   * unavailable level, such runs start unfenced, as before.
+   */
+  fence?: { level: FenceLevel; agentsRoot: string; pnpmStore?: string };
+  /** The folder check-all.sh's queue and results share across sessions and the merge check (checkQueueEnv). */
+  coordDir?: string;
   log?: (msg: string) => void;
 };
 
@@ -149,6 +158,18 @@ export function defaultBin(agentKind: string): string {
   return path.join(path.dirname(require.resolve(`${pkg}/package.json`)), rel);
 }
 
+/** Makes base/rel folder by folder, refusing to go through anything that isn't a real folder (a link). */
+function realDirsUnder(base: string, rel: string): boolean {
+  let at = base;
+  for (const part of rel.split(path.sep).filter(Boolean)) {
+    at = path.join(at, part);
+    const st = lstatSync(at, { throwIfNoEntry: false });
+    if (!st) mkdirSync(at);
+    else if (!st.isDirectory()) return false;
+  }
+  return true;
+}
+
 type RunState = {
   child: ChildProcess;
   sessionId: string | null;
@@ -251,7 +272,10 @@ export class SessionManager {
         return;
       }
       case "permission.decide":
-        this.runs.get(command.runId)?.pendingPermissions.get(command.requestId)?.(command.verdict);
+        // A verdict for a request that is no longer waiting (the run was cancelled or ended, or the runner restarted) reaches nothing: say so, so a card that was answered but never ran can be traced.
+        const settle = this.runs.get(command.runId)?.pendingPermissions.get(command.requestId);
+        if (settle) settle(command.verdict);
+        else this.opts.emit({ type: "runner.log", level: "warn", message: `A "${command.verdict}" verdict for permission request ${command.requestId} of run ${command.runId} arrived, but nothing is waiting for it.` });
         return;
       case "workspace.release":
         void this.opts.workspaces
@@ -329,7 +353,7 @@ export class SessionManager {
                     ? ws.pushForReview({ projectId: command.projectId, ticketId: command.ticketId }, command.target, secrets)
                     : command.type === "workspace.migrations"
                       ? ws.migrations({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.others, secrets)
-                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets),
+                      : ws.merge({ projectId: command.projectId, ticketId: command.ticketId }, command.target, command.message, secrets, command.checks?.length ? { commands: command.checks } : null),
               );
         work.then(
           (data) => reply(command.requestId, { ok: true, data }),
@@ -405,7 +429,79 @@ export class SessionManager {
     }
     // shortcut: owner chat (boardToolsOnly) denies edit/bash/web but leaves OpenCode's read-only tools on, upgrade if they must go too.
     if (cmd.agentKind === "opencode") Object.assign(env, opencodeEnv(secrets.OPENCODE_CONFIG_CONTENT ?? base.OPENCODE_CONFIG_CONTENT, cmd.boardToolsOnly ? "deny" : "ask"));
+    if (this.opts.coordDir) Object.assign(env, checkQueueEnv(this.opts.coordDir));
     return env;
+  }
+
+  /**
+   * Sets a fenced run up (BOS-321): the agent's own home (HOME, harness state, caches) under
+   * agentsRoot, a temp folder for this run, the project's shared Claude memory linked in, and
+   * the command that starts the adapter inside the fence. Changes env in place.
+   */
+  private fenceRun(cmd: StartCommand, env: NodeJS.ProcessEnv, bin: string, args: string[], skillsDir: string | null) {
+    const fence = this.opts.fence!;
+    const base = this.opts.baseEnv ?? process.env;
+    if (!/^[0-9a-f-]{36}$/i.test(cmd.agentId) || !/^[0-9a-f-]{36}$/i.test(cmd.runId)) throw new Error("the agent or run id isn't a UUID");
+    const home = path.join(fence.agentsRoot, cmd.agentId);
+    const tmp = path.join(home, "tmp", cmd.runId);
+    const dirs = { CLAUDE_CONFIG_DIR: path.join(home, ".claude"), CODEX_HOME: path.join(home, ".codex"), XDG_CONFIG_HOME: path.join(home, ".config"), XDG_CACHE_HOME: path.join(home, ".cache"), XDG_DATA_HOME: path.join(home, ".local", "share"), XDG_STATE_HOME: path.join(home, ".local", "state") };
+    mkdirSync(home, { recursive: true });
+    for (const d of [tmp, ...Object.values(dirs)]) {
+      if (!realDirsUnder(home, path.relative(home, d))) throw new Error(`${path.relative(home, d)} in the agent's home isn't a folder`);
+    }
+    Object.assign(env, { HOME: home, TMPDIR: tmp }, dirs);
+    // The shared repo's root is read-only to the agent, where auto-gc and pack-refs would write.
+    addGitConfig(env, "gc.auto", "0");
+
+    const readWrite: string[] = [];
+    if (fence.pnpmStore) {
+      // pnpm keeps the store's location in HOME's config; without this it starts a new store in the worktree.
+      mkdirSync(fence.pnpmStore, { recursive: true });
+      env.npm_config_store_dir = fence.pnpmStore;
+      readWrite.push(fence.pnpmStore);
+    }
+    const readOnlyExtra: string[] = [];
+    if (this.opts.coordDir) {
+      const grant = checkQueueGrant(this.opts.coordDir);
+      readWrite.push(grant.readWrite);
+      readOnlyExtra.push(grant.readOnly);
+    }
+    let repo: { bare: string; admin: string | null } | undefined;
+    if (cmd.workspace && this.opts.workspaces) {
+      repo = repoGrant(this.opts.workspaces.repoDir(cmd.workspace.projectId), cmd.cwd);
+      // Claude Code keeps a project's auto-memory under its config folder, keyed by the shared repo.
+      // Agents share it today, so the agent's own folder links to the shared one, granted alone.
+      const shared = base.CLAUDE_CONFIG_DIR;
+      if (shared && cmd.agentKind === "claude") {
+        const slug = claudeProjectSlug(repo.bare);
+        const memory = path.join(shared, "projects", slug, "memory");
+        const link = path.join(dirs.CLAUDE_CONFIG_DIR, "projects", slug, "memory");
+        mkdirSync(memory, { recursive: true });
+        // The agent owns its folder and could swap a parent for a link elsewhere, so the runner
+        // makes folders and its link only through real folders. The grant is the shared folder either way.
+        if (realDirsUnder(home, path.relative(home, path.dirname(link))) && !lstatSync(link, { throwIfNoEntry: false })) symlinkSync(memory, link);
+        readWrite.push(memory);
+      }
+    }
+    const real = (p: string | undefined) => {
+      try {
+        return p ? realpathSync(p) : null;
+      } catch {
+        return null;
+      }
+    };
+    const onPath = (b: string) => (b.includes("/") ? b : (env.PATH ?? "").split(":").map((d) => path.join(d, b)).find((p) => existsSync(p)));
+    const readOnly = [
+      skillsDir,
+      real(onPath(bin)) && path.dirname(real(onPath(bin))!),
+      real(base.CLAUDE_CODE_EXECUTABLE) && path.dirname(real(base.CLAUDE_CODE_EXECUTABLE)!),
+      base.NPM_CONFIG_PREFIX,
+      base.PLAYWRIGHT_BROWSERS_PATH,
+      ...(base.NODE_PATH ?? "").split(":"),
+      ...readOnlyExtra,
+    ].filter((p): p is string => !!p);
+    const rules = fenceProfile({ cwd: cmd.cwd, home, tmp, repo, readOnly, readWrite });
+    return { command: fencedCommand(rules, bin, args), tmp };
   }
 
   private async start(cmd: StartCommand) {
@@ -471,10 +567,32 @@ export class SessionManager {
       emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: String((err as Error)?.message ?? err) });
       return;
     }
+    // The fence (BOS-321): asked for per run; a runner that can't fence runs it as before and says so.
+    let launch = { bin, args: adapterArgs(cmd.agentKind) };
+    let fenced: boolean | undefined;
+    let runTmp: string | null = null;
+    if (cmd.fence) {
+      fenced = false;
+      if ((this.opts.fence?.level ?? "unavailable") === "unavailable") {
+        emit({ type: "runner.log", level: "warn", message: `Run ${cmd.runId} was asked to run fenced, but this runner can't fence agents, so it runs unfenced.` });
+      } else {
+        try {
+          const set = this.fenceRun(cmd, env, bin, launch.args, skillsDir);
+          launch = set.command;
+          runTmp = set.tmp;
+          fenced = true;
+        } catch (err) {
+          dropSkills();
+          emit({ type: "run.ended", runId: cmd.runId, stopReason: null, error: `Couldn't set up the agent's fence: ${String((err as Error)?.message ?? err).slice(0, 500)}` });
+          return;
+        }
+      }
+    }
+    const dropTmp = () => runTmp && rmSync(runTmp, { recursive: true, force: true });
     // Its own process group: the adapter runs Claude Code as a child, and if the adapter dies
     // Claude Code carries on headless with every permission denied (spike S4). Ending the run
     // kills the whole group.
-    const child = spawn(bin, adapterArgs(cmd.agentKind), { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    const child = spawn(launch.bin, launch.args, { env, cwd: cmd.cwd, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stderr = "";
     child.stderr?.on("data", (d) => {
       stderr = (stderr + String(d)).slice(-4000);
@@ -518,6 +636,7 @@ export class SessionManager {
         kind: req.toolCall.kind ?? null,
         rawInput,
         optionKinds: req.options.map((o) => o.kind),
+        ...(id ? { toolCallId: id.slice(0, 200) } : {}),
         ...(detail ? { detail } : {}),
       });
       return verdict;
@@ -611,6 +730,7 @@ export class SessionManager {
       connection.close();
       killGroup(child);
       dropSkills();
+      dropTmp();
     };
     // "close", not "exit": by then stderr is fully read, and it holds the reason the agent died.
     child.on("close", (code) => {
@@ -703,7 +823,7 @@ export class SessionManager {
         this.reportedModels.set(cmd.agentKind, seen);
         emit({ type: "runner.models", agentKind: cmd.agentKind, models: choices });
       }
-      emit({ type: "run.started", runId: cmd.runId, agentId: cmd.agentId, acpSessionId: session.sessionId, model, resumed: session.resumed });
+      emit({ type: "run.started", runId: cmd.runId, agentId: cmd.agentId, acpSessionId: session.sessionId, model, resumed: session.resumed, ...(fenced === undefined ? {} : { fenced }) });
 
       // A session that couldn't be reopened gets the full prompt, so it doesn't miss what the old one knew.
       const first = !session.resumed && cmd.resumeSessionId && cmd.freshPrompt ? cmd.freshPrompt : cmd.prompt;

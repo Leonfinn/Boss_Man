@@ -4,12 +4,12 @@
 import { readFile } from "node:fs/promises";
 import { eq, like } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { companies, settings } from "../db/schema.js";
+import { companies, mcpServers, settings } from "../db/schema.js";
 import type { runnersService } from "./runners.js";
 
 export type LauncherOptions = { url: string; keyFile: string };
 /** `current`: running the image `boss-man-runner:current` points at now (absent from a launcher older than the server). */
-export type LaunchedRunner = { slug: string; state: string; status: string; image: string; current?: boolean };
+export type LaunchedRunner = { slug: string; state: string; status: string; image: string; current?: boolean; guard?: "on" | "off" | "unavailable" };
 
 export class LauncherError extends Error {
   constructor(
@@ -33,6 +33,17 @@ export function slugify(name: string): string {
     .slice(0, 34)
     .replace(/-+$/, "");
   return s || "company";
+}
+
+/** host:port of a tool server's URL, or null if it has none the network guard could allow (an IPv6 literal, a bad URL). */
+export function toolServerAddress(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (u.hostname.startsWith("[")) return null;
+    return `${u.hostname}:${u.port || (u.protocol === "https:" ? "443" : "80")}`;
+  } catch {
+    return null;
+  }
 }
 
 export function launcherService(db: Db, deps: { runners: ReturnType<typeof runnersService>; options?: LauncherOptions; fetch?: typeof fetch }) {
@@ -78,8 +89,24 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
     return now!.value as string;
   }
 
+  /** The company's tool servers as host:port: the runner's network guard keeps these reachable on private addresses. */
+  async function allowFor(companyId: string): Promise<string[]> {
+    const rows = await db.select({ url: mcpServers.url }).from(mcpServers).where(eq(mcpServers.companyId, companyId));
+    return [...new Set(rows.map((r) => toolServerAddress(r.url)).filter((a): a is string => !!a))];
+  }
+
   return {
     enabled: !!opts,
+
+    /** Tells the launcher the company's tool servers again (after one is added or removed). Best effort: a launcher that is down picks them up at the next start. */
+    async syncAllow(companyId: string) {
+      if (!opts) return;
+      try {
+        await call("PUT", `/runners/${await slugFor(companyId)}/allow`, { allow: await allowFor(companyId) });
+      } catch {
+        /* the next runner start sends the list again */
+      }
+    },
 
     /** Starts the runner, or reconnects it: a new token, written by the launcher, and a fresh container. */
     async start(companyId: string) {
@@ -87,7 +114,7 @@ export function launcherService(db: Db, deps: { runners: ReturnType<typeof runne
       // The launcher must answer before the token changes, or a working runner would be cut off for nothing.
       await call("GET", "/runners");
       const { token } = await deps.runners.register(companyId);
-      await call("PUT", `/runners/${slug}`, { token });
+      await call("PUT", `/runners/${slug}`, { token, allow: await allowFor(companyId) });
       return { slug };
     },
 

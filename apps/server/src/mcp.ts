@@ -1692,6 +1692,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           case "read": {
             if (!input.slug) return fail("Give the page's slug.");
             const p = await wiki.get(scope.companyId, input.slug);
+            // The exact app link, so an agent (or the CEO) pastes it rather than guessing the format (BOS-356).
+            const link = `#/wiki/${scope.companyId}/${p.slug}`;
             const sections = splitSections(p.body);
             const outline = (error?: string) =>
               [
@@ -1701,6 +1703,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
                 ...sections.map((s) => `- ${s.path} (${s.ownEnd - s.start} chars): ${p.body.slice(s.start, s.ownEnd).split("\n").find((l) => l.trim() && !/^#+\s/.test(l))?.trim().slice(0, 100) ?? ""}`),
                 "",
                 `Read a section with section="<heading>", or the whole page in parts with offset=0.`,
+                `Link: ${link}`,
               ].join("\n");
             let body: string;
             let shown: string;
@@ -1714,7 +1717,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
               body = `${input.offset ? "" : `# ${p.title}\n\n`}${cut(p.body, CAP, (m) => `continue with offset=${m}`, input.offset ?? 0)}`;
             } else return text(outline());
             const l = await wiki.links(scope.companyId, p.slug, shown);
-            return text([body, ...(l.links.length ? [`Links: ${l.links.join(", ")}`] : []), ...(l.linkedFrom.length ? [`Linked from: ${l.linkedFrom.join(", ")}`] : [])].join("\n\n"));
+            return text([body, ...(l.links.length ? [`Links: ${l.links.join(", ")}`] : []), ...(l.linkedFrom.length ? [`Linked from: ${l.linkedFrom.join(", ")}`] : []), `Link: ${link}`].join("\n\n"));
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
@@ -1830,7 +1833,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
   server.registerTool(
     "set_ticket_state",
     {
-      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished; ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
+      description: "Move one of your company's tickets to a new state. Call it with state \"review\" when your work is ready to check, or \"done\" when it is finished (a no-code ticket assigned to you can be closed by you); ending your turn does not move the ticket. Moving to review, done or blocked needs a summary (up to 240 characters): what you did, or what you are waiting on. Blocked is refused unless something open holds the ticket; if you are waiting on the owner (to run something, answer or sign off), call raise_decision with blocksTicketId first, and only after you have tried every way to do it yourself. Naming the owner in the summary does not reach them. It is kept on the ticket for whoever reads it next, so write it in plain words with no file paths unless essential. If the ticket has acceptance criteria, the summary must say pass or fail for each of them. Pass expected_version (the ticket's version as you last saw it) so the move is refused if the ticket has changed since. When blocking on something with a known time (e.g. a scheduled deployment), pass blocked_until (a future date and time within 30 days, ISO 8601 with a time zone) and optionally blocked_reason (one line, up to 240 characters): the Scrum Master watchdog then stays quiet until that time plus a grace period. Without blocked_until the normal blocked limit applies.",
       inputSchema: { ticketId: z.string().uuid(), state: z.enum(STATES), outcome: z.enum(["completed", "cancelled"]).optional(), expected_version: z.number().int().optional(), summary: z.string().max(240).optional(), blocked_until: z.string().datetime({ offset: true }).optional(), blocked_reason: z.string().max(BLOCKED_UNTIL_REASON_MAX).optional() },
     },
     async ({ ticketId, state, outcome, expected_version, summary, blocked_until, blocked_reason }) => {
@@ -1845,16 +1848,20 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // In a project with a repo, a ticket is done when its branch is merged after review (R46, R47).
       if (state === "done") {
         const [t] = await db
-          .select({ repoUrl: projects.repoUrl, mergeCommit: tickets.mergeCommit, noCode: tickets.noCode })
+          .select({ repoUrl: projects.repoUrl, mergeCommit: tickets.mergeCommit, noCode: tickets.noCode, assignee: tickets.assigneeAgentId })
           .from(tickets)
           .innerJoin(projects, eq(projects.id, tickets.projectId))
           .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
         // A ticket whose branch is already merged but stayed in review (e.g. waiting on the owner's yes) can be closed by a manager.
         const merged = !!t?.mergeCommit && (await managerIn(db, scope));
+        // A no-code ticket never has a branch to merge, so its own assignee closes it once the work is
+        // done (BOS-304): the CEO no longer has to move each research, wiki or docs task by hand.
+        const ownNoCode = !!t?.noCode && !!scope.agentId && t.assignee === scope.agentId;
         // A ticket whose change shipped on another ticket has nothing of its own to merge; the CEO or a manager may close it.
-        if (t?.repoUrl && outcome !== "cancelled" && !merged) {
-          // A no-code ticket has nothing to merge by definition.
-          const nothingOwn = t.noCode || (await review.needsChanges(ticketId, scope.companyId).catch(() => false));
+        if (t?.repoUrl && outcome !== "cancelled" && !merged && !ownNoCode) {
+          // No code at all means nothing to merge for anyone; otherwise only "nothing changed" can skip review.
+          // A manager may still close either, as before, whatever the branch holds.
+          const nothingOwn = !!t?.noCode || (await review.needsChanges(ticketId, scope.companyId).catch(() => false));
           if (!nothingOwn) return fail('This project has a repo: move the ticket to "review" instead. It becomes done when its branch is approved, checked and merged.');
           if (!(await managerIn(db, scope))) return fail("This ticket has no changes of its own, so it can't be merged. If its change shipped on another ticket, ask your CEO or manager to close it (set_ticket_state done, naming that ticket in the summary).");
         }

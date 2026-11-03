@@ -589,6 +589,27 @@
       "when": 1793610910154,
       "tag": "0085_runner_harness_versions",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1793646056196,
+      "tag": "0088_runner_sandbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1793650814895,
+      "tag": "0092_checked_commit",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1793659340000,
+      "tag": "0097_runner_boot_id",
+      "breakpoints": true
     }
   ]
 }
