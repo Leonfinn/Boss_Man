@@ -271,7 +271,7 @@ describe("rules judge: write allow-list (BOS-357)", () => {
       "node -e \"process.chdir(require('os').homedir()); require('fs').appendFileSync('.bashrc','x')\"",
       "cd; echo x > .bashrc", "cd && cp /tmp/a .bashrc", "cd \"\" && echo x > .bashrc", "cd - && echo x > .bashrc",
       "git config core.fsmonitor /tmp/x.sh", "git config --local core.fsmonitor /tmp/x.sh", "git config core.sshCommand 'sh -c id'", "git config alias.st '!sh -c id'", "git -C ~ config alias.x y",
-      "sed --in-place 's/a/b/' /home/node/.bashrc", "tar -xPf a.tar", "tar xf a.tar --absolute-names", "pip install --user x", "xargs -I{} sh -c 'echo x > {}' <<< /home/node/.bashrc",
+      "sed --in-place 's/a/b/' /home/node/.bashrc", "tar -xPf a.tar", "tar xf a.tar --absolute-names", "pip install --user x", "7z x a.7z -o/home/node", "7za x a.7z -o/home/node/x", "xargs -I{} sh -c 'echo x > {}' <<< /home/node/.bashrc",
     ]);
     allows(["git config --get user.name", "git config --list", "git commit -m 'update config'", "python3 -c \"print(1)\"", "python3 -c \"open('/tmp/x','w').write('y')\""]);
     it("reads adversarial inline code in linear time", () => {

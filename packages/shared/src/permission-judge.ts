@@ -305,9 +305,9 @@ function toolTargets(c: string): string[] {
     unzip: { short: "d", long: [] },
     "7z": { short: "o", long: [] },
   };
-  for (const m of c.matchAll(/(?<![\w./-])(curl|wget|tar|unzip)\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g)) {
+  for (const m of c.matchAll(/(?<![\w./-])(curl|wget|tar|unzip|7z|7za|7zr)\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g)) {
     const tool = m[1]!;
-    const { short, long } = spec[tool]!;
+    const { short, long } = spec[/^7z/.test(tool) ? "7z" : tool]!;
     const toks = (m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map((t) => t);
     for (let i = 0; i < toks.length; i++) {
       const t = toks[i]!;
