@@ -28,7 +28,7 @@ import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, missingVerdicts, readVerdicts } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
-import { findSection, splitSections, WikiError, type wikiService } from "./services/wiki.js";
+import { findSection, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import type { SkillFinding } from "./db/schema.js";
@@ -451,7 +451,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
       const hint = await ownerActionHint(db, scope, ticketId, body);
-      return text(`Posted on the ticket's conversation.${hint ? `\n\n${hint}` : ""}`);
+      const links = await missingPageNote(db, scope.companyId, body);
+      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint}` : ""}`);
     },
   );
 
@@ -519,7 +520,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (err instanceof WorkError) return fail(err.message);
         throw err;
       }
-      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
+      const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
+      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${links ? `\n\n${links}` : ""}`);
     },
   );
 
@@ -734,7 +736,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const link = input.link ?? (input.ticketId ? `#/tickets/${input.ticketId}` : `#/runs/${scope.runId}`);
       const n = await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: input.level, title: input.title, body: input.body ?? null, link });
       if (!n) return fail("Couldn't record that notification.");
-      return text(n.level === input.level ? `Sent as a ${n.level}.` : `Sent as a ${n.level} instead of a ${input.level} (${n.demotedBy}).`);
+      const links = await missingPageNote(db, scope.companyId, `${input.title}\n${input.body ?? ""}`);
+      const sent = n.level === input.level ? `Sent as a ${n.level}.` : `Sent as a ${n.level} instead of a ${input.level} (${n.demotedBy}).`;
+      return text(`${sent}${links ? `\n\n${links}` : ""}`);
     },
   );
 

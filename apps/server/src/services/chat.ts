@@ -10,6 +10,7 @@ import { agentIdentity } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { activity, agents, companies, decisions, ownerChatMessages, projects, runs, wakes } from "../db/schema.js";
 import { ceoNotesLines, NOTE_LIMITS } from "./agent-notes.js";
+import { missingPageNote } from "./wiki.js";
 
 export const CHAT_REASON = "owner_chat";
 const HISTORY = 30;
@@ -181,8 +182,12 @@ export function chatService(db: Db, deps: { notify: (agentId: string, input: { r
       const [r] = await db.select({ companyId: runs.companyId, agentId: runs.agentId, purpose: runs.purpose, duty: agents.duty }).from(runs).innerJoin(agents, eq(agents.id, runs.agentId)).where(eq(runs.id, runId));
       // The PA speaks only through pa_reply, which is checked; its own closing text never reaches the owner (R87).
       if (r?.purpose !== "chat" || r.duty === "assistant") return;
+      // A chat reply has no tool result to come back in, so a link to a page that isn't there is
+      // named in a line under the saved reply (BOS-359); the agent's words are left as written.
+      const links = await missingPageNote(db, r.companyId, text);
+      const saved = links ? `${text}\n\n${links}` : text;
       // Started once and shared: awaiting a query builder twice would insert the reply twice.
-      const save = db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text, runId }).then(() => {});
+      const save = db.insert(ownerChatMessages).values({ companyId: r.companyId, agentId: r.agentId, role: "assistant", text: saved, runId }).then(() => {});
       saving.set(runId, save.catch(() => {}));
       await save;
     },
