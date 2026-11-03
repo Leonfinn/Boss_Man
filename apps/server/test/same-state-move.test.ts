@@ -71,10 +71,10 @@ describe("a same-state move only updates the note (DR-010)", () => {
   it("the owner route has the same guard", async () => {
     const c = (ctx = await setup());
     const t = await c.ticket();
-    await c.req("PATCH", `/api/tickets/${t.id}`, { state: "review" });
+    await c.req("POST", `/api/tickets/${t.id}/state`, { state: "review" });
     const first = await c.rounds(t.id);
     expect(first.length).toBeGreaterThan(0);
-    await c.req("PATCH", `/api/tickets/${t.id}`, { state: "review" });
+    await c.req("POST", `/api/tickets/${t.id}/state`, { state: "review" });
     expect((await c.rounds(t.id)).sort()).toEqual([...first].sort());
   });
 });
