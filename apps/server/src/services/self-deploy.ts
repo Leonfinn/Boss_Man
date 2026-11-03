@@ -153,7 +153,8 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const shaOk = isSha(commit) && isSha(fromCommit);
     const bg = a?.bluegreen;
     const colour = a?.liveColour === "blue" || a?.liveColour === "green" ? a.liveColour : null;
-    const noSrc = "Boss Man can't tell where it is installed, so no command is shown here. The folder is in docs/06-install-truenas.md; ask us on this ticket for the exact commands.";
+    // Never a guide's folder (BOS-417): docs/06 is TrueNAS-only, and an owner card must not send them to a doc.
+    const noSrc = "Boss Man can't tell where it is installed, because the machine hasn't reported its install folder, so no command is shown here. Ask us on this ticket for the exact commands.";
     const handSteps: string[] = [];
     if (infra) {
       handSteps.push(

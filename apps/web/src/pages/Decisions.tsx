@@ -777,6 +777,17 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                             <li key={i}><StepText text={s} refs={d.refs} /></li>
                           ))}
                         </ol>
+                        {/* The lint's findings (BOS-417): small, under the steps, never the headline. */}
+                        {d.context.lint?.override && (
+                          <p className="muted" data-lint-override style={{ fontSize: 12 }}>
+                            Boss Man flagged {d.context.lint.override.findings.map((f) => `step ${f.step}: ${f.problem}`).join("; ")}. The CEO says: {d.context.lint.override.reason}
+                          </p>
+                        )}
+                        {!!d.context.lint?.warn.length && (
+                          <p className="muted" data-lint-warn style={{ fontSize: 12 }}>
+                            Boss Man flagged {d.context.lint.warn.map((f) => `step ${f.step}: ${f.problem}`).join("; ")}.
+                          </p>
+                        )}
                       </div>
                     )}
                     {d.context?.check && (
