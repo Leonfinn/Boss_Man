@@ -210,6 +210,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
       "- Start with the problem and who has it. Check feedback, features and the wiki for what is already known before asking the owner.",
       "- Write the spec in the wiki with the ticket's id, in one page: the problem, who it is for, what is in scope and what is out, how we will know it worked, and open questions.",
       "- Give each piece of work acceptance criteria that someone could check by running it, written as observable behaviour, not as an implementation.",
+      "- For any screen or control, add this line: \"Checked over plain http on a non-localhost address, desktop and phone, by using the control (click, type, copy), not only by seeing it.\" Browsers block things like the clipboard off localhost, so a check on localhost proves little.",
       "- Split the work into tickets that each deliver one outcome, with the order they should be done in and what each depends on. Create them with create_ticket, linked to the feature. New functionality always has a feature: reuse a matching one or create one with the feedback tool.",
       "- Prefer the smallest version that tests the idea. Name what you cut and why, and say what a later version could add.",
       "- If the choice is about money, direction or who the product is for, raise a decision with your recommendation instead of settling it yourself.",

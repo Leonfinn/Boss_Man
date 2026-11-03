@@ -143,3 +143,55 @@ export function parseNameStatus(out: string): Array<{ status: string; path: stri
   }
   return list;
 }
+
+/** The gate's wording for what to do about a journal problem; drizzle gives no error of its own. */
+const JOURNAL_FIX = "To fix: merge origin/<target> into your branch, renumber your migration to the next free number (NNNN), set its journal \"when\" to Date.now(), then run drizzle-kit generate to confirm it reports no changes.";
+/** A journal entry may not be dated further ahead than this: a made-up future time would make every later migration look older and be skipped. */
+export const JOURNAL_FUTURE_SLACK_MS = 10 * 60_000;
+
+type JournalEntry = { idx?: unknown; when?: unknown; tag?: unknown };
+
+/**
+ * Problems with the journal a merge would produce (BOS-360). Drizzle runs a migration only when its
+ * `when` is later than the newest already applied, and skips the rest without a word, so a
+ * migration that merges with an older, equal or made-up future `when` ships and never runs.
+ * `base` is the target's journal, `merged` the journal after the merge; an entry is the branch's
+ * when its tag isn't on the target. Returns plain sentences, empty when all is well.
+ */
+export function journalProblems(base: JournalEntry[], merged: JournalEntry[], now: number, target = "main"): string[] {
+  const baseTags = new Set(base.map((e) => String(e.tag)));
+  const mine = merged.filter((e) => !baseTags.has(String(e.tag)));
+  if (!mine.length) return [];
+  const problems: string[] = [];
+  const newest = Math.max(-Infinity, ...base.map((e) => Number(e.when)).filter(Number.isFinite));
+  for (const e of mine) {
+    const when = Number(e.when);
+    const tag = String(e.tag);
+    if (!Number.isFinite(when)) problems.push(`${tag}: its journal entry has no usable "when".`);
+    else if (when <= newest) problems.push(`${tag}: its journal "when" (${when}) isn't later than the newest one on ${target} (${newest}), so drizzle would silently skip it.`);
+    else if (when > now + JOURNAL_FUTURE_SLACK_MS) problems.push(`${tag}: its journal "when" (${when}) is more than 10 minutes in the future, so every later migration would be skipped.`);
+  }
+  const seen = (key: (e: JournalEntry) => string, what: string) => {
+    const groups = new Map<string, string[]>();
+    for (const e of merged) groups.set(key(e), [...(groups.get(key(e)) ?? []), String(e.tag)]);
+    for (const [k, tags] of groups) if (tags.length > 1 && tags.some((t) => !baseTags.has(t))) problems.push(`${what} ${k} is used by ${tags.join(" and ")}.`);
+  };
+  seen((e) => String(e.idx), "Journal idx");
+  seen((e) => /^\d+/.exec(String(e.tag))?.[0] ?? String(e.tag), "Migration number");
+  return problems.length ? [...problems, JOURNAL_FIX.replace("<target>", target)] : [];
+}
+
+/** The entries of the journal at `ref`, or none when it has no readable one. */
+export async function journalAt(git: GitCode, ref: string): Promise<JournalEntry[]> {
+  const files = (await git(["ls-tree", "-r", "-z", "--name-only", ref])).stdout.split("\0");
+  // Several matches: the shallowest one is the real journal; a stray copy deeper in the tree can't shadow it.
+  const file = files.filter((p) => /(^|\/)drizzle\/meta\/_journal\.json$/.test(p)).sort((x, y) => x.split("/").length - y.split("/").length)[0];
+  if (!file) return [];
+  const shown = await git(["show", `${ref}:${file}`]);
+  if (shown.code !== 0) return [];
+  try {
+    return (JSON.parse(shown.stdout) as { entries?: JournalEntry[] }).entries ?? [];
+  } catch {
+    return [];
+  }
+}

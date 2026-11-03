@@ -59,6 +59,13 @@ describe("Always allow on a permission card (BOS-294)", () => {
     expect(await ctx.ask(ctx.co.ceo.id, MD)).not.toBeNull();
   });
 
+  it("saves the rule once when the same card is answered twice at the same time", async () => {
+    const card = await ctx.ask(ctx.dev.id, MD);
+    const [a, b] = await Promise.all([ctx.answer(card!.id, ALWAYS), ctx.answer(card!.id, ALWAYS)]);
+    expect([a.statusCode, b.statusCode].filter((c) => c === 200)).toHaveLength(1);
+    expect(await ctx.rules()).toHaveLength(1);
+  });
+
   it("covers every agent only when the owner picks that scope", async () => {
     const card = await ctx.ask(ctx.dev.id, MD);
     expect((await ctx.answer(card!.id, ALWAYS, { alwaysScope: "company" })).statusCode).toBe(200);

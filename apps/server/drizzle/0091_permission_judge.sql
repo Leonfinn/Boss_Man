@@ -1,0 +1,1 @@
+ALTER TABLE "companies" ADD COLUMN "permission_judge" text DEFAULT 'watch' NOT NULL;
