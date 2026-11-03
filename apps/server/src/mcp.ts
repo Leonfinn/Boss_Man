@@ -1696,6 +1696,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           case "read": {
             if (!input.slug) return fail("Give the page's slug.");
             const p = await wiki.get(scope.companyId, input.slug);
+            // The exact app link, so an agent (or the CEO) pastes it rather than guessing the format (BOS-356).
+            const link = `#/wiki/${scope.companyId}/${p.slug}`;
             const sections = splitSections(p.body);
             const outline = (error?: string) =>
               [
@@ -1705,6 +1707,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
                 ...sections.map((s) => `- ${s.path} (${s.ownEnd - s.start} chars): ${p.body.slice(s.start, s.ownEnd).split("\n").find((l) => l.trim() && !/^#+\s/.test(l))?.trim().slice(0, 100) ?? ""}`),
                 "",
                 `Read a section with section="<heading>", or the whole page in parts with offset=0.`,
+                `Link: ${link}`,
               ].join("\n");
             let body: string;
             let shown: string;
@@ -1718,7 +1721,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
               body = `${input.offset ? "" : `# ${p.title}\n\n`}${cut(p.body, CAP, (m) => `continue with offset=${m}`, input.offset ?? 0)}`;
             } else return text(outline());
             const l = await wiki.links(scope.companyId, p.slug, shown);
-            return text([body, ...(l.links.length ? [`Links: ${l.links.join(", ")}`] : []), ...(l.linkedFrom.length ? [`Linked from: ${l.linkedFrom.join(", ")}`] : [])].join("\n\n"));
+            return text([body, ...(l.links.length ? [`Links: ${l.links.join(", ")}`] : []), ...(l.linkedFrom.length ? [`Linked from: ${l.linkedFrom.join(", ")}`] : []), `Link: ${link}`].join("\n\n"));
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
