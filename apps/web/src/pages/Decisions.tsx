@@ -874,6 +874,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           <p className="rec">
                             <strong>RECOMMENDED</strong>
                             {d.recommendedOption}
+                            {d.context?.judge?.mode === "advise" && <span className="muted"> — {d.context.judge.reason}.</span>}
                           </p>
                         )}
                         {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (

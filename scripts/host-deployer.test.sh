@@ -145,8 +145,8 @@ not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_IN
 for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh apps/server/Dockerfile .env.example; do
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
-# CI files and the Penpot add-on don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh; do
+# CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml; do
   if echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
@@ -188,7 +188,7 @@ rm -f "$D/state/last-server"
 
 # 8. Runner updates: only to the deployed commit; never needs the tip.
 head="$(git -C "$T/src" rev-parse HEAD)"
-req runner "$c3"; host; has "$D/outbox/status.json" "only to the commit that is deployed"
+req runner "$c3"; host; has "$D/outbox/status.json" "Nothing is broken and nothing needs doing now"
 req runner "$head"; host
 [[ $(status result) == deployed && $(status target) == runner ]] || fail "runner status"
 has "$STUB_LOG" "update-runner.sh"

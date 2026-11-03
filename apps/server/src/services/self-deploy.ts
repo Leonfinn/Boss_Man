@@ -284,9 +284,15 @@ export function selfDeployService(db: Db, deps: { dir?: string; notify: (n: Noti
     const ctx = d?.context as DecisionContext | undefined;
     const what = s.target === "runner" ? "The runners" : "Boss Man";
     // A runner "deploy" now only builds the image and asks for the drain; the swap's own result is reported by the drain (maintenance.ts).
-    const title = s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
+    // A refused runner update is not a failure and needs nothing from the owner (the message says why): a quiet note, not a flag.
+    const runnerRefused = s.target === "runner" && s.result === "rejected";
+    const title = runnerRefused ? `Runner update not started (${short(s.to_commit)})` : s.result === "deployed" && s.target === "runner" ? `New runner image ready (${short(s.to_commit)}); update waiting for runs to finish` : s.result === "deployed" ? `${what} updated to ${short(s.to_commit)}` : s.result === "nothing_new" ? `${what} was already up to date` : `Update ${s.result === "rejected" ? "refused" : "failed"}: ${short(s.to_commit)}`;
     const changes = s.result === "deployed" && ctx?.type === "self_deploy" ? (ctx.changes ?? []) : [];
-    await deps.notify({ companyId: null, level: LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
+    await deps.notify({ companyId: null, level: runnerRefused ? "note" : LEVEL[s.result], title, body: changes.length ? `${s.message}\n\nWhat changed:\n${changes.map((c) => `- ${c}`).join("\n")}` : s.message, link: "#/settings" });
+    // A server update that was switched back (or failed) leaves no runner update to offer for the commit it never reached.
+    if (s.target === "server" && (s.result === "rolled_back" || s.result === "failed") && s.from_commit) {
+      for (const o of await openFor("runner")) if ((o.context as SelfDeployContext).commit === s.from_commit) await db.update(decisions).set({ status: "withdrawn" }).where(eq(decisions.id, o.id));
+    }
     if (d && ctx?.type === "self_deploy") {
       await db.update(decisions).set({ context: { ...ctx, result: { result: s.result, message: s.message, at: s.ended } } }).where(eq(decisions.id, d.id));
       await record(db, { companyId: d.companyId, kind: "self_deploy", summary: `${title}. ${s.message}` });

@@ -319,3 +319,10 @@ The live colour is whatever `active.caddy` names; no second record exists to dis
    - the cron schedule needs every field set to `*`, because the UI's Hourly preset runs once an hour.
 3. A webhook that nobody receives is silent. Test it (`docs/06`) after install and after any Home Assistant restore.
 4. The first deploy of this phase is by hand: it adds `--commit` to `deploy.sh` and changes `scripts/` and `deploy/`.
+
+## Why a runner update can be refused, and what the status shows (BOS-364)
+
+- Runners are rebuilt from the deployer's checkout, so a runner request is accepted only for the commit the checkout is on (the version the server runs). While a server swap runs, the deployer holds its lock and does not read the request; it is read on a later minute. If the server update was switched back in between (for example by the automatic switch-back during the standby window), the checkout is back on the old commit and the runner request is refused with a plain message. Nothing is broken; offer the runner update again once the server runs the version you want.
+- Boss Man shows that refusal as a quiet note ("Runner update not started"), not an alert, and withdraws a runner offer for a commit the server never reached.
+- `server_status` `deploy.liveCommit` / `liveSince` come only from a finished **server** deploy (otherwise from the host's deployed commit, then the server's own commit). A refused or failed request never counts as live.
+- This is generic to any Docker host; nothing here depends on paths or names. Host-specific notes belong in the install guide for that host.
