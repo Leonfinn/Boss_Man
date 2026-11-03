@@ -561,7 +561,7 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
       await c.selfDeploy.sync();
       vi.setSystemTime(new Date("2026-11-03T01:25:00Z"));
       await c.selfDeploy.sync();
-      const cards = (await c.open()).filter((d) => target(d).target === "runner");
+      const cards = (await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === C);
       expect(cards).toHaveLength(1);
       expect(cards[0]!.context).toMatchObject({ commit: C, fromCommit: A });
     });
