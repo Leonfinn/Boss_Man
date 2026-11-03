@@ -557,6 +557,17 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect((await c.db.select().from(tickets).where(eq(tickets.id, other.id)))[0]).toMatchObject({ systemState: "done" });
   });
 
+  it("runs the deeper check when a high-risk approved ticket lands with a low-risk one (BOS-372)", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git", verifyCommand: "pnpm test"  });
+    await c.db.update((await import("../src/db/schema.js")).projects).set({ deepVerifyCommand: "pnpm test:e2e" });
+    const other = await otherTicket(c, "Inner work", "high");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["pnpm test", "pnpm test:e2e"]);
+  });
+
   it("never lands a carried ticket that isn't approved, even when this branch holds all of it (BOS-372)", async () => {
     const c = (ctx = await setup());
     const other = await otherTicket(c, "Unfinished work");

@@ -834,7 +834,7 @@ export function reviewService(
       }
       // Approved tickets whose whole branch this one holds (the fast-forward case, BOS-372) land together with it.
       const together: CarriedInfo[] = [];
-      for (const c of carried) if (c.contained && (await approvedAndWaiting(c.ticketId))) together.push(c);
+      for (const c of carried) if (!opts?.skipChecks && c.contained && (await approvedAndWaiting(c.ticketId))) together.push(c);
       carried = carried.filter((c) => !together.includes(c));
       if (carried.length) {
         const r = await refuseCarried(t, carried, { reviewerAgentId: null });
@@ -842,7 +842,9 @@ export function reviewService(
       }
 
       // The project's check, plus its deeper one for high and critical work (R47, R48).
-      const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
+      // Deep check at the highest risk among this ticket and every ticket landing with it.
+      const needsDeep = [t.risk, ...together.map((c) => c.risk)].some((r) => deepChecks(r));
+      const checks = opts?.skipChecks ? [] : [verifyCommand, needsDeep ? deepVerifyCommand : null].filter((c): c is string => !!c);
       const kindOf = (command: string) => (command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify");
       // A failed check: wait for the lock, a stuck check, or the ticket goes back with the output (shared by both ways of checking).
       const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
