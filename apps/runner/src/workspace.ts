@@ -735,7 +735,12 @@ export class Workspaces {
         if (!exists) continue;
         // B is carried when this branch holds a commit on B's own first-parent line (B's work).
         // Commits B has only by merging this ticket in are on this ticket's side, not B's line (BOS-365).
-        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
+        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) {
+          // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
+          // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
+          const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
+          found.push({ ticketId: b.ticketId, branch: b.branch, contained });
+        }
       }
       return { carried: found };
     });
