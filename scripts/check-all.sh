@@ -82,8 +82,10 @@ node --test scripts/*.test.mjs
 node scripts/lint-migrations.mjs
 # The heavy phases below peak well above 2 GB each, so only CHECK_ALL_SLOTS checks (1 until a side-by-side pair has passed, then 2) run them at once;
 # the rest queue in order, merge checks first. Each slot is a lock file held until this script exits.
-# A waiter prints its place and an estimated wait and does not give up (hand-run checks) or gives up
-# after CHECK_ALL_LOCK_WAIT seconds (default 3 h, merge check only: exit 75, which Boss Man retries).
+# A waiter prints its place and an estimated wait. Hand-run checks never give up. A merge check keeps its place for as
+# long as the queue moves, and gives up (exit 75) only when it stands still: neither its place nor who holds a slot has
+# changed for CHECK_ALL_STUCK_AFTER seconds (default 1 h, longer than a check runs); it then says so ("made no progress").
+# CHECK_ALL_LOCK_WAIT, when set, is a hard cap on the whole wait for a merge check (exit 75, which Boss Man retries).
 # The merge check queues like the rest but goes ahead of waiting hand-run checks; one already running is never interrupted.
 # fd 9 is inherited by pnpm/vitest: if a timed-out check leaves children behind they keep the slot until
 # they exit (tracked in the runner-cleanup ticket). Skipped where flock is missing (macOS).
@@ -97,19 +99,23 @@ if command -v flock >/dev/null; then
   elif [ "${CHECK_ALL_SLOTS:-1}" -gt 1 ]; then echo "check-all: CHECK_ALL_SLOTS=$CHECK_ALL_SLOTS ignored, no passed side-by-side pair recorded in $PROOF; running one at a time"
   fi
   QDIR="$LOCK.queue"  # one file per waiting check, "<0 merge | 1 hand-run>-<time>-<pid>"; names sort into serving order
-  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then WAIT=${CHECK_ALL_LOCK_WAIT:-10800}; prio=0; else WAIT=${CHECK_ALL_LOCK_WAIT:-0}; prio=1; fi
+  WAIT=${CHECK_ALL_LOCK_WAIT:-0}; STUCK=0; prio=1
+  if [ -n "${BOSSMAN_MERGE_CHECK:-}" ]; then prio=0; STUCK=${CHECK_ALL_STUCK_AFTER:-3600}; fi
+  AGEREF="$LOCK.age.$$"  # an empty file dated 2 h ago, to tell stale queue entries by their modification time
   # An unreachable lock folder (for example outside a fenced session's grant) fails at once with a clear message,
   # never a silent wait: a slot file that cannot be opened would otherwise read as "busy" forever.
   lock_unusable() { echo "check-all: cannot use the check lock folder: $1 (set CHECK_ALL_LOCK to a writable path)" >&2; exit 2; }
   mkdir -p "$QDIR" 2>/dev/null || lock_unusable "cannot create $QDIR"
   qfile="$QDIR/$prio-$(date +%s%N)-$$"
   { : >"$qfile"; } 2>/dev/null || lock_unusable "cannot write $qfile"
-  trap 'rm -f "$qfile"' EXIT
+  trap 'rm -f "$qfile" "$AGEREF"' EXIT
   take_slot() {
     local k
     for ((k = 1; k <= SLOTS; k++)); do
       { exec 9>"$LOCK.slot.$k"; } 2>/dev/null || lock_unusable "cannot open $LOCK.slot.$k"
-      if flock -n 9; then return 0; fi
+      # Note who holds the slot in a file of its own (every waiter's open truncates the slot file): a waiter
+      # sees the queue move when this line changes. Best effort; a holder from an older script leaves none.
+      if flock -n 9; then echo "$$ $(date +%s)" >"$LOCK.holder.$k" 2>/dev/null || true; return 0; fi
     done
     exec 9>&-
     return 1
@@ -119,7 +125,10 @@ if command -v flock >/dev/null; then
   # took 13.6 s a pass with them), and only the first CHECK_ALL_QUEUE_SCAN entries in serving order count.
   # A waiter further back sees a place past the scan and keeps waiting.
   queue_place() {
-    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now; now=$(date +%s)
+    local f base qts qpid mine=0 total=0 scan=${CHECK_ALL_QUEUE_SCAN:-200} now stale=0; now=$(date +%s)
+    # A live waiter touches its entry every report, so age is read from the file's modification time (a bash test,
+    # no subprocess per entry), not from the name: a check that has waited more than 2 h in a long queue keeps its place.
+    touch -d "@$((now - 7200))" "$AGEREF" 2>/dev/null && stale=1
     for f in "$QDIR"/*; do
       [ -e "$f" ] || continue
       # Drop malformed entries first: the folder is shared, so a name is never used in arithmetic unless it is
@@ -129,7 +138,7 @@ if command -v flock >/dev/null; then
       base=${f##*/}
       if ! [[ $base =~ ^[01]-([0-9]{1,19})-([0-9]{1,9})$ ]]; then rm -f "$f"; continue; fi
       qts=$((10#${BASH_REMATCH[1]} / 1000000000)); qpid=$((10#${BASH_REMATCH[2]}))
-      if [ ! -d "/proc/$qpid" ] || [ $((now - qts)) -gt 7200 ] || [ $((qts - now)) -gt 60 ]; then rm -f "$f"; continue; fi
+      if [ ! -d "/proc/$qpid" ] || [ $((qts - now)) -gt 60 ] || { [ "$stale" = 1 ] && [ "$f" -ot "$AGEREF" ]; }; then rm -f "$f"; continue; fi
       total=$((total + 1)); [ "$f" != "$qfile" ] || mine=$total
       if [ "$total" -ge "$scan" ]; then
         [ "$mine" -gt 0 ] || mine=$((scan + 1))
@@ -150,12 +159,24 @@ if command -v flock >/dev/null; then
     fi
     if [ "$n" -gt 0 ]; then echo $((sum / n)); else echo 600; fi
   }
-  waited_from=$SECONDS; last_said=-1000; got=no; typical=""
+  waited_from=$SECONDS; last_said=-1000; got=no; typical=""; stuck=no; seen=""; moved_at=$SECONDS
   while :; do
     read -r place total < <(queue_place)
     if [ "$place" -le 1 ] && take_slot; then got=yes; break; fi
     if [ "$WAIT" -gt 0 ] && [ $((SECONDS - waited_from)) -ge "$WAIT" ]; then break; fi
+    # The queue moves when my place changes or a slot gets a new holder; one that stands still too long is stuck.
+    if [ "$STUCK" -gt 0 ]; then
+      holders=""
+      for h in "$LOCK".holder.*; do
+        [ -f "$h" ] || continue
+        line=""; read -r line <"$h" 2>/dev/null || true
+        holders="$holders|$line"
+      done
+      if [ "$place|$holders" != "$seen" ]; then seen="$place|$holders"; moved_at=$SECONDS; fi
+      if [ $((SECONDS - moved_at)) -ge "$STUCK" ]; then stuck=yes; break; fi
+    fi
     if [ $((SECONDS - last_said)) -ge "${CHECK_ALL_QUEUE_REPORT:-30}" ]; then
+      { : >"$qfile"; } 2>/dev/null || true  # keep my queue entry fresh (and put it back if someone removed it)
       [ -n "$typical" ] || typical=$(typical_run)
       rounds=$(((place + SLOTS - 1) / SLOTS))
       echo "check-all: waiting for a free check slot (place $place of $total, $SLOTS run at once); about $(((rounds * typical + 59) / 60)) min to go"
@@ -165,9 +186,12 @@ if command -v flock >/dev/null; then
   done
   if [ "$got" = no ]; then
     # Exit 75 (EX_TEMPFAIL) and this exact wording tell Boss Man nothing ran: it retries the merge instead of sending the ticket back.
+    if [ "$stuck" = yes ]; then
+      echo "check-all: gave up waiting for the heavy-phase lock $LOCK: the queue made no progress for $(((STUCK + 59) / 60)) min (place $place of $total; the check holding the slot has not changed)" >&2; exit 75
+    fi
     echo "check-all: gave up waiting for the heavy-phase lock $LOCK" >&2; exit 75
   fi
-  rm -f "$qfile"; trap - EXIT
+  rm -f "$qfile" "$AGEREF"; trap - EXIT
   echo "check-all: slot taken, running the checks"
 else
   echo "check-all: flock not found, running without the heavy-phase lock"

@@ -513,16 +513,20 @@ export class Workspaces {
       };
       let tail = "";
       // While check-all.sh waits in its queue the clock is the (long) queue limit; it restarts at the full timeout once the checks really begin.
+      // The queue limit is a no-progress limit (BOS-370): it restarts whenever the printed place changes.
       let queued = false;
       let slotTaken = false;
+      let lastPlace = "";
       const onData = (chunk: string) => {
         tail = (tail + chunk).slice(-8192);
         if (!slotTaken && tail.includes(CHECK_STARTED_MARKER)) {
           slotTaken = true;
           arm(timeoutMs);
-        } else if (!queued && !slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
+        } else if (!slotTaken && tail.includes(CHECK_QUEUED_MARKER)) {
+          const place = [...chunk.matchAll(/waiting for a free check slot \(place (\d+) of/g)].pop()?.[1] ?? "";
+          if (!queued || (place && place !== lastPlace)) arm(queueMaxMs);
           queued = true;
-          arm(queueMaxMs);
+          if (place) lastPlace = place;
         }
       };
       child.stdout.setEncoding("utf8");

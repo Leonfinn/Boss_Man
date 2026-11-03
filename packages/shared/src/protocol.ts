@@ -253,8 +253,14 @@ export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boo
  * the answer a minute longer than both.
  */
 export const VERIFY_TIMEOUT_MS = 30 * 60_000;
-export const VERIFY_QUEUE_MAX_MS = 3 * 60 * 60_000;
-export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_MAX_MS + VERIFY_TIMEOUT_MS + 60_000;
+export const VERIFY_QUEUE_MAX_MS = 90 * 60_000;
+/**
+ * VERIFY_QUEUE_MAX_MS is a no-progress limit (BOS-370): the runner restarts it every time the check's place in the queue
+ * changes, so a long queue that keeps moving never trips it; scripts/check-all.sh gives up sooner (an hour) on its own.
+ * The server's wait is only a ceiling for a queue that moves for a very long time.
+ */
+export const VERIFY_QUEUE_CEILING_MS = 24 * 60 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_CEILING_MS + VERIFY_TIMEOUT_MS + 60_000;
 /** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the 30-minute clock at the second. */
 export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
 export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
