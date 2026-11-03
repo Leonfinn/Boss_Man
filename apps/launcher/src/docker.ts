@@ -12,7 +12,7 @@ export class DockerError extends Error {
 }
 
 export type ContainerSummary = { Id: string; Names: string[]; Image: string; ImageID?: string; State: string; Status: string; Labels: Record<string, string>; Created: number };
-export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string } };
+export type ContainerInfo = { Id: string; Name: string; Config: { Labels: Record<string, string> | null }; State: { Status: string; StartedAt?: string; ExitCode?: number; Health?: { Status: string } } };
 
 export function dockerClient(socketPath = "/var/run/docker.sock") {
   function call<T>(method: string, path: string, body?: unknown): Promise<{ status: number; json: T | null }> {

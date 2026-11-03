@@ -51,9 +51,9 @@ INBOX="$D/inbox" OUTBOX="$D/outbox" STATE="$D/state" LOG="$D/deployer.log"
 # docs/09-self-deploy.md lists the same files.
 INFRA='^(docker-compose[^/]*\.ya?ml$|deploy/|scripts/(deploy|rebuild-live|update-runner|host-deployer)\.sh$|\.dockerignore$|\.npmrc$|\.env|(.*/)?Dockerfile[^/]*$)'
 # Under deploy/ but never used by Boss Man's own containers: the Penpot add-on is its own Compose project (docs/15).
-NOT_INFRA='^deploy/penpot\.yml$'
+NOT_INFRA='^deploy/(penpot|ntfy)\.yml$'
 # Same rule as needs_runner in scripts/deploy.sh (scripts/host-deployer.test.sh keeps them equal).
-RUNNER_PATHS='^(apps/runner/|apps/launcher/|packages/shared/|pnpm-lock\.yaml$)'
+RUNNER_PATHS='^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 
 # Git as root must not run hooks from a checkout that agents' commits land in; deploy.sh inherits this.
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_TERMINAL_PROMPT=0
@@ -477,7 +477,7 @@ main() {
     [[ $COMMIT == "$tip" ]] || { rm -f "$OUTBOX/available.json"; finish rejected "Rejected: ${COMMIT:0:8} is not the tip of main (${tip:0:8}). Approve the latest deploy instead."; }
   else
     # Runners are built from what is checked out, which is what the server deploy put there.
-    [[ $COMMIT == "$head" ]] || finish rejected "Rejected: runners are updated only to the commit that is deployed (${head:0:8}), not ${COMMIT:0:8}."
+    [[ $COMMIT == "$head" ]] || finish rejected "The runners were not updated. They can only be rebuilt from the version the server runs, which is ${head:0:8}, and you asked for ${COMMIT:0:8} (the server update to it may still be running, or was switched back). Nothing is broken and nothing needs doing now: once the server runs the version you want, use Build and update runners in Settings."
   fi
 
   last="$(cat "$STATE/last-$TARGET" 2>/dev/null || echo 0)"
