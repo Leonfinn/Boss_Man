@@ -282,4 +282,25 @@ describe("rules judge: write allow-list (BOS-357)", () => {
       }
     });
   });
+
+  describe("9. Jane's round 10", () => {
+    denies([
+      "git config --get core.x && git config core.fsmonitor /tmp/x",
+      "git config --list; git config alias.x '!id'",
+      "git config --get a\ngit config core.sshCommand x",
+      `py=python3; $py -c "open('/home/node/.bashrc','w')"`,
+      `py=python3; \${py} -c "open('/home/node/.bashrc','w')"`,
+      `$(which python3) -c "open('/home/node/.bashrc','w')"`,
+      `P=python3; "$P" -c "open('/home/node/.bashrc','w')"`,
+      "`which node` -e \"require('fs').writeFileSync('/home/node/.bashrc','x')\"",
+    ]);
+    allows(["git config --get a && git config --get b", "git log --oneline | head -3"]);
+    it("scans a long run of git -c options in linear time", () => {
+      for (const cmd of ["git" + " -c".repeat(60) + " x", "git" + " -c".repeat(5000) + " x", "git" + " -c a=b".repeat(500) + " status"]) {
+        const t = Date.now();
+        judge(cmd);
+        expect(Date.now() - t).toBeLessThan(200);
+      }
+    });
+  });
 });

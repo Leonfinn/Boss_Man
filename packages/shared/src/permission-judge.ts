@@ -93,8 +93,19 @@ export function judgePermission(question: string, command: string | null, ownFol
   // `git -C dir config`), the git config environment variables, and npm-family config/global installs.
   // Every `git config` write is refused (worktrees share the repo config, so core.fsmonitor / sshCommand / alias.x '!..'
   // would run in other agents' git); only the explicit read forms pass.
-  const gitConfig = /\bgit(?:\s+(?:-[cC]\s+(?:'[^']*'|"[^"]*"|\S+)|--[\w-]+(?:=\S+)?|-\w+))*\s+config\b([^;&|\n]*)/.exec(c);
-  if (gitConfig && !(/(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?=\s|$)/.test(gitConfig[1]!) && !/(?:^|\s)(?:--add|--unset(?:-all)?|--replace-all|--edit|-e|--rename-section|--remove-section|--set\S*|--file\S*|-f\S*|--global|--system|--worktree|--blob)(?=\s|=|$)/.test(gitConfig[1]!))) return result("outside");
+  // Linear scan, per command segment: a `git` word followed later by a `config` word. Every such segment must be a pure read.
+  for (const segment of c.split(/[;&|\n]/)) {
+    const g = /\bgit\b/.exec(segment);
+    if (!g) continue;
+    // Walk the words after `git`: options (and the value of -c / -C) until the subcommand; only `config` matters.
+    const words = segment.slice(g.index + 3).match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    let k = 0;
+    while (k < words.length && words[k]!.startsWith("-")) k += /^-[cC]$/.test(words[k]!) ? 2 : 1;
+    if (words[k] !== "config") continue;
+    const args = words.slice(k + 1).join(" ");
+    const readOnly = /(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?=\s|$)/.test(args) && !/(?:^|\s)(?:--add|--unset(?:-all)?|--replace-all|--edit|-e|--rename-section|--remove-section|--set\S*|--file\S*|-f\S*|--global|--system|--worktree|--blob)(?=\s|=|$)/.test(args);
+    if (!readOnly) return result("outside");
+  }
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
   if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
   // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
@@ -335,6 +346,8 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
   // The interpreter is found wherever it stands (after env, timeout, xargs, a full path, `then` ...), not only first.
   const re = new RegExp(`(?<![\\w.-])(?:[\\w./-]*/)?(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
   const piped = new RegExp(`\\|\\s*(?:${interp})\\b`);
+  // A command word that is a variable, `$(...)` or backtick is an unknown program: with -c/-e/-r it may be an interpreter.
+  if (/(?:^|[;&|(\n])[ \t]*(?:env[ \t]+)?(?:"?\$\{?[A-Za-z_]\w*\}?"?|\$\(|\x60)[^;&|\n]*?[ \t]-[A-Za-z]*[ceErp](?=[ \t]|$)/.test(c)) return false;
   for (const m of c.matchAll(re)) {
     const name = m[1]!;
     const seg = m[0]!;
