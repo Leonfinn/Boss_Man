@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
+import { decisions, fundingSources, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -557,7 +557,8 @@ describe("scheduler", () => {
     async function twoAccounts() {
       ctx = await setup({ agent: 5 });
       const a = (await ctx.req("POST", "/api/funding-sources", { name: "Max one", kind: "subscription", provider: "anthropic", fallbackRank: 1 })).json();
-      const b = (await ctx.req("POST", "/api/funding-sources", { name: "Max two", kind: "subscription", provider: "anthropic", fallbackRank: 2 })).json();
+      const sec = (await ctx.req("POST", "/api/secrets", { name: "Max two login", kind: "claude_oauth_token", value: "sk-ant-oat01-abcdefghijklmnop" })).json().secret.id as string;
+      const b = (await ctx.req("POST", "/api/funding-sources", { name: "Max two", kind: "subscription", provider: "anthropic", fallbackRank: 2, secretId: sec })).json();
       await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: a.id });
       return { a, b };
     }
@@ -591,6 +592,16 @@ describe("scheduler", () => {
       const { a, b } = await twoAccounts();
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
       await ctx.req("POST", "/api/quota-samples", { fundingSourceId: b.id, claudeMeta: meta(0.99) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    });
+
+    it("refuses a second account with no login, and skips one whose login was removed", async () => {
+      const { a, b } = await twoAccounts();
+      const bad = await ctx.req("POST", "/api/funding-sources", { name: "No login", kind: "subscription", provider: "anthropic", fallbackRank: 2 });
+      expect(bad.statusCode).toBe(400);
+      await ctx.db.update(fundingSources).set({ secretId: null }).where(eq(fundingSources.id, b.id));
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
       await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
       expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
     });

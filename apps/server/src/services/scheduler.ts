@@ -1360,7 +1360,9 @@ export function schedulerService(
             // An agent on one of the owner's ranked Claude subscriptions goes to the first one with
             // room (BOS-383); an agent on any other source is checked against its own as before.
             const pool = source.fallbackRank != null && source.provider === "anthropic" ? await claudeAccounts(source) : [];
-            const accounts = pool.length ? pool : [source];
+            // An account after the first with no login (its secret was deleted) would silently run on the company's default token, so it counts as unavailable.
+            const usable = pool.filter((a, i) => i === 0 || a.secretId);
+            const accounts = usable.length ? usable : [source];
             const checked: { source: typeof source; rank: number; passes: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
             for (const a of accounts) {
               const samples = await latestQuotaWindows(a.id);

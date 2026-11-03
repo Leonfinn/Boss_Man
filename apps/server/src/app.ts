@@ -1050,7 +1050,7 @@ export async function buildApp(opts: AppOptions) {
     const rankProblem = async (kind: string, provider: string, rank: number | null | undefined, secretId: string | null | undefined) => {
       if (rank == null) return null;
       if (kind !== "subscription" || provider !== "anthropic") return "Only a Claude subscription can be put in the list of accounts.";
-      if (!secretId) return null;
+      if (!secretId) return rank > 1 ? "Every account after the first needs its own Claude setup-token as its login." : null;
       const [s] = await db.select({ kind: secretsTable.kind }).from(secretsTable).where(eq(secretsTable.id, secretId));
       return s?.kind === "claude_oauth_token" ? null : "Pick a Claude setup-token secret as this account's login.";
     };
