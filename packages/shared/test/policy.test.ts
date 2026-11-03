@@ -597,3 +597,23 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
     expect(recommendedVerdict(exec("find /tmp/x -delete"))).toBe("allow");
   });
 });
+
+// BOS-233: the recorded routing decision. A read-only `dd` and any command Boss Man can't read as own
+// work stay with the owner: the item-1 shapes are frozen (the Landlock fence contains them), so these
+// pins keep the check from drifting by accident.
+describe("own-work routing pins (BOS-233)", () => {
+  const route = (c: string) => evaluatePermission(exec(c), []);
+  it("keeps a read-only dd with the owner, and the same for any unrecognised command", () => {
+    for (const c of ["dd if=/tmp/session.db count=40", "dd if=/dev/zero", "docker run --rm -v /:/h alpine rm -rf /h/x", "zfs destroy tank/apps"]) {
+      expect(route(c).outcome, c).toBe("owner");
+      expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    }
+  });
+  it("still sends the company's build output and /tmp deletes to the CEO, never to the owner", () => {
+    expect(route("rm -rf /tmp/probe233")).toMatchObject({ outcome: "ceo" });
+    // Pushes and anything outside /tmp stay the owner's even when they sit beside own work.
+    for (const c of ["git push --force origin main", "git push origin main", "rm -rf /home/node/x", "rm -rf /tmp/../home"]) {
+      expect(route(c).outcome, c).toBe("owner");
+    }
+  });
+});

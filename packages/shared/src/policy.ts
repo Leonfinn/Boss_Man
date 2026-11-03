@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, ownWorkKind, readPush, tempCleanup } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -27,6 +27,8 @@ export type PolicyMatch = {
   tempCleanupOnly?: boolean;
   /** Only matches a shell command written as one string whose deletes include plain relative paths in the working copy, the rest as tempCleanupOnly (BOS-120, cleanupScope in explain.ts). */
   workingCopyOnly?: boolean;
+  /** Only matches a shell command that is entirely own work: a throwaway /tmp clone, the agent's own checkout, or its own script (BOS-233, ownWorkKind in explain.ts). */
+  scratchObjectOnly?: boolean;
 };
 
 export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: PolicyOutcome };
@@ -41,9 +43,14 @@ export const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
 
 export const TEMP_CLEANUP_RULE = "Temp-file cleanup goes to the CEO first";
 export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to the CEO first";
+export const OWN_WORK_RULE = "Work in the agent's own /tmp scratch, throwaway clone, checkout or own script goes to the CEO first";
 
 export const DEFAULT_POLICY: PolicyRuleSpec[] = [
   { name: "Boss Man's own tools", match: { titlePattern: String.raw`^(mcp__bossman__|mcp\.bossman\.)` }, outcome: "allow" },
+  // Own work (BOS-233) is the CEO's call, like cleanup: a throwaway /tmp folder named in a variable, a
+  // throwaway clone in /tmp, an in-place edit of the agent's checkout, or the agent's own script. Placed
+  // first among the CEO rules so the most precise shape claims the card. It only ever routes to the CEO.
+  { name: OWN_WORK_RULE, match: { kinds: ["execute"], scratchObjectOnly: true }, outcome: "ceo" },
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
   { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
   // The same for plain relative paths in the agent's checkout; the server sends it to the owner when the run has no checkout (BOS-120).
@@ -106,6 +113,11 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     if (!scratch || scratch.unchecked.length) return false;
   }
   if (rule.tempCleanupOnly && !tempCleanup(commandOf(info.rawInput) ?? "")) return false;
+  if (rule.scratchObjectOnly) {
+    // A string only, like workingCopyOnly: an argv array runs without a shell, so the reading of ; and && wouldn't hold.
+    const cmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
+    if (typeof cmd !== "string" || !ownWorkKind(cmd)) return false;
+  }
   if (rule.workingCopyOnly) {
     // A string only: an argv array runs without a shell, so cleanupScope's reading of ; and && wouldn't hold.
     const cmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
@@ -115,7 +127,7 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly);
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.scratchObjectOnly);
 }
 
 /** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
@@ -166,6 +178,8 @@ export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]
 
 /** Build output in the agent's working folder (node_modules, dist…), by a plain relative path: no component starting with a dot (so no .., . or .git), no ~, $ or globs. Source folders such as src aren't vouched for. */
 const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-][\w.+@-]*\/)*(?:node_modules|dist|build|coverage|out|target)\/?)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
+/** A plain rm of entries directly in /tmp, as explain.ts's TEMP_DELETE reads them: same narrow shape, so the recommendation stays Allow for a /tmp delete and Deny for anything else. */
+const TEMP_ONLY_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+\/tmp\/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
@@ -176,6 +190,19 @@ const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-
  */
 export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const cmd = commandOf(info.rawInput) ?? info.title ?? "";
+  // Its own work is Allow only when the deletes in it are the company's build output or /tmp entries: the
+  // same narrow list as everywhere else, reused, not widened. A source file, .env or .git in the checkout is Deny.
+  if (ownWorkKind(cmd)) {
+    const scratch = explainCommand(cmd).scratch;
+    if (scratch && !scratch.unchecked.length) return "allow";
+    const run = cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
+    const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
+    if (!hits.length) return "allow";
+    if (hits.some((h) => !/^rm\b/i.test(h))) return "deny";
+    const destructive = new RegExp(DESTRUCTIVE, "i");
+    const segments = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
+    return segments.every((s) => !destructive.test(s) || WORKSPACE_DELETE.test(s) || TEMP_ONLY_DELETE.test(s)) ? "allow" : "deny";
+  }
   // Temp cleanup is Allow whatever else is in it: cleanupScope already refuses shred, pushes and other destructive words, and a later cd can't move a /tmp/NAME delete.
   if (tempCleanup(cmd)) return "allow";
   // A push is judged by where it goes (BOS-208): a plain ticket-branch push is Allow; main, force,
