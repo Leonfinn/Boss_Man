@@ -227,6 +227,7 @@ describe("wake classes: callers of wake() and notify()", () => {
     "services/recovery.ts": NEVER_DROPPED,
     "services/retro.ts": NEVER_DROPPED,
     "services/review.ts": DROP_RECORDED + " (ci passed is scheduled and never dropped)",
+    "services/release-log.ts": CHECKS_OUTCOME + " (a dropped release wake is logged and retried next pass)",
     "services/review-kinds.ts": NEVER_DROPPED,
     "services/runs.ts": NEVER_DROPPED,
     "services/scheduler.ts": CHECKS_OUTCOME + " (check due retries next tick; nudge reports the drop)",

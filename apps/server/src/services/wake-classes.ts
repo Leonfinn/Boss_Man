@@ -34,6 +34,7 @@ export const WAKE_CLASS: Record<string, WakeClass> = {
   retro: "scheduled",
   "ci passed": "scheduled",
   "checking an old card": "scheduled",
+  "live release": "scheduled",
   // Started by agents.
   nudge: "agent",
   chased: "agent",
