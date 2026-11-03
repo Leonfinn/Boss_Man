@@ -274,6 +274,8 @@ export type MergeResult =
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] }
+  /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
+  | { status: "migration_journal"; problems: string[] }
   /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
   | { status: "check_failed"; command: string; result: VerifyResult }
   /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
