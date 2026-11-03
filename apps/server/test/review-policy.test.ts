@@ -43,12 +43,12 @@ async function setup() {
   const [runner] = await db.select().from(runners).where(eq(runners.id, reg.runnerId));
   const sent: RunnerCommand[] = [];
   /** Set to make the runner's merge fail, as when it drops off mid-way. */
-  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null } = { merge: false, changed: false, holdMerge: null, holdVerify: null };
+  const faults: { merge: boolean; changed: boolean; holdMerge: Promise<void> | null; holdVerify: Promise<void> | null; verifyTimeout: boolean } = { merge: false, changed: false, holdMerge: null, holdVerify: null, verifyTimeout: false };
   built.runners.connect(reg.runnerId, (c) => {
     sent.push(c);
     const ok = (data: unknown) => queueMicrotask(() => built.runners.resolveReply({ requestId: (c as { requestId: string }).requestId, ok: true, data }));
     if (c.type === "workspace.diff") ok(faults.changed ? { ...DIFF, files: [{ path: "src/a.ts", added: 1, removed: 0 }] } : DIFF);
-    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok({ ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
+    if (c.type === "workspace.verify") void (faults.holdVerify ?? Promise.resolve()).then(() => ok(faults.verifyTimeout ? { ok: false, exitCode: null, timedOut: true, output: "", ms: 1 } : { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 }));
     if (c.type === "workspace.merge" && faults.merge) queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: false, error: "The runner went away" }));
     else if (c.type === "workspace.merge") void (faults.holdMerge ?? Promise.resolve()).then(() => ok({ status: "merged", commit: "c".repeat(40) }));
     if (c.type === "workspace.carried") ok({ carried: [] });
@@ -419,5 +419,18 @@ describe("the merge sweep for approved tickets (BOS-362)", () => {
     // The retry is once per server start: the next sweep leaves it to the open card.
     expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 0 });
     expect(c.sent.filter((x) => x.type === "workspace.merge")).toHaveLength(1);
+  });
+
+  it("raises a new card when the retry's check times out, even with an answered card holding the key", async () => {
+    const c = await setup();
+    const t = await c.ticket();
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "pnpm test" });
+    await approvedLongAgo(c, t.id);
+    const row = await c.row(t.id);
+    const [old] = await c.db.insert(decisions).values({ companyId: row.companyId, kind: "question", question: "old", options: ["Run the check again", "Send it back to the agent"], recommendedOption: "Run the check again", tier: "owner", status: "answered", dedupeKey: `merge-stuck:${t.id}`, context: { type: "check_stuck", ticketId: t.id } }).returning();
+    c.faults.verifyTimeout = true;
+    expect(await c.sweeps.run()).toMatchObject({ unmergedApprovals: 1 });
+    await vi.waitFor(async () => expect((await c.db.select().from(decisions).where(and(eq(decisions.dedupeKey, `merge-stuck:${t.id}`), eq(decisions.status, "open")))).length).toBe(1));
+    expect((await c.db.select().from(decisions).where(eq(decisions.id, old!.id)))[0]!.dedupeKey).toBeNull();
   });
 });
