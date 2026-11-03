@@ -48,6 +48,9 @@ describe("R6: a card names a button that doesn't exist", () => {
       "Press Yes, move it on this card.",
       "Click the link in the email and press it twice.",
       "Press OK in the box that asks.",
+      // The project page's tabs (Board.tsx PROJECT_TABS), and a button on its Config tab.
+      "Open Projects, open Acme, click Config, then click Re-detect.",
+      "Click the Budget tab.",
     ];
     for (const s of ok) expect(r6([s], ["Yes, move it", "No"]), s).toEqual([]);
   });
@@ -69,7 +72,12 @@ describe("R6: a card names a button that doesn't exist", () => {
 
 // ---- The list can't go stale: every button in the web app is on it, and every entry still has a button. ----
 
-/** Which screen each file's buttons are on. A new file with buttons must be added here. */
+/**
+ * The screen a file's buttons are on when nothing else says: for a page, the page; for a shared widget, "Any
+ * screen". A component another component renders takes its screens from where it is rendered instead (see
+ * `screensOf`), so ProjectRow, written in Settings.tsx, counts as Config, Projects and Setup, where it's shown.
+ * A new file with buttons must be added here.
+ */
 const FILE_SCREEN: Record<string, OwnerScreen> = {
   "App.tsx": "Any screen",
   "components/ImageAttach.tsx": "Any screen",
@@ -96,12 +104,25 @@ const FILE_SCREEN: Record<string, OwnerScreen> = {
   "pages/Roadmap.tsx": "Roadmap",
   "pages/Rules.tsx": "Settings",
   "pages/Run.tsx": "Run",
+  // No buttons of its own, but it shows ScrumMasterLog's.
+  "pages/ScrumMaster.tsx": "Scrum Master",
   "pages/Secrets.tsx": "Settings",
   "pages/Settings.tsx": "Settings",
   "pages/Setup.tsx": "Setup",
   "pages/Skills.tsx": "Skills",
   "pages/Ticket.tsx": "Ticket",
   "pages/Wiki.tsx": "Wiki",
+};
+
+/** A page component the router (App.tsx) shows as its own screen, where that isn't its file's screen. */
+const PAGE_SCREEN: Record<string, OwnerScreen> = {
+  "pages/Settings.tsx#ProjectsPage": "Projects",
+};
+/** A render site that is a tab of its page: `file>Component` is that component as that file renders it. */
+const SITE_SCREEN: Record<string, OwnerScreen> = {
+  "pages/Board.tsx>ProjectRow": "Config",
+  "pages/Board.tsx>ProjectBrief": "Config",
+  "pages/Board.tsx>ArchiveProject": "Config",
 };
 
 /** Entries no <button> text shows, each with where it comes from; the test checks those sources instead. */
@@ -185,6 +206,59 @@ const walk = (d: string) => {
   }
 };
 walk(WEB);
+
+// ---- Where each component is shown: its render sites, followed up to a page or a shared widget. ----
+
+const rel = (f: string) => relative(WEB, f).replace(/\\/g, "/");
+type Chunk = { file: string; name: string; src: string };
+/** A file's top-level declarations, each with its text up to the next one: components, mostly. */
+function chunks(file: string, src: string): Chunk[] {
+  const starts = [...src.matchAll(/^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function|const|let|class)\s+(\w+)/gm)];
+  const head: Chunk = { file, name: "", src: src.slice(0, starts[0]?.index ?? src.length) };
+  return [head, ...starts.map((m, k) => ({ file, name: m[1]!, src: src.slice(m.index, starts[k + 1]?.index ?? src.length) }))];
+}
+/** The names a file imports from another web file, local name to `file#Name`. */
+function imports(file: string, src: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*"(\.{1,2}\/[^"]+)"/g)) {
+    const target = rel(join(WEB, file, "..", `${m[2]}.tsx`));
+    for (const part of m[1]!.split(",")) {
+      const [orig, local] = part.replace(/^\s*type\s+/, "").trim().split(/\s+as\s+/);
+      if (orig) out.set(local ?? orig, `${target}#${orig}`);
+    }
+  }
+  return out;
+}
+const all: Chunk[] = tsx.flatMap((f) => chunks(rel(f), readFileSync(f, "utf8")));
+const importsOf = new Map(tsx.map((f) => [rel(f), imports(rel(f), readFileSync(f, "utf8"))]));
+const defined = new Set(all.map((c) => `${c.file}#${c.name}`));
+/** The app's entry points and router: what they render is a page, shown as its own screen. */
+const ROUTERS = new Set(["App.tsx", "main.tsx", "portal-main.tsx"]);
+/** Every chunk that renders `file#Name`, outside the routers. */
+function sitesOf(id: string): Chunk[] {
+  const [file, name] = id.split("#") as [string, string];
+  return all.filter((c) => {
+    if (ROUTERS.has(c.file) || !new RegExp(`<${name}[\\s/>]`).test(c.src)) return false;
+    const via = importsOf.get(c.file)?.get(name);
+    return via ? via === id : c.file === file && defined.has(id);
+  });
+}
+/** The screens a component's buttons are on. */
+function screensOf(id: string, seen = new Set<string>()): Set<OwnerScreen> {
+  const file = id.split("#")[0]!;
+  const own = PAGE_SCREEN[id] ?? FILE_SCREEN[file];
+  if (PAGE_SCREEN[id] || own === "Any screen" || seen.has(id)) return new Set(own ? [own] : []);
+  seen.add(id);
+  const sites = sitesOf(id);
+  if (!sites.length) return new Set(own ? [own] : []);
+  const out = new Set<OwnerScreen>();
+  for (const c of sites) {
+    const tab = SITE_SCREEN[`${c.file}>${id.split("#")[1]}`];
+    for (const s of tab ? [tab] : screensOf(`${c.file}#${c.name}`, new Set(seen))) out.add(s);
+  }
+  return out;
+}
+
 const listed = (screen: OwnerScreen) => (OWNER_CONTROLS[screen] as readonly string[]).map((l) => l.replace(/ …$/, ""));
 /** A button piece is on the list as itself or as a "…" label's start. */
 const onList = (screen: OwnerScreen, label: string) => listed(screen).includes(label);
@@ -193,28 +267,52 @@ describe("OWNER_CONTROLS matches the web app", () => {
   const found = new Map<OwnerScreen, Set<string>>();
   const add = (s: OwnerScreen, l: string) => (found.get(s) ?? found.set(s, new Set()).get(s)!).add(l);
   for (const f of tsx) {
-    const labels = buttonLabels(readFileSync(f, "utf8"));
+    if (!buttonLabels(readFileSync(f, "utf8")).length) continue;
+    const file = rel(f);
+    it(`${file} has a screen`, () => expect(FILE_SCREEN[file], `add ${file} to FILE_SCREEN in this test`).toBeDefined());
+  }
+  for (const c of all) {
+    const labels = buttonLabels(c.src);
     if (!labels.length) continue;
-    const file = relative(WEB, f).replace(/\\/g, "/");
-    const screen = FILE_SCREEN[file];
-    it(`${file} has a screen`, () => expect(screen, `add ${file} to FILE_SCREEN in this test`).toBeDefined());
-    if (!screen) continue;
-    for (const l of labels) add(screen, l);
-    it(`every button in ${file} is listed under ${screen}`, () => {
-      expect(labels.filter((l) => !onList(screen, l)), `add these to OWNER_CONTROLS["${screen}"] in packages/shared/src/owner-controls.ts`).toEqual([]);
-    });
+    const id = `${c.file}#${c.name}`;
+    const screens = screensOf(id);
+    it(`${id} is on a screen`, () => expect(screens.size, `a file that renders ${c.name} needs a FILE_SCREEN entry`).toBeGreaterThan(0));
+    for (const screen of screens) {
+      for (const l of labels) add(screen, l);
+      it(`every button in ${id} is listed under ${screen}`, () => {
+        // The names go in the message, which vitest prints whole (it cuts the compared value: "…(6)").
+        const missing = labels.filter((l) => !onList(screen, l));
+        expect(missing, `add to OWNER_CONTROLS["${screen}"] in packages/shared/src/owner-controls.ts: ${missing.join(" | ")}`).toEqual([]);
+      });
+    }
   }
   // The sidebar menu and the Settings tabs are drawn from arrays, so their labels are read from those.
   const sidebar = [...readFileSync(join(WEB, "components/Sidebar.tsx"), "utf8").matchAll(/\{ id: "[\w-]+", label: "([^"]+)"/g)].map((m) => m[1]!);
   const tabs = [...(/const TABS = \[([\s\S]*?)\] as const/.exec(readFileSync(join(WEB, "pages/Settings.tsx"), "utf8"))?.[1] ?? "").matchAll(/label: "([^"]+)"/g)].map((m) => m[1]!);
+  const projectTabs = [...(/const PROJECT_TABS = \[([\s\S]*?)\] as const/.exec(readFileSync(join(WEB, "pages/Board.tsx"), "utf8"))?.[1] ?? "").matchAll(/label: "([^"]+)"/g)].map((m) => m[1]!);
   for (const l of sidebar) add("Any screen", l);
   for (const l of tabs) add("Settings", l);
+  for (const l of projectTabs) add("Board", l);
 
-  it("lists the sidebar menu and the Settings tabs", () => {
+  it("lists the sidebar menu, the Settings tabs and the project tabs", () => {
     expect(sidebar.length).toBeGreaterThan(10);
     expect(tabs.length).toBeGreaterThan(4);
+    expect(projectTabs).toContain("Config");
     expect(sidebar.filter((l) => !onList("Any screen", l))).toEqual([]);
     expect(tabs.filter((l) => !onList("Settings", l))).toEqual([]);
+    expect(projectTabs.filter((l) => !onList("Board", l))).toEqual([]);
+  });
+
+  it("puts a component on the screens it's shown on, not its file's", () => {
+    expect([...screensOf("pages/Settings.tsx#ProjectRow")].sort()).toEqual(["Config", "Projects", "Setup"]);
+    expect([...screensOf("pages/Settings.tsx#Runner")].sort()).toEqual(["Settings", "Setup"]);
+    expect([...screensOf("pages/Funding.tsx#Funding")]).toEqual(["Settings"]);
+    // Each override still names a real component, and each tab override a file that renders it.
+    for (const id of Object.keys(PAGE_SCREEN)) expect(defined.has(id), id).toBe(true);
+    for (const site of Object.keys(SITE_SCREEN)) {
+      const [file, name] = site.split(">") as [string, string];
+      expect(all.some((c) => c.file === file && new RegExp(`<${name}[\\s/>]`).test(c.src)), site).toBe(true);
+    }
   });
 
   it("has no entry the app no longer shows", () => {
@@ -223,6 +321,6 @@ describe("OWNER_CONTROLS matches the web app", () => {
     const stale = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).flatMap((s) =>
       listed(s).filter((l) => !found.get(s)?.has(l) && !NOT_FROM_BUTTONS[s]?.includes(l)).map((l) => `${s}: ${l}`),
     );
-    expect(stale, "remove these from packages/shared/src/owner-controls.ts, or fix FILE_SCREEN").toEqual([]);
+    expect(stale, `remove from packages/shared/src/owner-controls.ts, or fix FILE_SCREEN, PAGE_SCREEN or SITE_SCREEN: ${stale.join(" | ")}`).toEqual([]);
   });
 });

@@ -23,6 +23,9 @@ export const OWNER_CONTROLS = {
   Setup: [
     "Create the company", "Add the project", "Check the token against …", "Add the task to …", "Continue", "Dismiss",
     "Back", "Next", "Skip for now", "Finish", "I know what I'm doing, let me get on with it",
+    // The runner, credentials, funding and project panels Setup shares with Settings and Projects.
+    "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
+    "Save", "Check with Claude", "Check", "Remove", "Edit", "Delete", "Add", "Cancel", "Re-detect",
   ],
   Decisions: [
     "Show less", "Show all …", "Save and approve", "Cancel", "Edit these values before approving", "All companies",
@@ -31,9 +34,11 @@ export const OWNER_CONTROLS = {
     // Under each command in a step (the label is set in code, so the test can't read it).
     "Copy",
   ],
-  Notifications: ["Mark read", "Send a test to my phone", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again"],
+  Notifications: ["Mark read", "Send a test to my phone", "All", "Unread", "Read", "Mark these read", "Mark all read", "Clear filters", "Try again", "Show less", "Show all …"],
   Chat: ["Ask the CEO", "Send"],
+  // A project's page (Projects → a project). Its tabs along the top, then the Kanban tab's buttons.
   Board: [
+    "Kanban", "Budget", "Config",
     "Save", "Cancel", "New feature", "New task", "Add feature", "Add and start", "Add to backlog",
     "Let the CEO question me first", "Add task", "All", "Features", "Tasks", "Working now", "Show fewer",
     "Show all done tasks", "Run now",
@@ -45,7 +50,14 @@ export const OWNER_CONTROLS = {
     "Show", "Hide", "Block", "Save", "Check now", "Clear", "Schedule a check",
     // The ticket's conversation, links, outputs and reviews.
     "Send", "Interrupt and send", "Stop", "Add", "Remove", "Reviews",
+    // The Scrum Master's log of this ticket.
+    "Undo", "Undoing", "Scrum Master", "Show all …",
   ],
+  // A project's Config tab (repo and merge-check settings, brief, archive), and the Projects page, which shows
+  // the same settings for every project. The merge-check setting ("Before merging, Boss Man will…") is here,
+  // not under Settings.
+  Config: ["Re-detect", "Refresh brief", "Write brief", "Archive", "Unarchive"],
+  Projects: ["Open …", "Unarchive", "Re-detect"],
   Run: ["Send after this turn", "Interrupt and send", "Stop run"],
   Roadmap: ["Save", "Delete", "Add a milestone", "Add", "Cancel", "Mark done", "Remove", "Reopen", "No date …", "Add objective"],
   Plan: ["Refresh"],
@@ -77,8 +89,8 @@ export const OWNER_CONTROLS = {
     // The tabs along the top.
     "Server and runner", "Access and funding", "Reviews and CEO", "Import and export", "Funding", "Rules", "Secrets",
     "Reconnect runner", "Start runner", "Restart", "Stop", "Copy token", "Issue a new runner token", "Register a runner",
-    "Save", "Check with Claude", "Check", "Remove", "Add tool server", "Edit", "Delete", "Add", "Cancel", "Unarchive",
-    "Archive", "Re-detect", "Refresh brief", "Write brief", "Open …", "Switch off", "Switch back on", "Switch on",
+    "Save", "Check with Claude", "Check", "Remove", "Add tool server", "Edit", "Delete", "Add", "Cancel",
+    "Open …", "Switch off", "Switch back on", "Switch on",
     "Test on the past 48 hours", "Run a retro now", "Test", "Start a new chapter", "Deploy latest",
     "Build and update runners", "Cancel the update", "Update runners (finish runs first)", "Check name",
     "Import as a new company", "Run the setup wizard", "Reset to defaults",
