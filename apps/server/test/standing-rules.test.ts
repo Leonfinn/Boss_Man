@@ -80,4 +80,48 @@ describe("standing rules (BOS-353)", () => {
     expect((w as { isError?: boolean }).isError).toBeFalsy();
     expect(await briefFor(ctx.dev.id, "worker")).toContain("Never force-push.");
   });
+
+  it("a CEO save waits for the owner when they approve edits, and applies when they say yes", async () => {
+    await ctx.req("PUT", `/api/companies/${ctx.company.id}/agent-approvals`, { approvals: "hires_and_edits" });
+    const ceo = await ctx.mcp(ctx.ceo.id);
+    const w = await ceo.callTool({ name: "standing_rules", arguments: { action: "write", text: "Only the merge gate runs the full check." } });
+    expect((w as { isError?: boolean }).isError).toBeFalsy();
+    expect(textOf(w)).toContain("waiting for the owner");
+    // Nothing is saved yet, so no run reads it.
+    expect(await briefFor(ctx.dev.id, "worker")).not.toContain("Only the merge gate runs the full check.");
+
+    const list = (await ctx.req("GET", "/api/decisions")).json() as Array<{ id: string; question: string }>;
+    const card = list.find((d) => d.question.includes("standing rules"));
+    expect(card).toBeTruthy();
+    // Not the CEO's to answer: the owner alone decides it.
+    const refused = await ceo.callTool({ name: "decisions", arguments: { action: "answer", id: card!.id, answer: "Apply the change" } });
+    expect((refused as { isError?: boolean }).isError).toBe(true);
+
+    const ans = await ctx.req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Apply the change" });
+    expect(ans.statusCode).toBe(200);
+    expect(await briefFor(ctx.dev.id, "worker")).toContain("Only the merge gate runs the full check.");
+  });
+
+  it("keeps the previous text, so the last change can be undone", async () => {
+    await ctx.req("PUT", `/api/companies/${ctx.company.id}/standing-rules`, { text: "Be kind." });
+    await ctx.req("PUT", `/api/companies/${ctx.company.id}/standing-rules`, { text: "Never force-push." });
+    expect(await briefFor(ctx.dev.id, "worker")).toContain("Never force-push.");
+    const back = await ctx.req("POST", `/api/companies/${ctx.company.id}/standing-rules/undo`);
+    expect(back.statusCode).toBe(200);
+    expect((back.json() as { text: string }).text).toBe("Be kind.");
+    expect(await briefFor(ctx.dev.id, "worker")).toContain("Be kind.");
+    // The first save (from nothing) is still undoable in turn: it clears them again.
+    const again = await ctx.req("POST", `/api/companies/${ctx.company.id}/standing-rules/undo`);
+    expect(again.statusCode).toBe(200);
+    expect((again.json() as { text: string }).text).toBe("");
+    const none = await ctx.req("POST", `/api/companies/${ctx.company.id}/standing-rules/undo`);
+    expect(none.statusCode).toBe(409);
+  });
+
+  it("frames the rules as notes to weigh, not as instructions to follow", async () => {
+    await ctx.req("PUT", `/api/companies/${ctx.company.id}/standing-rules`, { text: "Never force-push." });
+    const b = await briefFor(ctx.dev.id, "worker");
+    expect(b).toContain("Weigh them against the rest of the brief");
+    expect(b).not.toContain("Follow them like any other instruction");
+  });
 });

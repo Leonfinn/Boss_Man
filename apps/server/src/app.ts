@@ -61,7 +61,7 @@ import { hashFiles } from "./services/skill-files.js";
 import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
-import { getStandingRules, setStandingRules, standingRulesError, STANDING_RULES_MAX } from "./services/standing-rules.js";
+import { getStandingRules, setStandingRules, standingRulesError, STANDING_RULES_MAX, undoStandingRules } from "./services/standing-rules.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
@@ -746,17 +746,34 @@ export async function buildApp(opts: AppOptions) {
       if (!c) return reply.code(404).send({ error: "not_found" });
       return { ...(await getStandingRules(db, id)), max: STANDING_RULES_MAX };
     });
+    // The owner's change is kept in the company CEO's history too, so the same Undo works for either of them.
+    const standingRulesCeo = async (companyId: string) => (await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt))))[0]?.id ?? null;
     owner.put("/api/companies/:id/standing-rules", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
       const b = z.object({ text: z.string() }).parse(req.body);
+      const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
+      if (!c) return reply.code(404).send({ error: "not_found" });
       const problem = standingRulesError(b.text.replace(/\r\n/g, "\n").trim());
       if (problem) return reply.code(400).send({ error: "invalid_standing_rules", message: problem });
       try {
-        const saved = await setStandingRules(db, id, { text: b.text, by: "the owner" });
+        const saved = await setStandingRules(db, id, { text: b.text, by: "the owner", byAgentId: await standingRulesCeo(id) });
         await record(db, { companyId: id, kind: "settings", summary: saved.text ? "Owner updated the standing rules" : "Owner cleared the standing rules" });
         return { ...saved, max: STANDING_RULES_MAX };
       } catch (err) {
         if (err instanceof Error && err.name === "StandingRulesError") return reply.code(400).send({ error: "invalid_standing_rules", message: err.message });
+        throw err;
+      }
+    });
+    owner.post("/api/companies/:id/standing-rules/undo", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const ceo = await standingRulesCeo(id);
+      if (!ceo) return reply.code(404).send({ error: "not_found" });
+      try {
+        const saved = await undoStandingRules(db, id, ceo);
+        await record(db, { companyId: id, kind: "settings", summary: "Owner undid the last standing rules change" });
+        return { ...saved, max: STANDING_RULES_MAX };
+      } catch (err) {
+        if (err instanceof Error && err.name === "StandingRulesError") return reply.code(409).send({ error: "cannot_undo_standing_rules", message: err.message });
         throw err;
       }
     });

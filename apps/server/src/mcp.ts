@@ -43,7 +43,7 @@ import type { alertLadder } from "./services/alert-ladder.js";
 import { FindingsShape, ProposeShape, RetroError, type retroService } from "./services/retro.js";
 import { sizingGuideText } from "./services/sizing.js";
 import { getHold, WRAP_UP } from "./services/maintenance.js";
-import { getStandingRules, setStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
+import { getStandingRules, STANDING_RULES_MAX, StandingRulesError } from "./services/standing-rules.js";
 import type { serverStatusService } from "./services/server-status.js";
 
 /** Why the watcher is woken when everything in its watched tree has stopped; the wake's note names the tree's root ticket. */
@@ -707,7 +707,7 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
     "standing_rules",
     {
       description:
-        `For CEOs only: the company-wide "Standing rules" every agent reads at the start of every run (at most ${STANDING_RULES_MAX} characters). action read shows the current text and who changed it last; action write replaces it with text. Only you and the owner can change them; agents cannot. Write rules that fit any host and any company (for example "never force-push"), not one-off instructions for a single ticket.`,
+        `For CEOs only: the company-wide "Standing rules" every agent reads at the start of every run (at most ${STANDING_RULES_MAX} characters). action read shows the current text and who changed it last; action write replaces it with text. Only you and the owner can change them; agents cannot. Unless the owner has asked to approve your edits, a change is applied at once, notifies the owner and can be undone on the Settings page; otherwise it waits in Decisions. Write rules that fit any host and any company (for example "never force-push"), not one-off instructions for a single ticket.`,
       inputSchema: { action: z.enum(["read", "write"]), text: z.string().max(20_000).optional() },
     },
     async ({ action, text: body }) => {
@@ -719,11 +719,12 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       }
       if (body === undefined) return fail("Give the text to save, or an empty string to clear them.");
       try {
-        const saved = await setStandingRules(db, scope.companyId, { text: body, by: me.name });
-        await record(db, { companyId: scope.companyId, agentId: scope.agentId, kind: "settings", summary: saved.text ? `${me.name} updated the standing rules` : `${me.name} cleared the standing rules` });
-        return text(saved.text ? "Standing rules saved; every run from now on reads them." : "Standing rules cleared.");
+        const r = await team.proposeStandingRules(scope.companyId, scope.agentId!, body);
+        if ("decisionId" in r) return text(`The change is waiting for the owner's approval (decision ${r.decisionId}).`);
+        return text(r.saved.text ? "Standing rules saved; every run from now on reads them." : "Standing rules cleared.");
       } catch (err) {
         if (err instanceof StandingRulesError) return fail(err.message);
+        if (err instanceof AgentError) return fail(err.message);
         throw err;
       }
     },
