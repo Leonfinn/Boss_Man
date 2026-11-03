@@ -232,11 +232,18 @@ if command -v flock >/dev/null; then
   if command -v git >/dev/null; then
     git -C "$repo" checkout -q -- .  # a clean tree, so a result is stored
     for sig in TERM INT HUP; do
-      rm -rf "$t/ksto" "$t/lock.queue" "$t/kill.out" "$t/kill.pid"; hold 1 8; h1=$!; sleep 0.3
+      # Hold the slot until we kill the holder, not for a fixed few seconds: under load the check can take longer
+      # than the hold to reach its wait loop (the first "waiting" line comes after a slot scan), and a hold that
+      # expired would let the check take the slot and run, so the signal arrived too late and the check died on its
+      # own missing-file error instead of the trap (BOS-345 merge check, 2 Nov).
+      rm -rf "$t/ksto" "$t/lock.queue" "$t/kill.out" "$t/kill.pid"; hold 1 3600; h1=$!; sleep 0.3
       ( cd "$repo" && PATH="$t/bin:$PATH" CHECK_ALL_LOCK="$t/lock" CHECK_ALL_QUEUE_REPORT=1 CHECK_ALL_PAIR_PROOF="$t/none" BOSSMAN_CHECK_STORE="$t/ksto" \
           setsid bash -c 'echo $$ >"$1"; exec ./scripts/check-all.sh' _ "$t/kill.pid" >"$t/kill.out" 2>&1 ) & k=$!
-      for _ in $(seq 50); do grep -q "waiting for a free check slot" "$t/kill.out" 2>/dev/null && break; sleep 0.2; done
+      # The queue entry is written before the wait loop, so wait on it (not on the printed line, which the slot
+      # scan can delay); then require the "waiting" line before signalling, so the check is provably waiting.
+      for _ in $(seq 150); do [ -n "$(ls "$t/lock.queue" 2>/dev/null)" ] && grep -q "waiting for a free check slot" "$t/kill.out" 2>/dev/null && break; sleep 0.2; done
       [ -n "$(ls "$t/lock.queue" 2>/dev/null)" ] || fail "kill $sig: check never queued: $(cat "$t/kill.out")"
+      grep -q "waiting for a free check slot" "$t/kill.out" || fail "kill $sig: check never reached its wait loop: $(cat "$t/kill.out")"
       kill -s "$sig" "$(cat "$t/kill.pid")"
       rc=0; wait "$k" || rc=$?
       [ "$rc" -ne 0 ] || fail "kill $sig: exit 0"
