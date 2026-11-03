@@ -8,6 +8,9 @@ import { agents, decisions, runners } from "../src/db/schema.js";
 
 // BOS-334: OpenCode asks twice for one shell command that reaches outside the checkout (the folder, then the
 // command). One Allow once must cover the one tool call, not raise a second identical card.
+// BOS-376: the same command comes back as a new ask (a harness retry, or a second run of the same call) with a
+// new requestId and often a different or missing toolCallId. A repeat of the same command in the same run,
+// soon after an Allow once, gets that answer applied instead of a second card. A Deny is never turned into one.
 
 let ctx: Awaited<ReturnType<typeof setup>>;
 const CMD = "rm -rf /tmp/shots/old && ls /tmp/shots";
@@ -35,7 +38,7 @@ async function setup() {
     return { d, requestId };
   };
   const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
-  return { ...built, db, close, sent, ask, ceo: ceo! };
+  return { ...built, db, close, sent, ask, emit, runId, ceo: ceo! };
 }
 
 beforeEach(async () => {
@@ -60,17 +63,99 @@ describe("one Allow once covers the one tool call (BOS-334)", () => {
     expect(ctx.sent).toEqual([expect.objectContaining({ type: "permission.decide", requestId: second.requestId, verdict: "allow" })]);
   });
 
-  it("is only for that call: another call, another title or no call id still raises a card", async () => {
+  it("is only for that call: another call or another title still raises a card", async () => {
     const first = await folder("call-1");
     await ctx.decisions.answer(first.d!.id, "Allow once");
-    expect((await ctx.ask(CMD, "call-2")).d).toBeDefined();
+    // Another command and another title are not this call.
+    expect((await ctx.ask("rm -rf /tmp/other", "call-2")).d).toBeDefined();
     expect((await ctx.ask(CMD, "call-1", "Something else")).d).toBeDefined();
-    expect((await ctx.ask(CMD, undefined)).d).toBeDefined();
+    // The same command and title with no call id is the same ask, settled since BOS-376.
+    expect((await ctx.ask(CMD, undefined)).d).toBeUndefined();
   });
 
   it("does not carry over a Deny", async () => {
     const first = await folder("call-1");
     await ctx.decisions.answer(first.d!.id, "Deny");
     expect((await ctx.ask(CMD, "call-1")).d).toBeDefined();
+  });
+});
+
+describe("an identical repeat in the same run is settled by the Allow once (BOS-376)", () => {
+  it("answers a repeat of the same command asked as a new request, with no tool call id, without a card", async () => {
+    const first = await ctx.ask(CMD, "call-1");
+    expect(first.d).toBeDefined();
+    await ctx.decisions.answer(first.d!.id, "Allow once");
+    ctx.sent.length = 0;
+    const again = await ctx.ask(CMD, undefined);
+    expect(again.d).toBeUndefined();
+    expect(ctx.sent).toEqual([expect.objectContaining({ type: "permission.decide", requestId: again.requestId, verdict: "allow" })]);
+  });
+
+  it("answers a repeat under a different tool call id, the way a retried call comes back", async () => {
+    const first = await ctx.ask(CMD, "call-1");
+    await ctx.decisions.answer(first.d!.id, "Allow once");
+    ctx.sent.length = 0;
+    const again = await ctx.ask(CMD, "call-9");
+    expect(again.d).toBeUndefined();
+    expect(ctx.sent).toEqual([expect.objectContaining({ type: "permission.decide", requestId: again.requestId, verdict: "allow" })]);
+  });
+
+  it("settles a repeat that arrives while the first card is still queued, once it is answered", async () => {
+    const first = await ctx.ask(CMD, undefined);
+    const repeat = await ctx.ask(CMD, undefined);
+    // The second ask is held (not a new card) while the first is open.
+    expect(repeat.d).toBeUndefined();
+    ctx.sent.length = 0;
+    await ctx.decisions.answer(first.d!.id, "Allow once");
+    expect(ctx.sent).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "permission.decide", requestId: repeat.requestId, verdict: "allow" })]),
+    );
+  });
+
+  it("keeps the answer on the run so a repeat after a reconnect is still settled", async () => {
+    const first = await ctx.ask(CMD, undefined);
+    await ctx.decisions.answer(first.d!.id, "Allow once");
+    ctx.sent.length = 0;
+    // A reconnect drops the runner's in-memory state; the server's record of the answer survives.
+    await ctx.runners.connect((await ctx.db.select({ id: runners.id }).from(runners).limit(1))[0]!.id, (cmd) => (ctx.sent.push(cmd), true));
+    expect((await ctx.ask(CMD, undefined)).d).toBeUndefined();
+    expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", verdict: "allow" }));
+  });
+
+  it("notes on the waiting card that a repeat rides on it, so one answer covers both", async () => {
+    const first = await ctx.ask(CMD, undefined);
+    const repeat = await ctx.ask(CMD, undefined);
+    expect(repeat.d).toBeUndefined();
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.id, first.d!.id));
+    expect(card!.question).toContain(repeat.requestId);
+    const ctxOnCard = card!.context as { repeats?: Array<{ requestId: string }> };
+    expect(ctxOnCard.repeats).toEqual([expect.objectContaining({ requestId: repeat.requestId })]);
+  });
+
+  it("records on the allowed card which repeat it settled, as same as its own id", async () => {
+    const first = await ctx.ask(CMD, undefined);
+    await ctx.decisions.answer(first.d!.id, "Allow once");
+    await ctx.ask(CMD, undefined);
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.id, first.d!.id));
+    expect((card!.context as { settledByRepeat?: { sameAs?: string } }).settledByRepeat?.sameAs).toBe(first.d!.id);
+  });
+
+  it("never turns a Deny into an Allow", async () => {
+    const first = await ctx.ask(CMD, undefined);
+    await ctx.decisions.answer(first.d!.id, "Deny");
+    const repeat = await ctx.ask(CMD, undefined);
+    expect(repeat.d).toBeDefined();
+  });
+
+  it("does not carry an Allow over to a different command, or to another run", async () => {
+    const first = await ctx.ask(CMD, undefined);
+    await ctx.decisions.answer(first.d!.id, "Allow once");
+    expect((await ctx.ask("rm -rf /tmp/other", undefined)).d).toBeDefined();
+    const otherRun = randomUUID();
+    await ctx.emit({ type: "run.started", runId: otherRun, agentId: ctx.ceo.id, acpSessionId: "s2", model: null });
+    const requestId = randomUUID();
+    await ctx.emit({ type: "run.permission_request", runId: otherRun, requestId, title: CMD, kind: "execute", rawInput: { command: CMD }, optionKinds: ["allow_once", "reject_once"] });
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
+    expect(d).toBeDefined();
   });
 });
