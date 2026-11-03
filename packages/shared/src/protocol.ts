@@ -49,6 +49,8 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     optionKinds: z.array(z.string()),
     /** Text the agent attached to the request, e.g. the plan when it asks to leave plan mode (R40). */
     detail: z.string().max(20_000).optional(),
+    /** The agent's id for the tool call, so two requests for one call (OpenCode asks for a folder, then the command) can be told apart from a repeat. */
+    toolCallId: z.string().max(200).optional(),
   }),
   z.object({
     type: z.literal("run.cost"),
@@ -203,6 +205,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
+    /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
+    bootId: z.string().max(100).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
   }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
@@ -272,6 +276,8 @@ export type MergeResult =
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] }
+  /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
+  | { status: "migration_journal"; problems: string[] }
   /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
   | { status: "check_failed"; command: string; result: VerifyResult }
   /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
