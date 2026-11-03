@@ -29,6 +29,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { REVIEW_REASON } from "./review-kinds.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
@@ -835,11 +836,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   /** A plan from a plan-first ticket, put to the CEO, or to the owner for high-risk work (R40, R48). */
   async function planRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
-    const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+    const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId, origin: runs.origin }).from(runs).where(eq(runs.id, event.runId));
     const [t] = run?.ticketId ? await db.select().from(tickets).where(eq(tickets.id, run.ticketId)) : [];
     const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
     const plan = event.detail ?? null;
-    if (t && plan) await db.update(tickets).set({ plan, lastActivityAt: now() }).where(eq(tickets.id, t.id));
+    // A reviewer has no plan to present: what it sends through ExitPlanMode is its review verdict, so the CEO gets it as that and the owner is not asked to approve a plan (BOS-371).
+    if (run?.origin === REVIEW_REASON && t) {
+      send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "deny" });
+      const who = agent?.name ?? "A reviewer";
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, runner.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo && wake) await wake({ agentId: ceo.id, ticketId: t.id, reason: "decision", priority: 3, note: `${who} was asked to review "${t.title}" but could only send this through the plan door, so treat it as their review verdict:\n${untrusted("reviewer verdict", (plan ?? "(empty)").slice(0, 3000))}` });
+      await record(db, { companyId: runner.companyId, ticketId: t.id, kind: "review_fallback", summary: `${who} sent their review as a plan; it went to the CEO as the verdict, not to the owner as a plan.`, at: now() });
+      return { outcome: "deny" as const, rule: "A reviewer's plan is a review verdict", decisionId: null };
+    }
+    // An approved plan stays: a later plan from someone else never replaces it.
+    if (t && plan && !t.planApprovedAt) await db.update(tickets).set({ plan, lastActivityAt: now() }).where(eq(tickets.id, t.id));
     // The review policy says who approves a plan: the owner, the CEO, or an agent. A CEO's own plan always goes to the owner.
     let tier: "owner" | "ceo" = "owner";
     let forAgentId: string | null = null;
@@ -1851,10 +1862,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ctx.plan && allowed && ctx.ticketId) await db.update(tickets).set({ planApprovedAt: now() }).where(eq(tickets.id, ctx.ticketId));
         if (ctx.plan && !allowed) {
           // Sent before the verdict, so the agent picks it up as its next turn and keeps planning.
+          // "Keep planning" on a later card never withdraws a plan the ticket already has approved (BOS-371).
+          const [already] = ctx.ticketId ? await db.select({ at: tickets.planApprovedAt }).from(tickets).where(eq(tickets.id, ctx.ticketId)) : [];
           send(ctx.runnerId, {
             type: "run.message",
             runId: ctx.runId,
-            text: `Your plan wasn't approved yet.${extra.note ? ` Feedback: ${extra.note}` : ""} Revise the plan and present it again with ExitPlanMode.`,
+            text: already?.at
+              ? `This plan wasn't approved.${extra.note ? ` Feedback: ${extra.note}` : ""} The ticket's earlier approved plan still stands; this does not undo it.`
+              : `Your plan wasn't approved yet.${extra.note ? ` Feedback: ${extra.note}` : ""} Revise the plan and present it again with ExitPlanMode.`,
             interrupt: false,
           });
         }
