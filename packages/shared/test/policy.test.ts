@@ -707,6 +707,8 @@ describe("the ordered permission table (BOS-307)", () => {
     const deny = { name: "no shell", match: { kinds: ["execute"] }, outcome: "deny" as const };
     expect(decidePermission(exec("git status"), [...broadAllow, deny])).toMatchObject({ outcome: "deny", row: 4 });
     expect(decidePermission(exec("git status"), [deny])).toMatchObject({ outcome: "deny", row: 4 });
+    // Row 4 is a separate row above the allow, so the owner's order between them doesn't matter.
+    expect(decidePermission(exec("git status"), [deny, ...broadAllow])).toMatchObject({ outcome: "deny", row: 4 });
   });
 
   it("row 1 vs rows 4 to 6: the network guard beats a company allow", () => {
