@@ -93,9 +93,8 @@ export function judgePermission(question: string, command: string | null, ownFol
   // `git -C dir config`), the git config environment variables, and npm-family config/global installs.
   // Every `git config` write is refused (worktrees share the repo config, so core.fsmonitor / sshCommand / alias.x '!..'
   // would run in other agents' git); only the explicit read forms pass.
-  // Allow-list: a command that starts with git passes only as one of a short list of literal subcommands (no `$`, backtick,
-  // `-c` or `--output` in its arguments) or the read-only config forms; everything else that starts with git is Deny.
-  if (gitDenied(c)) return result("outside");
+  // Allow-list: a git command passes only as a subcommand in GIT_TABLE with flags listed for it (checked below, once the own
+  // folder is known) or the read-only config forms; everything else that uses git is Deny.
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
   if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
   // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
@@ -112,6 +111,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     if (/^\/tmp(\/|$)/.test(p)) return true;
     return inOwn(p);
   };
+  if (gitDenied(c, (d) => dirOk(d, inOwn), writeOk)) return result("outside");
   // Variables set in the same command are resolved; any other variable (and $(...)) can't be, so its target is denied.
   // $(git rev-parse --git-dir ...) is the asking agent's own git folder and $(mktemp ...) lands in /tmp, unless its
   // arguments (or a TMPDIR set anywhere) put the file somewhere else.
@@ -199,39 +199,166 @@ export function judgePermission(question: string, command: string | null, ownFol
   return result("ok");
 }
 
-/** Literal git subcommands that cannot write config or run a program of the agent's choosing. */
-const GIT_SAFE = /^git (?:-C \S+ |--no-pager )*(?:commit|log|add|status|diff|show|checkout|switch|branch|tag|stash|merge|merge-base|merge-tree|rebase|rev-parse|rev-list|grep|push|pull|fetch|ls-tree|ls-files|ls-remote|check-ignore|worktree|archive|clone|rm|mv|reset|restore|cherry-pick|blame|describe|shortlog|cat-file|for-each-ref|show-ref|symbolic-ref|diff-tree|name-rev|reflog|clean|init|apply|am|remote -v)(?:\s|$)/;
+/**
+ * What each git subcommand may be given. Anything not in this table is Deny: the subcommand itself (rebase, bisect, submodule,
+ * am, archive, bundle, format-patch, checkout-index, `worktree add`, config writes, ...) and every flag that is not listed.
+ * l: long flags, space separated; a trailing `=` means the flag takes its value as the next word (`--author x`).
+ * s: short flags (letters); v: the short flags that take a value (`-m msg`, `-mmsg`); `0` in s allows `-5`.
+ * w: the subcommand changes the tree or index, so absolute or `..` path arguments go through the write-target check.
+ * first: the first plain word must match (`worktree list`); none: no plain words at all.
+ */
+interface GitSpec { l: string; s?: string; v?: string; w?: boolean; first?: RegExp; none?: boolean }
+const DIFFISH = "--stat --shortstat --numstat --name-only --name-status --patch --no-patch --color --no-color --summary --raw --compact-summary --find-renames --no-renames --diff-filter= --unified= --word-diff --color-words --minimal --patience --histogram --abbrev --full-index --binary --text --ignore-all-space --ignore-space-change --ignore-blank-lines --relative --check --exit-code --quiet";
+const LOGISH = "--oneline --graph --decorate --no-decorate --abbrev-commit --abbrev --all --branches --tags --remotes --author= --committer= --since= --until= --after= --before= --grep= --max-count= --skip= --reverse --merges --no-merges --first-parent --date= --follow --pretty --format --topo-order --date-order --cherry-pick --left-right --boundary --invert-grep --all-match --parents --children --full-history --simplify-by-decoration --relative-date --no-walk --ancestry-path --source --notes --no-notes --diff-filter= --pickaxe-all";
+const GIT_TABLE: Record<string, GitSpec> = {
+  status: { l: "--short --branch --porcelain --long --ignored --untracked-files --no-renames --ahead-behind --no-ahead-behind", s: "sbzv" },
+  log: { l: `${LOGISH} ${DIFFISH}`, s: "npsSGiM0", v: "nSG" },
+  show: { l: `${LOGISH} ${DIFFISH}`, s: "psq" },
+  diff: { l: `${DIFFISH} --cached --staged --no-index --merge-base`, s: "puUbwRMSGaz", v: "USG" },
+  grep: { l: "--no-index --cached --untracked --line-number --ignore-case --word-regexp --files-with-matches --files-without-match --count --extended-regexp --fixed-strings --perl-regexp --basic-regexp --heading --break --color --no-color --and --or --not --quiet --invert-match --text --full-name --max-depth= --threads=", s: "niwvlLcEFGPrhHIaeqAB0", v: "eAB" },
+  "ls-files": { l: "--cached --others --modified --deleted --stage --ignored --unmerged --killed --exclude-standard --full-name --error-unmatch --deduplicate --eol --directory --no-empty-directory", s: "comdsiukzt" },
+  "ls-tree": { l: "--name-only --long --full-name --full-tree --abbrev --object-only", s: "rdtlz" },
+  "merge-tree": { l: "--write-tree --name-only --messages --no-messages --merge-base= --allow-unrelated-histories --trivial-merge", s: "z" },
+  "rev-parse": { l: "--abbrev-ref --short --verify --git-dir --absolute-git-dir --show-toplevel --is-inside-work-tree --show-prefix --show-cdup --git-path= --symbolic-full-name --is-bare-repository --git-common-dir --quiet", s: "q" },
+  "rev-list": { l: "--count --max-count= --all --branches --tags --reverse --parents --first-parent --no-merges --merges --left-right --abbrev-commit --oneline --since= --until= --author= --grep= --skip= --topo-order --date-order --ancestry-path", s: "n", v: "n" },
+  "cat-file": { l: "--batch --batch-check --batch-all-objects", s: "tspe" },
+  blame: { l: "--porcelain --line-porcelain --abbrev --since= --date= --root", s: "LwelspfnMCb", v: "L" },
+  "diff-tree": { l: "--name-only --name-status --no-commit-id --root --stat --numstat", s: "rpmcst" },
+  "for-each-ref": { l: "--format= --sort= --count= --merged --no-merged --contains --points-at=" },
+  "show-ref": { l: "--heads --tags --verify --quiet --dereference --hash --abbrev", s: "qds" },
+  describe: { l: "--tags --always --abbrev --dirty --long --contains --match= --exclude= --all --first-parent --candidates=" },
+  shortlog: { l: "--summary --numbered --email --since= --until= --no-merges", s: "sne" },
+  "name-rev": { l: "--name-only --tags --refs= --no-undefined --always" },
+  "merge-base": { l: "--is-ancestor --fork-point --all --octopus --independent", s: "a" },
+  "ls-remote": { l: "--heads --tags --refs --quiet --exit-code", s: "q" },
+  "check-ignore": { l: "--verbose --non-matching --quiet --stdin --no-index", s: "vnqz" },
+  "symbolic-ref": { l: "--short --quiet", s: "q" },
+  remote: { l: "--verbose", s: "v", none: true },
+  worktree: { l: "--porcelain --verbose", s: "vz", first: /^list$/ },
+  commit: { l: "--amend --no-edit --no-verify --allow-empty --allow-empty-message --signoff --quiet --all --dry-run --short --porcelain --author= --date= --message= --fixup= --squash= --file= --reuse-message=", s: "maAsqvnFC", v: "mFC", w: true },
+  add: { l: "--all --update --dry-run --verbose --force --intent-to-add --ignore-errors --no-all", s: "AunvfN", w: true },
+  rm: { l: "--cached --force --quiet --dry-run --ignore-unmatch", s: "rfqn", w: true },
+  mv: { l: "--force --dry-run --verbose", s: "fknv", w: true },
+  restore: { l: "--staged --worktree --source= --quiet --ours --theirs --overlay --no-overlay", s: "SWsq", v: "s", w: true },
+  reset: { l: "--hard --soft --mixed --keep --merge --quiet", s: "qN", w: true },
+  clean: { l: "--force --dry-run --quiet", s: "fdxXnqe", v: "e", w: true },
+  checkout: { l: "--quiet --force --detach --track --no-track --ours --theirs --merge --orphan=", s: "bBqftml", v: "bB", w: true },
+  switch: { l: "--create= --force-create= --detach --force --quiet --track --no-track --discard-changes --merge", s: "cCdfqtm", v: "cC", w: true },
+  branch: { l: "--all --remotes --verbose --list --show-current --contains --merged --no-merged --format= --sort= --set-upstream-to= --unset-upstream --force --delete --move --copy --points-at= --no-color --color --abbrev --quiet --track", s: "arvdDmMcCluft", v: "u", w: true },
+  tag: { l: "--annotate --delete --force --message= --list --contains --merged --no-merged --sort= --points-at= --format= --verify", s: "adlmfnv", v: "m", w: true },
+  stash: { l: "--include-untracked --all --keep-index --message= --quiet --stat --staged", s: "uakmq", v: "m", w: true },
+  merge: { l: "--no-ff --ff-only --ff --squash --no-commit --commit --abort --continue --message= --quiet --no-edit --no-verify --allow-unrelated-histories --no-stat --stat", s: "mqn", v: "m", w: true },
+  "cherry-pick": { l: "--continue --abort --skip --quit --no-commit --no-edit --allow-empty --keep-redundant-commits --mainline= --ff", s: "xnm", v: "m", w: true },
+  fetch: { l: "--all --prune --tags --no-tags --quiet --verbose --depth= --unshallow --force --dry-run", s: "ptqvfn" },
+  pull: { l: "--rebase --no-rebase --ff-only --no-ff --ff --autostash --no-autostash --all --quiet --verbose --tags --prune --depth=", s: "rqvp" },
+  push: { l: "--set-upstream --tags --follow-tags --dry-run --quiet --verbose --no-verify --atomic", s: "unqv" },
+  clone: { l: "--quiet --depth= --branch= --single-branch --no-tags --bare --no-checkout", s: "qbn", v: "b", w: true },
+  init: { l: "--quiet --bare --initial-branch=", s: "qb", v: "b", w: true },
+  apply: { l: "--check --stat --numstat --summary --index --3way --cached --reverse --quiet --verbose", s: "3Rqv" },
+};
 const GIT_READ = /^git (?:config (?:--get(?:-all|-regexp|-urlmatch)? [\w.-]+|--list)|--version)$/;
-const GIT_WRAPPER = /^(?:\w+=\S*|sudo|env|xargs|time|nohup|exec|command|nice|timeout|-\S*|\d+)$/;
+/** Words that may stand in front of git without changing what it runs. */
+const GIT_WRAPPER = /^(?:time|nohup|command|nice|timeout|-\S*|\d+)$/;
+/** Programs that start another program with its own arguments: when git follows one, it can't be read. */
+const GIT_LAUNCHER = /^(?:\w+\+?=\S*|env|export|declare|typeset|local|readonly|sudo|doas|xargs|exec|setsid|stdbuf|ionice|watch|parallel|busybox|chroot|su|-exec|-execdir|-ok|-okdir|sh|bash|zsh|dash|ksh|eval|script|unshare|nsenter|flock|strace|ltrace|gdb)$/;
 
-/** True when a command that starts with git (after ;, |, $(, (, or a backtick) is not on the allow-list. */
-function gitDenied(c: string): boolean {
-  // Environment that makes git run a program (GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_PAGER, ...), set anywhere on a line that uses git.
+/** Words of a shell command with quotes and backslashes removed. Anything with $ or a backtick is refused by the caller. */
+function shellWords(s: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let has = false;
+  let q = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (q) { if (ch === q) q = ""; else if (ch === "\\" && q === '"' && i + 1 < s.length) cur += s[++i]!; else cur += ch; continue; }
+    if (ch === "'" || ch === '"') { q = ch; has = true; continue; }
+    if (ch === "\\" && i + 1 < s.length) { cur += s[++i]!; has = true; continue; }
+    if (/\s/.test(ch)) { if (has || cur) out.push(cur); cur = ""; has = false; continue; }
+    cur += ch;
+  }
+  if (has || cur) out.push(cur);
+  return out;
+}
+
+/** True when the arguments of one git command (words after `git`) are not on the allow-list. `dirOk` places a folder git is pointed at. */
+function gitArgsDenied(args: string[], dirOk: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
+  let i = 0;
+  // Where git runs: -C, --git-dir and --work-tree get the same own-folder test as `cd`.
+  for (; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "-C") { if (i + 1 >= args.length || !dirOk(args[++i]!)) return true; continue; }
+    if (/^--(?:git-dir|work-tree)$/.test(a)) { if (i + 1 >= args.length || !dirOk(args[++i]!)) return true; continue; }
+    const eq = /^--(?:git-dir|work-tree)=(.*)$/.exec(a);
+    if (eq) { if (!dirOk(eq[1]!)) return true; continue; }
+    if (a === "--no-pager" || a === "--no-optional-locks") continue;
+    break;
+  }
+  const sub = args[i++];
+  const spec = sub === undefined ? undefined : Object.hasOwn(GIT_TABLE, sub) ? GIT_TABLE[sub] : undefined;
+  if (!spec) return true;
+  const longs = new Map<string, boolean>();
+  for (const f of spec.l.split(" ")) longs.set(f.replace(/=$/, ""), f.endsWith("="));
+  const plain: string[] = [];
+  let dashes = false;
+  for (; i < args.length; i++) {
+    const a = args[i]!;
+    // A redirect is read by the general write scan; skip it here.
+    if (/^\d*[<>]/.test(a)) { if (/^\d*>{1,2}[|&]?$|^\d*<$/.test(a)) i++; continue; }
+    if (dashes || a === "-" || !a.startsWith("-")) { plain.push(a); continue; }
+    if (a === "--") { dashes = true; continue; }
+    if (a.startsWith("--")) {
+      const name = a.split("=")[0]!;
+      if (!longs.has(name)) return true;
+      if (longs.get(name) && !a.includes("=")) i++; // value in the next word
+      continue;
+    }
+    for (let j = 1; j < a.length; j++) {
+      const ch = a[j]!;
+      if (/\d/.test(ch)) { if (!(spec.s ?? "").includes("0")) return true; continue; }
+      if (!(spec.s ?? "").includes(ch)) return true;
+      if ((spec.v ?? "").includes(ch)) { if (j === a.length - 1) i++; break; }
+    }
+  }
+  if (spec.none && plain.length > 0) return true;
+  if (spec.first && !(plain[0] !== undefined && spec.first.test(plain[0]))) return true;
+  for (const p of plain) {
+    if (/::/.test(p) && sub === "clone") return true;
+    if (/\{[^}]*(?:,|\.\.)[^}]*\}/.test(p)) return true; // brace expansion
+    if (!spec.w) continue;
+    if (/(?:^|\/)\.\.(?:\/|$)/.test(p)) return true;
+    if (/^[/~]/.test(p) && !(sub === "clone" && p === plain[0]) && !pathOk(p)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when a command that starts with git (after ;, |, $(, (, or a backtick) is not on the allow-list: the subcommand must be a
+ * row of GIT_TABLE, every flag must be listed for it, and the folder git runs in must pass the same test as `cd`. A NAME=value,
+ * env, export or other launcher in front of git, and any `$` or backtick in a git command, is Deny.
+ */
+function gitDenied(c: string, dirOk: (p: string) => boolean, pathOk: (p: string) => boolean): boolean {
+  // Environment that makes git run a program or move it (GIT_DIR, GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_PAGER, ...), set anywhere on a line that uses git.
   if (/\bgit\b/.test(c) && /(?:^|[\s;&|(])(?:export\s+|env\s+|declare\s+(?:-x\s+)?)?(?:GIT_\w+|PAGER|EDITOR|VISUAL|SSH_ASKPASS|LESSOPEN|LD_\w+)\+?=/.test(c)) return true;
-  // A variable set exactly once to a plain path-like value (not an option) is read as that value.
-  const plain = new Map<string, string>();
-  for (const m of c.matchAll(/(?:^|[;&|\s])(\w+)=([\w./@+][\w./@+-]*)(?=$|[\s;&|)])/g)) plain.set(m[1]!, plain.has(m[1]!) ? "$" : m[2]!);
-  for (const m of c.matchAll(/(?:^|[;&|\s])(\w+)\+?=/g)) if (plain.has(m[1]!) && (c.match(new RegExp(`(?:^|[;&|\\s])${m[1]!}\\+?=`, "g")) ?? []).length > 1) plain.set(m[1]!, "$");
-  const known = (x: string): string => x.replace(/\$\{?(\w+)\}?/g, (all, n: string) => { const v = plain.get(n); return v !== undefined && v !== "$" ? v : all; });
-  c = known(c);
   for (const seg of c.split(/[;&|\n]/)) {
     const parts = seg.split(/\$\(|[()\x60]/);
     for (let i = 0; i < parts.length; i++) {
       const raw = parts[i]!.trim();
-      // Quotes and backslashes removed, so `g''it` reads as `git`; the allow-list below still needs the raw text.
-      const words = raw.replace(/['"\\]/g, "").split(/\s+/).filter(Boolean);
+      const words = shellWords(raw);
       let k = 0;
       while (k < words.length && GIT_WRAPPER.test(words[k]!)) k++;
       const head = words[k];
       if (head === undefined) continue;
       // An unknown program with arguments (`$g config x y`) could be git.
       if (i === 0 && /^(?:\$[\w{(@*#?!$]|\x60)/.test(head) && words.length - k > 1 && (!head.includes("/") || /\/git$/.test(head))) return true;
+      // A launcher (`FOO=1 git ...`, `env git ...`, `sudo git ...`, `xargs git ...`, `sh -c 'git ...'`) with git after it.
+      if (GIT_LAUNCHER.test(head) && words.slice(k + 1).some((w) => /(?:^|[\s/])git(?:\s|$)/.test(w))) return true;
+      // `find ... -exec git ...` runs git with arguments from elsewhere.
+      if (words.some((w, n) => /^-(?:exec|execdir|ok|okdir)$/.test(w) && /(?:^|[\s/])git(?:\s|$)/.test(words[n + 1] ?? ""))) return true;
       if (!/^(?:[\w./-]*\/)?git(?:[$\x60{].*)?$/.test(head)) continue;
       if (GIT_READ.test(raw)) continue;
-      // A substitution after the git word (`git log $(...)`) counts against it, except a plain `$(git <subcommand> ...)`, which is
-      // read as its own command; single-quoted text and escaped \$ or backticks are literal.
-      const text = (i === 0 ? seg : raw).replace(/'[^']*'/g, "''").replace(/\\[$`]/g, "").replace(/\$\(\s*git [^$`()]*\)/g, "");
-      if (!GIT_SAFE.test(raw) || /[$\x60]/.test(text) || /(?:^|\s)-c|--output|--config-env|--ext-diff|--open-files-in-pager|--textconv|(?:^|\s)-[A-Za-z]*O|--exec-path|--upload-pack|--receive-pack|\s--exec\b/.test(text)) return true;
+      // No substitution, variable or backtick anywhere in a git command, quoted or not: it can't be read.
+      if (/[$\x60]/.test(i === 0 ? seg : raw)) return true;
+      if (gitArgsDenied(words.slice(k + 1), dirOk, pathOk)) return true;
     }
   }
   return false;
