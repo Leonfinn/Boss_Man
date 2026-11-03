@@ -1,7 +1,7 @@
 // Boss Man's v1 data model (docs/02-architecture.md). Every company-owned row carries
 // company_id; cross-company links exist only through engagements.
 import { sql } from "drizzle-orm";
-import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, type AddonReport, type RetroFinding, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
+import { DEFAULT_REVIEW_POLICY, DEFAULT_WATCHDOG, PERMISSION_JUDGE_MODES, type AddonReport, type RetroFinding, type SandboxReport, type ReviewPolicy, type WatchdogSettings } from "@boss-man/shared";
 import {
   type AnyPgColumn,
   bigint,
@@ -64,6 +64,8 @@ export const companies = pgTable("companies", {
   nudgesPerHour: integer("nudges_per_hour").notNull().default(30),
   /** Minutes the CEO has to act on a decision the owner asked for advice on, before it goes back to the owner. */
   adviceTimeoutMinutes: integer("advice_timeout_minutes").notNull().default(120),
+  /** How the rules judge advises on permission cards (BOS-337): off, watch (only logs next to the answer) or advise (sets the suggested button). Never answers a card. */
+  permissionJudge: text("permission_judge", { enum: PERMISSION_JUDGE_MODES }).notNull().default("watch"),
   /** The Scrum Master watchdog's switch and limits (BOS-58), edited by the owner. */
   watchdog: jsonb("watchdog").$type<WatchdogSettings>().notNull().default(DEFAULT_WATCHDOG),
   /** Set when the watchdog hit its hourly cap and switched itself off; cleared when the owner switches it back on. */
@@ -150,11 +152,18 @@ export const runners = pgTable("runners", {
   /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
   harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
+  bootId: text("boot_id"),
+  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
   diskCheckedAt: timestamp("disk_checked_at", { withTimezone: true }),
   /** The runner's last report on its add-ons (docs/12); null until it reports one. */
   addons: jsonb("addons").$type<AddonReport[]>(),
+  /** What the runner can fence agents with, from its start-up self-test (BOS-321); null until it reports. */
+  sandbox: jsonb("sandbox").$type<SandboxReport>(),
+  sandboxCheckedAt: timestamp("sandbox_checked_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 
@@ -282,6 +291,8 @@ export const tickets = pgTable(
     baseCommit: text("base_commit"),
     /** The merge commit on the target branch once the ticket's branch is merged (R46). */
     mergeCommit: text("merge_commit"),
+    /** The merge commit the checks ran on and that was pushed, when the gate checks the merged result (BOS-313). */
+    checkedCommit: text("checked_commit"),
     /** The pull request approved work is waiting in (R59), and why it isn't merged yet. */
     pullRequestUrl: text("pull_request_url"),
     pullRequestNumber: integer("pull_request_number"),
@@ -320,6 +331,8 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
+    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty strings), checked against at review; empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),

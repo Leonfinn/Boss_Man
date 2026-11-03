@@ -32,7 +32,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # True when the files changed between two commits mean the runners need a new image.
 needs_runner() { # old new
-  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|packages/shared/|pnpm-lock\.yaml$)'
+  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 }
 
 DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0 COMMIT=

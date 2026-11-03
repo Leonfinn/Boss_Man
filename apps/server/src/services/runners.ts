@@ -1,13 +1,17 @@
 // Runner registration, authentication and event ingestion (R31).
 import { randomBytes } from "node:crypto";
-import { and, eq, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
 import { z } from "zod";
-import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
 import { costEvents, decisions, engagements, runnerEvents, runners, runs, settings, tickets } from "../db/schema.js";
 import type { fundingService } from "./funding.js";
+
+/** After a runner restart, at most this many parked checks are pulled forward, and none again within this long of the last restart (BOS-352). */
+const RESTART_PULL_MAX = 20;
+const RESTART_PULL_COOLDOWN_MS = 10 * 60_000;
 
 type Runner = typeof runners.$inferSelect;
 export type CommandSender = (command: RunnerCommand) => boolean;
@@ -199,9 +203,38 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       return true;
     },
 
+    /** Keeps the runner's latest fence self-test (BOS-321). */
+    async recordSandbox(runnerId: string, report: SandboxReport, at: Date) {
+      await db.update(runners).set({ sandbox: report, sandboxCheckedAt: at }).where(eq(runners.id, runnerId));
+    },
+
     async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>) {
       // An older runner sends none: keep what we last knew rather than blanking it.
       await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
+    },
+
+    /**
+     * A runner said hello with its boot id (BOS-352). A new id means the process restarted, which
+     * silently kills any background check an agent started, so the checks parked on a schedule_check
+     * are pulled forward to now, each with a note. Capped, and skipped when a restart pulled some
+     * minutes ago, so a restart loop can't flood wakes. A reconnect (same id) changes nothing.
+     */
+    async bootSeen(runner: Runner, bootId: string | undefined): Promise<number> {
+      if (!bootId || bootId === runner.bootId) return 0;
+      const at = new Date();
+      await db.update(runners).set({ bootId }).where(eq(runners.id, runner.id));
+      if (runner.bootPulledAt && at.getTime() - runner.bootPulledAt.getTime() < RESTART_PULL_COOLDOWN_MS) return 0;
+      const pending = await db
+        .select({ id: tickets.id, assigneeAgentId: tickets.assigneeAgentId })
+        .from(tickets)
+        .where(and(eq(tickets.companyId, runner.companyId), isNotNull(tickets.monitorAt), gt(tickets.monitorAt, at), isNotNull(tickets.assigneeAgentId)))
+        .orderBy(asc(tickets.monitorAt))
+        .limit(RESTART_PULL_MAX);
+      if (!pending.length) return 0;
+      await db.update(runners).set({ bootPulledAt: at }).where(eq(runners.id, runner.id));
+      await db.update(tickets).set({ monitorAt: at, monitorRestartAt: at }).where(inArray(tickets.id, pending.map((p) => p.id)));
+      for (const p of pending) await record(db, { companyId: runner.companyId, agentId: p.assigneeAgentId, ticketId: p.id, kind: "monitor", summary: "The runner restarted: the scheduled check was brought forward", at });
+      return pending.length;
     },
 
     connect(runnerId: string, send: CommandSender, feats: string[] = []) {

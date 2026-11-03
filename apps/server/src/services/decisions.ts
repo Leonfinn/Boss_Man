@@ -11,6 +11,11 @@ import {
   rankDecision,
   ticketRef,
   recommendedVerdict,
+  isJudgeable,
+  judgePermission,
+  commandOf,
+  type JudgeReading,
+  type PermissionJudgeMode,
   TEMP_CLEANUP_RULE,
   WORKING_COPY_RULE,
   cleanupScope,
@@ -29,6 +34,7 @@ import {
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
+import { REVIEW_REASON } from "./review-kinds.js";
 import { addTicketDependency } from "./ticket-links.js";
 import type { Ladder } from "./alert-ladder.js";
 import { recordGoalAnswer } from "./goal-check.js";
@@ -108,7 +114,7 @@ export type DeployUpdate = {
 };
 
 export type DecisionContext =
-  | { type: "permission"; runnerId: string; runId: string; requestId: string; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
+  | { type: "permission"; runnerId: string; runId: string; requestId: string; /** The tool call this was raised for and its title: a later request for the same call is covered by an Allow here. */ toolCallId?: string; toolTitle?: string | null; plan?: boolean; ticketId?: string | null; explain?: PermissionExplanation; /** What the rules judge made of it and the company setting at the time (BOS-337); the human's answer is logged next to it. */ judge?: JudgeNote; always?: AlwaysChoice[]; /** Temp-file cleanup, sent to the CEO first (BOS-111). */ tempCleanup?: boolean; /** Deletes in the agent's working copy, sent to the CEO first (BOS-120). */ workingCopy?: WorkingCopy; /** Who on the team settled it, and why (BOS-111 audit). */ settled?: Settled }
   | { type: "engagement"; engagementId: string }
   | { type: "question"; /** What the agent tried first, and why only the owner can do this. */ triedFirst?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** Why this ask is still fresh even though the owner answered something like it before (BOS-123). */ stillNeeded?: string }
   | { type: "stale_blocker"; dependencyId: string; blockedTicketId: string; blockerTicketId: string | null; blockerEngagementId: string | null }
@@ -278,6 +284,8 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
       .returning({ id: decisions.id });
     if (done) cleared++;
   }
+  // An answered or withdrawn card keeps its key (the column is unique), which would swallow a fresh insert silently (BOS-362).
+  await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticketId}`), ne(decisions.status, "open")));
   return cleared;
 }
 
@@ -424,6 +432,9 @@ function fileList(files: string[], max: number): string {
   return shown < files.length ? `${out}${out ? ", " : ""}…and ${files.length - shown} more` : out;
 }
 
+/** The rules judge's reading of a permission card, kept on it (BOS-337). In watch mode it is only recorded; in advise mode it also picked the suggested button. */
+export type JudgeNote = { mode: Exclude<PermissionJudgeMode, "off">; verdict: JudgeReading["verdict"]; row: JudgeReading["row"]; reason: string };
+
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
 
 /** How long a permission or plan request waits with the CEO before it moves to the owner: the runner gives up at 10 minutes (BOS-111, BOS-119). */
@@ -538,7 +549,7 @@ export async function unblockedNote(db: Db, ticketId: string, answered?: { quest
   return lines.length ? `What you were waiting on:\n${lines.join("\n")}`.slice(0, 800) : undefined;
 }
 
-export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}) {
+export function decisionsService(db: Db, send: Sender, now: () => Date = () => new Date(), isConnected: (runnerId: string) => boolean = () => false, log: (message: string) => void = () => {}, workspaceRoot?: string) {
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
@@ -835,11 +846,21 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
   /** A plan from a plan-first ticket, put to the CEO, or to the owner for high-risk work (R40, R48). */
   async function planRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
-    const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId }).from(runs).where(eq(runs.id, event.runId));
+    const [run] = await db.select({ agentId: runs.agentId, ticketId: runs.ticketId, origin: runs.origin }).from(runs).where(eq(runs.id, event.runId));
     const [t] = run?.ticketId ? await db.select().from(tickets).where(eq(tickets.id, run.ticketId)) : [];
     const [agent] = run?.agentId ? await db.select({ name: agents.name, role: agents.role }).from(agents).where(eq(agents.id, run.agentId)) : [];
     const plan = event.detail ?? null;
-    if (t && plan) await db.update(tickets).set({ plan, lastActivityAt: now() }).where(eq(tickets.id, t.id));
+    // A reviewer has no plan to present: what it sends through ExitPlanMode is its review verdict, so the CEO gets it as that and the owner is not asked to approve a plan (BOS-371).
+    if (run?.origin === REVIEW_REASON && t) {
+      send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "deny" });
+      const who = agent?.name ?? "A reviewer";
+      const [ceo] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, runner.companyId), eq(agents.role, "ceo"), isNull(agents.retiredAt)));
+      if (ceo && wake) await wake({ agentId: ceo.id, ticketId: t.id, reason: "decision", priority: 3, note: `${who} was asked to review "${t.title}" but could only send this through the plan door, so treat it as their review verdict:\n${untrusted("reviewer verdict", (plan ?? "(empty)").slice(0, 3000))}` });
+      await record(db, { companyId: runner.companyId, ticketId: t.id, kind: "review_fallback", summary: `${who} sent their review as a plan; it went to the CEO as the verdict, not to the owner as a plan.`, at: now() });
+      return { outcome: "deny" as const, rule: "A reviewer's plan is a review verdict", decisionId: null };
+    }
+    // An approved plan stays: a later plan from someone else never replaces it.
+    if (t && plan && !t.planApprovedAt) await db.update(tickets).set({ plan, lastActivityAt: now() }).where(eq(tickets.id, t.id));
     // The review policy says who approves a plan: the owner, the CEO, or an agent. A CEO's own plan always goes to the owner.
     let tier: "owner" | "ceo" = "owner";
     let forAgentId: string | null = null;
@@ -968,6 +989,15 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     return subject ? (await openSibling(d, subject)) !== null : false;
   }
 
+  /** The id of a card already answered Allow for this same tool call (same run, same call id, same title), if any. */
+  async function allowedSameToolCall(event: PermissionEvent): Promise<string | null> {
+    const rows = await db
+      .select({ id: decisions.id, context: decisions.context })
+      .from(decisions)
+      .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "answered"), eq(decisions.answer, ALLOW), sql`${decisions.context}->>'runId' = ${event.runId}`, sql`${decisions.context}->>'toolCallId' = ${event.toolCallId}`));
+    return rows.find((r) => (r.context as { toolTitle?: string | null }).toolTitle === event.title)?.id ?? null;
+  }
+
   return {
     /** Called for every permission request a runner reports. */
     async onPermissionRequest(runner: { id: string; companyId: string }, event: PermissionEvent) {
@@ -985,6 +1015,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             ? { outcome: "allow" as const, rule: "The owner chat's board tools" }
             : { outcome: "deny" as const, rule: "The owner chat has board tools only" }
           : evaluatePermission(info, await rulesFor(runner.companyId));
+      // OpenCode asks twice for one shell command that reaches outside the checkout: first for the folder, then for the command. If the owner or CEO has already allowed this tool call, the second ask is not a new question. The rules still apply first, so a denial stands.
+      if (outcome !== "allow" && outcome !== "deny" && event.toolCallId) {
+        const earlier = await allowedSameToolCall(event);
+        if (earlier && send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: "allow" })) return { outcome: "allow" as const, rule: `Same tool call as decision ${earlier}, already allowed`, decisionId: null };
+      }
       if (outcome === "allow" || outcome === "deny") {
         if (send(runner.id, { type: "permission.decide", runId: event.runId, requestId: event.requestId, verdict: outcome })) return { outcome, rule, decisionId: null };
         // The runner dropped off between sending the request and getting the verdict. The event
@@ -1051,7 +1086,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       }
       // Standing rules are the owner's call, never an agent's.
       const always = tier === "owner" ? alwaysChoices(info, explain) : [];
-      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, explain, ...(always.length ? { always } : {}) };
+      // The rules judge (BOS-337) only picks which button is suggested. The policy above already decided who answers; nothing here answers a card.
+      const [company] = await db.select({ mode: companies.permissionJudge }).from(companies).where(eq(companies.id, runner.companyId));
+      const judgeMode = company?.mode ?? "watch";
+      const judgedCommand = commandOf(info.rawInput);
+      // Very long commands are not judged (the old recommendation stays): the patterns are not built for them and this runs on the server loop.
+      const reading = judgeMode === "off" || !isJudgeable(judgedCommand) ? null : judgePermission(`${explain.title}. ${explain.summary}`, judgedCommand, run?.ticketId ?? undefined, workspaceRoot && (run?.ticketId ?? run?.agentId) ? `${workspaceRoot}/${run?.ticketId ?? run?.agentId}`.replace(/[^A-Za-z0-9]/g, "-") : undefined);
+      const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel } : undefined;
+      const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, ...(event.toolCallId ? { toolCallId: event.toolCallId, toolTitle: event.title } : {}), explain, ...(judge ? { judge } : {}), ...(always.length ? { always } : {}) };
       // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
       const stored = { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) };
       const [row] = await db
@@ -1066,7 +1108,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           options: [ALLOW, ...always.map((a) => a.label), DENY],
           // The same allow-list as everywhere else: build output is Allow, source or anything else is
           // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).
-          recommendedOption: recommendedVerdict(info) === "allow" ? ALLOW : DENY,
+          recommendedOption: (judge?.mode === "advise" ? judge.verdict : recommendedVerdict(info)) === "allow" ? ALLOW : DENY,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
@@ -1830,6 +1872,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         }
       }
 
+      // Watch mode (BOS-337): the judge's reading next to what the human chose, so the owner can see how often they agree before turning advice on. The reading is also kept on the decision row.
+      if (ctx.type === "permission" && ctx.judge) {
+        const human = answer === ALLOW || answer === APPROVE_PLAN ? "allow" : "deny";
+        log(`permission judge (${ctx.judge.mode}): decision ${id} judge=${ctx.judge.verdict} (${ctx.judge.row}) human=${human}${human === ctx.judge.verdict ? "" : " DISAGREE"}`);
+      }
+
       let delivered: boolean | null = null;
       let endedHere = false;
       if (ctx.type === "permission") {
@@ -1837,10 +1885,14 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         if (ctx.plan && allowed && ctx.ticketId) await db.update(tickets).set({ planApprovedAt: now() }).where(eq(tickets.id, ctx.ticketId));
         if (ctx.plan && !allowed) {
           // Sent before the verdict, so the agent picks it up as its next turn and keeps planning.
+          // "Keep planning" on a later card never withdraws a plan the ticket already has approved (BOS-371).
+          const [already] = ctx.ticketId ? await db.select({ at: tickets.planApprovedAt }).from(tickets).where(eq(tickets.id, ctx.ticketId)) : [];
           send(ctx.runnerId, {
             type: "run.message",
             runId: ctx.runId,
-            text: `Your plan wasn't approved yet.${extra.note ? ` Feedback: ${extra.note}` : ""} Revise the plan and present it again with ExitPlanMode.`,
+            text: already?.at
+              ? `This plan wasn't approved.${extra.note ? ` Feedback: ${extra.note}` : ""} The ticket's earlier approved plan still stands; this does not undo it.`
+              : `Your plan wasn't approved yet.${extra.note ? ` Feedback: ${extra.note}` : ""} Revise the plan and present it again with ExitPlanMode.`,
             interrupt: false,
           });
         }

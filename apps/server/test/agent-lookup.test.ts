@@ -167,6 +167,8 @@ describe("agents look tickets up (R77)", () => {
     expect(names).toEqual(expect.arrayContaining(["board", "create_ticket", "skills", "tickets", "wiki"]));
     expect(chatRun.prompt).toContain("wiki (read, write and file the company's pages)");
     expect(chatRun.prompt).toContain("Use your tools before saying you can't see something");
+    // The CEO is told how to link a wiki page, so links open the page (BOS-356).
+    expect(chatRun.prompt).toContain("name it as [[slug]]");
     await client.close();
   });
 });
