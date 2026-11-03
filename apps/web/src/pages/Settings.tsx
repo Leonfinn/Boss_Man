@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { RUNNER_ADDONS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
+import { RUNNER_ADDONS, SECOND_OPINION_PRESETS, WATCHDOG_RULE_LABEL, type AddonReport, type WatchdogRule, type WatchdogSettings } from "@boss-man/shared";
 import { api, ApiError, type Agent, type Company, type FundingSource, type Project } from "../api";
 import { CompanyReviews, ProjectReviews } from "../components/ReviewPolicy";
 import { copyMessage, copyText } from "../clipboard";
@@ -1403,6 +1403,101 @@ function PermissionJudgeSetting({ company, onChanged }: { company: Company; onCh
   );
 }
 
+type SecondOpinion = { enabled: boolean; baseUrl: string; model: string; secretId: string | null };
+
+/** The optional model second opinion on permission cards (BOS-338): off by default. The key is a secret from the encrypted store. */
+function SecondOpinionSetting({ company }: { company: Company }) {
+  const cur = usePoll((signal) => api<SecondOpinion>(`/api/companies/${company.id}/second-opinion`, { signal }), 600_000, `second-${company.id}`);
+  const secrets = usePoll((signal) => api<Array<{ id: string; name: string }>>("/api/secrets", { signal }), 600_000, "secrets");
+  const [v, setV] = useState<SecondOpinion | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sv = useSaveState(v);
+  // Only the first load fills the form, so a background refresh never overwrites an edit in progress.
+  useEffect(() => {
+    if (!cur.data || v) return;
+    setV(cur.data);
+    sv.reset(cur.data);
+  }, [cur.data]);
+  if (!v) return null;
+  const judgeOff = (company.permissionJudge ?? "watch") === "off";
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    api(`/api/companies/${company.id}/second-opinion`, { method: "PUT", body: v })
+      .then(
+        () => (sv.markSaved(), setMsg("Saved.")),
+        (err: Error) => setMsg(err.message),
+      )
+      .finally(() => setBusy(false));
+  };
+  const test = () => {
+    setBusy(true);
+    setMsg("Asking the model…");
+    api<{ ok: boolean; message: string }>(`/api/companies/${company.id}/second-opinion/test`, { method: "POST", body: v })
+      .then(
+        (r) => setMsg(r.message),
+        (err: Error) => setMsg(err.message),
+      )
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Section id="second-opinion-h" title="Second opinion from a model (optional)">
+      <form onSubmit={save} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <p className="muted" style={{ fontSize: 14 }}>
+          Off by default. When it's on, a card the rules above would suggest allowing is also shown to a model you pick. It can only make the advice stricter: a card is suggested Allow only when both agree. If the model is slow (over 5 seconds), down, out of credit or gives an answer Boss Man can't read, the rules decide alone. It never presses a button. The card's text is sent to the provider, with tokens, keys and passwords removed first.
+        </p>
+        {judgeOff && <p className="muted" style={{ fontSize: 14 }}>Advice on permission cards is off, so the model isn't asked. Set it to Watch or Advise first.</p>}
+        <label>
+          <input type="checkbox" checked={v.enabled} onChange={(e) => setV({ ...v, enabled: e.target.checked })} /> Ask a model for a second opinion
+        </label>
+        <div>
+          <strong style={{ fontSize: 14 }}>Suggested models</strong> <span className="muted" style={{ fontSize: 14 }}>(from our test on 203 real cards; click one to fill in the fields)</span>
+          <ul style={{ margin: "6px 0", paddingLeft: 20, fontSize: 14 }}>
+            {SECOND_OPINION_PRESETS.map((p) => (
+              <li key={p.label}>
+                <button type="button" className="linkish" onClick={() => setV({ ...v, baseUrl: p.baseUrl, model: p.model })}>
+                  {p.label}
+                </button>{" "}
+                <span className="muted">— {p.note}</span>
+              </li>
+            ))}
+          </ul>
+          <small className="muted">Decision models such as Jev, d3 and the others that only return a score don't work for this: they can't tell safe from unsafe reliably and give no reason. Use a chat model.</small>
+        </div>
+        <div className="field">
+          <label htmlFor="second-url">Provider address</label>
+          <input id="second-url" value={v.baseUrl} placeholder="https://openrouter.ai/api/v1" onChange={(e) => setV({ ...v, baseUrl: e.target.value })} />
+          <small className="muted">Any OpenAI-compatible service (it must accept /chat/completions): OpenRouter, Synthetic, or your own server such as Ollama.</small>
+        </div>
+        <div className="field">
+          <label htmlFor="second-model">Model</label>
+          <input id="second-model" value={v.model} placeholder="openai/gpt-oss-safeguard-20b" onChange={(e) => setV({ ...v, model: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="second-key">API key</label>
+          <select id="second-key" value={v.secretId ?? ""} onChange={(e) => setV({ ...v, secretId: e.target.value || null })}>
+            <option value="">None (a local server)</option>
+            {(secrets.data ?? []).map((x) => (
+              <option key={x.id} value={x.id}>
+                {x.name}
+              </option>
+            ))}
+          </select>
+          {!v.secretId && <small className="muted">Add the key under Secrets first, then pick it here.</small>}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <SaveButton {...sv} busy={busy} />
+          <button type="button" className="btn" disabled={busy || !v.baseUrl || !v.model} onClick={test}>
+            Test
+          </button>
+        </div>
+        {msg && <p role="status">{msg}</p>}
+      </form>
+    </Section>
+  );
+}
+
 /** The company's hourly nudge limit (BOS-73). */
 function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
@@ -2053,6 +2148,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
             <PermissionJudgeSetting company={company} onChanged={onChanged} />
+            <SecondOpinionSetting company={company} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />
             <Chapters company={company} />

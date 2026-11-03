@@ -62,6 +62,7 @@ import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
+import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
@@ -233,6 +234,10 @@ export async function buildApp(opts: AppOptions) {
   const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), log: (m) => app.log.warn(m) });
   const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
+  // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
+  const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  decisionsSvc.setSecondOpinion(secondOpinion);
+  app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
     now: opts.now,
     onShipped: async (ticketId) => {
@@ -1697,6 +1702,18 @@ export async function buildApp(opts: AppOptions) {
       const after = await semantic.setSettings(id, b);
       if (after.enabled && (!before.enabled || before.model !== after.model || before.baseUrl !== after.baseUrl || before.secretId !== after.secretId)) await semantic.reindexAll(id);
       return semanticView(after);
+    });
+    // The model second opinion on permission cards (BOS-338). The key is picked from Secrets, never sent back.
+    owner.get("/api/companies/:id/second-opinion", async (req) => secondOpinion.settings(IdParam.parse(req.params).id));
+    owner.put("/api/companies/:id/second-opinion", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = SecondOpinionSettings.parse(req.body);
+      if (b.enabled && (!b.model || !b.baseUrl)) return reply.code(400).send({ error: "invalid_request", message: "Set the provider address and the model first." });
+      return secondOpinion.setSettings(id, b);
+    });
+    owner.post("/api/companies/:id/second-opinion/test", async (req) => {
+      IdParam.parse(req.params);
+      return secondOpinion.test(SecondOpinionSettings.parse(req.body));
     });
     owner.post("/api/companies/:id/wiki-semantic/reindex", async (req, reply) => reply.code(202).send({ pages: await semantic.reindexAll(IdParam.parse(req.params).id) }));
     owner.get("/api/tickets/:id/artifacts", async (req) => wiki.artifacts(IdParam.parse(req.params).id, { family: true }));

@@ -33,6 +33,7 @@ import {
   untrusted,
 } from "@boss-man/shared";
 import type { Db } from "../db/client.js";
+import type { SecondOpinionCard, SecondOpinionResult } from "./second-opinion.js";
 import { record } from "./activity.js";
 import { REVIEW_REASON } from "./review-kinds.js";
 import { addTicketDependency } from "./ticket-links.js";
@@ -433,7 +434,13 @@ function fileList(files: string[], max: number): string {
 }
 
 /** The rules judge's reading of a permission card, kept on it (BOS-337). In watch mode it is only recorded; in advise mode it also picked the suggested button. */
-export type JudgeNote = { mode: Exclude<PermissionJudgeMode, "off">; verdict: JudgeReading["verdict"]; row: JudgeReading["row"]; reason: string };
+export type JudgeNote = { mode: Exclude<PermissionJudgeMode, "off">; verdict: JudgeReading["verdict"]; row: JudgeReading["row"]; reason: string; /** The model second opinion (BOS-338), asked only when the rules judge allows. Pending until it answers or fails (at most 5 s). */ second?: SecondNote };
+
+/** What the model second opinion said (BOS-338). "failed" means the rules judge decided alone; `reason` is the model's one line, cleaned, or why it failed. */
+export type SecondNote = { state: "pending" } | { state: "allow" } | { state: "deny"; reason: string } | { state: "failed"; reason: string };
+
+/** Asks the company's model, if it has one switched on (BOS-338). */
+export type SecondOpinionHook = { enabled: (companyId: string) => Promise<boolean>; ask: (companyId: string, card: SecondOpinionCard) => Promise<SecondOpinionResult> };
 
 export type Settled = { agentId: string; name: string; note: string | null; at: string };
 
@@ -553,6 +560,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let wake: WakeHook | null = null;
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
+  let secondOpinion: SecondOpinionHook | null = null;
+  // Second opinions still being asked, so a shutdown or a test can wait for them.
+  const secondInFlight = new Set<Promise<void>>();
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
   let onModelChange: ModelChangeHook | null = null;
@@ -797,6 +807,24 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   }
 
   /** Wakes the company's CEO, or the agent a plan was put to, to answer a decision (R19). */
+  /**
+   * Records the model's second opinion on a card (BOS-338). Only `judge.second` is written (jsonb_set), so an
+   * answer saved meanwhile isn't overwritten. In advise mode an open card's suggestion becomes Allow when the
+   * model allowed or failed (the rules judge, which allowed, decides alone), and stays Deny when it denied.
+   */
+  async function settleSecondOpinion(decisionId: string, r: SecondOpinionResult) {
+    const note: SecondNote = "failed" in r ? { state: "failed", reason: r.failed } : r.verdict === "deny" ? { state: "deny", reason: r.reason } : { state: "allow" };
+    const suggest = note.state === "deny" ? DENY : ALLOW;
+    await db
+      .update(decisions)
+      .set({
+        context: sql`jsonb_set(${decisions.context}, '{judge,second}', ${JSON.stringify(note)}::jsonb)`,
+        recommendedOption: sql`CASE WHEN ${decisions.status} = 'open' AND ${decisions.context} #>> '{judge,mode}' = 'advise' THEN ${suggest} ELSE ${decisions.recommendedOption} END`,
+      })
+      .where(and(eq(decisions.id, decisionId), sql`${decisions.context} #>> '{judge,second,state}' = 'pending'`));
+    if (note.state === "failed") log(`second opinion for decision ${decisionId} failed (${note.reason}); the rules judge decided alone`);
+  }
+
   async function tellCeo(companyId: string, question: string, agentId?: string) {
     const [ceo] = agentId ? [{ id: agentId }] : await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
     if (ceo && wake) await wake({ agentId: ceo.id, reason: "decision", note: `A decision is waiting for you: ${question}\nUse the decisions tool to read it and answer.` });
@@ -1092,7 +1120,9 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       const judgedCommand = commandOf(info.rawInput);
       // Very long commands are not judged (the old recommendation stays): the patterns are not built for them and this runs on the server loop.
       const reading = judgeMode === "off" || !isJudgeable(judgedCommand) ? null : judgePermission(`${explain.title}. ${explain.summary}`, judgedCommand, run?.ticketId ?? undefined, workspaceRoot && (run?.ticketId ?? run?.agentId) ? `${workspaceRoot}/${run?.ticketId ?? run?.agentId}`.replace(/[^A-Za-z0-9]/g, "-") : undefined);
-      const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel } : undefined;
+      // The model second opinion (BOS-338) is asked only when the rules judge allows: it can only make a card stricter.
+      const askSecond = !!reading && reading.verdict === "allow" && judgeMode !== "off" && !!secondOpinion && (await secondOpinion.enabled(runner.companyId).catch(() => false));
+      const judge: JudgeNote | undefined = reading && judgeMode !== "off" ? { mode: judgeMode, verdict: reading.verdict, row: reading.row, reason: reading.reasonLabel, ...(askSecond ? { second: { state: "pending" as const } } : {}) } : undefined;
       const context: DecisionContext = { type: "permission", runnerId: runner.id, runId: event.runId, requestId: event.requestId, ...(event.toolCallId ? { toolCallId: event.toolCallId, toolTitle: event.title } : {}), explain, ...(judge ? { judge } : {}), ...(always.length ? { always } : {}) };
       // workingCopy stays when it falls to the owner (CEO paused), so the card and the audit still say so.
       const stored = { ...context, rule, ...(workingCopy ? { workingCopy } : {}), ...(ladder ? { ...(rule === TEMP_CLEANUP_RULE ? { tempCleanup: true } : {}), ladder } : {}) };
@@ -1108,7 +1138,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
           options: [ALLOW, ...always.map((a) => a.label), DENY],
           // The same allow-list as everywhere else: build output is Allow, source or anything else is
           // Deny, so the CEO is never handed a pre-selected Allow for rm -rf src (adversarial review).
-          recommendedOption: (judge?.mode === "advise" ? judge.verdict : recommendedVerdict(info)) === "allow" ? ALLOW : DENY,
+          // While the second opinion is pending the card suggests Deny: it is advised Allow only once both judges allow (or the model fails, and the rules judge decides alone).
+          recommendedOption: (judge?.mode === "advise" ? (judge.second?.state === "pending" ? "deny" : judge.verdict) : recommendedVerdict(info)) === "allow" ? ALLOW : DENY,
           raisedByAgentId: run?.agentId ?? null,
           tier,
           dedupeKey: `permission:${event.requestId}`,
@@ -1116,6 +1147,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
         })
         .onConflictDoNothing()
         .returning({ id: decisions.id, question: decisions.question });
+      // Asked in the background: the runner's events wait on this function, and a slow model must not hold up every agent's events.
+      if (row && askSecond && secondOpinion) {
+        const ownTicket = run?.ticketId ?? null;
+        const p = secondOpinion
+          .ask(runner.companyId, { question: `${explain.title}. ${explain.summary}`, command: judgedCommand, ownTicket })
+          .then((r) => settleSecondOpinion(row.id, r))
+          .catch((err) => log(`second opinion for decision ${row.id} could not be recorded: ${(err as Error).message}`))
+          .finally(() => secondInFlight.delete(p));
+        secondInFlight.add(p);
+      }
       if (row && ceoId && "ladder" in stored && stored.ladder) {
         await wakeLadderCeo(runner.companyId, row, stored as typeof stored & { ladder: Ladder }, ceoId, [
           `A permission request is waiting for you (decision ${row.id}): ${row.question}`,
@@ -1286,6 +1327,16 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
 
     setLoopHooks(hooks: LoopHooks) {
       loopHooks = hooks;
+    },
+
+    /** The model second opinion on permission cards (BOS-338). */
+    setSecondOpinion(hook: SecondOpinionHook) {
+      secondOpinion = hook;
+    },
+
+    /** Waits for second opinions still being asked (shutdown, tests). Each takes at most the 5 s deadline. */
+    async drainSecondOpinions() {
+      while (secondInFlight.size) await Promise.all([...secondInFlight]);
     },
 
     setWakeHook(hook: WakeHook) {
@@ -1875,7 +1926,11 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // Watch mode (BOS-337): the judge's reading next to what the human chose, so the owner can see how often they agree before turning advice on. The reading is also kept on the decision row.
       if (ctx.type === "permission" && ctx.judge) {
         const human = answer === ALLOW || answer === APPROVE_PLAN ? "allow" : "deny";
-        log(`permission judge (${ctx.judge.mode}): decision ${id} judge=${ctx.judge.verdict} (${ctx.judge.row}) human=${human}${human === ctx.judge.verdict ? "" : " DISAGREE"}`);
+        // With a second opinion (BOS-338) the combined advice is what is compared: Allow only when both allowed.
+        const second = ctx.judge.second;
+        const combined = second?.state === "deny" ? "deny" : ctx.judge.verdict;
+        const secondPart = second ? ` second=${second.state}${second.state === "failed" ? ` (${second.reason})` : ""}` : "";
+        log(`permission judge (${ctx.judge.mode}): decision ${id} judge=${ctx.judge.verdict} (${ctx.judge.row})${secondPart} human=${human}${human === combined ? "" : " DISAGREE"}`);
       }
 
       let delivered: boolean | null = null;
