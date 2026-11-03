@@ -52,12 +52,9 @@ export function ticketHref(ref: string, ctx: LinkContext): string | null {
   const m = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(ref);
   if (!m) return null;
   const number = Number(m[2]);
+  // A ticket in this screen's list already covers "this ticket" too, so one lookup is enough.
   const known = ctx.tickets?.find((t) => t.number === number && (t.prefix ?? ctx.prefix ?? "T") === m[1]);
   if (known) return `#/tickets/${known.id}`;
-  if (ctx.selfId && ctx.prefix && ctx.prefix === m[1]) {
-    const self = ctx.tickets?.find((t) => t.id === ctx.selfId);
-    if (self && self.number === number) return `#/tickets/${ctx.selfId}`;
-  }
   return null;
 }
 
@@ -70,12 +67,13 @@ const IMG = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
 // One pattern, in order of what wins: a pasted image or file, a Markdown link whose text and
 // address are both written out, a bare in-app route, a page name in double brackets, and a
-// ticket reference. A bare route stops before whitespace or closing punctuation.
+// ticket reference. A bare route must start the text or follow whitespace, an opening bracket or
+// punctuation (not sit inside a URL or a word), and stops before whitespace or closing punctuation.
 const PATTERN = new RegExp(
   [
     `(!?)\\[([^\\]]*)\\]\\((/api/ticket-images/${IMG})\\)`,
     `\\[([^\\]]+)\\]\\((#[\\/][a-z]+(?:\\/[^\\s)\\]]*)?)\\)`,
-    `\`?(#[\\/][a-z]+(?:\\/[0-9a-f-]{36})?(?:\\/[^\\s\`]*?(?=[.,;:!?)\\s\\]]|$))?)\`?`,
+    `(?<![^\\s([{:;"'*\`])(#[\\/][a-z]+(?:\\/[0-9a-f-]{36})?(?:\\/[^\\s\`]*?(?=[.,;:!?)\\s\\]]|$))?)`,
     `\\[\\[([^\\]#|]+?)(#[^\\]]*)?\\]\\]`,
     `(?<![\\w/-])([A-Za-z][A-Za-z0-9]*-\\d+)(?![\\w-])`,
   ].join("|"),
@@ -85,9 +83,24 @@ const PATTERN = new RegExp(
 // Groups: 1-3 image/file, 4-5 [text](#/route), 6 bare #/route, 7-8 [[page#section]], 9 ticket ref.
 const [, IMG_BANG, IMG_ALT, IMG_SRC, MD_TEXT, MD_HREF, BARE, PAGE, PAGE_HASH, REF] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
 
+// Text that must be shown exactly as written: fenced code, inline code, and an existing Markdown
+// link like [read this](https://…). Ranges are found up front and any match inside them is skipped,
+// so a page name or ticket number in code or in a link's address is never turned into a link.
+const VERBATIM = [/```[\s\S]*?```/g, /`[^`\n]*`/g, /\[[^\]]*\]\((?!#[\/]|\/api\/ticket-images\/)[^)\s]+\)/g];
+
+function verbatimRanges(text: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  for (const re of VERBATIM) {
+    for (const m of text.matchAll(re)) out.push([m.index!, m.index! + m[0].length]);
+  }
+  return out;
+}
+const inside = (ranges: Array<[number, number]>, at: number) => ranges.some(([s, e]) => at >= s && at < e);
+
 /** Splits text into plain runs and links, for a screen that renders each piece its own way. */
 export function linkPieces(text: string, ctx: LinkContext = {}): Piece[] {
   const out: Piece[] = [];
+  const ranges = verbatimRanges(text);
   let at = 0;
   const push = (piece: Piece) => {
     if (piece.kind === "text" && !piece.text) return;
@@ -97,6 +110,8 @@ export function linkPieces(text: string, ctx: LinkContext = {}): Piece[] {
     else out.push(piece);
   };
   for (const m of text.matchAll(PATTERN)) {
+    // Code and existing links are left exactly as they were written.
+    if (inside(ranges, m.index!)) continue;
     push({ kind: "text", text: text.slice(at, m.index!) });
     at = m.index! + m[0].length;
     // A pasted image shows as a thumbnail; a pasted file as a chip that downloads.
