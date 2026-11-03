@@ -3,7 +3,7 @@
  * card that tells the owner to press something not on this list (`lintOwnerSteps`, rule R6), so a card can't send
  * them to a button that doesn't exist (3 Nov 15:10, "Overrule and merge").
  *
- * `apps/server/test/owner-controls.test.ts` reads every <button> in apps/web/src and fails when a label is missing
+ * `apps/server/test/owner-control-list.test.ts` reads every <button> in apps/web/src and fails when a label is missing
  * here or an entry here no longer has a button, so a change to a button's text must change this list too.
  *
  * A label ending in " …" has a value inside it ("Open …" is "Open Acme's Kanban"): anything may follow the words
