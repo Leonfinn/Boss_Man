@@ -28,7 +28,7 @@ export type ServerStatusDeps = {
   now?: () => Date;
 };
 
-type DeployStatus = { result?: string; to_commit?: string; from_commit?: string; ended?: string; message?: string } | null;
+type DeployStatus = { target?: string; result?: string; to_commit?: string; from_commit?: string; ended?: string; message?: string } | null;
 type Available = { deployed?: string; tip?: string; checkedAt?: string } | null;
 
 const short = (sha: string | undefined | null) => (sha ? sha.slice(0, 8) : null);
@@ -104,6 +104,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const status = (deploy?.status as DeployStatus) ?? null;
       const available = (deploy?.available as Available) ?? null;
       const recentErrors = deps.errors.recent(20, companyId);
+      // Only a finished SERVER deploy says which commit is live. A refused or failed request (e.g. a runner update) names a commit that never went live.
+      const serverDeployed = status?.target === "server" && status.result === "deployed";
 
       return {
         server: {
@@ -114,8 +116,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         },
         deploy: {
           enabled: !!deploy?.enabled,
-          liveCommit: short(status?.to_commit ?? available?.deployed),
-          liveSince: status?.ended ?? null,
+          liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),
+          liveSince: serverDeployed ? (status?.ended ?? null) : null,
           lastResult: status?.result ?? null,
           lastMessage: status?.message ?? null,
           pending: !!deploy?.pending,
