@@ -206,6 +206,8 @@ const GIT_WRAPPER = /^(?:\w+=\S*|sudo|env|xargs|time|nohup|exec|command|nice|tim
 
 /** True when a command that starts with git (after ;, |, $(, (, or a backtick) is not on the allow-list. */
 function gitDenied(c: string): boolean {
+  // Environment that makes git run a program (GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_PAGER, ...), set anywhere on a line that uses git.
+  if (/\bgit\b/.test(c) && /(?:^|[\s;&|(])(?:export\s+|env\s+|declare\s+(?:-x\s+)?)?(?:GIT_\w+|PAGER|EDITOR|VISUAL|SSH_ASKPASS|LESSOPEN|LD_\w+)\+?=/.test(c)) return true;
   // A variable set exactly once to a plain path-like value (not an option) is read as that value.
   const plain = new Map<string, string>();
   for (const m of c.matchAll(/(?:^|[;&|\s])(\w+)=([\w./@+][\w./@+-]*)(?=$|[\s;&|)])/g)) plain.set(m[1]!, plain.has(m[1]!) ? "$" : m[2]!);
@@ -229,7 +231,7 @@ function gitDenied(c: string): boolean {
       // A substitution after the git word (`git log $(...)`) counts against it, except a plain `$(git <subcommand> ...)`, which is
       // read as its own command; single-quoted text and escaped \$ or backticks are literal.
       const text = (i === 0 ? seg : raw).replace(/'[^']*'/g, "''").replace(/\\[$`]/g, "").replace(/\$\(\s*git [^$`()]*\)/g, "");
-      if (!GIT_SAFE.test(raw) || /[$\x60]/.test(text) || /(?:^|\s)-c|--output|--config-env|--exec-path|--upload-pack|--receive-pack|\s--exec\b/.test(text)) return true;
+      if (!GIT_SAFE.test(raw) || /[$\x60]/.test(text) || /(?:^|\s)-c|--output|--config-env|--ext-diff|--open-files-in-pager|--textconv|(?:^|\s)-[A-Za-z]*O|--exec-path|--upload-pack|--receive-pack|\s--exec\b/.test(text)) return true;
     }
   }
   return false;

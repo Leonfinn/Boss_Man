@@ -383,6 +383,22 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     });
   });
 
+  describe("10. Rex's round 8", () => {
+    denies([
+      "git grep -O'sh -c id' x",
+      "git grep --open-files-in-pager=sh x",
+      "GIT_SSH_COMMAND='sh -c id' git fetch",
+      "GIT_EXTERNAL_DIFF=/tmp/x git diff",
+      "GIT_PAGER='sh -c id' git log",
+      "GIT_EDITOR=/tmp/x git commit",
+      "GIT_SEQUENCE_EDITOR=/tmp/x git rebase -i main",
+      "export GIT_PAGER='sh -c id'; git log",
+      "env GIT_SSH_COMMAND=/tmp/x git fetch",
+      "git diff --ext-diff",
+    ]);
+    allows(["git grep -n foo", "git diff --stat", "git log --oneline -5"]);
+  });
+
   describe("9. Jane's round 10", () => {
     denies([
       "git config --get core.x && git config core.fsmonitor /tmp/x",
