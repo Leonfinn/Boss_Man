@@ -162,13 +162,17 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
     expect(c.workingCopy).toMatchObject({ ticketId: ctx.ticket.id, branch: `bossman/${ctx.ticket.id}`, files: ["test/zz-probe.test.ts", "dist"] });
     expect(c.ladder).toMatchObject({ rung: "ceo", minutes: 5 });
     expect(d!.question).toContain(`working copy for `);
-    expect(d!.question).toContain(`(branch bossman/${ctx.ticket.id}): test/zz-probe.test.ts, dist.`);
+    expect(d!.question).toContain(`(branch bossman/${ctx.ticket.id}), and Boss Man can't see where it has moved to since: test/zz-probe.test.ts, dist.`);
+    // BOS-159: the card says where the run STARTED, never that the paths are inside the checkout now.
+    expect(d!.question).not.toContain(`(branch bossman/${ctx.ticket.id}): test/zz-probe.test.ts, dist.`);
     expect((await ctx.decisions.queue()).map((q) => q.id)).not.toContain(d!.id);
     expect(await ownerNotified(d!.id)).toEqual([]);
     const [w] = await ctx.db.select().from(wakes).where(eq(wakes.agentId, ctx.ceo.id));
-    expect(w).toMatchObject({ reason: "decision", priority: 3 });
+    expect(w).toMatchObject({ reason: "decision", priority: 3, ticketId: ctx.ticket.id });
     expect(w!.note).toContain("symlink");
-    expect(w!.note).toContain("It has no cd.");
+    // BOS-159: the shell keeps its folder between commands, so the note can't vouch for where it sits.
+    expect(w!.note).toContain("can't vouch for where it sits now");
+    expect(w!.note).not.toContain("It has no cd.");
     expect(w!.note).not.toContain("pnpm or npm install");
 
     const ceo = await client(ctx.ceo.id);
@@ -190,7 +194,11 @@ describe("deletes in the agent's own working copy go to the CEO first (BOS-120)"
   });
 
   it("recommends Allow only for build output, never for source (adversarial review)", async () => {
-    expect((await ctx.ask("rm -rf dist apps/web/dist/ node_modules", ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "ceo", recommendedOption: "Allow once" });
+    expect((await ctx.ask("rm -rf dist node_modules", ctx.dev.id, { ticketId: ctx.ticket.id })).d).toMatchObject({ tier: "ceo", recommendedOption: "Allow once" });
+    // BOS-150: a trailing slash or a deeper path follows a symlinked dist, so it is never recommended Allow
+    for (const [c, tier] of [["rm -rf dist/", "owner"], ["rm -rf apps/web/dist/", "owner"], ["rm -rf dist apps/web/dist", "ceo"]] as [string, string][]) {
+      expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier, recommendedOption: "Deny" });
+    }
     for (const c of ["rm -rf src", "rm -rf package.json", "rm -rf .github/workflows", "rm -f .env", "rm -rf dist src"]) {
       expect((await ctx.ask(c, ctx.dev.id, { ticketId: ctx.ticket.id })).d, c).toMatchObject({ tier: "ceo", recommendedOption: "Deny" });
     }

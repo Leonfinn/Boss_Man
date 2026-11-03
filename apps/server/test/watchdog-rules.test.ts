@@ -37,6 +37,8 @@ describe("watchdog rules (BOS-58)", () => {
     expect(rules([ticket({ stateChangedAt: ago(120) })])).toEqual(["t1:stale_in_progress"]);
     expect(rules([ticket({ state: "review", stateChangedAt: ago(119) })])).toEqual([]);
     expect(rules([ticket({ state: "review", stateChangedAt: ago(120) })])).toEqual(["t1:stale_review"]);
+    // Approved by everyone and waiting for the merge sweep: not chased as stale review (BOS-362).
+    expect(rules([ticket({ state: "review", stateChangedAt: ago(240), mergeWaiting: true })])).toEqual([]);
     expect(rules([ticket({ state: "blocked", stateChangedAt: ago(479) })])).toEqual([]);
     expect(rules([ticket({ state: "blocked", stateChangedAt: ago(480) })])).toEqual(["t1:stale_blocked"]);
     // Limits come from settings.

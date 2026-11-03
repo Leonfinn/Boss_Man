@@ -416,6 +416,30 @@ cd $B/src && docker compose logs --tail 100 server
 
 If a migration failed, don't edit the database by hand. Keep the log. Restore from a backup if you have one (`scripts/deploy.sh` keeps them in `$B`). Also check Postgres is healthy with `docker compose ps`.
 
+**Where Boss Man backups are saved.**
+Every script that makes a backup writes it straight into your backup folder, which is `<install-dir>` (`$B` in this guide), next to `src`. The file names tell you which script made them:
+- `bossman-YYYY-MM-DD-HHMM.sql.gz`: made before each update (`scripts/deploy.sh`) and by the host deployer.
+- `rebuild-YYYY-MM-DD-HHMM.sql.gz`: made by `scripts/rebuild-live.sh`.
+- `restore-test-*.sql.gz`: made by `scripts/restore-test.sh --fresh-backup`.
+- `penpot-YYYY-MM-DD-HHMM.tar`: made by `scripts/backup-penpot.sh`, if you use Penpot.
+
+If you set `BOSSMAN_BACKUP_DIR`, they go there instead. Backups made by current scripts are readable by their owner only (mode 600).
+
+**Lock down backups made before this fix.**
+Older backups may be readable by every user on the host and hold password hashes and sessions. To list the ones that are not owner-only, run:
+
+```sh
+find $B -maxdepth 1 -type f \( -name 'bossman-*.sql.gz' -o -name 'rebuild-*.sql.gz' -o -name 'restore-test-*.sql.gz' -o -name 'penpot-*.tar' \) -perm /077 -print
+```
+
+To lock them all down, run this once. It is safe to run again, and it only changes files in that folder (not folders below it). If you set `BOSSMAN_BACKUP_DIR`, put that folder in place of `$B`:
+
+```sh
+find $B -maxdepth 1 -type f \( -name 'bossman-*.sql.gz' -o -name 'rebuild-*.sql.gz' -o -name 'restore-test-*.sql.gz' -o -name 'penpot-*.tar' \) -exec chmod 600 {} +
+```
+
+Run the first command again: it should print nothing.
+
 **The disk is filling up.**
 Check the host and Docker:
 

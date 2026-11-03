@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
+import { decisions, fundingSources, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -140,10 +140,10 @@ describe("scheduler", () => {
 
   it("caps an agent's runs with no ticket, but never the owner's own (R68)", async () => {
     ctx = await setup();
-    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: `d${i}` });
-    const seventh = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d6" });
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `d${i}` });
+    const seventh = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "d6" });
     expect(seventh).toMatchObject({ status: "dropped", statusReason: "more than 6 wakes with no ticket in an hour" });
-    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d7" });
+    await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "d7" });
     // The owner hears once, not for every dropped wake.
     const alerts = (await ctx.db.select().from(decisions)).filter((d) => /with no ticket/.test(d.question));
     expect(alerts).toHaveLength(1);
@@ -155,11 +155,23 @@ describe("scheduler", () => {
 
   it("never counts or drops the watchdog's sweep wake against the no-ticket limit", async () => {
     ctx = await setup();
-    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: `d${i}` });
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `d${i}` });
     expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "watchdog", note: "sweep" })).toMatchObject({ status: "queued" });
     // The sweeps don't use up the agent's other no-ticket wakes either.
-    const other = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", note: "d6" });
+    const other = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "d6" });
     expect(other).toMatchObject({ status: "dropped" });
+  });
+
+  it("never caps the CEO's 'decision' wakes (cards) at the no-ticket limit (BOS-272)", async () => {
+    ctx = await setup();
+    for (let i = 0; i < 6; i++) await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: `t${i}` });
+    // Past the ticketless cap, a card for the CEO (a permission request or an alert) still queues;
+    // on the old code it was dropped, so the card skipped the CEO and landed on the owner.
+    const card = await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", priority: 3, note: "A decision is waiting for you." });
+    expect(card).toMatchObject({ status: "queued" });
+    // Card wakes don't use up the agent's other no-ticket wakes either way.
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "triage", note: "t6" })).toMatchObject({ status: "dropped" });
+    expect(await ctx.scheduler.wake({ agentId: ctx.ceo.id, reason: "decision", priority: 3, note: "Another card." })).toMatchObject({ status: "queued" });
   });
 
   it("defers when a pausing budget is exceeded, failing closed", async () => {
@@ -538,5 +550,66 @@ describe("scheduler", () => {
     expect(held!.statusReason).toBe("subscription seven_day window nearly used up");
     const status = await ctx.serverStatus.status(ctx.company.id);
     expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, held: "subscription seven_day window nearly used up" })]);
+  });
+
+  describe("two Claude accounts (BOS-383)", () => {
+    const meta = (w: number) => ({ "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: w, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } });
+    async function twoAccounts() {
+      ctx = await setup({ agent: 5 });
+      const a = (await ctx.req("POST", "/api/funding-sources", { name: "Max one", kind: "subscription", provider: "anthropic", fallbackRank: 1 })).json();
+      const sec = (await ctx.req("POST", "/api/secrets", { name: "Max two login", kind: "claude_oauth_token", value: "sk-ant-oat01-abcdefghijklmnop" })).json().secret.id as string;
+      const b = (await ctx.req("POST", "/api/funding-sources", { name: "Max two", kind: "subscription", provider: "anthropic", fallbackRank: 2, secretId: sec })).json();
+      await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: a.id });
+      return { a, b };
+    }
+    const lastRun = async () => (await ctx.db.select().from(runs))[0]!;
+
+    it("starts new runs on the first account while it has room", async () => {
+      const { a } = await twoAccounts();
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+      expect((await lastRun()).fundingSourceId).toBe(a.id);
+    });
+
+    it("moves new runs to the second account when the first is full, and tells the owner once", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      await ctx.req("POST", "/api/scheduler/tick");
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      const firstRun = await lastRun();
+      await ctx.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.id, firstRun.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+      const second = (await ctx.db.select().from(runs)).find((r) => r.id !== firstRun.id)!;
+      expect(second.fundingSourceId).toBe(b.id);
+      // The run that was already going keeps its account.
+      expect((await ctx.db.select().from(runs).where(eq(runs.id, firstRun.id)))[0]!.fundingSourceId).toBe(a.id);
+      expect((await ctx.db.select().from(notifications)).filter((n) => /New runs now use Max two/.test(n.title))).toHaveLength(1);
+    });
+
+    it("holds routine work when every account is full", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: b.id, claudeMeta: meta(0.99) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    });
+
+    it("refuses a second account with no login, and skips one whose login was removed", async () => {
+      const { a, b } = await twoAccounts();
+      const bad = await ctx.req("POST", "/api/funding-sources", { name: "No login", kind: "subscription", provider: "anthropic", fallbackRank: 2 });
+      expect(bad.statusCode).toBe(400);
+      await ctx.db.update(fundingSources).set({ secretId: null }).where(eq(fundingSources.id, b.id));
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    });
+
+    it("refuses a ranked account that is not a Claude subscription", async () => {
+      ctx = await setup({ agent: 5 });
+      const res = await ctx.req("POST", "/api/funding-sources", { name: "Plain", kind: "api_credit", provider: "anthropic", fallbackRank: 1 });
+      expect(res.statusCode).toBe(400);
+    });
   });
 });

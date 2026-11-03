@@ -11,7 +11,7 @@ import { record } from "./activity.js";
 import { checkAsk } from "./decisions.js";
 import { quotedAnswer, recentOwnerAnswer } from "./stale-requests.js";
 import { getHold } from "./maintenance.js";
-import { activeRows, latestRows, REVIEW_REASON } from "./review-kinds.js";
+import { activeRows, evaluate as evaluateReviews, latestRows, REVIEW_REASON } from "./review-kinds.js";
 import { backtest } from "./watchdog-backtest.js";
 import { buildSummary } from "./watchdog-summary.js";
 import { backoffGapMs, evaluate, ruleLimitMs, type SnapHold, type Snapshot, type SnapRun, type SnapTicket, type Trip } from "./watchdog-rules.js";
@@ -333,6 +333,12 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
           ? { blockedTicketId: dep.blockedTicketId, kind: "engagement", resolved: engagementStatus === "signed_off" }
           : { blockedTicketId: dep.blockedTicketId, kind: "decision", decisionId: dep.blockerDecisionId!, resolved: decisionStatus !== "open", openedAt: decisionAt ?? new Date(0) },
     );
+    // Tickets in review whose reviews have all passed: they wait for the merge sweep, so "no movement in review" doesn't apply (BOS-362).
+    const mergeWaiting = new Set<string>();
+    for (const r of rows) if (r.systemState === "review") {
+      const rr = await latestRows(db, r.id);
+      if (rr.length && evaluateReviews(rr) === "passed") mergeWaiting.add(r.id);
+    }
     const snapTickets: SnapTicket[] = rows.map((r) => ({
       id: r.id,
       state: r.systemState,
@@ -343,6 +349,7 @@ export function watchdogService(db: Db, deps: WatchdogDeps) {
       scheduled: !!r.monitorAt || (!!r.assigneeAgentId && waiting.has(`${r.assigneeAgentId}:${r.id}`)),
       awaitingPlan: r.planFirst && !r.planApprovedAt,
       withOwner: withOwner.has(r.id),
+      mergeWaiting: mergeWaiting.has(r.id),
       bounces: bounces.get(r.id) ?? 0,
     }));
     return {
