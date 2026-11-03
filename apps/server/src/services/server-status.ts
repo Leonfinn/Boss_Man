@@ -10,6 +10,7 @@ import type { Db } from "../db/client.js";
 import { migrationsFolder } from "../db/client.js";
 import { agents, runners, runs as runsTable, tickets, wakes } from "../db/schema.js";
 import type { ErrorBuffer } from "./error-buffer.js";
+import type { StallSummary } from "./stall-monitor.js";
 
 export type ServerStatusDeps = {
   /** "leader", "standby" or "single" (leader.ts). */
@@ -25,6 +26,8 @@ export type ServerStatusDeps = {
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
   errors: ErrorBuffer;
+  /** Event-loop stalls, GC pauses and memory (stall-monitor.ts, BOS-432). Server-wide; route patterns only, no ids. */
+  stalls?: () => StallSummary;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
   commit: string;
@@ -122,6 +125,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
           startedAt: deps.startedAt.toISOString(),
           uptimeSeconds: ageSeconds(deps.startedAt, at),
         },
+        // Freezes over 1 s with memory, GC and requests in flight (BOS-432), plus the memory reading now.
+        stalls: deps.stalls?.() ?? null,
         deploy: {
           enabled: !!deploy?.enabled,
           liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),

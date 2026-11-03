@@ -30,6 +30,7 @@ import { AnswerError, decisionsService } from "./services/decisions.js";
 import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
+import { createStallMonitor } from "./services/stall-monitor.js";
 import { selfDeployService } from "./services/self-deploy.js";
 import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
@@ -196,6 +197,16 @@ export async function buildApp(opts: AppOptions) {
   await app.register(cookie);
   await app.register(websocket);
 
+  // Event-loop stalls and GC pauses, with memory and what was in flight (BOS-432): logged, and shown in server_status.
+  const stalls = createStallMonitor({ runnerSockets: () => app.websocketServer?.clients.size ?? 0, log: (line) => app.log.warn(line) });
+  stalls.start();
+  app.addHook("onClose", async () => stalls.stop());
+  app.addHook("onRequest", async (req, reply) => {
+    if (req.headers.upgrade) return; // a websocket is counted as a runner socket, not a request
+    stalls.requestStarted(req, `${req.method} ${req.routeOptions.url ?? "unmatched"}`);
+    reply.raw.once("close", () => stalls.requestEnded(req));
+  });
+
   const secretsSvc = secretsService(db, master, opts.liveValidator);
   const funding = fundingService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, now: opts.now });
   const runners = runnersService(db, funding);
@@ -330,6 +341,7 @@ export async function buildApp(opts: AppOptions) {
       return h ? { reason: h.reason, since: h.since, deadline: h.deadline, force: h.force } : null;
     },
     errors: errorBuffer,
+    stalls: () => stalls.summary(),
     // Synthetic's cached quota, for the CEO's server_status in chat and runs (BOS-239).
     syntheticUsage: (companyId: string) => funding.syntheticUsage(companyId),
     commit: process.env.BOSSMAN_COMMIT || "dev",
