@@ -71,7 +71,8 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
     # Memory limits (docs/00-first-time-install.md, "Memory limits"): the database is among the last things the kernel kills.
-    mem_limit: ${BOSSMAN_DB_MEMORY:-1g}
+    # 0 = no cap: the db row of the owner's docker stats reading (BOS-405) was cut off, so 1g is unverified. Set BOSSMAN_DB_MEMORY to cap it.
+    mem_limit: ${BOSSMAN_DB_MEMORY:-0}
     mem_reservation: ${BOSSMAN_DB_MEMORY_RESERVED:-256m}
     oom_score_adj: -500
     healthcheck:
@@ -108,7 +109,8 @@ services:
       BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
     secrets:
       - master_key
-    mem_limit: ${BOSSMAN_SERVER_MEMORY:-2g}
+    # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
+    mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
     mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
     oom_score_adj: -500
     volumes:

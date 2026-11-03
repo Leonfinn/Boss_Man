@@ -36,6 +36,14 @@ describe("compose memory limits", () => {
     expect(runner.oom_score_adj).toBeGreaterThan(0);
   });
 
+  it("server and database are uncapped unless the owner sets a limit (the server uses 10-13 GiB, BOS-405)", () => {
+    const bg = services("deploy/truenas-bluegreen.yml");
+    const main = services("docker-compose.yml");
+    for (const [n, s] of [["db", main.db], ["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      expect(String(s!.mem_limit), n).toMatch(/^\$\{BOSSMAN_(SERVER|DB)_MEMORY:-0\}$/);
+    }
+  });
+
   it("server, database and proxy are protected from the OOM killer", () => {
     const main = services("docker-compose.yml");
     expect(main.db!.oom_score_adj).toBeLessThan(0);

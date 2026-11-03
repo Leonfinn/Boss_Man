@@ -24,7 +24,8 @@ x-server: &server
   secrets:
     - master_key
   # Same limits and priority as the single server in docker-compose.yml.
-  mem_limit: ${BOSSMAN_SERVER_MEMORY:-2g}
+  # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
+  mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
   mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
   oom_score_adj: -500
   networks: [default, launcher]
