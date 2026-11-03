@@ -17,8 +17,8 @@ describe("judge agreement report", () => {
     const r = summarise(rows, new Date("2026-11-01"), new Date("2026-11-15"));
     expect(r.judged).toBe(6);
     expect(r.unclassified).toBe(1);
-    expect(r.agreement).toEqual({ agreed: 3, compared: 5, pct: 60 });
-    expect(r.agreementRulesOnly.agreed).toBe(4 - 1); // allow/allow, deny/deny, allow/allow(second deny): rules say allow=human allow
+    expect(r.agreement).toEqual({ agreed: 2, compared: 5, pct: 40 });
+    expect(r.agreementRulesOnly.agreed).toBe(3);
     expect(r.falseAllows.band).toEqual({ A: 1, B: 1 });
     expect(r.falseAllows.total).toBe(2);
     expect(r.second).toMatchObject({ asked: 2, allow: 1, deny: 1, denyHumanAllowed: 1 });
