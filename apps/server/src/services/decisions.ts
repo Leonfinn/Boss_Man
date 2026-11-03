@@ -278,6 +278,8 @@ export async function clearMergeCards(db: Db, ticketId: string, withdrawal: With
       .returning({ id: decisions.id });
     if (done) cleared++;
   }
+  // An answered or withdrawn card keeps its key (the column is unique), which would swallow a fresh insert silently (BOS-362).
+  await db.update(decisions).set({ dedupeKey: null }).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticketId}`), ne(decisions.status, "open")));
   return cleared;
 }
 
