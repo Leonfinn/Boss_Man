@@ -15,7 +15,7 @@ import { parseAcpUsageCost, type RunnerCommand, type RunnerEvent } from "@boss-m
 import { probeModels } from "./models-probe.js";
 import { addonList, checkAddons } from "./addons.js";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, claudeProjectSlug, fencedCommand, fenceProfile, repoGrant, type FenceLevel } from "./fence.js";
-import { gitAuthEnv, isClone, type Workspaces } from "./workspace.js";
+import { gitAuthEnv, isClone, RepoLockTimeout, type Workspaces } from "./workspace.js";
 
 type StartCommand = Extract<RunnerCommand, { type: "run.start" }>;
 
@@ -35,6 +35,10 @@ export type SessionManagerOptions = {
   stateFile?: string;
   /** Git worktrees per ticket (R38). Without it, runs use the cwd they're given. */
   workspaces?: Workspaces;
+  /** How long a run keeps retrying when only the repo lock timed out (default 30 minutes). */
+  lockRetryMs?: number;
+  /** The pause between those retries (default 5-10 seconds, random so queued runs don't move in step). */
+  lockRetryDelayMs?: number;
   /** The company's granted secrets outside a run, e.g. a GIT_TOKEN for pushing a merge. */
   resolveCompanyEnv?: (purpose: "merge" | "check") => Promise<Record<string, string>>;
   /** Where each run's skills are written for the agent to load (R71). */
@@ -287,7 +291,10 @@ export class SessionManager {
         return;
       }
       case "permission.decide":
-        this.runs.get(command.runId)?.pendingPermissions.get(command.requestId)?.(command.verdict);
+        // A verdict for a request that is no longer waiting (the run was cancelled or ended, or the runner restarted) reaches nothing: say so, so a card that was answered but never ran can be traced.
+        const settle = this.runs.get(command.runId)?.pendingPermissions.get(command.requestId);
+        if (settle) settle(command.verdict);
+        else this.opts.emit({ type: "runner.log", level: "warn", message: `A "${command.verdict}" verdict for permission request ${command.requestId} of run ${command.runId} arrived, but nothing is waiting for it.` });
         return;
       case "workspace.release":
         void this.opts.workspaces
@@ -540,9 +547,25 @@ export class SessionManager {
       }
       const spec = cmd.workspace;
       try {
-        if (spec.review) cmd = { ...cmd, cwd: (await this.opts.workspaces.ensureReview(spec, secrets)).path };
+        const workspaces = this.opts.workspaces;
+        // Many runs start together after a restart and the repo lock is shared with merge checks, so a
+        // wait that only timed out on the lock is tried again (BOS-331) until the run is cancelled or
+        // the limit is up; any other failure ends the run at once.
+        const giveUpAt = Date.now() + (this.opts.lockRetryMs ?? 30 * 60_000);
+        const withLockRetry = async <T>(prepare: () => Promise<T>): Promise<T> => {
+          for (let attempt = 1; ; attempt++) {
+            try {
+              return await prepare();
+            } catch (err) {
+              if (!(err instanceof RepoLockTimeout) || Date.now() >= giveUpAt || this.cancelledEarly.has(cmd.runId)) throw err;
+              if (attempt === 1) emit({ type: "runner.log", level: "info", message: `Run ${cmd.runId} is waiting for the repo lock before it can start; trying again until it frees.` });
+              await new Promise((r) => setTimeout(r, this.opts.lockRetryDelayMs ?? 5_000 + Math.random() * 5_000));
+            }
+          }
+        };
+        if (spec.review) cmd = { ...cmd, cwd: (await withLockRetry(() => workspaces.ensureReview(spec, secrets))).path };
         else {
-          const ws = await this.opts.workspaces.ensure(spec, secrets);
+          const ws = await withLockRetry(() => workspaces.ensure(spec, secrets));
           cmd = { ...cmd, cwd: ws.path };
           emit({ type: "run.workspace", runId: cmd.runId, ticketId: spec.ticketId, branch: ws.branch, baseCommit: ws.baseCommit, created: ws.created, restoredPatch: ws.restoredPatch });
         }
@@ -658,6 +681,7 @@ export class SessionManager {
         kind: req.toolCall.kind ?? null,
         rawInput,
         optionKinds: req.options.map((o) => o.kind),
+        ...(id ? { toolCallId: id.slice(0, 200) } : {}),
         ...(detail ? { detail } : {}),
       });
       return verdict;

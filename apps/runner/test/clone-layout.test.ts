@@ -12,6 +12,7 @@ vi.stubEnv("BOSSMAN_TICKET_COPIES", "clone");
 afterAll(() => vi.unstubAllEnvs());
 await import("./workspace.test.js");
 await import("./merge.test.js");
+await import("./merge-check.test.js");
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: ENV }).trim();
@@ -181,11 +182,27 @@ describe("turning a ticket's worktree into a clone (BOS-323)", () => {
     // As if it stopped right after the swap: old .git aside, its admin folder still there, no index.
     writeFileSync(path.join(w.path, ".git.bossman-converting"), pointer);
     mkdirSync(admin, { recursive: true });
+    writeFileSync(path.join(admin, "gitdir"), path.join(w.path, ".git") + "\n");
     rmSync(path.join(w.path, ".git", "index"));
     await as("clone").ensure(spec);
     expect(existsSync(path.join(w.path, ".git.bossman-converting"))).toBe(false);
     expect(existsSync(admin)).toBe(false);
     expect(git(w.path, "status", "--porcelain")).not.toContain("D ");
+  });
+
+  it("never deletes another ticket's worktree admin folder, whatever pointer the agent leaves in the aside file", async () => {
+    const { as, spec, w } = await workedWorktree();
+    // A second ticket's worktree on the same runner: its admin folder is the victim.
+    const other = { ...spec, ticketId: ids.b };
+    const o = await as("worktree").ensure(other);
+    const victim = path.resolve(o.path, readFileSync(path.join(o.path, ".git"), "utf8").replace("gitdir:", "").trim());
+    await as("clone").ensure(spec);
+    // The agent (now in a clone) plants a pointer at the victim's admin folder, as if a conversion were cut short.
+    writeFileSync(path.join(w.path, ".git.bossman-converting"), `gitdir: ${victim}\n`);
+    await as("clone").ensure(spec);
+    expect(existsSync(victim)).toBe(true);
+    expect(existsSync(path.join(w.path, ".git.bossman-converting"))).toBe(false);
+    expect(git(o.path, "status", "--porcelain")).toBe("");
   });
 
   it("leaves worktrees as they are while new copies are worktrees, and puts back one cut short", async () => {

@@ -59,7 +59,10 @@ describe("wiki and ticket outputs (R69)", () => {
     await client.callTool({ name: "wiki", arguments: { action: "write", slug: "research/2026-agent-landscape", title: "2026 Agent Landscape!", body: "Updated.", ticketId: t.id } });
     await client.callTool({ name: "wiki", arguments: { action: "attach", ticketId: t.id, title: "Source notes", path: "docs/04-research.md", ref: "c996308" } });
     expect(await client.callTool({ name: "wiki", arguments: { action: "attach", ticketId: t.id, url: "javascript:alert(1)" } })).toMatchObject({ isError: true });
-    expect(textOf(await client.callTool({ name: "wiki", arguments: { action: "read", slug: "research/2026-agent-landscape" } }))).toBe("# 2026 Agent Landscape!\n\nUpdated.");
+    const read = textOf(await client.callTool({ name: "wiki", arguments: { action: "read", slug: "research/2026-agent-landscape" } }));
+    expect(read).toContain("# 2026 Agent Landscape!\n\nUpdated.");
+    // read, like write, gives the exact app link so an agent pastes it rather than guessing (BOS-356).
+    expect(read).toContain(`Link: #/wiki/${c.company.id}/research/2026-agent-landscape`);
     // The notification opens the page itself.
     await client.callTool({ name: "notify_owner", arguments: { level: "note", title: "Research ready", ticketId: t.id, link: `#/wiki/${c.company.id}/research/2026-agent-landscape` } });
     expect(await client.callTool({ name: "notify_owner", arguments: { level: "note", title: "x", link: "https://evil.example" } })).toMatchObject({ isError: true });

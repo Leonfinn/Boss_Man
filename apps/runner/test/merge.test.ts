@@ -192,12 +192,13 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
    * What a developer merges to take in another ticket's branch: a worktree sees it directly; a
    * clone (BOS-323) fetches it from the shared repo once a turn's end has brought it there.
    */
-  const otherBranch = async (ws: Workspaces, dir: string) => {
-    if (!isClone(dir)) return `bossman/${ids2.other}`;
-    await ws.checkpoint({ projectId: ids.project, ticketId: ids2.other }, "after a turn");
+  const branchOf = async (ws: Workspaces, dir: string, ticketId: string) => {
+    if (!isClone(dir)) return `bossman/${ticketId}`;
+    await ws.checkpoint({ projectId: ids.project, ticketId }, "after a turn");
     git(dir, "fetch", "-q", "shared");
-    return `shared/bossman/${ids2.other}`;
+    return `shared/bossman/${ticketId}`;
   };
+  const otherBranch = (ws: Workspaces, dir: string) => branchOf(ws, dir, ids2.other);
 
   it("says which other branches' unmerged commits this branch has, and only those", async () => {
     const o = origin();
@@ -224,9 +225,117 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
 
     // This ticket merges the other in, as a developer would to stay up to date.
     git(w.path, "merge", "--no-edit", await otherBranch(ws, w.path));
-    expect(await ws.carried(spec, "main", branches)).toEqual({ carried: [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }] });
+    expect(await ws.carried(spec, "main", branches)).toMatchObject({ carried: [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }] });
     // Nothing merges with the guard in place: the branch is exactly as it was.
     expect(git(w.path, "status", "--porcelain")).toBe("");
+  });
+
+  it("does not count a branch that merged this ticket in as carried (BOS-365)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    // The other ticket builds on this one by merging it in; this ticket never merges the other.
+    git(other.path, "merge", "--no-edit", await branchOf(ws, other.path, ids.t));
+    expect(await ws.carried(spec, "main", [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }])).toEqual({ carried: [] });
+  });
+
+  it("still counts a branch this ticket fast-forwarded in (BOS-365)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    // A third ticket merges the other in before committing anything: a fast-forward.
+    const ffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const ff = await ws.ensure({ ...spec, ticketId: ffId });
+    git(ff.path, "merge", "--no-edit", await branchOf(ws, ff.path, ids2.other));
+    writeFileSync(path.join(ff.path, "ff.txt"), "own\n");
+    git(ff.path, "add", ".");
+    git(ff.path, "commit", "-qm", "ff ticket's work");
+    const hit = { ticketId: ids2.other, branch: `bossman/${ids2.other}` };
+    expect(await ws.carried({ ...spec, ticketId: ffId }, "main", [hit])).toEqual({ carried: [{ ...hit, contained: true }] });
+  });
+
+  it("still counts a branch that fast-forwarded this ticket in, then committed: same shape as the reverse, so it can't be told apart (BOS-369)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const ffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const ff = await ws.ensure({ ...spec, ticketId: ffId });
+    git(ff.path, "merge", "--no-edit", await branchOf(ws, ff.path, ids.t));
+    writeFileSync(path.join(ff.path, "ff.txt"), "own\n");
+    git(ff.path, "add", ".");
+    git(ff.path, "commit", "-qm", "ff ticket's work");
+    const hit = { ticketId: ffId, branch: `bossman/${ffId}` };
+    await ws.checkpoint({ ...spec, ticketId: ffId }, "after a turn"); // a clone's work reaches the shared repo at a turn's end
+    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [{ ...hit, contained: false }] });
+  });
+
+  it("still counts a branch whose work this ticket fast-forwarded in, then committed, before the branch fast-forwarded this ticket (BOS-369)", async () => {
+    const o = origin();
+    const { ws } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const tId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const spec = { projectId: ids.project, ticketId: tId, repoUrl: o.url, baseRef: "main" };
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    writeFileSync(path.join(b.path, "b1.txt"), "b1\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b1");
+    const t = await ws.ensure(spec);
+    git(t.path, "merge", "--no-edit", await branchOf(ws, t.path, bId));
+    writeFileSync(path.join(t.path, "t1.txt"), "t1\n");
+    git(t.path, "add", ".");
+    git(t.path, "commit", "-qm", "t1");
+    git(b.path, "merge", "--no-edit", await branchOf(ws, b.path, tId));
+    writeFileSync(path.join(b.path, "b2.txt"), "b2\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b2");
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
+  });
+
+  it("still counts a branch whose work this ticket merged in before the branch fast-forwarded this ticket (BOS-369)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    writeFileSync(path.join(b.path, "b1.txt"), "b1\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b1");
+    // This ticket merges B in (holding b1); B then fast-forwards this ticket and commits b2.
+    const w = await ws.ensure(spec);
+    git(w.path, "merge", "--no-edit", await branchOf(ws, w.path, bId));
+    git(b.path, "merge", "--no-edit", await branchOf(ws, b.path, ids.t));
+    writeFileSync(path.join(b.path, "b2.txt"), "b2\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b2");
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
+  });
+
+  it("counts a branch this ticket was fast-forwarded onto, even after the branch merged this ticket back in (BOS-340)", async () => {
+    const o = origin();
+    const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    // 1. B commits its own work.
+    writeFileSync(path.join(b.path, "b1.txt"), "b1\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b1");
+    // 2. This ticket (A) is reset to main, fast-forwarded onto B, then commits its own work.
+    git(w.path, "reset", "-q", "--hard", isClone(w.path) ? "origin/main" : "main");
+    git(w.path, "merge", "--ff-only", await branchOf(ws, w.path, bId));
+    writeFileSync(path.join(w.path, "a2.txt"), "a2\n");
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "a2");
+    // 3. B merges A in with a merge commit.
+    git(b.path, "merge", "--no-ff", "--no-edit", await branchOf(ws, b.path, ids.t));
+    // 4. A still holds B's commit, so B is carried.
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
   });
 
   it("finds nothing once the carried branch has itself merged to the target", async () => {

@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RunnerEvent } from "@boss-man/shared";
 import { SessionManager } from "../src/session-manager.js";
-import { Workspaces } from "../src/workspace.js";
+import { RepoLockTimeout, Workspaces } from "../src/workspace.js";
 import { startStubAnthropic, type StubLogEntry } from "./stub-model.js";
 import { startMcpServer, type McpCall } from "./mcp-server.js";
 
@@ -28,7 +28,7 @@ afterEach(async () => {
   await mcp.close();
 });
 
-function harness(model: string | null, opts: { skills?: Array<{ name: string; files: Array<{ path: string; content: string }> }>; skillsRoot?: string; home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
+function harness(model: string | null, opts: { skills?: Array<{ name: string; files: Array<{ path: string; content: string }> }>; skillsRoot?: string; home?: string; cwd?: string; resumeSessionId?: string; freshPrompt?: string; boardToolsOnly?: boolean; workspaces?: Workspaces; lockRetryMs?: number; workspace?: { projectId: string; ticketId: string; repoUrl: string; baseRef: string } } = {}) {
   const events: RunnerEvent[] = [];
   const home = opts.home ?? mkdtempSync(path.join(tmpdir(), "bm-runner-home-"));
   const fundingSourceId = randomUUID();
@@ -36,6 +36,8 @@ function harness(model: string | null, opts: { skills?: Array<{ name: string; fi
   const ended = new Promise<void>((r) => (done = r));
   const manager: SessionManager = new SessionManager({
     workspaces: opts.workspaces,
+    lockRetryMs: opts.lockRetryMs,
+    lockRetryDelayMs: 5,
     skillsRoot: opts.skillsRoot,
     mcpUrl: mcp.url,
     baseEnv: { PATH: process.env.PATH, HOME: home, CLAUDE_CONFIG_DIR: path.join(home, ".claude"), NO_PROXY: "127.0.0.1,localhost" },
@@ -257,6 +259,27 @@ describe("runs in a git workspace (R38)", () => {
     expect(readlinkSync(mine)).toBe(shared);
     expect(existsSync(shared)).toBe(true);
   }, 90_000);
+
+  it("tries again when only the repo lock timed out, and ends the run on any other failure (BOS-331)", async () => {
+    let calls = 0;
+    const fake = {
+      ensure: async () => {
+        if (++calls <= 2) throw new RepoLockTimeout("p");
+        throw new Error("boom");
+      },
+    } as unknown as Workspaces;
+    const h = harness(null, { workspaces: fake, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "x", baseRef: "main" } });
+    await h.ended;
+    expect(calls).toBe(3);
+    expect((h.events.find((e) => e.type === "run.ended") as { error: string }).error).toBe("Couldn't prepare the git workspace: boom");
+  }, 30_000);
+
+  it("gives up on a lock that never frees once the retry limit is up", async () => {
+    const fake = { ensure: async () => { throw new RepoLockTimeout("p"); } } as unknown as Workspaces;
+    const h = harness(null, { workspaces: fake, lockRetryMs: 50, workspace: { projectId: randomUUID(), ticketId: randomUUID(), repoUrl: "x", baseRef: "main" } });
+    await h.ended;
+    expect((h.events.find((e) => e.type === "run.ended") as { error: string }).error).toMatch(/Timed out waiting for the lock/);
+  }, 30_000);
 
   it("ends the run with a clear error when the repo can't be cloned", async () => {
     const workspaces = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));

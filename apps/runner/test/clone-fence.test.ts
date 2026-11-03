@@ -21,6 +21,7 @@ afterAll(() => {
 if (live) {
   await import("./workspace.test.js");
   await import("./merge.test.js");
+  await import("./merge-check.test.js");
 }
 
 const ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -172,7 +173,7 @@ describe.skipIf(!live)("the merge check, fenced when asked (BOS-323)", () => {
       ].join("; ");
       const res = await ws.verify(spec, script, undefined, undefined, true);
       expect(res).toMatchObject({ ok: true, fenced: true });
-      expect(res.output).toContain(`home=${path.join(root, "agents", "merge-check")}`);
+      expect(res.output).toMatch(new RegExp(`home=${path.join(root, "agents", "merge-check", "tmp")}/check-[^/]+/home\\n`));
       for (const ok of ["tmp-ok", "copy-ok", "pnpm-ok", "git-ok"]) expect(res.output).toContain(ok);
       expect(res.output).not.toContain("outside-written");
       expect(res.output).not.toContain("runner-token");

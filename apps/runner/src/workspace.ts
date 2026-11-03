@@ -24,9 +24,26 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { CHECK_TOOLS, detectChecks, type CarriedResult, type DetectResult, type DiskReport, type MergeResult, type MigrationsResult, type PushResult, type VerifyResult, type WorkspaceDiff, CHECK_QUEUED_MARKER, CHECK_STARTED_MARKER, VERIFY_QUEUE_MAX_MS, VERIFY_TIMEOUT_MS } from "@boss-man/shared";
 import { addGitConfig, checkQueueEnv, checkQueueGrant, fencedCommand, fenceProfile, repoGrant } from "./fence.js";
-import { checkMigrations } from "./migrations.js";
+import { checkMigrations, journalAt, journalProblems } from "./migrations.js";
 
 const run = promisify(execFile);
+
+/**
+ * The worktree admin folder a .git pointer names, but only if it sits directly in <repo>/worktrees
+ * and its own gitdir file points back at <dir>/.git. A pointer the agent wrote at another ticket's
+ * admin folder fails the second test (BOS-323, Jane's finding).
+ */
+function ownAdminDir(repo: string, dir: string, pointer: string | undefined): string | null {
+  if (!pointer) return null;
+  const admin = path.resolve(dir, pointer);
+  if (path.dirname(admin) !== path.join(repo, "worktrees")) return null;
+  try {
+    const back = readFileSync(path.join(admin, "gitdir"), "utf8").trim();
+    return path.resolve(back) === path.join(path.resolve(dir), ".git") ? admin : null;
+  } catch {
+    return null;
+  }
+}
 const VERIFY_KILL_GRACE_MS = 2000;
 
 export type WorkspaceSpec = { projectId: string; ticketId: string; repoUrl: string; baseRef: string; review?: boolean };
@@ -83,6 +100,14 @@ export async function diskUsage(target: string): Promise<number> {
   };
   await walk(target);
   return total;
+}
+
+/** The repo's lock stayed taken for the whole wait: nothing is wrong with the repo, so the caller can try again. */
+export class RepoLockTimeout extends Error {
+  constructor(projectId: string) {
+    super(`Timed out waiting for the lock on ${projectId}.`);
+    this.name = "RepoLockTimeout";
+  }
 }
 
 /**
@@ -213,7 +238,7 @@ export class Workspaces {
         } catch {
           const age = Date.now() - (statSync(lockDir, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
           if (age > 10 * 60_000) rmSync(lockDir, { recursive: true, force: true });
-          else if (i > 600) throw new Error(`Timed out waiting for the lock on ${projectId}.`);
+          else if (i > 600) throw new RepoLockTimeout(projectId);
           else await new Promise((r) => setTimeout(r, 100));
         }
       }
@@ -282,7 +307,7 @@ export class Workspaces {
     if (existsSync(aside) && !existsSync(gitPath)) renameSync(aside, gitPath);
     if (!isClone(dir)) {
       const admin = readFileSync(gitPath, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
-      if (!admin || path.dirname(path.resolve(dir, admin)) !== path.join(repo, "worktrees")) throw new Error(`${dir} isn't a worktree of ${repo}.`);
+      if (!ownAdminDir(repo, dir, admin)) throw new Error(`${dir} isn't a worktree of ${repo}.`);
       const head = await this.git(["rev-parse", "HEAD"], { cwd: dir, repo });
       const branch = await this.git(["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: dir, repo }).catch(() => null);
       const tmp = this.buildDir(dir);
@@ -297,7 +322,9 @@ export class Workspaces {
     if (!existsSync(aside)) return;
     await this.git(["reset", "--quiet"], { cwd: dir, repo });
     const admin = readFileSync(aside, "utf8").match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
-    if (admin && path.dirname(path.resolve(dir, admin)) === path.join(repo, "worktrees")) rmSync(path.resolve(dir, admin), { recursive: true, force: true });
+    // The aside file is agent-writable: only an admin folder that points back at this very folder is ours to delete.
+    const own = ownAdminDir(repo, dir, admin);
+    if (own) rmSync(own, { recursive: true, force: true });
     rmSync(aside);
   }
 
@@ -781,7 +808,7 @@ export class Workspaces {
 
   /**
    * The merge check inside the fence (BOS-323), with what an agent's session gets for the same copy:
-   * read-write on the ticket's copy, the check's own home, a temp folder for this check, the pnpm
+   * read-write on the ticket's copy, a fresh home and temp folder for this check, the pnpm
    * store and check-all's queue; read-only on the system, the runner's install, the global npm tools,
    * the browsers, check-all's results and the shared repo (for a worktree, what a commit writes too).
    * Nothing of the daemon's: not its HOME, its token or other tickets' copies.
@@ -790,7 +817,11 @@ export class Workspaces {
     const { home, pnpmStore } = this.checkFence!;
     mkdirSync(path.join(home, "tmp"), { recursive: true });
     const tmp = mkdtempSync(path.join(home, "tmp", "check-"));
-    const out: NodeJS.ProcessEnv = { ...env, HOME: home, TMPDIR: tmp };
+    // A fresh HOME per check, gone with the temp folder: one ticket's check scripts can't plant dotfiles
+    // (.gitconfig, .npmrc) that a later ticket's check would run with write access to its copy (Jane's finding).
+    const checkHome = path.join(tmp, "home");
+    mkdirSync(checkHome);
+    const out: NodeJS.ProcessEnv = { ...env, HOME: checkHome, TMPDIR: tmp };
     const readWrite: string[] = [];
     const readOnly = [this.baseEnv.NPM_CONFIG_PREFIX, this.baseEnv.PLAYWRIGHT_BROWSERS_PATH].filter((p): p is string => !!p);
     if (pnpmStore) {
@@ -808,7 +839,7 @@ export class Workspaces {
     }
     // A worktree's shared repo has a read-only root, where auto-gc would write.
     addGitConfig(out, "gc.auto", "0");
-    const rules = fenceProfile({ cwd: dir, home, tmp, repo: repoGrant(this.repoDir(projectId), dir), readOnly, readWrite });
+    const rules = fenceProfile({ cwd: dir, home: checkHome, tmp, repo: repoGrant(this.repoDir(projectId), dir), readOnly, readWrite });
     return { env: out, launch: fencedCommand(rules, launch.bin, launch.args), tmp };
   }
 
@@ -835,6 +866,10 @@ export class Workspaces {
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
         const { tree, targetSha, branchSha } = tried;
+        // Drizzle silently skips a migration whose "when" isn't later than the newest applied one (BOS-360): read both journals, nothing is checked out.
+        const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
+        const problems = journalProblems(await journalAt(gitIn, targetSha), await journalAt(gitIn, tree), Date.now(), target);
+        if (problems.length) return { status: "migration_journal" as const, problems };
         const who = this.authorEnv();
         const commit = await this.git(["commit-tree", tree, "-p", targetSha, "-p", branchSha, "-m", message], { cwd: repo, env: who });
         const pushed = await this.gitCode(["push", "--quiet", "origin", `${commit}:refs/heads/${target}`], { cwd: repo, env: auth });
@@ -872,11 +907,16 @@ export class Workspaces {
       const built = await this.withRepoLock(spec.projectId, async (): Promise<MergeResult | { status: "check"; commit: string; tree: string; targetSha: string; branchSha: string }> => {
         const ticketDir = this.ticketDir(spec.ticketId);
         if (existsSync(path.join(ticketDir, ".git"))) {
-          const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir });
+          const dirty = await this.git(["status", "--porcelain"], { cwd: ticketDir, repo });
           if (dirty) return { status: "uncommitted", files: dirty.split("\n").map((l) => l.slice(3)) };
+          if (isClone(ticketDir)) await this.syncBranch(repo, ticketDir, spec.ticketId);
         }
         const tried = await this.tryMerge(repo, branch, target, auth);
         if (tried.status !== "clean") return tried;
+        // Same journal rule as the plain merge (BOS-360): a refused branch builds and pushes nothing.
+        const gitIn = (args: string[]) => this.gitCode(args, { cwd: repo });
+        const problems = journalProblems(await journalAt(gitIn, tried.targetSha), await journalAt(gitIn, tried.tree), Date.now(), target);
+        if (problems.length) return { status: "migration_journal" as const, problems };
         if (refused && refused.targetSha === tried.targetSha) throw new Error(`Couldn't push the merge to ${target}: ${refused.stderr.slice(0, 500)}`);
         const commit = await this.git(["commit-tree", tried.tree, "-p", tried.targetSha, "-p", tried.branchSha, "-m", message], { cwd: repo, env: this.authorEnv() });
         if (!checked || tried.tree !== checked.tree) {
@@ -962,8 +1002,8 @@ export class Workspaces {
       await this.git(["fetch", "--quiet", "origin"], { cwd: repo, env: auth });
       // A failed rev-list mustn't look like "no commits": a safety gate that can't answer has to
       // say so, not report the branch clean (BOS-130).
-      const refs = async (ref: string) => {
-        const r = await this.gitCode(["rev-list", ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
+      const refs = async (ref: string, firstParent = false) => {
+        const r = await this.gitCode(["rev-list", ...(firstParent ? ["--first-parent"] : []), ref, "--not", `refs/remotes/origin/${target}`], { cwd: repo });
         if (r.code !== 0) throw new Error(`git rev-list ${ref} failed (exit ${r.code}): ${r.stderr.slice(0, 500)}`);
         return r.stdout.split("\n").filter(Boolean);
       };
@@ -982,7 +1022,14 @@ export class Workspaces {
           () => false,
         );
         if (!exists) continue;
-        if ((await refs(b.branch)).some((sha) => mine.has(sha))) found.push({ ticketId: b.ticketId, branch: b.branch });
+        // B is carried when this branch holds a commit on B's own first-parent line (B's work).
+        // Commits B has only by merging this ticket in are on this ticket's side, not B's line (BOS-365).
+        if ((await refs(b.branch, true)).some((sha) => mine.has(sha))) {
+          // Whether this branch holds all of B (B's tip is an ancestor of ours): then merging this one lands B too, which the
+          // server may allow when B is approved (BOS-372). The fast-forward shape stays reported: git can't tell it from a hole.
+          const contained = (await this.gitCode(["merge-base", "--is-ancestor", `refs/heads/${b.branch}`, `refs/heads/${branchFor(spec.ticketId)}`], { cwd: repo })).code === 0;
+          found.push({ ticketId: b.ticketId, branch: b.branch, contained });
+        }
       }
       return { carried: found };
     });
