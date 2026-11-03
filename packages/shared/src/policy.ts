@@ -2,7 +2,7 @@
 // company's rules, then global rules, then these defaults; the first match decides.
 // "ceo" and "owner" outcomes become decision-queue rows; the agent waits for the answer.
 
-import { cleanupScope, explainCommand, ownWorkKind, readPush, tempCleanup } from "./explain.js";
+import { cleanupScope, explainCommand, readPush, tempCleanup } from "./explain.js";
 
 export type PolicyOutcome = "allow" | "deny" | "ceo" | "owner";
 
@@ -27,8 +27,8 @@ export type PolicyMatch = {
   tempCleanupOnly?: boolean;
   /** Only matches a shell command written as one string whose deletes include plain relative paths in the working copy, the rest as tempCleanupOnly (BOS-120, cleanupScope in explain.ts). */
   workingCopyOnly?: boolean;
-  /** Only matches a shell command that is entirely own work: a throwaway /tmp clone, the agent's own checkout, or its own script (BOS-233, ownWorkKind in explain.ts). */
-  scratchObjectOnly?: boolean;
+  /** Only matches a call to one of Boss Man's own tools that isn't a command (isBossmanCall). Built-in rule only. */
+  bossmanCall?: boolean;
 };
 
 export type PolicyRuleSpec = { name: string; match: PolicyMatch; outcome: PolicyOutcome };
@@ -43,14 +43,30 @@ export const PUSHING = String.raw`\b(git\s+push|npm\s+publish|docker\s+push)\b`;
 
 export const TEMP_CLEANUP_RULE = "Temp-file cleanup goes to the CEO first";
 export const WORKING_COPY_RULE = "Deletes in the agent's own working copy go to the CEO first";
-export const OWN_WORK_RULE = "Work in the agent's own /tmp scratch, throwaway clone, checkout or own script goes to the CEO first";
+
+// Boss Man's own tool server is named "bossman"; each harness spells the tool title its own way: Claude Code mcp__bossman__wiki,
+// Codex mcp.bossman.wiki or "Tool: bossman/wiki", OpenCode bossman_wiki, other adapters "bossman: wiki". Matched case-insensitively.
+export const BOSSMAN_TOOL_PATTERN = String.raw`^\s*(?:tool:\s*)?(?:mcp[_.:/ -]{1,2})?bossman(?:__|_|\.|:\s*|/|\s+-\s+)\S`;
+const BOSSMAN_TOOL = new RegExp(BOSSMAN_TOOL_PATTERN, "i");
+
+/** True when a tool title names a tool of Boss Man's own server, in any harness's spelling. */
+export function isBossmanTool(title: string | null | undefined): boolean {
+  return BOSSMAN_TOOL.test(title ?? "");
+}
+
+// Kinds a Boss Man tool call never has. Some harnesses title a shell request with the command itself or an
+// agent-written description, so a title alone could pass "bossman_x; rm -rf …" off as a board tool (BOS-292 security review).
+const NOT_A_BOSSMAN_CALL = ["execute", "edit", "delete", "move", "fetch"];
+
+/** True for a call to Boss Man's own server: its title names one, and it carries no command and no file, shell or fetch kind. */
+export function isBossmanCall(info: PermissionInfo): boolean {
+  if (commandOf(info.rawInput) != null) return false;
+  if (info.kind && NOT_A_BOSSMAN_CALL.includes(info.kind)) return false;
+  return isBossmanTool(info.title);
+}
 
 export const DEFAULT_POLICY: PolicyRuleSpec[] = [
-  { name: "Boss Man's own tools", match: { titlePattern: String.raw`^(mcp__bossman__|mcp\.bossman\.)` }, outcome: "allow" },
-  // Own work (BOS-233) is the CEO's call, like cleanup: a throwaway /tmp folder named in a variable, a
-  // throwaway clone in /tmp, an in-place edit of the agent's checkout, or the agent's own script. Placed
-  // first among the CEO rules so the most precise shape claims the card. It only ever routes to the CEO.
-  { name: OWN_WORK_RULE, match: { kinds: ["execute"], scratchObjectOnly: true }, outcome: "ceo" },
+  { name: "Boss Man's own tools", match: { bossmanCall: true }, outcome: "allow" },
   // Before the owner rule: cleaning up /tmp is the CEO's call, and reaches the owner only if the CEO escalates it (BOS-111).
   { name: TEMP_CLEANUP_RULE, match: { kinds: ["execute"], commandPattern: DESTRUCTIVE, tempCleanupOnly: true }, outcome: "ceo" },
   // The same for plain relative paths in the agent's checkout; the server sends it to the owner when the run has no checkout (BOS-120).
@@ -113,11 +129,6 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     if (!scratch || scratch.unchecked.length) return false;
   }
   if (rule.tempCleanupOnly && !tempCleanup(commandOf(info.rawInput) ?? "")) return false;
-  if (rule.scratchObjectOnly) {
-    // A string only, like workingCopyOnly: an argv array runs without a shell, so the reading of ; and && wouldn't hold.
-    const cmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
-    if (typeof cmd !== "string" || !ownWorkKind(cmd)) return false;
-  }
   if (rule.workingCopyOnly) {
     // A string only: an argv array runs without a shell, so cleanupScope's reading of ; and && wouldn't hold.
     const cmd = (info.rawInput as Record<string, unknown> | null)?.["command"];
@@ -127,7 +138,8 @@ export function matches(rule: PolicyMatch, info: PermissionInfo): boolean {
     const re = safeRegex(rule.titlePattern);
     if (!info.title || !re || !re.test(info.title)) return false;
   }
-  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.scratchObjectOnly);
+  if (rule.bossmanCall && !isBossmanCall(info)) return false;
+  return Boolean(rule.kinds || rule.commandPattern || rule.titlePattern || rule.scratchOnly || rule.bossmanCall);
 }
 
 /** Addresses a fetch must not reach: the home network and the machine itself (SSRF). */
@@ -156,7 +168,7 @@ const LAN_GUARD = "Fetching from your home network or this machine is blocked";
 
 /** True when a fetch, or a call to an outside tool server, aims at a private address. Unparseable addresses count as private. */
 export function reachesPrivateNetwork(info: PermissionInfo): boolean {
-  const outside = /^mcp__(?!bossman__)/.test(info.title ?? "") || info.kind === "fetch";
+  const outside = (/^mcp__/.test(info.title ?? "") && !isBossmanCall(info)) || info.kind === "fetch";
   if (!outside) return false;
   return urlsIn(info.rawInput).some((u) => {
     try {
@@ -170,16 +182,19 @@ export function reachesPrivateNetwork(info: PermissionInfo): boolean {
 export function evaluatePermission(info: PermissionInfo, rules: PolicyRuleSpec[]): { outcome: PolicyOutcome; rule: string } {
   // Checked before any rule, so an "Allow always" can't lift it. shortcut: checks the address asked for, not where DNS or a redirect lands; a network-level block on the tool containers is the full fix.
   if (reachesPrivateNetwork(info)) return { outcome: "deny", rule: LAN_GUARD };
+  // Boss Man's own tools are checked per call by the server (role and company), so a broad company
+  // rule that routes requests to the CEO or the owner must not catch them (BOS-292): that sent every
+  // board-tool call to a card. A company rule can still deny one.
+  const ownTool = isBossmanCall(info);
   for (const rule of [...rules, ...DEFAULT_POLICY]) {
+    if (ownTool && rule.outcome !== "deny" && rule.outcome !== "allow" && rules.includes(rule)) continue;
     if (matches(rule.match, info)) return { outcome: rule.outcome, rule: rule.name };
   }
   return { outcome: "owner", rule: "No rule matched" };
 }
 
-/** Build output in the agent's working folder (node_modules, dist…), by a plain relative path: no component starting with a dot (so no .., . or .git), no ~, $ or globs. Source folders such as src aren't vouched for. */
-const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:[\w+@-][\w.+@-]*\/)*(?:node_modules|dist|build|coverage|out|target)\/?)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
-/** A plain rm of entries directly in /tmp, as explain.ts's TEMP_DELETE reads them: same narrow shape, so the recommendation stays Allow for a /tmp delete and Deny for anything else. */
-const TEMP_ONLY_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+\/tmp\/(?!\.+(?:\s|$))[A-Za-z0-9._+@-]+)+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
+/** Build output directly in the agent's working folder (node_modules, dist…): one component only, no trailing slash. rm -rf NAME/ follows a symlink as if NAME were its target (BOS-150), and a deeper path such as dist/x still follows a symlinked dist, so `rm -rf dist` is the only shape vouched for. */
+const WORKSPACE_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+(?:node_modules|dist|build|coverage|out|target))+(?:\s+(?:(?:[12]|&)?>>?\s*\/dev\/null|2>&1))*$/;
 
 /**
  * What the decision queue recommends for an escalated request (BOS-111). Deleting or changing
@@ -190,19 +205,6 @@ const TEMP_ONLY_DELETE = /^rm(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*(?:\s+\/tmp\/(?
  */
 export function recommendedVerdict(info: PermissionInfo): "allow" | "deny" {
   const cmd = commandOf(info.rawInput) ?? info.title ?? "";
-  // Its own work is Allow only when the deletes in it are the company's build output or /tmp entries: the
-  // same narrow list as everywhere else, reused, not widened. A source file, .env or .git in the checkout is Deny.
-  if (ownWorkKind(cmd)) {
-    const scratch = explainCommand(cmd).scratch;
-    if (scratch && !scratch.unchecked.length) return "allow";
-    const run = cmd.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''");
-    const hits = run.match(new RegExp(DESTRUCTIVE, "gi")) ?? [];
-    if (!hits.length) return "allow";
-    if (hits.some((h) => !/^rm\b/i.test(h))) return "deny";
-    const destructive = new RegExp(DESTRUCTIVE, "i");
-    const segments = run.split(/&&|\|\||[;|\n]|(?<!>)&(?!>)/).map((s) => s.trim());
-    return segments.every((s) => !destructive.test(s) || WORKSPACE_DELETE.test(s) || TEMP_ONLY_DELETE.test(s)) ? "allow" : "deny";
-  }
   // Temp cleanup is Allow whatever else is in it: cleanupScope already refuses shred, pushes and other destructive words, and a later cd can't move a /tmp/NAME delete.
   if (tempCleanup(cmd)) return "allow";
   // A push is judged by where it goes (BOS-208): a plain ticket-branch push is Allow; main, force,
