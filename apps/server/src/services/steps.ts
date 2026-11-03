@@ -113,11 +113,21 @@ const norm = (s: string) => s.toLowerCase().replace(/’/g, "'").replace(/[^\p{L
 const KEYS = new Set(["enter", "return", "esc", "escape", "tab", "space", "spacebar", "ctrl", "control", "cmd", "command", "shift", "alt", "option", "delete", "backspace", "f5", "y", "n", "q"]);
 /** Words that end a button's name in a sentence: "press Approve on the card", "click Save again". */
 const AFTER_LABEL = /^(?:on|in|at|to|for|from|under|next|below|above|beside|near|again|and|then|when|once|if|so|or|until|button|link|tab|there|here|now|first|twice)\b/;
-/** Every control, normalised; a label ending in "…" is kept as its start and matches anything after it. */
+/**
+ * Every control, normalised; a label ending in "…" is kept as its start and matches anything after it. A label
+ * with a bracketed note ("Update runners (finish runs first)") also matches without it, as cards name it that way.
+ */
 const CONTROLS = (() => {
   const exact = new Set<string>();
   const prefix = new Set<string>();
-  for (const labels of Object.values(OWNER_CONTROLS) as ReadonlyArray<readonly string[]>) for (const l of labels) (l.endsWith("…") ? prefix : exact).add(norm(l));
+  for (const labels of Object.values(OWNER_CONTROLS) as ReadonlyArray<readonly string[]>) {
+    for (const l of labels) {
+      if (l.endsWith("…")) { prefix.add(norm(l)); continue; }
+      exact.add(norm(l));
+      const bare = l.replace(/\s*\([^)]*\)$/, "");
+      if (bare && bare !== l) exact.add(norm(bare));
+    }
+  }
   return { exact, prefix };
 })();
 const SCREENS = (Object.keys(OWNER_CONTROLS) as OwnerScreen[]).filter((k) => k !== "Any screen");

@@ -43,6 +43,7 @@ describe("R6: a card names a button that doesn't exist", () => {
       "Press Save again, then press Enter.",
       "Click Open Acme's Kanban.",
       "Press Update runners (finish runs first).",
+      "To undo, click Update runners again after reverting.",
       "Click Approve on this card.",
       "Press Yes, move it on this card.",
       "Click the link in the email and press it twice.",
