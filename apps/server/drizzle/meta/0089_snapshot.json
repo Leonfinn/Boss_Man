@@ -1,6 +1,6 @@
 {
   "id": "641425d6-d130-41be-a945-856f0086c468",
-  "prevId": "b3ea7be0-a520-4d72-8352-ae717d0a4b6f",
+  "prevId": "7d1f2c4e-5b6a-4c8d-9e0f-1a2b3c4d5e6f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1247,7 +1247,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6,\"progressContract\":true,\"silentSteerMinutes\":30,\"silentFlagMinutes\":60,\"unprovenHours\":2}'::jsonb"
+          "default": "'{\"enabled\":false,\"recordOnly\":false,\"unassignedMinutes\":15,\"inProgressHours\":2,\"reviewHours\":2,\"blockedHours\":8,\"blockedUntilGraceHours\":2,\"ownerDecisionHours\":8,\"reviewBounces\":2,\"maxSnoozeHours\":48,\"maxSmRunsPerHour\":4,\"maxNudgesPerHour\":12,\"alertMinutes\":30,\"maxCeoAlertsPerHour\":6}'::jsonb"
         },
         "watchdog_tripped_at": {
           "name": "watchdog_tripped_at",
@@ -7768,6 +7768,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "checked_commit": {
+          "name": "checked_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
