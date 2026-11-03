@@ -152,10 +152,13 @@ function missingControls(prose: string, options: Set<string>): string[] {
     const q = /^(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*|`([^`\n]+)`|'([^'\n]+)'(?!\w))/.exec(rest);
     if (q) named(q[1] ?? q[2] ?? q[3] ?? q[4] ?? q[5]!, true);
     else if (/^\p{Lu}/u.test(rest)) {
-      // Cut at a bracket ("Save (top right)"), unless the bracket is part of the label ("Update runners (finish runs first)").
+      // Widest reading first: an option can hold a comma ("Yes, move it") or a bracket that is part of the label
+      // ("Update runners (finish runs first)"). Only if none of those is a control, cut at a comma or bracket
+      // ("Save (top right)", "Approve, then close") and judge the shorter name.
       const cut = (re: RegExp) => rest.split(re)[0]!;
-      const whole = cut(/[.,;:!?\n→>]|\s+(?:button|link|tab)\b/);
-      if (!isControl(whole, false, options)) named(cut(/[.,;:!?()\n→>]|\s+(?:button|link|tab)\b/), false);
+      const end = String.raw`\s+(?:button|link|tab)\b`;
+      const readings = [`[.;:!?\\n→>]|${end}`, `[.,;:!?\\n→>]|${end}`, `[.,;:!?()\\n→>]|${end}`].map((re) => cut(new RegExp(re)));
+      if (!readings.some((r) => isControl(r, false, options))) named(readings[2]!, false);
     }
   }
   for (const m of prose.matchAll(/(?:"([^"\n]+)"|“([^”\n]+)”|\*\*([^*\n]+)\*\*)\s+button\b/g)) named(m[1] ?? m[2] ?? m[3]!, true);
