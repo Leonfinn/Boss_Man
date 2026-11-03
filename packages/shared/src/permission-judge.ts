@@ -86,11 +86,16 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (/base64\s+(-d|--decode)[^\n]*\|\s*(sh|bash|zsh)\b|\b(curl|wget)\b[^\n]*\|\s*(sh|bash|zsh)\b|\b(sh|bash|zsh|source)\s+<\(\s*(curl|wget)\b|\beval\s+["'$]|\b(exec|eval)\s*\([^\n]*(urlopen|requests\.get|fetch)\b/.test(c)) return result("opaque");
   // Writes and deletes outside its own folder and /tmp.
   // A write to a shared checkout, or after a cd into someone else's folder, is outside its own folder.
-  if (/\bsed\s+-i\b|>>?|\btee\b|\bcp\b|\bmv\b|\brm\b/.test(c) && /\/workspaces\/repos\//.test(c)) return result("outside");
+  if (/\bsed\s+(?:-\w*i|--in-place)\b|>>?|\btee\b|\bcp\b|\bmv\b|\brm\b/.test(c) && /\/workspaces\/repos\//.test(c)) return result("outside");
   // Any write must land in /tmp, the agent's own ticket folder, /dev/null or its own memory folder. Shared startup and
   // settings files (~/.bashrc, ~/.gitconfig, /etc/..., /usr/local/bin/...) are not the agent's to change.
   // Settings written through a tool's own commands: `git config` with a file flag (in any position, `git -c x config`,
   // `git -C dir config`), the git config environment variables, and npm-family config/global installs.
+  // Every `git config` write is refused (worktrees share the repo config, so core.fsmonitor / sshCommand / alias.x '!..'
+  // would run in other agents' git); only the explicit read forms pass.
+  const gitConfig = /\bgit(?:\s+(?:-[cC]\s+(?:'[^']*'|"[^"]*"|\S+)|--[\w-]+(?:=\S+)?|-\w+))*\s+config\b([^;&|\n]*)/.exec(c);
+  if (gitConfig && !(/(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?=\s|$)/.test(gitConfig[1]!) && !/(?:^|\s)(?:--add|--unset(?:-all)?|--replace-all|--edit|-e|--rename-section|--remove-section|--set\S*|--file\S*|-f\S*|--global|--system|--worktree|--blob)(?=\s|=|$)/.test(gitConfig[1]!))) return result("outside");
+  if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
   if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
   // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
   if (/(?:^|[;&|(\n]\s*)(?:vi|vim|nvim|ex|ed|view|vimdiff|emacs|nano|pico)\s/.test(c)) return result("outside");
@@ -157,7 +162,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   const writeTargets: string[] = [];
   const addTarget = (cand: string): void => { const r = resolve(cand); if (/^['"]*[~/$\x60]/.test(r) || /\$|\x60|OWNDIR/.test(r) || r.includes("..")) writeTargets.push(r); };
   for (const m of forTargets.matchAll(/>[>|&]?\s*(['"]?(?:[~/$]|OWNDIR)[^\s'";|&)<>]*)/g)) addTarget(m[1]!);
-  for (const m of forTargets.matchAll(/\b(?:cp|mv|tee|ln|install|touch|chmod|chown|truncate|dd|rsync|mkdir|rmdir|mkfifo|mknod|patch|sed\s+-i\S*|perl\s+-pi\S*|git\s+(?:clone|init|worktree|archive|checkout-index|bundle))\b([^;&|\n]*)/g)) {
+  for (const m of forTargets.matchAll(/\b(?:cp|mv|tee|ln|install|touch|chmod|chown|truncate|dd|rsync|mkdir|rmdir|mkfifo|mknod|patch|sed(?:\s+-[a-zA-Z]+)*\s+(?:-[a-zA-Z]*i\S*|--in-place\S*)|perl\s+-pi\S*|git\s+(?:clone|init|worktree|archive|checkout-index|bundle))\b([^;&|\n]*)/g)) {
     for (const tok of m[1]!.split(/\s+/)) {
       // Plain, `--opt=/x`, `of=/x` and `-t/x` forms.
       for (const cand of [tok, tok.split("=").slice(1).join("="), tok.replace(/^-\w(?=['"]?[~/$])/, "")]) addTarget(cand);
@@ -171,7 +176,7 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
   // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
   const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
-  if (hasRedirect) for (const m of c.matchAll(/\b(?:cd|pushd|chdir)\s+(?:--\s+)?['"]?([^\s;&|'")]*)/g)) if (!dirOk(m[1]!, inOwn)) return result("outside");
+  if (hasRedirect) for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
@@ -180,7 +185,7 @@ export function judgePermission(question: string, command: string | null, ownFol
     for (const t of targets) if (!/^\/tmp\//.test(t) && !inOwn(t) && t !== "/dev/null") return result("outside");
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
     for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
-    for (const m of c.matchAll(/\b(?:cd|pushd|chdir)\s+(?:--\s+)?['"]?([^\s;&|'")]*)/g)) if (!dirOk(m[1]!, inOwn)) return result("outside");
+    for (const m of c.matchAll(/\b(?:cd|pushd|chdir)(?=[\s;&|)]|$)(?:\s+(?:--\s+)?['"]?([^\s;&|'")]*))?/g)) if (!dirOk(m[1] ?? "", inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
     for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
       const start = m[2]!;
@@ -195,7 +200,7 @@ export function judgePermission(question: string, command: string | null, ownFol
 
 /** Where a `cd` / `pushd` may go: /tmp, the own folder, or a sub-folder of where it already is. */
 function dirOk(dir: string, inOwn: (p: string) => boolean): boolean {
-  if (dir === "" || dir === "-") return true;
+  if (dir === "" || dir === "-") return false; // a bare `cd` goes to $HOME, `cd -` to OLDPWD: both unknown
   if (/^\/tmp(\/|$)/.test(dir) && !dir.includes("..")) return true;
   if (inOwn(dir)) return true;
   return /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir) && !dir.includes(".."); // a sub-folder of where it already is
@@ -298,6 +303,7 @@ function toolTargets(c: string): string[] {
     wget: { short: "OoaP", long: ["--output-document", "--output-file", "--append-output", "--directory-prefix", "--save-cookies"] },
     tar: { short: "Cf", long: ["--directory", "--file", "--one-top-level", "--transform", "--to-command"] },
     unzip: { short: "d", long: [] },
+    "7z": { short: "o", long: [] },
   };
   for (const m of c.matchAll(/(?<![\w./-])(curl|wget|tar|unzip)\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g)) {
     const tool = m[1]!;
@@ -305,6 +311,8 @@ function toolTargets(c: string): string[] {
     const toks = (m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map((t) => t);
     for (let i = 0; i < toks.length; i++) {
       const t = toks[i]!;
+      // tar -P / --absolute-names: members keep their absolute paths, so nothing can be placed.
+      if (tool === "tar" && (t === "--absolute-names" || (i === 0 && /^-?[A-Za-z]*P[A-Za-z]*$/.test(t)) || /^-[A-Za-z]*P[A-Za-z]*$/.test(t))) out.push("/UNPLACED");
       const lf = long.find((l) => t === l || t.startsWith(l + "="));
       if (lf) { out.push(t === lf ? (toks[++i] ?? "") : t.slice(lf.length + 1)); continue; }
       if (/^-[A-Za-z]+$/.test(t) && short.includes(t.slice(-1))) { out.push(toks[++i] ?? ""); continue; }
@@ -324,7 +332,8 @@ function toolTargets(c: string): string[] {
  */
 function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
   const interp = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk";
-  const re = new RegExp(`(?:^|[;&|(\\n]\\s*)(?:\\w+=\\S*\\s+)*(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
+  // The interpreter is found wherever it stands (after env, timeout, xargs, a full path, `then` ...), not only first.
+  const re = new RegExp(`(?<![\\w.-])(?:[\\w./-]*/)?(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
   const piped = new RegExp(`\\|\\s*(?:${interp})\\b`);
   for (const m of c.matchAll(re)) {
     const name = m[1]!;
@@ -341,15 +350,22 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
     if (!inline && !fed) continue;
     const code = (fed ? c : seg).replace(/\\(["'`$])/g, "$1");
     const nodeOrPy = /^(?:python[\d.]*|node(?:js)?)$/.test(name);
-    if (/child_process|subprocess|\bos\.(?:system|popen|exec\w*|spawn\w*)|(?<![.\w])(?:system|popen|exec|execl\w*|execv\w*|spawn\w*|shell_exec|passthru|proc_open|qx|Open3|Kernel|eval|getline)\b|\b(?:execSync|execFileSync|spawnSync)\b/.test(code) || (!nodeOrPy && /\x60/.test(code))) return false;
+    // Code this long is not read (and the matching below stays cheap on adversarial input).
+    if (code.length > 3000) return false;
+    // `chdir`, home lookups and dynamic imports make a path (or a call) depend on something we can't see.
+    if (/\b(?:chdir|homedir|expanduser|userInfo|__import__|importlib|getattr|globals|pty)\b|\.home\s*\(/.test(code)) return false;
+    // A Path method that writes must be called right on a literal Path('...').
+    if ((code.match(/\.(?:write_text|write_bytes)\s*\(/g) ?? []).length !== (code.match(/\bPath\(\s*(['"])[^'"]*\1\s*\)\.(?:write_text|write_bytes)\s*\(/g) ?? []).length) return false;
+    if (/child_process|subprocess|\b(?:system|popen|exec|execl\w*|execv\w*|spawn\w*|shell_exec|passthru|proc_open|qx|Open3|Kernel|eval|getline)\b|\b(?:execSync|execFileSync|spawnSync)\b/.test(code) || (!nodeOrPy && /\x60/.test(code))) return false;
     // A path is placed when it is a literal that writeOk accepts; a relative literal stays where the shell already is.
     const literalOk = (p: string): boolean => !p.includes("..") && (!/^[~/]/.test(p) || writeOk(p));
     const pathy = [...code.matchAll(/(?:^|[\s'"`=])((?:~|\/(?=[\w.@+-]))[\w.@+\/~-]*)(?=$|[\s'"`),;:])/g)].map((p) => p[1]!);
     if (pathy.some((p) => !literalOk(p))) return false;
     if (nodeOrPy) {
       // Every file call must name its path as a literal, or as a variable set once to a literal.
-      const call = /\b(writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|copyFileSync|copyFile|cpSync|renameSync|rename|unlinkSync|unlink|rmSync|rmdirSync|mkdirSync|mkdir|symlinkSync|symlink|linkSync|chmodSync|chownSync|truncateSync|open|Path|write_text|write_bytes|shutil\.\w+|os\.(?:remove|rename|unlink|mkdir|makedirs|rmdir|chmod|symlink|link|truncate|replace))\s*\(\s*([^,)]*?)\s*(?:,\s*([^,)]*?)\s*)?[,)]/g;
-      for (const k of code.matchAll(call)) {
+      const call = /\b(writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|copyFileSync|copyFile|cpSync|renameSync|rename|unlinkSync|unlink|rmSync|rmdirSync|mkdirSync|mkdir|symlinkSync|symlink|linkSync|chmodSync|chownSync|truncateSync|open|Path|write_text|write_bytes|shutil\.\w+|os\.(?:remove|rename|unlink|mkdir|makedirs|rmdir|chmod|symlink|link|truncate|replace))\s*\(([^,)]*)(?:,([^,)]*))?[,)]/g; // disjoint groups: linear on unclosed input
+      for (const k0 of code.matchAll(call)) {
+        const k = [k0[0], k0[1], k0[2]?.trim(), k0[3]?.trim()] as (string | undefined)[];
         for (const arg of /^(?:copyFile|cpSync|copyFileSync|rename|renameSync|symlink|symlinkSync|linkSync|shutil|os\.(?:rename|replace|symlink|link))/.test(k[1]!) ? [k[2], k[3]] : [k[2]]) {
           if (arg === undefined || arg === "") continue;
           if (/^(?:['"][^'"$\\{}]*['"]|`[^`$\\]*`)$/.test(arg)) { if (!literalOk(arg.slice(1, -1))) return false; continue; }

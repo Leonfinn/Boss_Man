@@ -260,4 +260,26 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     denies(["f=$(mktemp -p /etc x) && echo hi > $f", "f=$(mktemp --tmpdir=/etc x) && echo hi > $f", "f=$(mktemp -p/etc x) && echo hi > $f", "TMPDIR=/etc; f=$(mktemp) && echo hi > $f", "f=$(mktemp /etc/x.XXXX) && echo hi > $f", "f=$(mktemp -p /tmp/../etc x) && echo hi > $f"]);
     allows(["f=$(mktemp /tmp/x.XXXX) && echo hi > $f", "f=$(mktemp -p /tmp x.XXXX) && echo hi > $f", "f=$(mktemp) && echo hi > $f", "d=$(mktemp -d) && echo hi > $d/o"]);
   });
+
+  describe("8. Jane's round 9", () => {
+    const bashrc = "open('/home/node/.bashrc','w')";
+    denies([
+      `env python3 -c "${bashrc}"`, `/usr/bin/python3 -c "${bashrc}"`, `command python3 -c "${bashrc}"`, `timeout 5 python3 -c "${bashrc}"`,
+      `nice python3 -c "${bashrc}"`, `xargs python3 -c "${bashrc}"`, `if true; then python3 -c "${bashrc}"; fi`,
+      "python3 -c \"import os as o; o.system('id')\"", "python3 -c \"__import__('os').system('id')\"", "python3 -c \"import pty;pty.spawn('sh')\"",
+      "python3 -c \"import pathlib; pathlib.Path.home().joinpath('.bashrc').write_text('x')\"",
+      "node -e \"process.chdir(require('os').homedir()); require('fs').appendFileSync('.bashrc','x')\"",
+      "cd; echo x > .bashrc", "cd && cp /tmp/a .bashrc", "cd \"\" && echo x > .bashrc", "cd - && echo x > .bashrc",
+      "git config core.fsmonitor /tmp/x.sh", "git config --local core.fsmonitor /tmp/x.sh", "git config core.sshCommand 'sh -c id'", "git config alias.st '!sh -c id'", "git -C ~ config alias.x y",
+      "sed --in-place 's/a/b/' /home/node/.bashrc", "tar -xPf a.tar", "tar xf a.tar --absolute-names", "pip install --user x", "xargs -I{} sh -c 'echo x > {}' <<< /home/node/.bashrc",
+    ]);
+    allows(["git config --get user.name", "git config --list", "git commit -m 'update config'", "python3 -c \"print(1)\"", "python3 -c \"open('/tmp/x','w').write('y')\""]);
+    it("reads adversarial inline code in linear time", () => {
+      for (const cmd of ['python3 -c "open(' + " ".repeat(3900), 'python3 -c "open(' + " ".repeat(9000)]) {
+        const t = Date.now();
+        judge(cmd); // an unclosed call writes nothing, so the verdict is not the point: the time is
+        expect(Date.now() - t).toBeLessThan(200);
+      }
+    });
+  });
 });
