@@ -20,6 +20,14 @@ export type StandingRules = {
 
 export type StandingRulesWrite = { text: string; by: string; byAgentId?: string | null };
 
+/**
+ * The text as it is saved: line endings made consistent and blank space stripped from both ends, so
+ * what a reviewer reads is what is stored (a run of blank lines can't hide the real text).
+ */
+export function normalizeStandingRules(text: string): string {
+  return text.replace(/\r\n/g, "\n").trim();
+}
+
 /** What is wrong with a set of rules, or null when it is fine. */
 export function standingRulesError(text: string): string | null {
   if (text.length > STANDING_RULES_MAX) return `The standing rules can be at most ${STANDING_RULES_MAX} characters; that is ${text.length}.`;
@@ -38,7 +46,7 @@ export async function getStandingRules(db: Db, companyId: string): Promise<Stand
  * CEO's id (null for the owner). Returns the new state; throws StandingRulesError when refused.
  */
 export async function setStandingRules(db: Db, companyId: string, { text, by, byAgentId = null }: StandingRulesWrite, now = new Date()): Promise<StandingRules> {
-  const trimmed = text.replace(/\r\n/g, "\n").trim();
+  const trimmed = normalizeStandingRules(text);
   const problem = standingRulesError(trimmed);
   if (problem) throw new StandingRulesError(problem);
   const before = await getStandingRules(db, companyId);

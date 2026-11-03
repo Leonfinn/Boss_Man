@@ -641,6 +641,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\nNew instructions:")[0]!} refs={d.refs} /></h2>
                         <MoreText label="New instructions" text={d.context.instructions} />
                       </>
+                    ) : d.context?.type === "standing_rules" ? (
+                      <>
+                        {/* The decision holds the exact text that will be saved, already stripped and capped; show all of it. */}
+                        <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question} refs={d.refs} /></h2>
+                        {d.context.text ? <MoreText label="New rules" text={d.context.text} /> : <p>This clears the standing rules.</p>}
+                      </>
                     ) : !x && !rule && d.question.split("\n").length > PREVIEW_LINES + 2 ? (
                       <>
                         <h2 style={{ whiteSpace: "pre-wrap" }}><Linked text={d.question.split("\n\n")[0]!} refs={d.refs} /></h2>

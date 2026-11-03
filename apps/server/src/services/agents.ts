@@ -8,7 +8,7 @@ import { record as logActivity } from "./activity.js";
 import { pictureType } from "./company-import.js";
 import { MODEL_APPROVE, MODEL_EDIT, MODEL_REJECT, TEAM_HIRE, TEAM_NOT_NOW, type AgentModelConfig, type HireProposal, type TeamHire } from "./decisions.js";
 import type { ModelChoice } from "./models.js";
-import { getStandingRules, setStandingRules, StandingRulesError } from "./standing-rules.js";
+import { getStandingRules, normalizeStandingRules, setStandingRules, standingRulesError, StandingRulesError } from "./standing-rules.js";
 
 export class AgentError extends Error {
   constructor(
@@ -273,6 +273,11 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
      * approve edits too, in which case it waits in Decisions. Nobody else can change them.
      */
     async proposeStandingRules(companyId: string, ceoId: string, text: string, reason?: string): Promise<{ saved: Awaited<ReturnType<typeof getStandingRules>> } | { decisionId: string }> {
+      // Normalise and check once, before anything is shown or saved: the text the owner reads on the
+      // card is exactly the text that gets saved, so blank space can't hide the real rules (security review).
+      const rules = normalizeStandingRules(text);
+      const problem = standingRulesError(rules);
+      if (problem) throw new AgentError(422, problem);
       if ((await approvals(companyId)) === "hires_and_edits") {
         const [d] = await db
           .insert(decisions)
@@ -281,15 +286,15 @@ export function agentsService(db: Db, opts: { now?: () => Date; notify?: Notify;
             raisedByAgentId: ceoId,
             kind: "approval",
             tier: "owner",
-            question: [text.trim() ? "The CEO wants to change the company's standing rules." : "The CEO wants to clear the company's standing rules.", reason ? `Why: ${reason}` : null, text.trim() ? `New rules:\n${text.slice(0, 3000)}` : null].filter(Boolean).join("\n\n"),
+            question: [rules ? "The CEO wants to change the company's standing rules." : "The CEO wants to clear the company's standing rules.", reason ? `Why: ${reason}` : null].filter(Boolean).join("\n\n"),
             options: [APPLY, KEEP],
             recommendedOption: APPLY,
-            context: { type: "standing_rules", text, byAgentId: ceoId },
+            context: { type: "standing_rules", text: rules, byAgentId: ceoId },
           })
           .returning({ id: decisions.id });
         return { decisionId: d!.id };
       }
-      const saved = await this.applyStandingRules(companyId, ceoId, text);
+      const saved = await this.applyStandingRules(companyId, ceoId, rules);
       await notify({ companyId, agentId: ceoId, level: "note", title: saved.text ? "The CEO changed the standing rules" : "The CEO cleared the standing rules", body: `${reason ? `${reason}\n` : ""}Every run from now on reads them. See them, or undo the change, on the Settings page.`, link: "#/settings" });
       return { saved };
     },

@@ -102,6 +102,32 @@ describe("standing rules (BOS-353)", () => {
     expect(await briefFor(ctx.dev.id, "worker")).toContain("Only the merge gate runs the full check.");
   });
 
+  it("strips blank space before the approval card, so the card shows the text that is saved", async () => {
+    await ctx.req("PUT", `/api/companies/${ctx.company.id}/agent-approvals`, { approvals: "hires_and_edits" });
+    const ceo = await ctx.mcp(ctx.ceo.id);
+    const padded = `\n\n   \n\n${"   \n".repeat(1200)}Only the merge gate runs the full check.  \n\n`;
+    const w = await ceo.callTool({ name: "standing_rules", arguments: { action: "write", text: padded } });
+    expect((w as { isError?: boolean }).isError).toBeFalsy();
+    expect(textOf(w)).toContain("waiting for the owner");
+
+    const list = (await ctx.req("GET", "/api/decisions")).json() as Array<{ id: string; question: string; context?: { type?: string; text?: string } }>;
+    const card = list.find((d) => d.context?.type === "standing_rules");
+    expect(card).toBeTruthy();
+    // The card holds the stripped text itself, and nothing hidden to the owner in the saved copy.
+    expect(card!.context!.text).toBe("Only the merge gate runs the full check.");
+    expect(card!.question).not.toContain("   \n");
+
+    // A save over the cap is refused before any card is raised.
+    const before = ((await ctx.req("GET", "/api/decisions")).json() as unknown[]).length;
+    const tooBig = await ceo.callTool({ name: "standing_rules", arguments: { action: "write", text: `   \n${"x".repeat(STANDING_RULES_MAX + 1)}\n\n` } });
+    expect((tooBig as { isError?: boolean }).isError).toBe(true);
+    expect(((await ctx.req("GET", "/api/decisions")).json() as unknown[]).length).toBe(before);
+
+    await ctx.req("POST", `/api/decisions/${card!.id}/answer`, { answer: "Apply the change" });
+    const got = (await ctx.req("GET", `/api/companies/${ctx.company.id}/standing-rules`)).json() as { text: string };
+    expect(got.text).toBe(card!.context!.text);
+  });
+
   it("keeps the previous text, so the last change can be undone", async () => {
     await ctx.req("PUT", `/api/companies/${ctx.company.id}/standing-rules`, { text: "Be kind." });
     await ctx.req("PUT", `/api/companies/${ctx.company.id}/standing-rules`, { text: "Never force-push." });
