@@ -43,8 +43,15 @@ const GIT_NETWORK = new Set(["fetch", "pull", "clone", "ls-remote", "submodule"]
 const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
 const PKG = new Set(["npm", "pnpm", "yarn"]);
 const PKG_INSTALL = new Set(["install", "i", "add", "ci", "remove", "uninstall"]);
-/** Package-manager options that take the next word as their value, so it isn't the subcommand. */
-const PKG_VALUE_OPTS = /^(?:-C|--dir|--prefix|--cwd|--filter|--workspace|-w|--registry|--reporter|--silent|-s|--loglevel)$/;
+/**
+ * Package-manager options before the subcommand, by whether they take the next word as their value
+ * (BOS-165 security round 5). Guessing was wrong in both directions: a value option left off the
+ * list had its value read as the subcommand (`pnpm --store-dir test dlx …` read "test"), and a
+ * plain flag on the list skipped the real one (`pnpm -s dlx build` read "build"). Fail closed: an
+ * option on neither list means the segment is not exempt.
+ */
+const PKG_FLAGS = new Set(["--silent", "-s", "-w", "--workspace", "--yes", "-y"]);
+const PKG_VALUE_OPTS = new Set(["-C", "--dir", "--prefix", "--cwd", "--filter", "--registry", "--reporter", "--loglevel"]);
 /**
  * Package-manager subcommands that are the project's own work (an install, its scripts and the
  * project's build/test/lint), so their writes belong to the project and never aim at a named
@@ -475,20 +482,24 @@ export function tempCleanup(command: string): boolean {
 }
 
 /**
- * The subcommand a package-manager segment runs (BOS-165 security round 4): the first word after
- * the program that isn't an option or an option's value, found the way the git branch finds its
- * subcommand. `pnpm --silent dlx rimraf …` reads "dlx", not "--silent", so a leading option can
- * no longer smuggle a program runner past PKG_SCRIPTS. Empty when there is none.
+ * The subcommand a package-manager segment runs (BOS-165 security round 4, made fail-closed in
+ * round 5): the first word after the program that isn't an option or an option's value.
+ * `pnpm --silent dlx rimraf …` reads "dlx", not "--silent", so a leading option can no longer
+ * smuggle a program runner past PKG_SCRIPTS. An option on neither list (--store-dir, --userconfig,
+ * a cluster like -sC) might take a value, so its value could be read as the subcommand: return ""
+ * and the segment is not exempt. Empty when there is none.
  */
 function pkgSubcommand(seg: string): string {
   const words = seg.trim().split(/\s+/).slice(1);
   for (let i = 0; i < words.length; i++) {
     const w = words[i]!;
     if (w.startsWith("-")) {
-      // A short cluster (-sC path) or a --opt=value carries its own value; otherwise an option
-      // that takes the next word (pnpm -C /home/node exec) swallows it.
-      if (!w.includes("=") && PKG_VALUE_OPTS.test(w)) i++;
-      continue;
+      // A --opt=value carries its own value; a known flag takes none; a known value option
+      // swallows the next word. Anything else means we can't tell what the subcommand is.
+      if (w.includes("=")) continue;
+      if (PKG_FLAGS.has(w)) continue;
+      if (PKG_VALUE_OPTS.has(w)) { i++; continue; }
+      return "";
     }
     return w;
   }

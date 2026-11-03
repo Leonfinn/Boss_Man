@@ -511,6 +511,35 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     ]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
   });
 
+  it("does not suggest Allow when a leading package option hides the runner (BOS-165 security round 5)", () => {
+    // Code and security review: round 4 guessed each option's arity, wrongly both ways. A value
+    // option it didn't know let its value read as the subcommand; a plain flag it took for a value
+    // option skipped the real subcommand. An unknown leading option now means not exempt.
+    for (const c of [
+      // Rex, round 5: --silent is a plain flag in pnpm, so "dlx" was skipped and "test"/"build"/"lint" read as a script.
+      "rm -rf /tmp/a && pnpm --silent dlx build rm /home/x",
+      "rm -rf /tmp/a && pnpm --silent dlx test > /home/x",
+      "rm -rf /tmp/a && pnpm --silent dlx lint /home/node",
+      // Jane, round 5: a value option it didn't know had its value read as the subcommand.
+      "rm -rf /tmp/a && pnpm --store-dir test dlx rimraf /home/node",
+      "rm -rf /tmp/a && npm --userconfig run exec -- rimraf /home/node",
+      "rm -rf /tmp/a && pnpm --cache run dlx rimraf /home/node",
+      // Jane, round 5: a plain flag it took for a value option skipped the real subcommand.
+      "rm -rf /tmp/a && pnpm -s dlx build /home/node",
+      // A short cluster that might carry a value, and a bare unknown --opt=value before the runner.
+      "rm -rf /tmp/a && pnpm -sC /home/node dlx rimraf .",
+      "rm -rf /tmp/a && pnpm --store-dir=/home/node dlx rimraf .",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    // Fail-closed only for what it can't vouch for: known flags and known value options still read as Allow.
+    for (const c of [
+      "rm -rf /tmp/a && pnpm --silent run build",
+      "rm -rf /tmp/a && pnpm -C packages/shared test",
+      "rm -rf /tmp/a && pnpm --filter x --workspace run build",
+      "rm -rf /tmp/a && pnpm --loglevel silent run test",
+      "rm -rf /tmp/a && npm --prefix web ci",
+    ]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+  });
+
   it("gives no /tmp note to a command that sets a variable (security round 11)", () => {
     for (const c of [
       "export PATH=/tmp/x && ls /tmp",
