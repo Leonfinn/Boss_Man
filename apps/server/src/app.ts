@@ -437,7 +437,8 @@ export async function buildApp(opts: AppOptions) {
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing a stall alert failed"));
   });
   const sweeps = sweepService(db, {
-    expireAdvice: () => decisionsSvc.expireAdvice(),
+    // The same sweep settles second opinions whose asker was lost to a restart (BOS-338).
+    expireAdvice: () => Promise.all([decisionsSvc.expireAdvice(), decisionsSvc.expireSecondOpinions()]),
     limits: opts.sweepLimits,
     now: opts.now,
     wake: (input) => scheduler.notify(input.agentId, input),

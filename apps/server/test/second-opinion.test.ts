@@ -192,6 +192,19 @@ describe("model second opinion (BOS-338)", () => {
     expect(judgeOf(d)?.second).toMatchObject({ state: "deny" });
   });
 
+  it("a card still pending after a restart (its asker lost) is settled by the sweep: the rules judge decides alone", async () => {
+    ctx = await setup(() => new Promise<Response>(() => {})); // never answers; stands in for a lost process
+    await ctx.req("PATCH", `/api/companies/${ctx.companyId}`, { permissionJudge: "advise" });
+    await ctx.turnOn();
+    const raised = await ctx.raise(JUDGE_ALLOWS);
+    expect(await ctx.decisions.expireSecondOpinions()).toBe(0); // still within its deadline
+    await ctx.db.update(decisions).set({ createdAt: new Date(Date.now() - 120_000) }).where(eq(decisions.id, raised.id));
+    expect(await ctx.decisions.expireSecondOpinions()).toBe(1);
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.id, raised.id));
+    expect(d!.recommendedOption).toBe("Allow once");
+    expect(judgeOf(d!)?.second).toMatchObject({ state: "failed" });
+  });
+
   it("settings: needs an address and model to switch on; Test reports a working model", async () => {
     ctx = await setup(answer('{"verdict":"allow","reason":"Runs tests."}'));
     expect((await ctx.req("PUT", `/api/companies/${ctx.companyId}/second-opinion`, { enabled: true, baseUrl: "", model: "", secretId: null })).statusCode).toBe(400);

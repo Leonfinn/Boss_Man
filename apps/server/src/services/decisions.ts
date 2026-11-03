@@ -561,7 +561,8 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
   let cancelRun: ((runId: string) => Promise<{ endedHere?: boolean }>) | null = null;
   let onEngagement: EngagementHook | null = null;
   let secondOpinion: SecondOpinionHook | null = null;
-  // Second opinions still being asked, so a shutdown or a test can wait for them.
+  // Second opinions still being asked, so a shutdown or a test can wait for them. Not kept: lost on restart, harmless because
+  // expireSecondOpinions (the advice sweep) settles any card still pending past the deadline as "failed".
   const secondInFlight = new Set<Promise<void>>();
   let onDeploy: DeployHook | null = null;
   let onAgentDecision: AgentDecisionHook | null = null;
@@ -1332,6 +1333,19 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
     /** The model second opinion on permission cards (BOS-338). */
     setSecondOpinion(hook: SecondOpinionHook) {
       secondOpinion = hook;
+    },
+
+    /**
+     * A card whose second opinion is still pending well past the 5 s deadline lost its asker (a restart or a
+     * blue/green swap): it is settled as failed, so the rules judge decides alone (BOS-338).
+     */
+    async expireSecondOpinions() {
+      const stale = await db
+        .select({ id: decisions.id })
+        .from(decisions)
+        .where(and(eq(decisions.kind, "permission"), eq(decisions.status, "open"), sql`${decisions.context} #>> '{judge,second,state}' = 'pending'`, sql`${decisions.createdAt} < ${new Date(now().getTime() - 60_000).toISOString()}::timestamptz`));
+      for (const d of stale) await settleSecondOpinion(d.id, { failed: "Boss Man restarted before the model answered" });
+      return stale.length;
     },
 
     /** Waits for second opinions still being asked (shutdown, tests). Each takes at most the 5 s deadline. */
