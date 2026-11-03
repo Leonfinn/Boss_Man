@@ -15,6 +15,8 @@ export type SnapTicket = {
   awaitingPlan: boolean;
   /** Already in the owner's queue through another sweep (missed work, merge stuck, review stall). */
   withOwner: boolean;
+  /** In review with every review passed: it waits for the merge sweep, not for a reviewer or its author (BOS-362). */
+  mergeWaiting?: boolean;
   /** Send-backs so far. */
   bounces: number;
 };
@@ -130,6 +132,8 @@ export function evaluate(snap: Snapshot, s: WatchdogSettings, now: Date): Trip[]
       const idle = t - since - covered(mine.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()]), since, t);
       if (idle >= s.inProgressHours * H) add("stale_in_progress", { idleMs: idle, limitMs: s.inProgressHours * H });
     } else if (x.state === "review") {
+      // Approved by everyone: the merge sweep owns it, and raises a merge card of its own if it can't land.
+      if (x.mergeWaiting) continue;
       const idle = t - since - covered(runs.map((r) => [r.startedAt.getTime(), (r.endedAt ?? now).getTime()]), since, t);
       if (idle >= s.reviewHours * H) add("stale_review", { idleMs: idle, limitMs: s.reviewHours * H });
     } else if (x.state === "blocked") {

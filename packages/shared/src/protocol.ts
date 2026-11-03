@@ -284,7 +284,8 @@ export type MergeResult =
   | { status: "main_moved" };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
-export type CarriedTicket = { ticketId: string; branch: string };
+/** `contained`: this ticket's branch holds the other branch's whole tip, so merging this one lands it too (BOS-372). */
+export type CarriedTicket = { ticketId: string; branch: string; contained?: boolean };
 
 /** The answer to workspace.carried: the other tickets whose unmerged commits this branch has. */
 export type CarriedResult = { carried: CarriedTicket[] };

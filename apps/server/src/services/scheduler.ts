@@ -803,8 +803,8 @@ export function schedulerService(
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
       ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
-      // A plan-first ticket starts in plan mode until its plan is approved (R40).
-      ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
+      // A plan-first ticket starts in plan mode until its plan is approved (R40). Plan mode is the assignee's: a reviewer is never put in it (BOS-371).
+      ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && w.ticketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: w.ticketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
       prompt: chapter?.prompt ?? wakePrompt,

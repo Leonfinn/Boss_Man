@@ -1373,6 +1373,39 @@ function AdviceTimeout({ company, onChanged }: { company: Company; onChanged: ()
   );
 }
 
+/** How the rules judge advises on permission cards (BOS-337). It only picks the suggested button; it never answers a card. */
+function PermissionJudgeSetting({ company, onChanged }: { company: Company; onChanged: () => void }) {
+  const act = useAction();
+  const mode = company.permissionJudge ?? "watch";
+  return (
+    <Section id="permission-judge-h" title="Advice on permission cards">
+      <p className="muted" style={{ fontSize: 14 }}>
+        Boss Man can look at where a command reaches (its own folder, secrets, other agents, the network) and suggest Allow or Deny with a one-line reason. It only suggests: you or the CEO still press the button, and pushes to main, publishing, deploys, secrets and other agents' work stay decided by fixed rules.
+      </p>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <label htmlFor="permission-judge">Advice</label>
+        <select
+          id="permission-judge"
+          value={mode}
+          disabled={act.busy}
+          onChange={(e) =>
+            void act.run(async () => {
+              await api(`/api/companies/${company.id}`, { method: "PATCH", body: { permissionJudge: e.target.value } });
+              onChanged();
+              return "Saved.";
+            })
+          }
+        >
+          <option value="advise">Advise: suggest a button and say why</option>
+          <option value="watch">Watch: only record what it would suggest next to your answer</option>
+          <option value="off">Off: use the older text rules</option>
+        </select>
+      </div>
+      {act.view}
+    </Section>
+  );
+}
+
 /** The company's hourly nudge limit (BOS-73). */
 function NudgeCap({ company, onChanged }: { company: Company; onChanged: () => void }) {
   const [cap, setCap] = useState(String(company.nudgesPerHour ?? 30));
@@ -2022,6 +2055,7 @@ export function Settings({ companies, companyId, tab, go, onChanged, children }:
             <NudgeCap company={company} onChanged={onChanged} />
             <WorkspaceDisk company={company} onChanged={onChanged} />
             <AdviceTimeout company={company} onChanged={onChanged} />
+            <PermissionJudgeSetting company={company} onChanged={onChanged} />
             <Watchdog company={company} />
             <WorkflowRetros company={company} />
             <Chapters company={company} />

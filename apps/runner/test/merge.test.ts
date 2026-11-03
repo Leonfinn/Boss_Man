@@ -214,7 +214,7 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
 
     // This ticket merges the other in, as a developer would to stay up to date.
     git(w.path, "merge", "--no-edit", `bossman/${ids2.other}`);
-    expect(await ws.carried(spec, "main", branches)).toEqual({ carried: [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }] });
+    expect(await ws.carried(spec, "main", branches)).toMatchObject({ carried: [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }] });
     // Nothing merges with the guard in place: the branch is exactly as it was.
     expect(git(w.path, "status", "--porcelain")).toBe("");
   });
@@ -246,7 +246,62 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     git(ff.path, "add", ".");
     git(ff.path, "commit", "-qm", "ff ticket's work");
     const hit = { ticketId: ids2.other, branch: `bossman/${ids2.other}` };
-    expect(await ws.carried({ ...spec, ticketId: ffId }, "main", [hit])).toEqual({ carried: [hit] });
+    expect(await ws.carried({ ...spec, ticketId: ffId }, "main", [hit])).toEqual({ carried: [{ ...hit, contained: true }] });
+  });
+
+  it("still counts a branch that fast-forwarded this ticket in, then committed: same shape as the reverse, so it can't be told apart (BOS-369)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const ffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const ff = await ws.ensure({ ...spec, ticketId: ffId });
+    git(ff.path, "merge", "--no-edit", `bossman/${ids.t}`);
+    writeFileSync(path.join(ff.path, "ff.txt"), "own\n");
+    git(ff.path, "add", ".");
+    git(ff.path, "commit", "-qm", "ff ticket's work");
+    const hit = { ticketId: ffId, branch: `bossman/${ffId}` };
+    expect(await ws.carried(spec, "main", [hit])).toEqual({ carried: [{ ...hit, contained: false }] });
+  });
+
+  it("still counts a branch whose work this ticket fast-forwarded in, then committed, before the branch fast-forwarded this ticket (BOS-369)", async () => {
+    const o = origin();
+    const { ws } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const tId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const spec = { projectId: ids.project, ticketId: tId, repoUrl: o.url, baseRef: "main" };
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    writeFileSync(path.join(b.path, "b1.txt"), "b1\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b1");
+    const t = await ws.ensure(spec);
+    git(t.path, "merge", "--no-edit", `bossman/${bId}`);
+    writeFileSync(path.join(t.path, "t1.txt"), "t1\n");
+    git(t.path, "add", ".");
+    git(t.path, "commit", "-qm", "t1");
+    git(b.path, "merge", "--no-edit", `bossman/${tId}`);
+    writeFileSync(path.join(b.path, "b2.txt"), "b2\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b2");
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
+  });
+
+  it("still counts a branch whose work this ticket merged in before the branch fast-forwarded this ticket (BOS-369)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const bId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const b = await ws.ensure({ ...spec, ticketId: bId });
+    writeFileSync(path.join(b.path, "b1.txt"), "b1\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b1");
+    // This ticket merges B in (holding b1); B then fast-forwards this ticket and commits b2.
+    const w = await ws.ensure(spec);
+    git(w.path, "merge", "--no-edit", `bossman/${bId}`);
+    git(b.path, "merge", "--no-edit", `bossman/${ids.t}`);
+    writeFileSync(path.join(b.path, "b2.txt"), "b2\n");
+    git(b.path, "add", ".");
+    git(b.path, "commit", "-qm", "b2");
+    const hit = { ticketId: bId, branch: `bossman/${bId}` };
+    expect(await ws.carried(spec, "main", [hit])).toMatchObject({ carried: [hit] });
   });
 
   it("finds nothing once the carried branch has itself merged to the target", async () => {
