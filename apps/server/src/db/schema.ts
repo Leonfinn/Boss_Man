@@ -152,6 +152,10 @@ export const runners = pgTable("runners", {
   /** Versions of the harnesses in the runner image, from its last hello (BOS-305); null until it reports them. */
   harnessVersions: jsonb("harness_versions").$type<Record<string, string>>(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  /** The boot id from the runner's last hello (BOS-352); a different id means the runner restarted. */
+  bootId: text("boot_id"),
+  /** When a restart last pulled parked checks forward, so a restart loop doesn't do it again straight away. */
+  bootPulledAt: timestamp("boot_pulled_at", { withTimezone: true }),
   /** Disk use of the runner's workspaces from its last clean-up pass (R54). */
   diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
   diskCheckedAt: timestamp("disk_checked_at", { withTimezone: true }),
@@ -327,6 +331,8 @@ export const tickets = pgTable(
     monitorNote: text("monitor_note"),
     monitorAttempts: integer("monitor_attempts").notNull().default(0),
     monitorMax: integer("monitor_max").notNull().default(5),
+    /** When a runner restart pulled this check forward (BOS-352); the wake says so, then this is cleared. */
+    monitorRestartAt: timestamp("monitor_restart_at", { withTimezone: true }),
     customFields: jsonb("custom_fields").notNull().default({}),
     /** The ticket's acceptance criteria (1 to 10 non-empty strings), checked against at review; empty means none. */
     acceptanceCriteria: jsonb("acceptance_criteria").$type<string[]>().notNull().default([]),

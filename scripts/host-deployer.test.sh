@@ -145,8 +145,8 @@ not_re="$(grep -o "^NOT_INFRA='[^']*'" "$here/host-deployer.sh" | sed "s/^NOT_IN
 for p in deploy/x.yml scripts/deploy.sh scripts/rebuild-live.sh scripts/update-runner.sh scripts/host-deployer.sh apps/server/Dockerfile .env.example; do
   if ! echo "$p" | grep -Eq "$infra_re" || echo "$p" | grep -Eq "$not_re"; then fail "$p should count as infra"; fi
 done
-# CI files and the Penpot add-on don't touch Boss Man's containers.
-for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh; do
+# CI files and the Penpot and ntfy add-ons don't touch Boss Man's containers.
+for p in .github/workflows/ci.yml deploy/penpot.yml scripts/make-app-icons.mjs scripts/check-all.sh scripts/lint-migrations.mjs scripts/restore-test.sh deploy/ntfy.yml; do
   if echo "$p" | grep -Eq "$infra_re" && ! echo "$p" | grep -Eq "$not_re"; then fail "$p should not count as infra"; fi
 done
 
@@ -192,7 +192,7 @@ req runner "$c3"; host; has "$D/outbox/status.json" "only to the commit that is 
 req runner "$head"; host
 [[ $(status result) == deployed && $(status target) == runner ]] || fail "runner status"
 has "$STUB_LOG" "update-runner.sh"
-hasnt "$STUB_LOG" "update-runner.sh --now" # the runner target drains; --now is for a person at the NAS
+hasnt "$STUB_LOG" "update-runner.sh --now" # the runner target drains; --now is for a person at the host
 
 # 9. A failed deploy reports the failure, keeps the status honest and posts the webhook.
 git -C "$T/w" reset -q --hard "$c2"; git -C "$T/w" push -qf origin HEAD:main 2>/dev/null # drop the compose change from main
@@ -294,7 +294,7 @@ reset_world() {  # live colour = $1, leading at commit $2
   : >"$DL"; : >"$T/hook.out"; : >"$D/deployer.log"; echo "$idle" >/dev/null
 }
 bg() { # run the script copy as the cron job would
-  BG_POLL_SECONDS=0 BG_READY_SECONDS=1 BG_HANDOVER_SECONDS=1 "$T/hd.sh" "$@" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (copy) exited non-zero"; }
+  BG_POLL_SECONDS=0 BG_READY_SECONDS=1 BG_HANDOVER_SECONDS=1 SOAK_CHECK_SECONDS=1 "$T/hd.sh" "$@" >"$T/out" 2>&1 || { cat "$T/out"; fail "host-deployer (copy) exited non-zero"; }
 }
 bgreq() { rm -f "$D/state/last-server"; req server "$1"; }
 cur="$(git -C "$T/src" rev-parse HEAD)"
@@ -353,6 +353,8 @@ FAKE_VERIFY_FAIL=green bg
 [[ $(status result) == rolled_back ]] || fail "auto switch-back: $(cat "$D/outbox/status.json")"
 live_is blue
 order "$DL" "signal USR1 green" "signal USR2 blue" "reload now blue" "stopped green"
+has "$D/outbox/status.json" "was switched back"
+has "$D/deployer.log" "Check failed on green"
 [[ $(cat "$W/role.blue") == leader && ! -e $W/running.green && ! -e $D/state/soak ]] || fail "world after switch-back"
 [[ $(git -C "$T/src" rev-parse HEAD) == "$P" ]] || fail "checkout not put back to the old commit"
 has "$T/hook.out" '"result": "rolled_back"'
@@ -425,7 +427,7 @@ reset_world green "$cur"; : >"$DL"; FAKE_NO_IMAGE=1 "$T/hd.sh" --rollback >"$T/o
 hasnt "$DL" "signal"; hasnt "$DL" "pg_dump"; live_is green
 # The other colour fails the checks after the flip: reversed, still live on the original colour.
 reset_world green "$cur"; : >"$DL"; echo "blue $cur" >"$D/state/previous"; echo "$cur" >"$W/commit.blue"
-FAKE_VERIFY_FAIL=blue BG_POLL_SECONDS=0 BG_READY_SECONDS=1 BG_HANDOVER_SECONDS=1 "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "a rollback whose checks fail must exit non-zero"
+FAKE_VERIFY_FAIL=blue BG_POLL_SECONDS=0 BG_READY_SECONDS=1 BG_HANDOVER_SECONDS=1 SOAK_CHECK_SECONDS=1 "$T/hd.sh" --rollback >"$T/out" 2>&1 && fail "a rollback whose checks fail must exit non-zero"
 live_is green; [[ $(cat "$W/role.green") == leader ]] || fail "original colour not restored"
 # A deploy that failed after its build left a different build in the stopped colour: refused, live untouched.
 reset_world green "$cur"; echo "blue $cur" >"$D/state/previous"; echo "$b6" >"$W/commit.blue"; : >"$DL"
