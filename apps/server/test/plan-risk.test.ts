@@ -39,6 +39,7 @@ async function setup(opts: { listen?: boolean; answers?: { verify?: (command: st
     if (c.type === "workspace.diff") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { baseCommit: "a".repeat(40), head: "b".repeat(40), commits: [{ sha: "b".repeat(40), subject: "Work" }], files: [{ path: "src/a.ts", added: 1, removed: 0 }], diff: "", truncated: false } }));
     if (c.type === "workspace.verify") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: opts.answers?.verify?.(c.command) ?? { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } }));
     if (c.type === "workspace.merge") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { status: "merged", commit: "c".repeat(40) } }));
+    if (c.type === "workspace.migrations") queueMicrotask(() => built.runners.resolveReply({ requestId: c.requestId, ok: true, data: { needed: false, reason: "No other branch uses this ticket's migration numbers." } }));
     return true;
   });
   let seq = 0;
@@ -98,6 +99,49 @@ describe("plan-first tickets (R40)", () => {
     const next = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start")!;
     expect(next.mode).toBeUndefined();
     expect(next.prompt).toContain("3. Burst case.");
+  });
+
+  it("BOS-371: a reviewer run is never started in plan mode, even on a ticket whose plan isn't approved", async () => {
+    const c = await setup();
+    const t = await c.ticket({ planFirst: true, state: "review" });
+    await c.db.delete(wakes);
+    await c.scheduler.wake({ agentId: c.ceo.id, ticketId: t.id, reason: "review requested" });
+    await c.scheduler.tick();
+    const start = c.sent.find((x): x is Extract<RunnerCommand, { type: "run.start" }> => x.type === "run.start");
+    expect(start).toBeDefined();
+    expect(start!.mode).toBeUndefined();
+  });
+
+  it("BOS-371: a plan sent by a reviewer run goes to the CEO as the verdict, not to the owner as a plan card", async () => {
+    const c = await setup();
+    const t = await c.ticket({ planFirst: true, state: "review" });
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: t.id, origin: "review requested" });
+    await c.db.delete(wakes);
+    c.sent.length = 0;
+    await c.emit({ type: "run.permission_request", runId, requestId: "r1", title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once"], detail: "Security review: approved." });
+    expect(await c.db.select().from(decisions).where(eq(decisions.kind, "approval"))).toEqual([]);
+    expect(c.sent).toEqual([expect.objectContaining({ type: "permission.decide", requestId: "r1", verdict: "deny" })]);
+    expect(await c.db.select().from(wakes)).toEqual([expect.objectContaining({ agentId: c.ceo.id, ticketId: t.id })]);
+    // The reviewer's text never becomes the ticket's plan.
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!.plan).toBeNull();
+  });
+
+  it("BOS-371: Keep planning on a later plan card leaves the approved plan approved and unchanged, and says so", async () => {
+    const c = await setup();
+    const t = await c.ticket({ planFirst: true });
+    const at = new Date("2026-11-02T23:15:00Z");
+    await c.db.update(tickets).set({ plan: PLAN, planApprovedAt: at }).where(eq(tickets.id, t.id));
+    const runId = randomUUID();
+    await c.db.insert(runs).values({ id: runId, companyId: c.company.id, agentId: c.worker.id, ticketId: t.id });
+    await c.emit({ type: "run.permission_request", runId, requestId: "k1", title: "Approve Plan", kind: "switch_mode", rawInput: {}, optionKinds: ["allow_once"], detail: "A different plan." });
+    const [d] = await c.db.select().from(decisions).where(eq(decisions.kind, "approval"));
+    c.sent.length = 0;
+    await c.req("POST", `/api/decisions/${d!.id}/answer`, { answer: "Keep planning" });
+    const after = (await c.db.select().from(tickets).where(eq(tickets.id, t.id)))[0]!;
+    expect(after.planApprovedAt).toEqual(at);
+    expect(after.plan).toBe(PLAN);
+    expect(c.sent[0]).toMatchObject({ type: "run.message", text: expect.stringContaining("earlier approved plan still stands") });
   });
 
   it("follows the risk level, with no checkbox: changing the risk before work starts turns it on or off", async () => {

@@ -89,9 +89,11 @@ services:
       BOSSMAN_DRAIN_MINUTES: ${BOSSMAN_DRAIN_MINUTES:-30}
       BOSSMAN_LAUNCHER_URL: http://launcher:3105
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
-      # Session cookies are Secure by default and need HTTPS (e.g. Tailscale Serve or a
-      # reverse proxy). Set to 1 only for plain-HTTP access on a trusted LAN.
+      # Session cookies are Secure per request: over HTTPS through the trusted proxy below, not on plain
+      # LAN http. Setting this to 1 turns Secure off everywhere (older setups); you no longer need it.
       BOSSMAN_INSECURE_COOKIES: ${BOSSMAN_INSECURE_COOKIES:-0}
+      # Exact address(es) of the proxy whose X-Forwarded-* headers are believed (deploy/tailscale.yml). Empty = none.
+      BOSSMAN_TRUSTED_PROXIES: ${BOSSMAN_TRUSTED_PROXIES:-}
       # The feedback portal alone, on its own port: the only port that may ever face the internet.
       BOSSMAN_PORTAL_PORT: "3101"
       # The portal's address as people reach it, for the share link, e.g. http://<host-ip>:3111.
@@ -122,6 +124,8 @@ services:
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
       BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
+      BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
+      BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key
     # Docker's socket, through the socket's own group rather than root.
     group_add: ["${BOSSMAN_DOCKER_GID:-999}"]
@@ -138,6 +142,20 @@ services:
     security_opt: ["no-new-privileges:true"]
     mem_limit: 128m
     pids_limit: 64
+
+  # Only here so `docker compose build` makes boss-man-netguard:current, which the launcher starts
+  # beside each runner (BOS-324) to block private networks. It exits at once if run.
+  netguard:
+    build:
+      context: .
+      dockerfile: apps/netguard/Dockerfile
+    image: boss-man-netguard:current
+    profiles: ["launcher"]
+    restart: "no"
+    command: ["--build-only"]
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
 
   runner-app-co:
     <<: *runner

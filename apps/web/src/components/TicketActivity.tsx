@@ -7,7 +7,7 @@ import { systemAuthor } from "@boss-man/shared";
 import { api, type Agent } from "../api";
 import { usePoll } from "../hooks";
 import { linked } from "../pages/Chat";
-import { ImagePreviews, useImageAttach, withImage } from "./ImageAttach";
+import { ImagePreviews, useImageAttach, withAttachments } from "./ImageAttach";
 import { outcomeTag, when } from "../pages/Runs";
 import { STATUS, type TicketReview } from "./TicketReviews";
 import { describe, useTranscript } from "../transcript";
@@ -116,7 +116,7 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   const convo = usePoll((signal) => api<Conversation>(`/api/tickets/${ticketId}/messages`, { signal }), busy ? 3000 : 10_000, ticketId);
   const runs = usePoll((signal) => api<RunRow[]>(`/api/tickets/${ticketId}/runs`, { signal }), busy ? 3000 : 10_000, ticketId);
   const [text, setText] = useState("");
-  const img = useImageAttach(companyId, (md) => setText((t) => withImage(t, md)), ticketId);
+  const img = useImageAttach(companyId, ticketId);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   // "" is whoever is working the ticket; another agent (e.g. the CEO) can be asked about it instead.
   const [to, setTo] = useState("");
@@ -137,10 +137,12 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
   }, [feed.length]);
 
   const send = async (interrupt = false) => {
-    if (!text.trim()) return;
+    const outgoing = withAttachments(text, img.attached);
+    if (!outgoing.trim()) return;
     try {
-      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: text.trim(), interrupt, ...(other ? { agentId: other.id } : {}) } });
+      await api(`/api/tickets/${ticketId}/messages`, { method: "POST", body: { text: outgoing.trim(), interrupt, ...(other ? { agentId: other.id } : {}) } });
       setText("");
+      img.clear();
       setNote(null);
       convo.reload();
       runs.reload();
@@ -229,15 +231,15 @@ export function TicketActivity({ ticketId, companyId, assignee, assigneeId = nul
           onKeyDown={onKey}
           onPaste={img.onPaste}
         />
-        <ImagePreviews text={text} onChange={setText} />
+        <ImagePreviews attached={img.attached} onRemove={img.remove} />
         <div className="compose-actions">
           {img.button}
-          <button className="btn primary" type="submit" disabled={!text.trim() || img.busy}>
+          <button className="btn primary" type="submit" disabled={(!text.trim() && !img.attached.length) || img.busy}>
             Send
           </button>
           {live && (
             <>
-              <button className="btn" type="button" disabled={!text.trim() || !!other} onClick={() => void send(true)} title="Stops the agent's current turn, then gives it your message">
+              <button className="btn" type="button" disabled={(!text.trim() && !img.attached.length) || !!other} onClick={() => void send(true)} title="Stops the agent's current turn, then gives it your message">
                 Interrupt and send
               </button>
               <button className="btn" type="button" onClick={() => void stop()} style={{ color: "var(--red-ink)" }}>

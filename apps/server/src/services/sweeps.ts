@@ -9,7 +9,8 @@ import { and, desc, eq, gt, inArray, isNotNull, isNull, like, lte, max, or, sql 
 import { MERGE_MISSED_AFTER_MS } from "@boss-man/shared";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
-import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { agents, companies, decisions, engagementMessages, engagements, keyResults, milestones, objectives, reviewRequests, runnerEvents, runners, runs, ticketDependencies, tickets, wakes } from "../db/schema.js";
+import { record } from "./activity.js";
 import { CANCEL_RUN, CHASE, DROP, KEEP_WAITING, LET_CEO_DECIDE, raiseMergeStuck, REASSIGN, type DecisionContext } from "./decisions.js";
 import type { AlertInput } from "./alert-ladder.js";
 import { raiseDueGoalChecks } from "./goal-check.js";
@@ -36,6 +37,10 @@ export type SweepLimits = {
   lostAfterMs: number;
   /** A run with no ticket after this long is flagged to the Scrum Master (BOS-254). */
   ticketlessAfterMs: number;
+  /** While the run waits inside a long command (check-all, vitest, tsc), the stall alert waits this long instead (BOS-217). */
+  busyStallAfterMs: number;
+  /** A quiet run whose runner is connected and still answering pings is probably inside a long command: wait this long too (BOS-217). */
+  busyRunnerAfterMs: number;
 };
 export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   staleAfterMs: 24 * 3_600_000,
@@ -46,14 +51,18 @@ export const DEFAULT_SWEEP_LIMITS: SweepLimits = {
   keepWaitingMs: 30 * 60_000,
   lostAfterMs: 30 * 60_000,
   ticketlessAfterMs: 10 * 60_000,
+  busyStallAfterMs: 15 * 60_000,
+  busyRunnerAfterMs: 15 * 60_000,
 };
 // After this many nudges in a day the owner is told instead (R82).
 const MISSED_NUDGES_PER_DAY = 2;
 
+/** A clock time in plain words, e.g. "14:05" (UTC, like the rest of the server's notes). */
+const hhmm = (d: Date) => d.toISOString().slice(11, 16);
 const ago = (ms: number) => (ms >= 2 * 86_400_000 ? `${Math.floor(ms / 86_400_000)} days` : ms >= 2 * 3_600_000 ? `${Math.floor(ms / 3_600_000)} hours` : `${Math.max(1, Math.floor(ms / 60_000))} minutes`);
 const later = (a: Date | null | undefined, b: Date | null | undefined) => (!a ? (b ?? null) : !b || a > b ? a : b);
 
-export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
+export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?: () => Date; wake: (input: WakeInput) => Promise<unknown>; isConnected: (runnerId: string) => boolean; /** The runner connected only just now, so its queued runs are still starting (BOS-331). */ runnerSettling?: (runnerId: string) => boolean; endRun: (runId: string, outcome: string, at: Date) => Promise<unknown>; endUnconfirmedCancels: (t: Date) => Promise<unknown>; expireAdvice?: () => Promise<unknown>; retryLand?: (ticketId: string) => Promise<unknown>; /** True while a merge for the ticket is running and alive (BOS-362). */ landingActive?: (ticketId: string) => boolean; expireSkills?: () => Promise<unknown>; /** Raises a stalled run or review on the alert ladder (BOS-119). */ alert: (input: AlertInput) => Promise<{ id: string } | null> }) {
   const limits = { ...DEFAULT_SWEEP_LIMITS, ...opts.limits };
   const now = opts.now ?? (() => new Date());
 
@@ -162,25 +171,103 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
     return ended;
   }
 
+  /**
+   * The last thing a run said, if it is still waiting inside a command (BOS-217): a check-all,
+   * vitest or tsc that runs for ten minutes is work, not a run that has gone quiet. The runner
+   * reports a tool call when it starts and again when it finishes; only a start counts.
+   */
+  async function busyInCommand(runId: string) {
+    const [last] = await db
+      .select({ type: runnerEvents.type, payload: runnerEvents.payload })
+      .from(runnerEvents)
+      .where(and(eq(runnerEvents.type, "run.update"), sql`${runnerEvents.payload}->>'runId' = ${runId}`))
+      .orderBy(desc(runnerEvents.seq))
+      .limit(1);
+    if (!last) return null;
+    const update = (last.payload as { update?: { kind?: unknown; title?: unknown; status?: unknown } } | null)?.update;
+    if (!update || ((update.kind !== "tool_call" && update.kind !== "tool_call_update") || update.status !== "in_progress")) return null;
+    return typeof update.title === "string" && update.title ? update.title.slice(0, 120) : "a command";
+  }
+
+  /**
+   * The runs that count as stalled, alerts closed by themselves (BOS-217), and new alerts raised.
+   * An alert about a run that has ended, or spoken again, is closed here with the reason, whether
+   * it sat with the Scrum Master, the CEO or the owner.
+   */
   async function stalledRuns(t: Date) {
     const live = await db
-      .select({ run: runs, agentName: agents.name, ticketTitle: tickets.title, ticketState: tickets.systemState, runnerId: runners.id })
+      .select({ run: runs, agentName: agents.name, ticketTitle: tickets.title, ticketState: tickets.systemState, runnerId: runners.id, runnerLastSeenAt: runners.lastSeenAt })
       .from(runs)
       .leftJoin(agents, eq(agents.id, runs.agentId))
       .leftJoin(tickets, eq(tickets.id, runs.ticketId))
       .leftJoin(runners, eq(runners.companyId, runs.companyId))
       .where(isNull(runs.endedAt));
+    // Every run an open alert is about, ended or not: one that finished after its alert was raised
+    // still needs the alert closed, and the live list below never holds it.
+    const open = await openOfKind("stalled_run");
+    const alertRuns = new Map<string, { endedAt: Date | null; lastEventAt: Date | null }>(live.map((r) => [r.run.id, { endedAt: null, lastEventAt: r.run.lastEventAt }]));
+    const watched = [...new Set(open.map((d) => (d.context as { runId?: unknown }).runId).filter((id): id is string => typeof id === "string" && !alertRuns.has(id)))];
+    if (watched.length) {
+      for (const r of await db.select({ id: runs.id, endedAt: runs.endedAt, lastEventAt: runs.lastEventAt }).from(runs).where(inArray(runs.id, watched))) {
+        alertRuns.set(r.id, { endedAt: r.endedAt, lastEventAt: r.lastEventAt });
+      }
+    }
     const waiting = await waitingOnOwner();
     const stalled = new Map<string, (typeof live)[number] & { idle: number }>();
+    // Whether a run is stalled has to hold both when its alert is open and when one is about to be
+    // raised, so an open alert is closed for the same reasons a new one would not be raised.
+    const busy = new Map<string, string>();
+    const idleOf = async (run: (typeof live)[number], withBusyChecks: boolean) => {
+      const idle = t.getTime() - (run.run.lastEventAt ?? run.run.startedAt).getTime();
+      // A finished ticket needs no alert about its run, and neither does one waiting on the owner.
+      const eligible = !waiting.has(run.run.id) && !!run.runnerId && run.ticketState !== "done";
+      if (!eligible || idle < limits.stallAfterMs) return { idle, stalled: false };
+      // A run that has said nothing yet, on a runner that has only just come back, is queued behind the others: wait.
+      if (!run.run.lastEventAt && opts.runnerSettling?.(run.runnerId!)) return { idle, stalled: false };
+      if (!withBusyChecks) return { idle, stalled: true };
+      const command = await busyInCommand(run.run.id);
+      if (command) {
+        busy.set(run.run.id, command);
+        return { idle, stalled: idle >= limits.busyStallAfterMs };
+      }
+      // The runner answers Boss Man's pings every 15 seconds even mid-command. Events only arrive at
+      // tool-call and turn boundaries, so a runner seen well after the last event is inside a long step.
+      const lastSeen = run.runnerLastSeenAt?.getTime() ?? 0;
+      if (lastSeen > (run.run.lastEventAt ?? run.run.startedAt).getTime() + limits.stallAfterMs) {
+        busy.set(run.run.id, "a long command");
+        return { idle, stalled: idle >= limits.busyRunnerAfterMs };
+      }
+      return { idle, stalled: true };
+    };
     for (const r of live) {
-      // A finished ticket needs no alert about its run.
-      if (waiting.has(r.run.id) || !r.runnerId || r.ticketState === "done") continue;
-      const idle = t.getTime() - (r.run.lastEventAt ?? r.run.startedAt).getTime();
-      if (idle >= limits.stallAfterMs) stalled.set(r.run.id, { ...r, idle });
+      const v = await idleOf(r, true);
+      if (v.stalled) stalled.set(r.run.id, { ...r, idle: v.idle });
     }
 
-    const open = await openOfKind("stalled_run");
-    await withdraw(open.filter((d) => !stalled.has((d.context as { runId: string }).runId)).map((d) => d.id));
+    // An alert about a run that has ended, or spoken since the alert was raised, is closed by itself
+    // with the reason (BOS-217): the owner never sees one for a run that has moved on. One still
+    // sitting inside a long command keeps its alert until the busy limit, as a new alert would.
+    const closed = new Set<string>();
+    for (const d of open) {
+      const runId = (d.context as { runId?: unknown }).runId;
+      if (typeof runId !== "string") continue;
+      const row = alertRuns.get(runId);
+      const liveRow = live.find((r) => r.run.id === runId);
+      const spokeSince = !!row?.lastEventAt && row.lastEventAt.getTime() > d.createdAt.getTime();
+      if (!row?.endedAt && !spokeSince && liveRow && (await idleOf(liveRow, true)).stalled) continue;
+      const ended = row?.endedAt ?? null;
+      const spokeAfterEnd = !!ended && (row?.lastEventAt?.getTime() ?? 0) > ended.getTime();
+      const note = ended ? `the run ended normally at ${hhmm(ended)}${spokeAfterEnd ? ", then spoke again" : ""}` : "the run is active again";
+      const [done] = await db
+        .update(decisions)
+        .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: { ...(d.context as object), withdrawn: { by: "system", note, at: t.toISOString() } } })
+        .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+        .returning({ id: decisions.id, question: decisions.question });
+      if (!done) continue;
+      closed.add(done.id);
+      await record(db, { companyId: d.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${done.question.slice(0, 120)}" by itself: ${note}`, at: t });
+    }
+    await withdraw(open.filter((d) => !closed.has(d.id) && !stalled.has((d.context as { runId?: unknown }).runId as string)).map((d) => d.id));
     // An answered alert frees its key when the run stirred (a later stall is reported again), or,
     // after "Keep waiting", when the run is still quiet this long after the answer.
     const answered = await db
@@ -203,7 +290,7 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
             kind: "stalled_run",
             // No event at all: the runner never began it, most likely lost in a runner restart.
             question: r.run.lastEventAt
-              ? `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. It may be stuck, or busy with a long command.`
+              ? `${r.agentName ?? "An agent"} has sent nothing for ${ago(r.idle)}${r.ticketTitle ? ` while working on "${r.ticketTitle}"` : ""}. ${busy.get(runId) ? `It is still inside ${busy.get(runId)}, so it may just be a long command.` : "It may be stuck, or busy with a long command."}`
               : `${r.agentName ?? "An agent"}'s run${r.ticketTitle ? ` on "${r.ticketTitle}"` : ""} never started: the runner hasn't reported it beginning in ${ago(r.idle)}, probably because the runner restarted. Cancel it, then message ${r.agentName ?? "the agent"} on the task to start again.`,
             options: [KEEP_WAITING, CANCEL_RUN],
             recommended: r.run.lastEventAt ? KEEP_WAITING : CANCEL_RUN,
@@ -347,18 +434,24 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       .select({ id: tickets.id, title: tickets.title, companyId: tickets.companyId })
       .from(tickets)
       .innerJoin(companies, eq(companies.id, tickets.companyId))
-      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false), lte(tickets.lastActivityAt, new Date(t.getTime() - limits.mergeMissedAfterMs))));
+      .where(and(eq(tickets.systemState, "review"), eq(companies.paused, false)));
     let raised = 0;
     for (const ticket of stuck) {
       const rows = await latestRows(db, ticket.id);
       if (!rows.length || evaluate(rows) !== "passed") continue;
+      // Quiet is measured from the last approval, and a merge that is alive holds the sweep back. Chat, chases
+      // and note refreshes on the ticket don't count: they used to postpone the retry for good (BOS-362).
+      if (opts.landingActive?.(ticket.id)) continue;
+      const approvedAt = Math.max(...rows.map((r) => (r.decidedAt ?? r.createdAt).getTime()));
+      if (approvedAt > t.getTime() - limits.mergeMissedAfterMs) continue;
       const [signoff] = await db
         .select({ id: decisions.id })
         .from(ticketDependencies)
         .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
         .where(and(eq(ticketDependencies.blockedTicketId, ticket.id), eq(decisions.status, "open")));
       if (signoff) continue;
-      const [asked] = await db.select({ id: decisions.id }).from(decisions).where(eq(decisions.dedupeKey, `merge-stuck:${ticket.id}`));
+      // Only an open card counts: an answered or withdrawn one must not stop the sweep (BOS-362).
+      const [asked] = await db.select({ id: decisions.id }).from(decisions).where(and(eq(decisions.dedupeKey, `merge-stuck:${ticket.id}`), eq(decisions.status, "open")));
       if (asked) continue;
       if (opts.retryLand && !retried.has(ticket.id)) {
         retried.add(ticket.id);
@@ -485,4 +578,33 @@ export function sweepService(db: Db, opts: { limits?: Partial<SweepLimits>; now?
       return { goalChecks, staleBlockers: staleB, stalledRuns: stalled, missedWork: missed, stalledReviews: reviews, lostRuns: lost, unmergedApprovals: unmerged, longTicketlessRuns: ticketless };
     },
   };
+}
+
+/**
+ * Closes a run's stall alert the moment the run ends or speaks again (BOS-217), so it rarely sits
+ * on the CEO's or the owner's queue until the next sweep. One line of why is recorded. Safe to
+ * call for any event: an event that isn't about a run, or a run with no open alert, does nothing.
+ */
+export async function closeStallAlertForRun(db: Db, runId: string, now: () => Date = () => new Date()) {
+  const [run] = await db.select({ endedAt: runs.endedAt, lastEventAt: runs.lastEventAt }).from(runs).where(eq(runs.id, runId));
+  if (!run) return 0;
+  const t = now();
+  const open = await db
+    .select({ id: decisions.id, companyId: decisions.companyId, question: decisions.question, context: decisions.context })
+    .from(decisions)
+    .where(and(eq(decisions.kind, "stalled_run"), eq(decisions.status, "open"), sql`${decisions.context}->>'runId' = ${runId}`));
+  let closed = 0;
+  for (const d of open) {
+    const ended = run.endedAt;
+    const note = ended ? `the run ended normally at ${hhmm(ended)}${run.lastEventAt && run.lastEventAt > ended ? ", then spoke again" : ""}` : "the run is active again";
+    const [done] = await db
+      .update(decisions)
+      .set({ status: "withdrawn", answeredAt: t, dedupeKey: null, context: { ...(d.context as object), withdrawn: { by: "system", note, at: t.toISOString() } } })
+      .where(and(eq(decisions.id, d.id), eq(decisions.status, "open")))
+      .returning({ id: decisions.id });
+    if (!done) continue;
+    closed++;
+    await record(db, { companyId: d.companyId, kind: "decision_withdrawn", summary: `Boss Man closed "${d.question.slice(0, 120)}" by itself: ${note}`, at: t });
+  }
+  return closed;
 }

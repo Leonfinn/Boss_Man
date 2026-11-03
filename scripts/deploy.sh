@@ -32,7 +32,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 # True when the files changed between two commits mean the runners need a new image.
 needs_runner() { # old new
-  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|packages/shared/|pnpm-lock\.yaml$)'
+  git diff --name-only "$1" "$2" | grep -Eq '^(apps/runner/|apps/launcher/|apps/netguard/|packages/shared/|pnpm-lock\.yaml$)'
 }
 
 DRY=0 FORCE=0 RUNNER=auto YES=0 ROLLBACK=0 COMMIT=
@@ -59,7 +59,7 @@ backup_db() {
   mkdir -p "$BACKUP_DIR"
   BACKUP="$BACKUP_DIR/bossman-$(date +%F-%H%M).sql.gz"
   if ((DRY)); then say "[dry-run] pg_dump | gzip > $BACKUP (then check it is not empty and gzip -t passes)"; return; fi
-  docker compose exec -T db pg_dump -U bossman bossman | gzip >"$BACKUP.partial" || { rm -f "$BACKUP.partial"; die "The backup failed. Nothing was changed."; }
+  (umask 077; docker compose exec -T db pg_dump -U bossman bossman | gzip >"$BACKUP.partial") || { rm -f "$BACKUP.partial"; die "The backup failed. Nothing was changed."; }
   if ! { [[ -s $BACKUP.partial ]] && gzip -t "$BACKUP.partial"; }; then rm -f "$BACKUP.partial"; die "The backup is empty or damaged. Nothing was changed."; fi
   mv "$BACKUP.partial" "$BACKUP"
   say "Backup saved: $BACKUP ($(du -h "$BACKUP" | cut -f1))"

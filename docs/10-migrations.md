@@ -23,6 +23,16 @@ ALTER TABLE "x" DROP COLUMN "old_col";
 
 A release that ships a `contract-ok` migration cannot be rolled back without a database restore; say so in its approval text. Generate migrations with `pnpm db:generate`.
 
+### Number clashes between branches (BOS-219)
+
+Drizzle names a migration by its number, so two branches that both add `0075_...` cannot both land: the second to merge collides with the first (that cost four tickets hours on 28–29 Oct). Two things now catch it before the merge:
+
+- **The lint fails a real clash.** Two files with the same number in one folder, two journal entries on one number, a journal entry with no file, or a file the journal doesn't list all fail `scripts/lint-migrations.mjs`, and so `scripts/check-all.sh` (CI runs both run).
+- **Branches are compared, not just one folder.** When a ticket moves to review and again just before it merges, the runner reads the branch, `origin/main` and the other open tickets' branches from its bare clone and says whether the ticket's new migration numbers are already taken. On a clash the ticket goes back with the next free number right now, rather than waiting for a merge to fail. `when` values still only increase: a branch whose new journal entry isn't later than the one already applied is also sent back.
+
+Rename a clashing migration to the number you're given (e.g. `0075_x.sql` → `0076_x.sql`), update its entry in `_journal.json` with a later `when`, regenerate the snapshot with `pnpm db:generate`, run the checks, then move the ticket back to review.
+
+
 ## Rules for server code (`apps/server/src`)
 
 1. **In-memory state needs a note.** A module- or service-level `new Map()` / `new Set()` is state a restart loses and a second server would not share. Put `// shortcut: <the limit>, <when to upgrade>` (or "lost on restart, harmless because ...") on the line or within three lines above. `scripts/check-in-memory-state.mjs` fails CI on an unannotated one. It only looks at declarations indented two spaces or less and with an empty constructor; maps filled inside a function are not state.
