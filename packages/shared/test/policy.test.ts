@@ -491,53 +491,42 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
     expect(recommendedVerdict(exec("find /tmp/x.y -name '*.log' -delete"))).toBe("allow");
   });
 
-  it("does not suggest Allow when an option comes before a package runner's subcommand (BOS-165 security round 4)", () => {
-    // Security review: the round-3 check read the literal second word, so any leading option got past it.
+  it("does not suggest Allow when an option comes before a package runner's subcommand (BOS-165 security rounds 4-6)", () => {
+    // Rounds 3-5 each found one more option spelling that slipped a runner past. Round 6 stops
+    // counting option values: exempt only when the word right after the program is on PKG_SCRIPTS,
+    // so any leading option, whatever its arity, means not exempt.
     for (const c of [
+      // Round 4: any leading option got past a check that read the literal second word.
       "rm -rf /tmp/a && pnpm --silent dlx rimraf /home/node",
       "rm -rf /tmp/a && pnpm -C /home/node exec rimraf .",
       "rm -rf /tmp/a && npm --yes exec -- rimraf /home/node",
       "rm -rf /tmp/a && yarn -s dlx rimraf /home/node",
       "rm -rf /tmp/a && pnpm --filter x --silent exec -- rm -rf /home/node",
       "rm -rf /tmp/a && npm --prefix=/home/node exec -- rimraf .",
-    ]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
-    // An ordinary project script, options or not, still reads as Allow so the fix doesn't over-correct.
-    for (const c of [
-      "rm -rf /tmp/a && pnpm install",
-      "rm -rf /tmp/a && pnpm run build",
-      "rm -rf /tmp/a && pnpm --silent run build",
-      "rm -rf /tmp/a && pnpm -C packages/shared test",
-      "rm -rf /tmp/a && npm --prefix web ci",
-    ]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
-  });
-
-  it("does not suggest Allow when a leading package option hides the runner (BOS-165 security round 5)", () => {
-    // Code and security review: round 4 guessed each option's arity, wrongly both ways. A value
-    // option it didn't know let its value read as the subcommand; a plain flag it took for a value
-    // option skipped the real subcommand. An unknown leading option now means not exempt.
-    for (const c of [
-      // Rex, round 5: --silent is a plain flag in pnpm, so "dlx" was skipped and "test"/"build"/"lint" read as a script.
+      // Round 5, Rex: --silent/-s are plain flags, so the runner was skipped and a script word read.
       "rm -rf /tmp/a && pnpm --silent dlx build rm /home/x",
       "rm -rf /tmp/a && pnpm --silent dlx test > /home/x",
       "rm -rf /tmp/a && pnpm --silent dlx lint /home/node",
-      // Jane, round 5: a value option it didn't know had its value read as the subcommand.
+      "rm -rf /tmp/a && pnpm -s dlx build /home/node",
+      // Round 5, Jane: a value option it didn't know had its value read as the subcommand.
       "rm -rf /tmp/a && pnpm --store-dir test dlx rimraf /home/node",
       "rm -rf /tmp/a && npm --userconfig run exec -- rimraf /home/node",
+      "rm -rf /tmp/a && pnpm --cache build exec rimraf /home/node",
       "rm -rf /tmp/a && pnpm --cache run dlx rimraf /home/node",
-      // Jane, round 5: a plain flag it took for a value option skipped the real subcommand.
-      "rm -rf /tmp/a && pnpm -s dlx build /home/node",
-      // A short cluster that might carry a value, and a bare unknown --opt=value before the runner.
+      // A short cluster that might carry a value, and a bare --opt=value before the runner.
       "rm -rf /tmp/a && pnpm -sC /home/node dlx rimraf .",
       "rm -rf /tmp/a && pnpm --store-dir=/home/node dlx rimraf .",
     ]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
-    // Fail-closed only for what it can't vouch for: known flags and known value options still read as Allow.
+    // The subcommand right after the program is still exempt, so ordinary project scripts read as Allow.
     for (const c of [
-      "rm -rf /tmp/a && pnpm --silent run build",
-      "rm -rf /tmp/a && pnpm -C packages/shared test",
-      "rm -rf /tmp/a && pnpm --filter x --workspace run build",
-      "rm -rf /tmp/a && pnpm --loglevel silent run test",
-      "rm -rf /tmp/a && npm --prefix web ci",
+      "rm -rf /tmp/a && pnpm install",
+      "rm -rf /tmp/a && pnpm run build",
+      "rm -rf /tmp/a && pnpm build",
+      "rm -rf /tmp/a && pnpm test",
+      "rm -rf /tmp/a && yarn typecheck",
     ]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+    // A leading option now means not exempt, even for an ordinary script: a needless Deny, by design.
+    expect(recommendedVerdict(exec("rm -rf /tmp/a && pnpm --silent run build"))).toBe("deny");
   });
 
   it("gives no /tmp note to a command that sets a variable (security round 11)", () => {

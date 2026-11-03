@@ -44,21 +44,14 @@ const GIT_VALUE_OPTS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--names
 const PKG = new Set(["npm", "pnpm", "yarn"]);
 const PKG_INSTALL = new Set(["install", "i", "add", "ci", "remove", "uninstall"]);
 /**
- * Package-manager options before the subcommand, by whether they take the next word as their value
- * (BOS-165 security round 5). Guessing was wrong in both directions: a value option left off the
- * list had its value read as the subcommand (`pnpm --store-dir test dlx …` read "test"), and a
- * plain flag on the list skipped the real one (`pnpm -s dlx build` read "build"). Fail closed: an
- * option on neither list means the segment is not exempt.
- */
-const PKG_FLAGS = new Set(["--silent", "-s", "-w", "--workspace", "--yes", "-y"]);
-const PKG_VALUE_OPTS = new Set(["-C", "--dir", "--prefix", "--cwd", "--filter", "--registry", "--reporter", "--loglevel"]);
-/**
  * Package-manager subcommands that are the project's own work (an install, its scripts and the
  * project's build/test/lint), so their writes belong to the project and never aim at a named
  * target. An allow-list, not a denylist (BOS-165 security round 4): anything else — dlx, exec,
  * create, publish, an unknown subcommand — runs a program on any folder, so it is not exempt.
- * Found by skipping leading options and their values, so `pnpm --silent dlx …` is not mistaken
- * for a run of the `--silent` "script".
+ * Only a subcommand right after the program counts (round 6): any leading option, whatever its
+ * arity, means not exempt. Counting options' values was a losing game — rounds 3-5 each found one
+ * more spelling that slipped a runner past — and losing Allow on `pnpm --silent run build` costs
+ * little.
  */
 const PKG_SCRIPTS = new Set(["install", "i", "add", "ci", "remove", "uninstall", "run", "run-script", "build", "test", "t", "typecheck", "lint", "start"]);
 
@@ -482,28 +475,15 @@ export function tempCleanup(command: string): boolean {
 }
 
 /**
- * The subcommand a package-manager segment runs (BOS-165 security round 4, made fail-closed in
- * round 5): the first word after the program that isn't an option or an option's value.
- * `pnpm --silent dlx rimraf …` reads "dlx", not "--silent", so a leading option can no longer
- * smuggle a program runner past PKG_SCRIPTS. An option on neither list (--store-dir, --userconfig,
- * a cluster like -sC) might take a value, so its value could be read as the subcommand: return ""
- * and the segment is not exempt. Empty when there is none.
+ * The subcommand a package-manager segment runs (BOS-165 security round 4, simplified in round 6):
+ * the word right after the program, and only that word. `pnpm --silent dlx rimraf …` reads
+ * "--silent", not "dlx" or "test", so a leading option can never smuggle a program runner past
+ * PKG_SCRIPTS — whatever the option's arity. Empty when the segment is just the program or the
+ * first word is an option.
  */
 function pkgSubcommand(seg: string): string {
-  const words = seg.trim().split(/\s+/).slice(1);
-  for (let i = 0; i < words.length; i++) {
-    const w = words[i]!;
-    if (w.startsWith("-")) {
-      // A --opt=value carries its own value; a known flag takes none; a known value option
-      // swallows the next word. Anything else means we can't tell what the subcommand is.
-      if (w.includes("=")) continue;
-      if (PKG_FLAGS.has(w)) continue;
-      if (PKG_VALUE_OPTS.has(w)) { i++; continue; }
-      return "";
-    }
-    return w;
-  }
-  return "";
+  const first = seg.trim().split(/\s+/)[1] ?? "";
+  return first.startsWith("-") ? "" : first;
 }
 
 /**
