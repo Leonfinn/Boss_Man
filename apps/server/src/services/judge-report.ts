@@ -1,6 +1,7 @@
 import { and, eq, gte, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { decisions } from "../db/schema.js";
+import { judgePermission, PUSHING } from "@boss-man/shared";
 
 /** Rows the BOS-339 act level may never touch (band A, hard gates). Everything else the judge can name is band B. */
 export const BAND_A_ROWS = ["outward", "secret", "privateNet", "others", "kills", "opaque"] as const;
@@ -22,7 +23,7 @@ export interface JudgeReport {
   /** Same, using the rules judge alone. */
   agreementRulesOnly: { agreed: number; compared: number; pct: number | null };
   /** Judge allowed, human denied. Combined advice first; rulesOnly ignores the model. */
-  falseAllows: { band: { A: number; B: number }; total: number; rulesOnlyTotal: number };
+  falseAllows: { band: { A: number; B: number; unknown: number }; total: number; rulesOnlyTotal: number };
   /** Same, split by who answered: the CEO settling it, or the owner. */
   answeredBy: { ceo: number; owner: number };
   /** Rules judge: count by row, each split by what the human did. */
@@ -32,6 +33,23 @@ export interface JudgeReport {
   second: { asked: number; allow: number; deny: number; failed: number; pending: number; denyHumanAllowed: number };
 }
 
+type Ctx = { explain?: { title?: string; summary?: string; command?: string; push?: { dangerous?: boolean } } };
+
+/**
+ * Band of a card, read from the card itself and not from the judge's own row (a judge allow always has row "ok").
+ * A: the stored command or text is a hard gate (outward, secret, privateNet, others, kills, opaque), found by re-running
+ * the rules on the stored command, a dangerous push reading, or the push/publish pattern. B: anything else.
+ * unknown: the card kept no explanation to read.
+ */
+export function bandOf(ctx: Ctx): "A" | "B" | "unknown" {
+  const e = ctx.explain;
+  if (!e || (e.command == null && !e.summary)) return "unknown";
+  if (e.push?.dangerous) return "A";
+  if (e.command && new RegExp(PUSHING).test(e.command)) return "A";
+  const again = judgePermission(`${e.title ?? ""}. ${e.summary ?? ""}`, e.command ?? null);
+  return (BAND_A_ROWS as readonly string[]).includes(again.row) ? "A" : "B";
+}
+
 interface Row { answer: string | null; context: unknown }
 
 /** Pure: turns answered permission rows into the report. Exported for tests. */
@@ -39,7 +57,7 @@ export function summarise(rows: Row[], from: Date, to: Date): JudgeReport {
   const r: JudgeReport = {
     from: from.toISOString(), to: to.toISOString(), judged: 0, unclassified: 0, compared: 0,
     agreement: { agreed: 0, compared: 0, pct: null }, agreementRulesOnly: { agreed: 0, compared: 0, pct: null },
-    falseAllows: { band: { A: 0, B: 0 }, total: 0, rulesOnlyTotal: 0 },
+    falseAllows: { band: { A: 0, B: 0, unknown: 0 }, total: 0, rulesOnlyTotal: 0 },
     answeredBy: { ceo: 0, owner: 0 }, rulesByRow: {}, rulesVerdicts: tally(),
     second: { asked: 0, allow: 0, deny: 0, failed: 0, pending: 0, denyHumanAllowed: 0 },
   };
@@ -74,7 +92,7 @@ export function summarise(rows: Row[], from: Date, to: Date): JudgeReport {
       r.falseAllows.rulesOnlyTotal++;
       if (combined === "allow") {
         r.falseAllows.total++;
-        (BAND_A_ROWS as readonly string[]).includes(j.row) ? r.falseAllows.band.A++ : r.falseAllows.band.B++;
+        const b = bandOf(ctx as Ctx); if (b === "A") r.falseAllows.band.A++; else if (b === "B") r.falseAllows.band.B++; else r.falseAllows.band.unknown++;
       }
     }
   }
@@ -83,7 +101,7 @@ export function summarise(rows: Row[], from: Date, to: Date): JudgeReport {
   return r;
 }
 
-/** Read-only: one SELECT over answered permission cards created in [from, to). */
+/** Read-only: one SELECT over answered permission cards answered in [from, to). */
 export async function judgeReport(db: Db, opts: { from: Date; to: Date; companyId?: string }): Promise<JudgeReport> {
   const rows = await db
     .select({ answer: decisions.answer, context: decisions.context })
@@ -101,7 +119,7 @@ export function formatReport(r: JudgeReport): string {
     `Answered by: CEO ${r.answeredBy.ceo}, owner ${r.answeredBy.owner}`,
     `Agreement, combined advice: ${p(r.agreement)}`,
     `Agreement, rules judge only: ${p(r.agreementRulesOnly)}`,
-    `Safety false allows (judge allowed, human denied): ${r.falseAllows.total} (band A ${r.falseAllows.band.A}, band B ${r.falseAllows.band.B}); rules judge alone: ${r.falseAllows.rulesOnlyTotal}`,
+    `Safety false allows (judge allowed, human denied): ${r.falseAllows.total} (band A ${r.falseAllows.band.A}, band B ${r.falseAllows.band.B}, band unknown ${r.falseAllows.band.unknown}); rules judge alone: ${r.falseAllows.rulesOnlyTotal}`,
     `Rules judge verdicts: allow ${r.rulesVerdicts.allow}, deny ${r.rulesVerdicts.deny}, uncertain ${r.rulesVerdicts.uncertain}`,
     `Model second opinion: asked ${r.second.asked} (allow ${r.second.allow}, deny ${r.second.deny}, failed ${r.second.failed}, pending ${r.second.pending}); said deny but human allowed ${r.second.denyHumanAllowed}`,
     `Per rules-judge row:`,

@@ -10,7 +10,7 @@ if (!url) { console.error("DATABASE_URL is required."); process.exit(1); }
 const to = opt("to") ? new Date(`${opt("to")}T00:00:00Z`) : new Date();
 const from = opt("from") ? new Date(`${opt("from")}T00:00:00Z`) : new Date(to.getTime() - Number(opt("days") ?? 14) * 86_400_000);
 if (Number.isNaN(+from) || Number.isNaN(+to)) { console.error("Bad date."); process.exit(1); }
-// migrate:false would assert; the report must not change the schema, so skip both by checking only.
+// openPostgres still checks that the schema is up to date (assertMigrated) but, with migrate:false, never changes it.
 const { db, close } = await openPostgres(url, { migrate: false });
 try {
   const r = await judgeReport(db, { from, to, companyId: opt("company") });
