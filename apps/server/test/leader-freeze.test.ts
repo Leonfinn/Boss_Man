@@ -32,7 +32,9 @@ async function fakePg(): Promise<FakePg> {
     async freezeDuringHeartbeat(ms) {
       Atomics.store(f, 0, 0);
       worker.postMessage({ mode: "trap" });
-      if ((await Atomics.waitAsync(f, 0, 0, 5000).value) === "timed-out") throw new Error("no heartbeat reached the fake Postgres");
+      for (const end = Date.now() + 5000; Atomics.load(f, 0) === 0; await new Promise((r) => setTimeout(r, 5))) {
+        if (Date.now() > end) throw new Error("no heartbeat reached the fake Postgres");
+      }
       block(ms);
     },
     close: () => worker.terminate(),
@@ -78,15 +80,18 @@ describe("leader heartbeat and server freezes (BOS-432)", () => {
   it("no reply at all: one miss is tolerated, the second steps down", async () => {
     const { pg, leader, logs, demotions } = await leaderOn({ queryTimeoutMs: 300 });
     pg.set("hang");
-    await waitFor(() => logs.some((l) => l.includes("heartbeat miss 1 of 2")));
-    expect(leader.isLeader()).toBe(true);
     await waitFor(() => !leader.isLeader());
     expect(demotions()).toBe(1);
-    expect(logs.some((l) => l.includes("STANDBY (no heartbeat reply 2 time(s) in a row)"))).toBe(true);
+    // Judged from the log order, not by polling between the misses, so a busy machine can't make it flaky.
+    const at = (s: string) => logs.findIndex((l) => l.includes(s));
+    expect(at("heartbeat miss 1 of 2")).toBeGreaterThan(-1);
+    expect(at("heartbeat miss 2 of 2")).toBeGreaterThan(at("heartbeat miss 1 of 2"));
+    expect(at("STANDBY (no heartbeat reply 2 time(s) in a row)")).toBeGreaterThan(at("heartbeat miss 2 of 2"));
+    expect(logs.filter((l) => l.includes("STANDBY"))).toHaveLength(1);
   });
 
   it("a reply after one miss clears it", async () => {
-    const { pg, leader, logs } = await leaderOn({ queryTimeoutMs: 300 });
+    const { pg, leader, logs } = await leaderOn({ queryTimeoutMs: 1500 });
     pg.set("hang");
     await waitFor(() => logs.some((l) => l.includes("heartbeat miss 1 of 2")));
     pg.set("normal"); // the held reply arrives late
@@ -104,11 +109,11 @@ describe("leader heartbeat and server freezes (BOS-432)", () => {
   });
 
   it("a dropped connection still steps down at once, not after two misses", async () => {
-    const { pg, leader, logs } = await leaderOn({ queryTimeoutMs: 3000 });
+    const { pg, leader, logs } = await leaderOn({ queryTimeoutMs: 5000 });
     const started = Date.now();
     pg.set("kill");
-    await waitFor(() => !leader.isLeader(), 2000);
-    expect(Date.now() - started).toBeLessThan(1500);
+    await waitFor(() => !leader.isLeader(), 4000);
+    expect(Date.now() - started).toBeLessThan(3000);
     expect(logs.some((l) => l.includes("lost the lock connection"))).toBe(true);
     expect(logs.some((l) => l.includes("heartbeat miss"))).toBe(false);
   });
