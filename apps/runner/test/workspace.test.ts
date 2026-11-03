@@ -102,6 +102,15 @@ describe("git workspaces (R38)", () => {
     expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(3);
   });
 
+  it("lets seven runs start at once on one repo and all get a workspace", async () => {
+    const r = remote();
+    const ws = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    const tickets = Array.from({ length: 7 }, (_, i) => `${i}0000000-0000-4000-8000-000000000000`);
+    const made = await Promise.all(tickets.map((ticketId) => ws.ensure({ projectId: ids.project, ticketId, repoUrl: r.dir, baseRef: "main" })));
+    expect(made.every((m) => m.created)).toBe(true);
+    expect(git(ws.repoDir(ids.project), "worktree", "list").split("\n")).toHaveLength(8);
+  });
+
   it("passes a git token through the environment only", () => {
     const env = gitAuthEnv({ GIT_TOKEN: "ghp_x" });
     expect(env).toMatchObject({ GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader" });

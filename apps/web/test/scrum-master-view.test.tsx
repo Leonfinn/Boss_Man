@@ -2,7 +2,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpenIssues } from "../src/components/OpenIssues";
-import { actionHeading, ScrumMasterLog } from "../src/components/ScrumMasterLog";
+import { actionHeading, actionSummary, ScrumMasterLog, type SmAction } from "../src/components/ScrumMasterLog";
 import { healthLine } from "../src/components/WatchdogHealth";
 
 afterEach(() => {
@@ -109,5 +109,90 @@ describe("Scrum Master activity (BOS-60)", () => {
     expect(await screen.findByText("Would have woken the Scrum Master")).toBeTruthy();
     expect(screen.getByText("Not sent")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Undo" })).toBeNull();
+  });
+});
+
+describe("a ticket page's folded Scrum Master section (BOS-251)", () => {
+  const warning = (id: string, at: string, status: "open" | "settled", label: string, reason: string, extra: Partial<SmAction> = {}): SmAction => ({
+    ...extra,
+    id,
+    kind: "alert_hop",
+    ticketId: "t1",
+    ticketRef: "BOS-251",
+    reason,
+    actorName: "Boss Man",
+    createdAt: at,
+    undoable: false,
+    undoneAt: null,
+    after: null,
+    warning: "Developer has sent nothing for 5 minutes",
+    issueKey: `alert:${id}`,
+    issueStatus: status,
+    issueLabel: label,
+    targetIsCeo: true,
+  });
+  const stub = (rows: SmAction[]) =>
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(rows), { status: 200, headers: { "content-type": "application/json" } })),
+    );
+  const openStates = (container: HTMLElement) => [...container.querySelectorAll("details")].map((d) => d.open);
+
+  it("summarises the day's warnings, shows the last 3 newest first and keeps an older open one in view", async () => {
+    stub([
+      warning("a4", "2026-10-27T23:27:00Z", "settled", "4th warning on BOS-251 today", "Run ended, the ticket is in review."),
+      warning("a3", "2026-10-27T21:10:00Z", "settled", "3rd warning on BOS-251 today", "Review looks stuck."),
+      warning("a2", "2026-10-27T20:40:00Z", "settled", "2nd warning on BOS-251 today", "Nudged the reviewer."),
+      warning("a1", "2026-10-27T19:00:00Z", "settled", "1st warning on BOS-251 today", "Nudged the developer."),
+      warning("a0", "2026-10-27T09:00:00Z", "open", "1st warning on BOS-251 today", "Passed on at the hourly limit."),
+    ]);
+    const { container } = render(<ScrumMasterLog companyId="c1" ticketId="t1" folded />);
+    expect(await screen.findByText("5 warnings today · 1 open")).toBeTruthy();
+    const lines = [...container.querySelectorAll("summary")].map((s) => s.textContent ?? "");
+    // The open one from this morning, then the newest 3 settled: the last 3 plus the open one, never more.
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toContain("Open");
+    expect(lines[0]).toContain("Passed to the CEO: Passed on at the hourly limit.");
+    expect(lines[1]).toContain("Passed to the CEO: Run ended, the ticket is in review.");
+    expect(lines[2]).toContain("Review looks stuck.");
+    expect(lines[3]).toContain("Nudged the reviewer.");
+    expect(lines[1]).toContain("Settled");
+    // The ticket you're on isn't named again, and the long title isn't repeated.
+    expect(container.textContent).not.toContain("BOS-251");
+    // Folded: nothing expanded yet, and the hidden ones are one click away.
+    expect(openStates(container)).toEqual([false, false, false, false]);
+    fireEvent.click(screen.getByRole("button", { name: /Show all 5 actions/ }));
+    expect(openStates(container)).toHaveLength(5);
+    expect(openStates(container).every(Boolean)).toBe(true);
+  });
+
+  it("opens one line on its own, and the heading opens every action", async () => {
+    stub([
+      { ...warning("a2", "2026-10-27T21:27:00Z", "settled", "2nd warning on BOS-251 today", "Run ended."), kind: "alert_resolved", actorName: "Scrum Master" },
+      warning("a3", "2026-10-27T21:10:00Z", "settled", "1st warning on BOS-251 today", "Review looks stuck."),
+    ]);
+    const { container } = render(<ScrumMasterLog companyId="c1" ticketId="t1" folded />);
+    expect(await screen.findByText("2 warnings today · all settled")).toBeTruthy();
+    expect(screen.getByText("Settled by Scrum Master: Run ended.")).toBeTruthy();
+    container.querySelector("details")!.open = true;
+    expect(openStates(container)).toEqual([true, false]);
+    fireEvent.click(screen.getByRole("button", { name: /Scrum Master/ }));
+    expect(openStates(container)).toEqual([true, true]);
+  });
+
+  it("names who a warning went to when it is the Scrum Master, and lists plain actions one line each", async () => {
+    expect(actionSummary({ kind: "alert_resolved", actorName: "Scrum Master" })).toBe("Settled by Scrum Master");
+    expect(actionSummary({ kind: "alert_hop", targetIsScrumMaster: true, targetName: "Scrum Master" })).toBe("Passed to the Scrum Master");
+    expect(actionSummary({ kind: "alert_hop", targetIsCeo: true, targetName: "Ada" })).toBe("Passed to the CEO");
+    expect(actionSummary({ kind: "nudge", targetName: "Sam" })).toBe("Nudged");
+
+    stub([
+      { id: "a2", kind: "nudge", ticketId: "t1", reason: "No movement for 3 h", actorName: "Scrum Master", createdAt: "2026-10-27T21:00:00Z", undoable: true, undoneAt: null, after: null },
+      { id: "a1", kind: "rewake", ticketId: "t1", reason: "Carry on from the merge", actorName: "Scrum Master", createdAt: "2026-10-27T09:00:00Z", undoable: false, undoneAt: null, after: null },
+    ]);
+    render(<ScrumMasterLog companyId="c1" ticketId="t1" folded />);
+    expect(await screen.findByText("2 actions · all settled")).toBeTruthy();
+    expect(screen.getByText("Nudged: No movement for 3 h")).toBeTruthy();
+    expect(screen.getByText("Re-woke: Carry on from the merge")).toBeTruthy();
   });
 });
