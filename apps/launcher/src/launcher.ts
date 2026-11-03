@@ -1,11 +1,11 @@
 // The launcher's API (R55): five calls, each about one company's runner, and nothing else.
 // The server holds the key; Docker is reached only from here, with a spec the launcher builds.
 import { timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { DockerError, type Docker } from "./docker.js";
-import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
+import { COMPANY_LABEL, companyDir, containerName, containerSpec, IMAGE, LABEL, MOUNTS, netguardDir, netguardName, netguardSpec, NETGUARD_LABEL, NETGUARD_UNAVAILABLE_EXIT, parseAllow, SLUG, tokenFile, type LauncherConfig } from "./spec.js";
 
 const TOKEN = /^bmr_[A-Za-z0-9_-]{20,200}$/;
 const MAX_BODY = 4096;
@@ -20,7 +20,21 @@ export class LauncherError extends Error {
 }
 
 /** `current` is true when the container runs the image `boss-man-runner:current` points at now. */
-export type RunnerStatus = { slug: string; state: string; status: string; image: string; current: boolean };
+export type RunnerStatus = { slug: string; state: string; status: string; image: string; current: boolean; guard: GuardStatus };
+/** "on": the guard is loaded; "off": turned off by BOSSMAN_NETGUARD=off; "unavailable": this host can't load the rules (BOSSMAN_NETGUARD=auto lets the runner go without). */
+export type GuardStatus = "on" | "off" | "unavailable";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The guard didn't come up. `hostCannot`: it said so itself (exit code 3), so retrying won't help. */
+class GuardUnavailable extends Error {
+  constructor(
+    readonly hostCannot: boolean,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 export function launcher(cfg: LauncherConfig, docker: Docker) {
   /** The container for a slug, if the launcher made it; anything else under that name is refused. */
@@ -32,63 +46,189 @@ export function launcher(cfg: LauncherConfig, docker: Docker) {
     return c;
   }
 
+  /** The slug's network guard, if there is one; a container of that name that isn't ours is refused. */
+  async function guardOf(slug: string) {
+    const g = await docker.inspect(netguardName(slug));
+    if (!g) return null;
+    const labels = g.Config.Labels ?? {};
+    if (labels[NETGUARD_LABEL] !== "1" || labels[COMPANY_LABEL] !== slug) throw new LauncherError(409, `A container called ${netguardName(slug)} exists that the launcher didn't make; it won't touch it.`);
+    return g;
+  }
+
+  /** Runs one slug's work after the previous work for that slug: guards are removed and made by name, so two at once would collide. */
+  const chains = new Map<string, Promise<unknown>>();
+  function locked<T>(slug: string, work: () => Promise<T>): Promise<T> {
+    const run = (chains.get(slug) ?? Promise.resolve()).then(work, work);
+    const tail = run.catch(() => undefined);
+    chains.set(slug, tail);
+    void tail.then(() => chains.get(slug) === tail && chains.delete(slug));
+    return run;
+  }
+
+  const mode = cfg.guardMode ?? "auto";
+  /** Companies whose guard can't run on this host (auto mode); set when the guard exits with netguard.sh's "no nftables" code. */
+  const unavailable = new Set<string>();
+
+  /** Waits until the guard has loaded its rules (its healthcheck passes); throws if it stops first. */
+  async function guardReady(slug: string) {
+    const deadline = Date.now() + (cfg.guardReadyMs ?? 20_000);
+    for (;;) {
+      const g = await guardOf(slug);
+      if (!g || g.State.Status === "exited" || g.State.Status === "dead") throw new GuardUnavailable(g?.State.ExitCode === NETGUARD_UNAVAILABLE_EXIT, `The network guard for ${slug} stopped (exit code ${g?.State.ExitCode ?? "unknown"}); see \`docker logs ${netguardName(slug)}\`.`);
+      if (g.State.Health?.Status === "healthy") return;
+      if (Date.now() > deadline) throw new GuardUnavailable(false, `The network guard for ${slug} didn't load its rules in time.`);
+      await sleep(250);
+    }
+  }
+
+  /**
+   * (Re)starts the guard in the runner's network namespace and waits for its rules. It must follow
+   * every runner start, because a restart makes a new namespace. Throws unless the runner is guarded,
+   * or (auto mode) the host can't run the guard at all, which is then reported as "unavailable".
+   */
+  async function guard(slug: string, runnerId: string) {
+    unavailable.delete(slug);
+    if (mode === "off") return;
+    try {
+      const old = await guardOf(slug);
+      if (old) await docker.remove(old.Id);
+      mkdirSync(netguardDir(cfg, slug), { recursive: true, mode: 0o755 });
+      await docker.start(await docker.create(netguardName(slug), netguardSpec(cfg, slug, runnerId)));
+      await guardReady(slug);
+    } catch (err) {
+      if (err instanceof GuardUnavailable && err.hostCannot && mode === "auto") {
+        unavailable.add(slug);
+        console.error(JSON.stringify({ at: new Date().toISOString(), msg: "network guard unavailable on this host; the runner is not guarded", slug }));
+        return;
+      }
+      if (err instanceof GuardUnavailable) throw new LauncherError(502, `${err.message}${err.hostCannot ? " This host can't load firewall rules; set BOSSMAN_NETGUARD=auto to run runners without the guard, or off to turn it off." : ""}`);
+      throw err;
+    }
+  }
+
+  /** Writes the tool-server allow list the guard reads (host:port lines); the guard picks it up within 15 s. */
+  function writeAllow(slug: string, hosts: string[]) {
+    const dir = netguardDir(cfg, slug);
+    mkdirSync(dir, { recursive: true, mode: 0o755 });
+    const tmp = path.join(dir, "allow.tmp");
+    writeFileSync(tmp, hosts.map((h) => `${h}\n`).join(""), { mode: 0o644 });
+    chmodSync(tmp, 0o644);
+    renameSync(tmp, path.join(dir, "allow"));
+  }
+
   async function create(slug: string) {
     // Every bind source must exist first: Docker would make a missing one owned by root, which the runner can't write.
     for (const [sub] of MOUNTS) mkdirSync(path.join(companyDir(cfg, slug), sub), { recursive: true, mode: 0o700 });
+    if (!existsSync(path.join(netguardDir(cfg, slug), "allow"))) writeAllow(slug, []);
     const old = await ours(slug);
     if (old) await docker.remove(old.Id);
     const id = await docker.create(containerName(slug), containerSpec(cfg, slug));
     await docker.start(id);
+    try {
+      await guard(slug, id);
+    } catch (err) {
+      // No guard, no runner: a runner that can reach the private networks must not be left running.
+      await docker.remove(id).catch(() => undefined);
+      throw err;
+    }
     return id;
   }
 
   return {
     /** Writes the token, then creates (or recreates) and starts the runner. Data folders are kept. */
-    async put(slug: string, token: string) {
+    put: (slug: string, token: string, allow?: string[]) => locked(slug, async () => {
       mkdirSync(companyDir(cfg, slug), { recursive: true, mode: 0o700 });
       // Written beside the target and renamed, so a runner never reads half a token.
       const tmp = `${tokenFile(cfg, slug)}.tmp`;
       writeFileSync(tmp, token, { mode: 0o600 });
       chmodSync(tmp, 0o600);
       renameSync(tmp, tokenFile(cfg, slug));
+      if (allow) writeAllow(slug, parseAllow(allow));
       const id = await create(slug);
       return { slug, id };
-    },
+    }),
 
-    async restart(slug: string) {
+    /** Replaces the company's tool-server allow list (host:port); no restart, the guard re-reads it. */
+    setAllow: (slug: string, allow: string[]) => locked(slug, async () => {
+      writeAllow(slug, parseAllow(allow));
+      return { slug, allow: parseAllow(allow) };
+    }),
+
+    restart: (slug: string) => locked(slug, async () => {
       const c = await ours(slug);
       if (!c) throw new LauncherError(404, "There's no runner for that company.");
       await docker.restart(c.Id);
+      try {
+        await guard(slug, c.Id);
+      } catch (err) {
+        // No guard, no runner (same as create).
+        await docker.remove(c.Id).catch(() => undefined);
+        throw err;
+      }
       return { slug, id: c.Id };
-    },
+    }),
 
     /** Stops and removes the runner and its token. Its workspaces, journal and sessions stay. */
-    async remove(slug: string) {
+    remove: (slug: string) => locked(slug, async () => {
       const c = await ours(slug);
+      const g = await guardOf(slug);
+      if (g) await docker.remove(g.Id);
       if (c) await docker.remove(c.Id);
+      unavailable.delete(slug);
       rmSync(tokenFile(cfg, slug), { force: true });
       return { slug, removed: !!c };
-    },
+    }),
 
     async list(): Promise<RunnerStatus[]> {
       const all = await docker.list(`${LABEL}=1`);
       const current = await docker.imageId(IMAGE);
       return all
         .filter((c) => SLUG.test(c.Labels[COMPANY_LABEL] ?? "") && c.Names.includes(`/${containerName(c.Labels[COMPANY_LABEL]!)}`))
-        .map((c) => ({ slug: c.Labels[COMPANY_LABEL]!, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current }));
+        .map((c) => ({ slug: c.Labels[COMPANY_LABEL]!, state: c.State, status: c.Status, image: c.Image, current: !!current && c.ImageID === current, guard: (mode === "off" ? "off" : unavailable.has(c.Labels[COMPANY_LABEL]!) ? "unavailable" : "on") as GuardStatus }));
+    },
+
+    /**
+     * Makes sure every running runner has a running guard that started after it. A runner that
+     * restarted on its own (a crash, Docker coming back) has a new network namespace the old
+     * guard isn't in. Returns the companies whose guard it started again. Runs at start and then on a timer.
+     */
+    async reconcileGuards() {
+      const fixed: string[] = [];
+      const errors: string[] = [];
+      for (const r of await this.list()) {
+        if (r.state !== "running" || r.guard !== "on") continue;
+        await locked(r.slug, async () => {
+          // Looked at again inside the lock: a create or restart may have just made a guard.
+          const c = await ours(r.slug);
+          if (!c || c.State.Status !== "running") return;
+          const g = await guardOf(r.slug);
+          const fresh = g && g.State.Status === "running" && new Date(g.State.StartedAt ?? 0).getTime() >= new Date(c.State.StartedAt ?? 0).getTime();
+          if (fresh) return;
+          try {
+            await guard(r.slug, c.Id);
+          } catch (err) {
+            // No guard, no runner: don't leave it running in a namespace with no rules.
+            await docker.remove(c.Id).catch(() => undefined);
+            throw err;
+          }
+          fixed.push(r.slug);
+        }).catch((err: unknown) => errors.push(`${r.slug}: ${String((err as Error)?.message ?? err)}`));
+      }
+      if (errors.length) throw new Error(errors.join("; "));
+      return fixed;
     },
 
     /** One company's runner again on the current image, with its own token: how a drain swaps runners one by one. // leader-only (the server decides when) */
-    async recreate(slug: string) {
+    recreate: (slug: string) => locked(slug, async () => {
       if (!(await ours(slug))) throw new LauncherError(404, "There's no runner for that company.");
       return { slug, id: await create(slug) };
-    },
+    }),
 
     /** For scripts/update-runner.sh --now: every runner again on the current image, with its own token. */
     async recreateAll() {
       const done: string[] = [];
       for (const r of await this.list()) {
-        await create(r.slug);
+        await locked(r.slug, () => create(r.slug));
         done.push(r.slug);
       }
       return done;
@@ -102,6 +242,17 @@ type Log = (entry: Record<string, unknown>) => void;
 function sameKey(given: string, key: Buffer) {
   const g = Buffer.from(given);
   return g.length === key.length && timingSafeEqual(g, key);
+}
+
+/** The { allow: ["host:port", …] } body of the tool-server allow list. */
+function allowFrom(body: unknown): string[] {
+  const allow = body && typeof body === "object" ? (body as { allow?: unknown }).allow : undefined;
+  if (!Array.isArray(allow) || allow.length > 100 || !allow.every((a) => typeof a === "string")) throw new LauncherError(400, "Send { allow: [host:port, …] }.");
+  try {
+    return parseAllow(allow as string[]);
+  } catch (err) {
+    throw new LauncherError(400, (err as Error).message);
+  }
 }
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {
@@ -139,13 +290,17 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
         if (req.method !== "GET") throw new LauncherError(405, "Only GET here.");
         return send(200, await api.list());
       }
-      const m = /^\/runners\/([^/]+)(\/restart|\/recreate)?$/.exec(url.pathname);
+      const m = /^\/runners\/([^/]+)(\/restart|\/recreate|\/allow)?$/.exec(url.pathname);
       if (!m) throw new LauncherError(404, "Unknown call.");
       const slug = decodeURIComponent(m[1]!);
       if (!SLUG.test(slug)) throw new LauncherError(400, "Bad company slug.");
       entry.slug = slug;
       const body = await readJson(req);
 
+      if (m[2] === "/allow") {
+        if (req.method !== "PUT") throw new LauncherError(405, "Only PUT here.");
+        return send(200, await api.setAllow(slug, allowFrom(body)));
+      }
       if (m[2]) {
         if (req.method !== "POST") throw new LauncherError(405, "Only POST here.");
         if (body !== undefined && !(typeof body === "object" && body && Object.keys(body).length === 0)) throw new LauncherError(400, "Restart and recreate take no body.");
@@ -154,10 +309,10 @@ export function launcherServer(api: Api, key: Buffer, log: Log = (e) => console.
       if (req.method === "PUT") {
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new LauncherError(400, "Send { token }.");
         const keys = Object.keys(body);
-        if (keys.length !== 1 || keys[0] !== "token") throw new LauncherError(400, "Only { token } is accepted.");
+        if (!keys.includes("token") || keys.some((k) => k !== "token" && k !== "allow")) throw new LauncherError(400, "Only { token, allow } is accepted.");
         const token = (body as { token: unknown }).token;
         if (typeof token !== "string" || !TOKEN.test(token)) throw new LauncherError(400, "That isn't a runner token.");
-        return send(200, await api.put(slug, token));
+        return send(200, await api.put(slug, token, "allow" in body ? allowFrom({ allow: (body as { allow: unknown }).allow }) : undefined));
       }
       if (req.method === "DELETE") {
         if (body !== undefined) throw new LauncherError(400, "Delete takes no body.");

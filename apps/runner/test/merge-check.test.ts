@@ -1,7 +1,7 @@
 // BOS-313 (F6): the merge gate checks the merge commit it pushes, not the branch on its own.
 // Against a real bare origin: a.txt and b.txt are each fine alone but must not exist together.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -124,5 +124,33 @@ describe("two branches that each pass alone (F6)", () => {
     writeFileSync(hook, "#!/bin/sh\necho protected branch >&2\nexit 1\n", { mode: 0o755 });
     await expect(ws.merge(spec, "main", "Merge B", {}, { commands: ["true"] })).rejects.toThrow(/Couldn.t push the merge to main/);
     expect(existsSync(ws.mergeCheckDir(ids.t))).toBe(false);
+  });
+});
+
+describe("migration journal on the checked path (BOS-360)", () => {
+  const journal = (whens: number[]) =>
+    JSON.stringify({ version: "7", dialect: "postgresql", entries: whens.map((when, idx) => ({ idx, version: "7", when, tag: String(idx + 1).padStart(4, "0") + "_m", breakpoints: true })) });
+  const put = (dir: string, whens: number[]) => {
+    mkdirSync(path.join(dir, "drizzle", "meta"), { recursive: true });
+    writeFileSync(path.join(dir, "drizzle", "meta", "_journal.json"), journal(whens));
+  };
+
+  it("refuses a new migration older than main's newest, and pushes nothing", async () => {
+    const o = origin();
+    const seed = mkdtempSync(path.join(tmpdir(), "bm-mc-seed-"));
+    git(seed, "clone", "-q", o.url, ".");
+    put(seed, [2000]);
+    git(seed, "add", ".");
+    git(seed, "commit", "-qm", "journal");
+    git(seed, "push", "-q", "origin", "HEAD:main");
+    const { ws, spec, w } = await ticketWithCommit(o, "b.txt", "b\n");
+    git(w.path, "pull", "-q", "--no-rebase", "origin", "main");
+    put(w.path, [2000, 1500]);
+    git(w.path, "add", ".");
+    git(w.path, "commit", "-qm", "old when");
+    const before = o.mainSha();
+    const r = await ws.merge(spec, "main", "Merge B", {}, { commands: ["true"] });
+    expect(r.status).toBe("migration_journal");
+    expect(o.mainSha()).toBe(before);
   });
 });
