@@ -16,11 +16,17 @@ export type ServerStatusDeps = {
   role: () => string;
   /** Whether this company's runner has an open socket right now (runnersService.isConnected). */
   isConnected: (runnerId: string) => boolean;
+  /** Whether the runner connected in the last few minutes (runnersService.isSettling). */
+  isSettling?: (runnerId: string, at: Date) => boolean;
+  /** When the runner's current connection opened (runnersService.connectedSince). */
+  connectedSince?: (runnerId: string) => Date | null;
   /** What the host deployer last reported (selfDeployService.overview). */
   deploy: () => Promise<{ enabled: boolean; status: unknown; available: unknown; pending: boolean }>;
   /** The runner-update hold, if one is on (maintenance). */
   hold: () => Promise<{ reason: string; since: string; deadline: string; force?: boolean } | null>;
   errors: ErrorBuffer;
+  /** The last hour of permission decisions for one company (permission-log.ts, BOS-306). */
+  permissions?: (companyId: string) => unknown;
   /** Synthetic's cached quota reading, its age, history and this company's agents paid from it (BOS-239). */
   syntheticUsage?: (companyId: string) => Promise<unknown>;
   commit: string;
@@ -28,7 +34,7 @@ export type ServerStatusDeps = {
   now?: () => Date;
 };
 
-type DeployStatus = { result?: string; to_commit?: string; from_commit?: string; ended?: string; message?: string } | null;
+type DeployStatus = { target?: string; result?: string; to_commit?: string; from_commit?: string; ended?: string; message?: string } | null;
 type Available = { deployed?: string; tip?: string; checkedAt?: string } | null;
 
 const short = (sha: string | undefined | null) => (sha ? sha.slice(0, 8) : null);
@@ -64,6 +70,10 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
     async status(companyId: string) {
       const at = now();
       const [runner] = await db.select({ id: runners.id, imageVersion: runners.imageVersion, harnessVersions: runners.harnessVersions, lastSeenAt: runners.lastSeenAt }).from(runners).where(eq(runners.companyId, companyId));
+      // Mid-swap: an update hold is on and the runner is away, or it only just came back and is
+      // starting its queued runs. "Never started" alerts wait while this is true.
+      const connected = runner ? deps.isConnected(runner.id) : false;
+      const swapping = runner ? (connected ? !!deps.isSettling?.(runner.id, at) : !!(await deps.hold())) : false;
 
       // The ticket each waiting wake is for, and whether it's Urgent, so an urgent wake that is
       // waiting can be found and its reason read (BOS-253).
@@ -104,6 +114,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
       const status = (deploy?.status as DeployStatus) ?? null;
       const available = (deploy?.available as Available) ?? null;
       const recentErrors = deps.errors.recent(20, companyId);
+      // Only a finished SERVER deploy says which commit is live. A refused or failed request (e.g. a runner update) names a commit that never went live.
+      const serverDeployed = status?.target === "server" && status.result === "deployed";
 
       return {
         server: {
@@ -114,8 +126,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         },
         deploy: {
           enabled: !!deploy?.enabled,
-          liveCommit: short(status?.to_commit ?? available?.deployed),
-          liveSince: status?.ended ?? null,
+          liveCommit: short(serverDeployed ? status?.to_commit : (available?.deployed ?? deps.commit)),
+          liveSince: serverDeployed ? (status?.ended ?? null) : null,
           lastResult: status?.result ?? null,
           lastMessage: status?.message ?? null,
           pending: !!deploy?.pending,
@@ -125,7 +137,12 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         maintenance: await deps.hold(),
         migration: await latestMigration(db),
         runner: runner
-          ? { connected: deps.isConnected(runner.id), lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null }
+          ? {
+              connected: deps.isConnected(runner.id),
+              connectedSince: deps.connectedSince?.(runner.id)?.toISOString() ?? null,
+              swapping,
+              lastSeenAt: runner.lastSeenAt?.toISOString() ?? null, imageVersion: runner.imageVersion, harnessVersions: runner.harnessVersions ?? null,
+            }
           : null,
         wakes: {
           waiting: waiting.map((w) => ({ id: w.id, agent: w.agent, reason: w.reason, ticketId: w.ticketId, urgent: !!w.ticketUrgent, held: w.statusReason, waitingSeconds: ageSeconds(w.createdAt, at) })),
@@ -139,6 +156,8 @@ export function serverStatusService(db: Db, deps: ServerStatusDeps) {
         // parameters or a stack. The buffer is server-wide, so lines with no company are counted,
         // not shown (security review round 2).
         errors: { count: deps.errors.count(companyId), recent: recentErrors, untagged: deps.errors.untagged() },
+        // Which rule decided each permission request in the last hour, and how many cards reached the CEO and the owner (BOS-306). Resets when the server restarts.
+        permissions: deps.permissions ? deps.permissions(companyId) : null,
         // The owner's own quota, so every company's CEO reads the same reading; the agents paid from
         // it are scoped to this company (see funding.syntheticUsage). A failed reading is unknown,
         // never an error, and never blocks this view.

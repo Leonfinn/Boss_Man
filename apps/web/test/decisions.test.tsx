@@ -10,6 +10,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const defineExec = (impl: typeof document.execCommand) => {
+  const spy = vi.fn(impl);
+  Object.defineProperty(document, "execCommand", { configurable: true, writable: true, value: spy });
+  return spy;
+};
+
+const setSecure = (secure: boolean) => Object.defineProperty(window, "isSecureContext", { configurable: true, value: secure });
+
 const company: Company = { id: "c1", name: "App Co", mission: null, paused: false, agents: [] };
 const decision = (over: Partial<Decision> = {}): Decision => ({
   id: "d1",
@@ -122,6 +130,7 @@ describe("decision queue", () => {
   });
 
   it("shows each hand-apply command in its own block with a Copy button that copies only the command (BOS-269)", async () => {
+    setSecure(true);
     const writeText = vi.fn(() => Promise.resolve());
     vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
     const fence = (c: string) => "```sh\n" + c + "\n```";
@@ -147,6 +156,61 @@ describe("decision queue", () => {
     fireEvent.click(buttons[1]!);
     await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
     expect(writeText).toHaveBeenCalledWith("cd /srv/bm/src && scripts/rebuild-live.sh");
+  });
+
+  it("copies the exact command on a plain-http LAN address using the fallback (BOS-336)", async () => {
+    setSecure(false);
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    let copiedFromField = "";
+    const exec = defineExec((cmd) => {
+      if (cmd === "copy") copiedFromField = (document.querySelector("textarea") as HTMLTextAreaElement | null)?.value ?? "";
+      return true;
+    });
+    const fence = (c: string) => "```sh\n" + c + "\n```";
+    const d = decision({
+      kind: "approval",
+      question: "Main has moved.",
+      options: ["Approve", "Not now"],
+      recommendedOption: "Approve",
+      blocks: [],
+      context: {
+        type: "self_deploy",
+        handSteps: ["Pin the commit with this command:\n\n" + fence("cd /srv/bm/src && git merge --ff-only abc")],
+        rollback: "",
+      },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+    await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
+    expect(writeText).not.toHaveBeenCalled();
+    expect(exec).toHaveBeenCalledWith("copy");
+    expect(copiedFromField).toBe("cd /srv/bm/src && git merge --ff-only abc");
+  });
+
+  it("says it couldn't copy and selects the command when both ways fail (BOS-336)", async () => {
+    setSecure(false);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
+    defineExec(() => {
+      throw new Error("blocked");
+    });
+    const fence = (c: string) => "```sh\n" + c + "\n```";
+    const d = decision({
+      kind: "approval",
+      question: "Main has moved.",
+      options: ["Approve", "Not now"],
+      recommendedOption: "Approve",
+      blocks: [],
+      context: {
+        type: "self_deploy",
+        handSteps: ["Apply it:\n\n" + fence("cd /srv/bm/src && scripts/rebuild-live.sh")],
+        rollback: "",
+      },
+    });
+    render(<Decisions decisions={[d]} companies={[company]} loaded agentsWorking={0} onAnswered={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy this command" }));
+    await waitFor(() => expect(screen.getByText("Couldn't copy, select the text instead")).toBeTruthy());
+    expect(window.getSelection()?.toString()).toBe("cd /srv/bm/src && scripts/rebuild-live.sh");
   });
 
   it("links the ticket it is about, the tickets it blocks, and known references in the text", () => {

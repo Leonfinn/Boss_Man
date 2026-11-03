@@ -53,7 +53,15 @@ export function checkNeverFinished(v: { timedOut: boolean; exitCode: number | nu
  * scripts/check-all.sh exits 75 with this wording before any step runs, so nothing the agent wrote failed.
  */
 export function checkWaitedForLock(v: { exitCode: number | null; output: string }): boolean {
-  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock/.test(v.output);
+  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock/.test(v.output) && !checkQueueStuck(v);
+}
+/**
+ * True when the queue itself stood still (BOS-370): a merge check keeps its place while the queue moves, and gives up
+ * only when its place and the slot holders have not changed for longer than a check runs. Retrying would only wait
+ * again, so the owner is told at once.
+ */
+export function checkQueueStuck(v: { exitCode: number | null; output: string }): boolean {
+  return v.exitCode === 75 && /check-all: gave up waiting for the heavy-phase lock[^\n]*the queue made no progress for (\d+) min/.test(v.output);
 }
 /** Tries a merge check that only timed out on the lock this many times, pausing LOCK_RETRY_BASE_MS, then double, between them. */
 export const LOCK_RETRY_ATTEMPTS = 6;
@@ -73,7 +81,7 @@ export const NOTHING_CHANGED = "Nothing in the repository changed. Make the chan
 
 /** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
-  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string };
+  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; problems?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string };
   const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
   switch (r.outcome) {
     case "merged":
@@ -94,6 +102,8 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       return "Approved, but not merged: the check couldn't finish. This isn't a problem with the agent's work; it's in your Decisions.";
     case "conflicts":
       return `Approved, but not merged: the work conflicts with ${ctx.branch} in ${(d.files ?? []).join(", ")}. ${back} to sort out.`;
+    case "migration_journal":
+      return `Approved, but not merged: the migration journal would make drizzle skip a migration (${(d.problems ?? []).join(" ")}). ${back} to fix.`;
     case "uncommitted":
       return `Approved, but not merged: some work isn't saved to the branch yet (${(d.files ?? []).join(", ")}). ${back} to commit it.`;
     default:
@@ -155,6 +165,14 @@ export function reviewService(
   let wake: NotifyHook | null = null;
   // shortcut: in memory, so a server restart mid-landing forgets the status (the ticket itself is unaffected); upgrade to a column if owners need it to survive restarts.
   const landings = new Map<string, LandingStatus>();
+  // When each ticket's merge last said it was alive (BOS-362). The merge sweep reads this, not the ticket's
+  // activity, which chat and chases also bump: talk must not hold a merge retry back, and a running merge must.
+  // shortcut: in memory like `landings`; a restart ends every merge, so forgetting it is correct.
+  const landingBeat = new Map<string, number>();
+  const beatNow = (ticketId: string) => {
+    landingBeat.set(ticketId, Date.now());
+    return db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+  };
 
   async function ticketWithRepo(ticketId: string, companyId?: string) {
     const [row] = await db
@@ -214,6 +232,7 @@ export function reviewService(
     const others = (await otherOpenBranches(t)).filter((o): o is typeof o & { branch: string } => !!o.branch && o.branch !== t.branch);
     if (!others.length) return [];
     let ids: string[];
+    let contained = new Set<string>();
     if (deps.runners.can(runnerId, "carried-check")) {
       let r: { carried?: CarriedTicket[] };
       try {
@@ -231,11 +250,30 @@ export function reviewService(
       }
       if (!Array.isArray(r.carried)) throw new ReviewError(409, "Couldn't check whether this branch carries other tickets' unmerged work, so it wasn't merged. Try approving it again.");
       ids = r.carried.map((c) => c.ticketId);
+      contained = new Set(r.carried.filter((c) => c.contained).map((c) => c.ticketId));
     } else {
       // An older runner: the host's pull requests are the only other answer, and they must give one.
       ids = await carriedOnHost(t, gitHost, gitApiBase, others);
     }
-    return others.filter((o) => ids.includes(o.ticketId)).map((o) => ({ ticketId: o.ticketId, branch: o.branch, title: o.title, risk: o.risk }));
+    return others.filter((o) => ids.includes(o.ticketId)).map((o) => ({ ticketId: o.ticketId, branch: o.branch, title: o.title, risk: o.risk, contained: contained.has(o.ticketId) }));
+  }
+
+  /**
+   * Whether a carried ticket is already fully approved and only waiting to merge (BOS-372): in review, every
+   * review passed, and no owner sign-off open. Its work is then reviewed, so a branch holding all of it may
+   * land it too. Anything less (still in review rounds, sent back, awaiting the owner) stays a refusal.
+   */
+  async function approvedAndWaiting(ticketId: string): Promise<boolean> {
+    const [c] = await db.select({ systemState: tickets.systemState }).from(tickets).where(eq(tickets.id, ticketId));
+    if (!c || c.systemState !== "review") return false;
+    const rows = await latestRows(db, ticketId);
+    if (!rows.length || evaluate(rows) !== "passed") return false;
+    const [signoff] = await db
+      .select({ id: decisions.id })
+      .from(ticketDependencies)
+      .innerJoin(decisions, eq(decisions.id, ticketDependencies.blockerDecisionId))
+      .where(and(eq(ticketDependencies.blockedTicketId, ticketId), eq(decisions.status, "open")));
+    return !signoff;
   }
 
   /**
@@ -613,6 +651,11 @@ export function reviewService(
       return { ...status, stale: await landingStale(ticketId) };
     },
 
+    /** True while a merge for this ticket has said it is alive within the merge window (a check or lock wait under way). */
+    landingActive(ticketId: string): boolean {
+      return Date.now() - (landingBeat.get(ticketId) ?? 0) <= MERGE_MISSED_AFTER_MS;
+    },
+
     /** Claims the ticket's merge marker, so the page shows the merge from its first moment. */
     async claimLanding(ticketId: string, reviewer: string): Promise<string> {
       const existing = landings.get(ticketId);
@@ -627,7 +670,7 @@ export function reviewService(
       landings.set(ticketId, { state: "running", startedAt, command: null, startedBy: reviewer });
       // A ticket can sit in review for hours before its last reviewer approves. Count the merge itself as
       // activity now, so the very first poll of a fresh merge is never judged stale from that quiet spell.
-      await db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+      await beatNow(ticketId);
       return startedAt;
     },
 
@@ -697,7 +740,7 @@ export function reviewService(
      * default branch, and the merge closes the ticket. A failed check, a conflict or
      * uncommitted work sends the ticket back to the agent with what to do.
      */
-    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried"; delivered: string | null; detail?: unknown }> {
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
@@ -713,7 +756,7 @@ export function reviewService(
           }
           const pause = LOCK_RETRY_BASE_MS * 2 ** (attempt - 1);
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `${LOCK_RETRY_TEXT} (try ${attempt} of ${LOCK_RETRY_ATTEMPTS}, next in ${Math.max(1, Math.round(pause / 60_000))} min). Nothing failed; no need to run it by hand.` });
-          const beat = setInterval(() => void db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId)).catch(() => undefined), MERGE_ACTIVITY_MS);
+          const beat = setInterval(() => void beatNow(ticketId).catch(() => undefined), MERGE_ACTIVITY_MS);
           beat.unref?.();
           try {
             await new Promise((resolve) => setTimeout(resolve, pause));
@@ -742,7 +785,7 @@ export function reviewService(
       }
     },
 
-    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried"; delivered: string | null; detail?: unknown }> {
+    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
@@ -755,7 +798,7 @@ export function reviewService(
         .limit(1);
       if (signoff) throw new ReviewError(409, "The owner's sign-off for this ticket is still waiting, so nothing was merged. Answer that card first.");
       // A merge under way is activity: the unmerged-approvals sweep waits for it rather than asking again.
-      const touch = () => db.update(tickets).set({ lastActivityAt: new Date() }).where(eq(tickets.id, ticketId));
+      const touch = () => beatNow(ticketId);
       await touch();
       if (!repoUrl) {
         await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
@@ -810,18 +853,30 @@ export function reviewService(
         const r = await refuseUnchecked(t, err);
         return { outcome: r.outcome, delivered: r.delivered, detail: r.detail };
       }
+      // Approved tickets whose whole branch this one holds (the fast-forward case, BOS-372) land together with it.
+      const together: CarriedInfo[] = [];
+      for (const c of carried) if (!opts?.skipChecks && c.contained && (await approvedAndWaiting(c.ticketId))) together.push(c);
+      carried = carried.filter((c) => !together.includes(c));
       if (carried.length) {
         const r = await refuseCarried(t, carried, { reviewerAgentId: null });
         return { outcome: "carried", delivered: r.delivered ?? null, detail: r.detail };
       }
 
       // The project's check, plus its deeper one for high and critical work (R47, R48).
-      const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
+      // Deep check at the highest risk among this ticket and every ticket landing with it.
+      const needsDeep = [t.risk, ...together.map((c) => c.risk)].some((r) => deepChecks(r));
+      const checks = opts?.skipChecks ? [] : [verifyCommand, needsDeep ? deepVerifyCommand : null].filter((c): c is string => !!c);
       const kindOf = (command: string) => (command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify");
       // A failed check: wait for the lock, a stuck check, or the ticket goes back with the output (shared by both ways of checking).
       const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
         // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
         if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
+        if (checkQueueStuck(v)) {
+          const mins = /no progress for (\d+) min/.exec(v.output)?.[1] ?? "60";
+          await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The check queue made no progress for ${mins} minutes (the same check held the slot); the merge check gave up and it's in your Decisions.` });
+          await raiseCheckStuck(db, t, command, `was stopped: the check queue made no progress for ${mins} minutes, because the check holding the slot never finished`, v.output);
+          return { outcome: "check_stuck", delivered: null, detail: v };
+        }
         const never = checkNeverFinished(v);
         if (never) {
           const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
@@ -888,6 +943,10 @@ export function reviewService(
         const delivered = await sendBack(`The review was approved, but these files aren't committed: ${m.files.join(", ")}. ${renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title })} Then move the ticket back to review.`, "commit");
         return { outcome: "uncommitted", delivered, detail: m };
       }
+      if (m.status === "migration_journal") {
+        const delivered = await sendBack(`The review was approved, but the migration journal would make drizzle skip a migration, so nothing was merged. ${m.problems.join(" ")} Then run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, and move the ticket back to review.`, "migration journal");
+        return { outcome: "migration_journal", delivered, detail: m };
+      }
       if (m.status === "conflicts") {
         const delivered = await sendBack(
           `The review was approved, but your branch conflicts with ${defaultBranch} in: ${m.files.join(", ")}. Merge origin/${defaultBranch} into your branch, resolve the conflicts keeping both sides' intent, run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, then move the ticket back to review.`,
@@ -916,6 +975,10 @@ export function reviewService(
       }
       await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
       await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
+      for (const c of together) {
+        await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, c.ticketId));
+        await deps.work.updateTicket(c.ticketId, { state: "done", outcome: "completed", overLimit: true });
+      }
       return { outcome: "merged", delivered: null, detail: m };
     },
 

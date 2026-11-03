@@ -5,7 +5,7 @@ import type { RunnerCommand, WorkspaceDiff } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { activity, reviewRequests, checkResults, decisions, runs, tickets, ticketDependencies, wakes } from "../src/db/schema.js";
-import { checkNeverFinished, checkWaitedForLock, LOCK_RETRY_ATTEMPTS, setLockRetryBase, landingText } from "../src/services/review.js";
+import { checkNeverFinished, checkQueueStuck, checkWaitedForLock, LOCK_RETRY_ATTEMPTS, setLockRetryBase, landingText } from "../src/services/review.js";
 import { approveAndWait } from "./helpers.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
@@ -397,6 +397,26 @@ describe("landing an approved ticket (R46, R47)", () => {
       expect(await c.db.select().from(wakes)).toHaveLength(0);
       expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("shared lock");
     }, 30_000);
+
+    // BOS-370: a queue that stood still is not retried; the card says so plainly.
+    const noProgress = { ok: false, exitCode: 75, timedOut: false, output: "check-all: gave up waiting for the heavy-phase lock /tmp/x.lock: the queue made no progress for 60 min (place 3 of 9; the check holding the slot has not changed)", ms: 3_700_000 };
+
+    it("tells a queue that stood still from a plain lock wait", () => {
+      expect(checkQueueStuck(noProgress)).toBe(true);
+      expect(checkWaitedForLock(noProgress)).toBe(false);
+      expect(checkQueueStuck(gaveUp)).toBe(false);
+    });
+
+    it("asks the owner at once, without retrying, when the queue made no progress", async () => {
+      setLockRetryBase(1);
+      const c = (ctx = await setup({ answers: { verify: noProgress } }));
+      await c.req("PATCH", `/api/projects/${c.project.id}`, { verifyCommand: "scripts/check-all.sh" });
+      await approveAndWait(c.req, c.ticket.id);
+      await landed(c);
+      expect(c.sent.filter((x) => x.type === "workspace.verify")).toHaveLength(1);
+      expect((await c.db.select().from(tickets).where(eq(tickets.id, c.ticket.id)))[0]!.systemState).toBe("review");
+      expect((await c.db.select().from(decisions).where(eq(decisions.status, "open")))[0]!.question).toContain("made no progress for 60 minutes");
+    }, 30_000);
   });
 
   describe("a check that was killed is the owner's call", () => {
@@ -545,6 +565,44 @@ describe("a branch that carries another open ticket's work (BOS-130)", () => {
     expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
     expect(await c.db.select().from(decisions)).toHaveLength(0);
     expect(await state(c)).toMatchObject({ systemState: "review" });
+  });
+
+  it("lands an approved ticket together with the one that holds all of it (fast-forward case, BOS-372)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Inner work");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    expect(await state(c)).toMatchObject({ systemState: "done" });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, other.id)))[0]).toMatchObject({ systemState: "done" });
+  });
+
+  it("runs the deeper check when a high-risk approved ticket lands with a low-risk one (BOS-372)", async () => {
+    const c = (ctx = await setup({ answers: { verify: { ok: true, exitCode: 0, timedOut: false, output: "ok", ms: 1 } } }));
+    await c.req("PATCH", `/api/projects/${c.project.id}`, { repoUrl: "https://github.com/Leonfinn/customer-app.git", verifyCommand: "pnpm test"  });
+    await c.db.update((await import("../src/db/schema.js")).projects).set({ deepVerifyCommand: "pnpm test:e2e" });
+    const other = await otherTicket(c, "Inner work", "high");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "merged" });
+    expect(c.sent.filter((x) => x.type === "workspace.verify").map((x) => (x as { command: string }).command)).toEqual(["pnpm test", "pnpm test:e2e"]);
+  });
+
+  it("never lands a carried ticket that isn't approved, even when this branch holds all of it (BOS-372)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Unfinished work");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "pending" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: true }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
+    expect((await c.db.select().from(tickets).where(eq(tickets.id, other.id)))[0]).toMatchObject({ systemState: "review" });
+  });
+
+  it("refuses an approved carried ticket this branch holds only part of (BOS-372)", async () => {
+    const c = (ctx = await setup());
+    const other = await otherTicket(c, "Inner work");
+    await c.db.insert(reviewRequests).values({ ticketId: other.id, kind: "code", reviewerAgentId: c.ceo.id, round: 1, seq: 0, status: "approved" });
+    c.answers.carried = { carried: [{ ticketId: other.id, branch: other.branch, contained: false }] };
+    expect((await approveAndWait(c.req, c.ticket.id)).json()).toMatchObject({ outcome: "carried" });
   });
 
   it("merges when the other ticket is done, so its work is on the target already", async () => {
