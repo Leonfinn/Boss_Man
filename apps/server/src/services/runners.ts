@@ -18,6 +18,9 @@ export type CommandSender = (command: RunnerCommand) => boolean;
 
 export type PermissionHook = (runner: Runner, event: Extract<RunnerEvent, { type: "run.permission_request" }>) => Promise<unknown>;
 
+/** How long after a runner connects its queued runs are still starting up. */
+export const RUNNER_SETTLE_MS = 10 * 60_000;
+
 export function runnersService(db: Db, funding: ReturnType<typeof fundingService>) {
   let onPermission: PermissionHook | null = null;
   const listeners: Array<(runner: Runner, event: RunnerEvent) => void> = [];
@@ -33,6 +36,8 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
   const connected = new Map<string, CommandSender>();
   // shortcut: per live socket; lost on restart, harmless because a runner sends its features again in hello.
   const features = new Map<string, string[]>();
+  // shortcut: when each runner last connected; lost on a server restart, which only makes "settling" read false.
+  const connectedAt = new Map<string, number>();
 
   /** Marks a run ended and logs it. */
   async function markEnded(runId: string, at: Date, outcome: string | null, usage?: { inputTokens: number; outputTokens: number; cachedReadTokens: number; cachedWriteTokens: number }) {
@@ -235,6 +240,7 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
 
     connect(runnerId: string, send: CommandSender, feats: string[] = []) {
       connected.set(runnerId, send);
+      connectedAt.set(runnerId, Date.now());
       features.set(runnerId, feats);
       for (const l of connectListeners) void Promise.resolve(l(runnerId)).catch(() => {});
       return () => {
@@ -250,6 +256,14 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
     },
 
     isConnected: (runnerId: string) => connected.has(runnerId),
+
+    /**
+     * Whether the runner (re)connected in the last few minutes, so it is probably mid-swap: runs
+     * queued behind it are still being started and "never started" alerts can wait.
+     */
+    isSettling: (runnerId: string, at: Date = new Date()) => at.getTime() - (connectedAt.get(runnerId) ?? -Infinity) < RUNNER_SETTLE_MS,
+
+    connectedSince: (runnerId: string) => (connectedAt.has(runnerId) && connected.has(runnerId) ? new Date(connectedAt.get(runnerId)!) : null),
 
     /** Sends a request command and waits for the runner's reply. */
     request<T>(runnerId: string, build: (requestId: string) => RunnerCommand, timeoutMs = 15_000): Promise<T> {
