@@ -372,7 +372,16 @@ const WRAPPERS: Record<string, string[]> = {
   unshare: [],
   nsenter: ["-t", "--target", "-S", "-G", "-r", "-w", "--setuid", "--setgid"],
   bunx: [],
+  strace: ["-o", "-e", "-p", "-s", "-u", "-E", "-a", "-b", "-I", "-P", "-S", "-X", "--output", "--trace", "--attach", "--string-limit", "--user", "--env"],
+  ltrace: ["-o", "-e", "-p", "-s", "-u", "-a", "-n", "-l", "-L", "-w", "-x", "--output", "--library"],
+  fakeroot: ["-l", "-s", "-i", "-b", "--lib", "--faked", "--fd-base"],
+  proot: ["-r", "-b", "-m", "-w", "-q", "-k", "--rootfs", "--bind", "--mount", "--cwd", "--qemu", "--kernel-release"],
+  "systemd-run": ["-u", "-p", "-M", "-H", "-E", "--unit", "--property", "--machine", "--host", "--setenv", "--description", "--slice", "--uid", "--gid", "--nice", "--working-directory"],
+  setpriv: ["--reuid", "--regid", "--ruid", "--rgid", "--euid", "--egid", "--groups", "--inh-caps", "--ambient-caps", "--bounding-set", "--securebits", "--pdeathsig", "--selinux-label", "--apparmor-profile", "--landlock-access", "--landlock-rule"],
+  entr: [],
 };
+// Wrappers whose first word after their options is a value (a CPU mask, a priority), not the program.
+const WRAPPERS_WITH_VALUE = new Set(["taskset", "chrt"]);
 // Programs given a shell command as an option's value (su -c, flock -c, script -qc, npx -c), and what they run without one.
 const SCRIPT_OPTION: Record<string, (args: Word[]) => Word[]> = {
   su: () => [],
@@ -394,6 +403,7 @@ const INLINE: Array<[RegExp, RegExp]> = [
   [/^perl[\d.]*$/, /^-[a-zA-Z]*[eEmM]/],
   [/^ruby[\d.]*$/, /^-[a-zA-Z]*e/],
   [/^php[\d.]*$/, /^-[a-zA-Z]*r/],
+  [/^(lua[\d.]*|luajit)$/, /^-[a-zA-Z]*e/],
   [/^[gmn]?awk$/, /^/],
 ];
 // Words in interpreter code that delete files, or that run or build code Boss Man can't read.
@@ -425,6 +435,10 @@ export function commandRisks(command: string | string[]): Risk[] {
       let wrapped = false;
       for (let hops = 0; hops < 12; hops++) {
         while (w.length && /^[A-Za-z_]\w*\+?=/.test(w[0]!.text)) w = w.slice(1);
+        // A keyword after a wrapper (time { rm …; }, time ! rm …) starts the command that follows it.
+        while (w.length && !w[0]!.quoted && KEYWORDS.has(w[0]!.text)) w = w.slice(1);
+        // `function f { rm …; }` and `coproc f { rm …; }` reach here as `f { rm …`: the body starts after the `{`.
+        if (w.length > 2 && !w[1]!.quoted && w[1]!.text === "{") w = w.slice(2);
         const first = w[0];
         if (!first) return;
         const all = w;
@@ -434,6 +448,18 @@ export function commandRisks(command: string | string[]): Risk[] {
         const prog = first.text.split("/").pop()!;
         const args = w.slice(1);
 
+        if (prog === "entr" && args.some((a) => /^-[a-zA-Z]*s/.test(a.text))) {
+          // entr -s 'cmd' hands its one argument to a shell.
+          const script = afterOptions(args)[0];
+          if (script?.dynamic) return destroys("runs a script only known when it runs");
+          return script ? readScript(script.text, depth + 1) : undefined;
+        }
+        if (WRAPPERS_WITH_VALUE.has(prog)) {
+          if (args.some((a) => a.text === "-p" || a.text === "--pid")) return; // changes a running process, runs nothing
+          w = afterOptions(args).slice(1);
+          wrapped = true;
+          continue;
+        }
         if (WRAPPERS[prog]) {
           if (prog === "xargs" || prog === "parallel") bulk = true;
           w = afterOptions(args, WRAPPERS[prog]);
@@ -543,18 +569,34 @@ export function commandRisks(command: string | string[]): Risk[] {
         if (prog === "git") {
           const valued = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"];
           // git -c can set a command git then runs: an alias starting with !, a pager, an editor, a hook path…
+          const aliases = new Map<string, string>();
           for (let i = 0; i < args.length && /^-/.test(args[i]!.text); i++) {
             if (args[i]!.text !== "-c") {
               if (valued.includes(args[i]!.text)) i++;
               continue;
             }
-            const set = args[++i]?.text ?? "";
-            const m = /^(alias\.[^=]*|[^=]*\.(fsmonitor|sshcommand|pager|editor|hookspath|cmd|command|program|helper|textconv|clean|smudge|process))=(.*)$/i.exec(set);
-            if (m) readScript(m[3]!.replace(/^!/, ""), depth + 1);
+            const setWord = args[++i];
+            const set = setWord?.text ?? "";
+            const alias = /^alias\.([^=]*)=(.*)$/is.exec(set);
+            const m = /^[^=]*\.(fsmonitor|sshcommand|pager|editor|hookspath|cmd|command|program|helper|textconv|clean|smudge|process)=(.*)$/i.exec(set);
+            if ((alias || m) && setWord!.dynamic) return destroys("sets a git command only known when it runs");
+            if (alias) aliases.set(alias[1]!.toLowerCase(), alias[2]!);
+            else if (m) readScript(m[2]!, depth + 1);
           }
           const rest = afterOptions(args, valued);
           if (rest[0]?.dynamic) return destroys("runs a git command only known when it runs");
           const sub = rest[0]?.text;
+          // An alias set with -c is read with the words given after it: `!rm` + ` -rf x` runs `rm -rf x`; `push` + ` -f` is git push -f.
+          // The -c is dropped, so the alias isn't expanded twice. (Aliases already in the repo's config can't be seen.)
+          const aliased = sub === undefined ? undefined : aliases.get(sub.toLowerCase());
+          if (aliased !== undefined) {
+            const extra = rest.slice(1).map((a) => a.text);
+            if (aliased.startsWith("!")) return readScript([aliased.slice(1), ...extra].join(" "), depth + 1);
+            w = [first, ...parse(aliased).cmds.flatMap((c) => c.words), ...rest.slice(1)];
+            wrapped = true;
+            continue;
+          }
+          for (const value of aliases.values()) if (value.startsWith("!")) readScript(value.slice(1), depth + 1);
           const opts = rest.slice(1).map((a) => a.text);
           // Also a refspec: git push origin "$b" with b=+main force-pushes.
           const unknownOpt = rest.slice(1).some(mayBeOption);
