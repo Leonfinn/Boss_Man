@@ -3,6 +3,7 @@
 // models are pinned at launch, Codex starts in workspace-write so approvals reach Boss Man,
 // and cost is reported as deltas (R34).
 import { spawn, type ChildProcess } from "node:child_process";
+import { mcpPreflight } from "./mcp-preflight.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,6 +26,10 @@ export type SessionManagerOptions = {
   resolveEnv: (runId: string) => Promise<Record<string, string>>;
   /** Boss Man's MCP endpoint as agents reach it. */
   mcpUrl: string;
+  /** Wait up to this long for the MCP endpoint to answer before a turn starts, retrying once more after telling the owner (0 or unset: no preflight). */
+  mcpPreflightMs?: number;
+  /** Test tuning for that preflight. */
+  mcpPreflightTuning?: { attemptTimeoutMs?: number; delayMs?: number };
   /** Environment every agent inherits (PATH, HOME, proxy settings); secrets are added per run. */
   baseEnv?: NodeJS.ProcessEnv;
   /** How long a permission request waits for a verdict before it is refused. */
@@ -768,6 +773,19 @@ export class SessionManager {
       }
 
       const mcpServers: McpServer[] = [{ type: "http", name: "bossman", url: this.opts.mcpUrl, headers: [{ name: "Authorization", value: `Bearer ${cmd.mcpToken}` }] }];
+      // Wait out a server stall before the agent's own (about 5 s) MCP handshake can give up on us (BOS-403).
+      if (this.opts.mcpPreflightMs) {
+        let pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: this.opts.mcpPreflightMs, ...this.opts.mcpPreflightTuning });
+        if (!pre.ok) {
+          emit({ type: "runner.log", level: "warn", message: `mcp-preflight: Boss Man tools unreachable for run ${cmd.runId} after ${pre.attempts} tries over ${Math.round(pre.waitedMs / 1000)}s (${pre.lastError}); retrying once.` });
+          emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools didn't load, retrying." } });
+          pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: this.opts.mcpPreflightMs, ...this.opts.mcpPreflightTuning });
+          if (!pre.ok) {
+            emit({ type: "runner.log", level: "error", message: `mcp-preflight: Boss Man tools still unreachable for run ${cmd.runId} (${pre.lastError}); starting the turn without waiting longer.` });
+            emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools could not be reached after a retry, so this turn may run without them. I will not pretend otherwise." } });
+          }
+        }
+      }
       // The company's extra tool servers: the token comes from this run's granted secrets, so an agent without it never gets the server.
       const supported = (init.agentCapabilities as { mcpCapabilities?: Record<string, boolean | undefined> } | undefined)?.mcpCapabilities;
       for (const m of cmd.mcpServers ?? []) {

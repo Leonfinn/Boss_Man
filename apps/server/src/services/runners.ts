@@ -144,6 +144,10 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       case "run.permission_request":
         await onPermission?.(runner, event);
         return;
+      case "runner.log":
+        // A failed tool-connection preflight is worth a line in the server log (BOS-403).
+        if (event.message.startsWith("mcp-preflight:")) console.warn(`[runner ${runner.id}] ${event.message}`);
+        return;
       default:
         // run.update and runner.log are stored; later phases act on them.
         return;
