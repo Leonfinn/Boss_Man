@@ -46,8 +46,10 @@ const result = (row: JudgeRow): JudgeReading => ({ verdict: row === "ok" ? "allo
  *   otherwise it is read from a leading `cd` or the most-named folder in the command.
  * @param ownProject name of the agent's own folder under `.claude/projects/`; only its `memory/` sub-folder
  *   may be written. Without it every `.claude` path is treated as shared.
+ * @param workspaceRoot the folder that holds `tickets/` and `reviews/`; the own folder is `<root>/(tickets|reviews)/<id>`
+ *   and nothing else counts as it. Without it any `.../workspaces/(tickets|reviews)/<id>` path counts.
  */
-export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string): JudgeReading {
+export function judgePermission(question: string, command: string | null, ownFolder?: string, ownProject?: string, workspaceRoot?: string): JudgeReading {
   if (!command) return judgeWithoutCommand(question, ownFolder, ownProject);
   // Safety net: callers should skip long commands with isJudgeable and keep the old recommendation.
   if (command.length > MAX_JUDGED_COMMAND) return result("tooLong");
@@ -87,65 +89,286 @@ export function judgePermission(question: string, command: string | null, ownFol
   if (/\bsed\s+-i\b|>>?|\btee\b|\bcp\b|\bmv\b|\brm\b/.test(c) && /\/workspaces\/repos\//.test(c)) return result("outside");
   // Any write must land in /tmp, the agent's own ticket folder, /dev/null or its own memory folder. Shared startup and
   // settings files (~/.bashrc, ~/.gitconfig, /etc/..., /usr/local/bin/...) are not the agent's to change.
-  if (/\bgit\s+config\s+(?:-\S+\s+)*--(global|system|file|worktree)\b/.test(c)) return result("outside");
+  // Settings written through a tool's own commands: `git config` with a file flag (in any position, `git -c x config`,
+  // `git -C dir config`), the git config environment variables, and npm-family config/global installs.
+  if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
+  // Editors take commands (`vim -c "w! /file"`); an agent has no use for one.
+  if (/(?:^|[;&|(\n]\s*)(?:vi|vim|nvim|ex|ed|view|vimdiff|emacs|nano|pico)\s/.test(c)) return result("outside");
+  const rootRe = workspaceRoot ? workspaceRoot.replace(/\/+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") : "(?:/[\\w.@+-]+)*/workspaces";
+  const ownRe = own ? new RegExp(`^${rootRe}/(?:tickets|reviews)/${own.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:/|$)`) : null;
+  /** Inside the agent's own ticket folder, anchored at the workspace root (the id elsewhere in a path does not count). */
+  const inOwn = (p: string): boolean => !!ownRe && !p.includes("..") && ownRe.test(p.replace(/^['"]+|['"]+$/g, ""));
   const writeOk = (t: string): boolean => {
     const p = t.replace(/^['"]+|['"]+$/g, "");
     if (/^OWNDIR(\/[\w.@+-]+)*$/.test(p) && !p.includes("..")) return true;
     if (p === "MEMORY_PATH" || p === "/dev/null" || /^\/dev\/(stdout|stderr|fd\/\d+)$/.test(p)) return true;
     if (p.includes("..")) return false;
     if (/^\/tmp(\/|$)/.test(p)) return true;
-    return !!own && new RegExp(`^/[\\w./@+-]*/${own}(/|$)`).test(p);
+    return inOwn(p);
   };
   // Variables set in the same command are resolved; any other variable (and $(...)) can't be, so its target is denied.
-  // $(git rev-parse --git-dir ...) is the asking agent's own git folder and $(mktemp ...) lands in /tmp.
+  // $(git rev-parse --git-dir ...) is the asking agent's own git folder and $(mktemp ...) lands in /tmp, unless its
+  // arguments (or a TMPDIR set anywhere) put the file somewhere else.
+  const tmpdirSet = /\bTMPDIR\b/.test(c);
+  const mktempPath = (args: string): string | null => {
+    if (tmpdirSet) return null;
+    const toks = args.trim().split(/\s+/).filter(Boolean);
+    let dir: string | null = null;
+    let tmpl: string | null = null;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i]!;
+      if (t === "-p") dir = toks[++i] ?? "";
+      else if (/^-p./.test(t)) dir = t.slice(2);
+      else if (t === "--tmpdir") dir = "/tmp"; // no value: $TMPDIR, which no command here sets
+      else if (t.startsWith("--tmpdir=")) dir = t.slice(9);
+      else if (!t.startsWith("-")) tmpl = t;
+    }
+    const under = (p: string | null): boolean => p === null || (/^\/tmp(\/|$)/.test(p) && !p.includes(".."));
+    const abs = (p: string | null): boolean => p !== null && /^[/~]/.test(p);
+    if (!under(dir) || (abs(tmpl) && !under(tmpl))) return null;
+    return (abs(tmpl) ? tmpl : dir) ?? "/tmp/mk";
+  };
   const safeSubst = (x: string): string => x
     .replace(/\$\(\s*git\s+(?:-C\s+\S+\s+)?rev-parse\s+(?:--absolute-git-dir|--git-dir|--show-toplevel|--git-path\s+[\w./-]+)\s*\)/g, "OWNDIR")
-    .replace(/\$\(\s*mktemp\b([^)\x60$]*)\)/g, (_a, args: string) => /\/tmp\/[\w.-]*/.exec(args)?.[0] ?? "/tmp/mk");
+    .replace(/\$\(\s*mktemp\b([^)\x60$]*)\)/g, (all, args: string) => mktempPath(args) ?? all);
   const cs = safeSubst(c);
   const assigned0 = new Map([...cs.matchAll(/(?:^|[;&|\s])(\w+)=(['"]?)(OWNDIR|\/tmp\/[\w.-]*)\2(?=$|[\s;&|)])/g)].map((m) => [m[1]!, m[3]!] as const));
   const cs2 = cs.replace(/\$\(\s*dirname\s+['"]?\$\{?(\w+)\}?['"]?\s*\)/g, (all, n: string) => assigned0.get(n) ?? all);
-  const assigned = new Map([...cs2.matchAll(/(?:^|[;&|\s])(\w+)=(['"]?)([^\s'";|&)$\x60]+)\2(?=$|[\s;&|)])/g)].map((m) => [m[1]!, m[3]!] as const));
+  // A variable is read only when it is set exactly once, to a plain value, before its first use. Any other way of setting
+  // it (a second assignment, `for X in`, `read X`, `${X:=...}`, `printf -v X`, `X+=`) or a use before the assignment means its
+  // value is unknown (HOME=/tmp; D=/etc; D=$HOME), so a target that uses it is denied.
+  const setCount = new Map<string, number>();
+  const bump = (n: string | undefined): void => void (n && setCount.set(n, (setCount.get(n) ?? 0) + 1));
+  for (const m of cs2.matchAll(/(?:^|[;&|\s(])(\w+)\+?=/g)) bump(m[1]);
+  for (const m of cs2.matchAll(/\bfor\s+(\w+)\b|\bprintf\s+-v\s+(\w+)|\$\{(\w+)[^}\w]*?(?::?[=])/g)) bump(m[1] ?? m[2] ?? m[3]);
+  for (const m of cs2.matchAll(/\b(?:read|mapfile|readarray|getopts)\b([^;&|\n]*)/g)) for (const w of m[1]!.split(/\s+/)) if (/^\w+$/.test(w)) bump(w);
+  const assigned = new Map<string, string>();
+  for (const m of cs2.matchAll(/(?:^|[;&|\s])(\w+)=(['"]?)([^\s'";|&)$\x60]+)\2(?=$|[\s;&|)])/g)) {
+    const name = m[1]!;
+    const firstUse = cs2.search(new RegExp(`\\$\\{?${name}\\b`));
+    if (setCount.get(name) === 1 && (firstUse < 0 || firstUse > m.index!)) assigned.set(name, m[3]!);
+  }
   const resolve = (t: string): string => t.replace(/\$\{?(\w+)\}?/g, (all, name: string) => (name !== "HOME" && assigned.has(name) ? assigned.get(name)! : all));
-  // A sed script is not a path (unless it can write one: `w /file`).
-  const forTargets = cs2.replace(/(\bsed\s+(?:-\S+\s+)*)('[^']*'|"[^"]*")/g, (all, head: string, script: string) => (/[wWe]\s*(\/|~|\$)/.test(script) ? all : head + "SCRIPT"));
+  // A sed script is not a path, but only a script that provably can't run commands or write files is set aside as text:
+  // `e` (flag or command), `w`/`W`/`r`/`R` (any file), or a script that can't be read means the write is not placed.
+  const sedMasked = maskSedScripts(cs2);
+  if (sedMasked === null) return result("outside");
+  const forTargets = sedMasked;
   const writeTargets: string[] = [];
-  for (const m of forTargets.matchAll(/>>?\s*(['"]?(?:[~/$]|OWNDIR)[^\s'";|&)<>]*)/g)) { const r = resolve(m[1]!); if (/^['"]*[~/$\x60]/.test(r) || /\$|\x60|OWNDIR/.test(r)) writeTargets.push(r); }
-  for (const m of forTargets.matchAll(/\b(?:cp|mv|tee|ln|install|touch|chmod|chown|truncate|dd|rsync|sed\s+-i\S*|perl\s+-pi\S*)\b([^;&|\n]*)/g)) {
+  const addTarget = (cand: string): void => { const r = resolve(cand); if (/^['"]*[~/$\x60]/.test(r) || /\$|\x60|OWNDIR/.test(r) || r.includes("..")) writeTargets.push(r); };
+  for (const m of forTargets.matchAll(/>[>|&]?\s*(['"]?(?:[~/$]|OWNDIR)[^\s'";|&)<>]*)/g)) addTarget(m[1]!);
+  for (const m of forTargets.matchAll(/\b(?:cp|mv|tee|ln|install|touch|chmod|chown|truncate|dd|rsync|mkdir|rmdir|mkfifo|mknod|patch|sed\s+-i\S*|perl\s+-pi\S*|git\s+(?:clone|init|worktree|archive|checkout-index|bundle))\b([^;&|\n]*)/g)) {
     for (const tok of m[1]!.split(/\s+/)) {
       // Plain, `--opt=/x`, `of=/x` and `-t/x` forms.
-      for (const cand of [tok, tok.split("=").slice(1).join("="), tok.replace(/^-\w(?=['"]?[~/$])/, "")]) {
-        const r = resolve(cand);
-        if (/^['"]*[~/$\x60]/.test(r) || /\$|\x60|OWNDIR/.test(r)) writeTargets.push(r);
-      }
+      for (const cand of [tok, tok.split("=").slice(1).join("="), tok.replace(/^-\w(?=['"]?[~/$])/, "")]) addTarget(cand);
     }
   }
+  // Downloaders and archive tools: the files named by their output / directory options, and every absolute path given to
+  // tar and unzip, must be placed too.
+  for (const t of toolTargets(forTargets)) addTarget(t);
+  // Inline code in an interpreter can write anywhere; it is read only when it provably touches no outside path.
+  if (!inlineCodeOk(c, writeOk)) return result("outside");
   if (writeTargets.some((t) => !writeOk(t))) return result("outside");
+  // A redirect (or any write) after a `cd`/`pushd` somewhere else lands there: `pushd /home/node; echo x >> .bashrc`.
+  const hasRedirect = />/.test(forTargets.replace(/\d*>>?\s*\/dev\/null|\d*>&\d|&>\s*\/dev\/null/g, ""));
+  if (hasRedirect) for (const m of c.matchAll(/\b(?:cd|pushd|chdir)\s+(?:--\s+)?['"]?([^\s;&|'")]*)/g)) if (!dirOk(m[1]!, inOwn)) return result("outside");
   const writes = /^(changes|deletes|unknown)$/.test(explainCommand(c).effect) || /rmSync|unlinkSync|writeFileSync|shutil\.rmtree|os\.remove|reset\s+--hard/.test(c) || new RegExp(DESTRUCTIVE, "i").test(c);
   if (writes) {
     for (const id of ids) if (own && id !== own && new RegExp(`(rm|rmSync|mv|reset|>|tee|cp)[^;&|\\n]*${id}`).test(c)) return result("outside");
     for (const m of c.matchAll(/\bcd\s+(?:\/[\w.@+-]+)*\/workspaces\/(?:tickets|reviews)\/([0-9a-f-]{36})/g)) if (own && m[1] !== own) return result("outside");
     const targets = [...c.matchAll(/(?:\brm\b|rmSync\(|rmtree\(|unlinkSync\()\s*(?:-\S+\s+)*['"]?((?:~|\$HOME|\/)[^\s'";|&)]*)/g)].map((m) => m[1]!);
-    for (const t of targets) if (!/^\/tmp\//.test(t) && !(own && t.includes(own)) && t !== "/dev/null") return result("outside");
+    for (const t of targets) if (!/^\/tmp\//.test(t) && !inOwn(t) && t !== "/dev/null") return result("outside");
     // A relative target can climb out of the folder (`rm -rf ..`), and a `cd` somewhere else makes every relative target land there.
     for (const m of c.matchAll(/\brm\b([^;&|\n]*)/g)) if (/(^|[\s'"=/])\.\.(?=$|[\s'"/;|&)])/.test(m[1]!)) return result("outside");
-    for (const m of c.matchAll(/\bcd\s+(?:--\s+)?['"]?([^\s;&|'")]*)/g)) {
-      const dir = m[1]!;
-      if (dir === "" || dir === "-") continue;
-      if (/^\/tmp(\/|$)/.test(dir) && !dir.includes("..")) continue;
-      if (own && dir.includes(own) && !dir.includes("..")) continue;
-      if (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir) && !dir.includes("..")) continue; // a sub-folder of where it already is
-      return result("outside");
-    }
+    for (const m of c.matchAll(/\b(?:cd|pushd|chdir)\s+(?:--\s+)?['"]?([^\s;&|'")]*)/g)) if (!dirOk(m[1]!, inOwn)) return result("outside");
     // `find <path> ... -delete` / `-exec rm`: the start path decides.
     for (const m of c.matchAll(/\bfind\s+((?:-[HLP]\s+)*)([^\s-][^\s]*|)[^\n;&|]*?(-delete\b|-exec\s+rm\b)/g)) {
       const start = m[2]!;
       if (start === "" || start === "." || (/^[\w.@+-]+(\/[\w.@+-]+)*$/.test(start) && !start.includes(".."))) continue;
       if (/^\/tmp\//.test(start) && !start.includes("..")) continue;
-      if (own && start.includes(own) && !start.includes("..")) continue;
+      if (inOwn(start)) continue;
       return result("outside");
     }
   }
   return result("ok");
+}
+
+/** Where a `cd` / `pushd` may go: /tmp, the own folder, or a sub-folder of where it already is. */
+function dirOk(dir: string, inOwn: (p: string) => boolean): boolean {
+  if (dir === "" || dir === "-") return true;
+  if (/^\/tmp(\/|$)/.test(dir) && !dir.includes("..")) return true;
+  if (inOwn(dir)) return true;
+  return /^[\w.@+-]+(\/[\w.@+-]+)*$/.test(dir) && !dir.includes(".."); // a sub-folder of where it already is
+}
+
+/**
+ * True only for a sed script made of commands that can neither run a command nor touch a file: addresses, `s` with the
+ * flags g p i I m M and digits, `y`, and the plain commands p d q Q n N h H g G x D P l =. `a`, `i`, `c` (plain text),
+ * and nothing else: not `e`, `w`, `W`, `r`, `R`, `b`, `t`, `:`, comments and anything it can't parse are not safe. The parser follows GNU sed (bracket expressions
+ * keep their delimiters), and stops at the first thing it doesn't know.
+ */
+function safeSedScript(raw: string): boolean {
+  const s = raw.replace(/^(['"])([\s\S]*)\1$/, "$2").replace(/\$\(\([^()]*\)\)/g, "1");
+  let i = 0;
+  const skipTo = (d: string, brackets: boolean): boolean => {
+    while (i < s.length) {
+      const ch = s[i]!;
+      if (ch === "\\") { i += 2; continue; }
+      if (brackets && ch === "[") {
+        i++;
+        if (s[i] === "^") i++;
+        if (s[i] === "]") i++;
+        while (i < s.length && s[i] !== "]") i += s[i] === "[" && /[:.=]/.test(s[i + 1] ?? "") ? (s.indexOf(s[i + 1]! + "]", i + 2) < 0 ? s.length : s.indexOf(s[i + 1]! + "]", i + 2) + 2 - i) : 1;
+        if (i >= s.length) return false;
+        i++;
+        continue;
+      }
+      if (ch === d) { i++; return true; }
+      if (ch === "\n") return false;
+      i++;
+    }
+    return false;
+  };
+  const delimiter = (): string | null => { const d = s[i++]; return d === undefined || /[\s\;]/.test(d) ? null : d; };
+  while (i < s.length) {
+    const ch = s[i]!;
+    if (/[\s;{}!,~+$\d]/.test(ch)) { i++; continue; }
+    if (ch === "/" || ch === "\\") {
+      if (ch === "\\") i++;
+      const d = delimiter();
+      if (!d || !skipTo(d, true)) return false;
+      while (/[IM]/.test(s[i] ?? "")) i++;
+      continue;
+    }
+    if (ch === "s" || ch === "y") {
+      i++;
+      const d = delimiter();
+      if (!d || !skipTo(d, ch === "s") || !skipTo(d, false)) return false;
+      if (ch === "s") while (/[gpiImM\d]/.test(s[i] ?? "")) i++;
+      continue;
+    }
+    if (/[pdqQnNhHgGxDPl=]/.test(ch)) { i++; continue; }
+    if (/[aic]/.test(ch)) { // text to append, insert or change: it runs to the end of the line (\ continues it) and is only text
+      i++;
+      while (i < s.length && s[i] !== "\n") i += s[i] === "\\" ? 2 : 1;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/** Replaces every sed script with the word SCRIPT when it is safe text; null when any sed script is not provably safe. */
+function maskSedScripts(c: string): string | null {
+  let unsafe = false;
+  const out = c.replace(/(?<![\w./-])sed\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g, (all, args: string) => {
+    const toks = args.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    let haveScript = false;
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i]!;
+      if (/^-[A-Za-z]*f$/.test(t)) { unsafe = true; continue; } // -f script-file
+      if (t === "--file" || t.startsWith("--file=")) { unsafe = true; continue; }
+      if (/^-[A-Za-z]*e$/.test(t) || t === "--expression") {
+        haveScript = true;
+        const next = toks[i + 1];
+        if (next === undefined || !safeSedScript(next)) unsafe = true;
+        else toks[i + 1] = "SCRIPT";
+        i++;
+        continue;
+      }
+      if (t.startsWith("--expression=")) { haveScript = true; if (!safeSedScript(t.slice(13))) unsafe = true; else toks[i] = "--expression=SCRIPT"; continue; }
+      if (t.startsWith("-")) continue;
+      if (!haveScript) {
+        // The first plain word is the script when no -e was given.
+        haveScript = true;
+        if (!safeSedScript(t)) unsafe = true;
+        else toks[i] = "SCRIPT";
+      }
+    }
+    return "sed " + toks.join(" ");
+  });
+  return unsafe ? null : out;
+}
+
+/** The value options of curl, wget, tar and unzip that name a file or folder, plus every absolute path given to tar and unzip. */
+function toolTargets(c: string): string[] {
+  const out: string[] = [];
+  const spec: Record<string, { short: string; long: string[] }> = {
+    curl: { short: "ocDK", long: ["--output", "--output-dir", "--cookie-jar", "--dump-header", "--stderr", "--trace", "--trace-ascii", "--libcurl", "--config"] },
+    wget: { short: "OoaP", long: ["--output-document", "--output-file", "--append-output", "--directory-prefix", "--save-cookies"] },
+    tar: { short: "Cf", long: ["--directory", "--file", "--one-top-level", "--transform", "--to-command"] },
+    unzip: { short: "d", long: [] },
+  };
+  for (const m of c.matchAll(/(?<![\w./-])(curl|wget|tar|unzip)\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g)) {
+    const tool = m[1]!;
+    const { short, long } = spec[tool]!;
+    const toks = (m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map((t) => t);
+    for (let i = 0; i < toks.length; i++) {
+      const t = toks[i]!;
+      const lf = long.find((l) => t === l || t.startsWith(l + "="));
+      if (lf) { out.push(t === lf ? (toks[++i] ?? "") : t.slice(lf.length + 1)); continue; }
+      if (/^-[A-Za-z]+$/.test(t) && short.includes(t.slice(-1))) { out.push(toks[++i] ?? ""); continue; }
+      const sv = /^-([A-Za-z])(.+)$/.exec(t);
+      if (sv && !t.startsWith("--") && short.includes(sv[1]!) && /^[~/$]|\.\./.test(sv[2]!)) { out.push(sv[2]!); continue; }
+      if ((tool === "tar" || tool === "unzip") && /^['"]*[~/$]|\.\./.test(t)) out.push(t);
+    }
+  }
+  return out;
+}
+
+/**
+ * Inline code run by an interpreter (`python3 -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, an awk program, a
+ * heredoc or pipe into one) is unknown and so denied, unless it provably does nothing that reaches a file: no file, process
+ * or environment API at all, or only file APIs on literal paths that `writeOk` places, with no shell-out and no way to
+ * build a path out of pieces. Interpreters that run a script file are not read here.
+ */
+function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
+  const interp = "python[\\d.]*|node(?:js)?|perl|ruby|php|lua|deno|bun|Rscript|tclsh|g?awk|mawk";
+  const re = new RegExp(`(?:^|[;&|(\\n]\\s*)(?:\\w+=\\S*\\s+)*(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
+  const piped = new RegExp(`\\|\\s*(?:${interp})\\b`);
+  for (const m of c.matchAll(re)) {
+    const name = m[1]!;
+    const seg = m[0]!;
+    const isAwk = /awk$/.test(name);
+    const fed = /<<|\s-(?:\s|$)/.test(seg) || piped.test(c); // code arrives by heredoc or pipe
+    // Inline when an option like -c / -e / -r comes before the first plain argument (which would be a script file).
+    let inline = isAwk;
+    for (const t of m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []) {
+      if (!t.startsWith("-") || t === "-") break;
+      if (/^-[A-Za-z]*[ceErp]$/.test(t) || /^--(?:eval|command|print)\b/.test(t)) { inline = true; break; }
+      if (isAwk && t === "-f") { inline = false; break; }
+    }
+    if (!inline && !fed) continue;
+    const code = (fed ? c : seg).replace(/\\(["'`$])/g, "$1");
+    const nodeOrPy = /^(?:python[\d.]*|node(?:js)?)$/.test(name);
+    if (/child_process|subprocess|\bos\.(?:system|popen|exec\w*|spawn\w*)|(?<![.\w])(?:system|popen|exec|execl\w*|execv\w*|spawn\w*|shell_exec|passthru|proc_open|qx|Open3|Kernel|eval|getline)\b|\b(?:execSync|execFileSync|spawnSync)\b/.test(code) || (!nodeOrPy && /\x60/.test(code))) return false;
+    // A path is placed when it is a literal that writeOk accepts; a relative literal stays where the shell already is.
+    const literalOk = (p: string): boolean => !p.includes("..") && (!/^[~/]/.test(p) || writeOk(p));
+    const pathy = [...code.matchAll(/(?:^|[\s'"`=])((?:~|\/(?=[\w.@+-]))[\w.@+\/~-]*)(?=$|[\s'"`),;:])/g)].map((p) => p[1]!);
+    if (pathy.some((p) => !literalOk(p))) return false;
+    if (nodeOrPy) {
+      // Every file call must name its path as a literal, or as a variable set once to a literal.
+      const call = /\b(writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|copyFileSync|copyFile|cpSync|renameSync|rename|unlinkSync|unlink|rmSync|rmdirSync|mkdirSync|mkdir|symlinkSync|symlink|linkSync|chmodSync|chownSync|truncateSync|open|Path|write_text|write_bytes|shutil\.\w+|os\.(?:remove|rename|unlink|mkdir|makedirs|rmdir|chmod|symlink|link|truncate|replace))\s*\(\s*([^,)]*?)\s*(?:,\s*([^,)]*?)\s*)?[,)]/g;
+      for (const k of code.matchAll(call)) {
+        for (const arg of /^(?:copyFile|cpSync|copyFileSync|rename|renameSync|symlink|symlinkSync|linkSync|shutil|os\.(?:rename|replace|symlink|link))/.test(k[1]!) ? [k[2], k[3]] : [k[2]]) {
+          if (arg === undefined || arg === "") continue;
+          if (/^(?:['"][^'"$\\{}]*['"]|`[^`$\\]*`)$/.test(arg)) { if (!literalOk(arg.slice(1, -1))) return false; continue; }
+          if (/^[\w.]+$/.test(arg) && /^[A-Za-z_]/.test(arg)) {
+            const sets = [...code.matchAll(new RegExp(`(?:^|[\\s;,(])${arg.replace(/\./g, "\\.")}\\s*=\\s*(\\S[^;\\n]*?)\\s*(?:;|\\n|$)`, "g"))];
+            const lit = sets.length === 1 ? /^['"]([^'"$\\{}]*)['"]$/.exec(sets[0]![1]!) : null;
+            if (lit && literalOk(lit[1]!)) continue;
+          }
+          // Not a flag like 'r'/'w': those are second arguments to open and are short literals handled above.
+          return false;
+        }
+      }
+      continue;
+    }
+    // Other interpreters: no file or process API at all, or no way to build a path out of pieces.
+    const touchesFiles = /\b(?:open|write\w*|append\w*|File|IO|FileUtils|unlink|remove|rename|copy\w*|move|mkdir\w*|symlink|chmod|chown|truncate|touch|file_put_contents|fopen|fwrite|require|import|Deno|Bun)\b|>\s*["'$\w/~]/.test(code);
+    if (touchesFiles && /\+|\bjoin\b|%[sdr(]|\bformat\b|\bchr\b|fromCharCode|base64|b64|decode|\\x[0-9a-fA-F]|\\u|environ|\benv\b|HOME|argv|getenv|\$\{/.test(code)) return false;
+  }
+  return true;
 }
 
 /**
