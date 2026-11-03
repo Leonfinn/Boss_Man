@@ -52,10 +52,18 @@ describe("the runner's own token", () => {
     }
   });
 
-  it("prefers the file over the environment when both are set, and leaves the variable untouched", () => {
+  it("refuses to start when the file setting and the plain token are both set, because the plain one is still readable in /proc (BOS-394)", () => {
+    // BOS-394: the file used to win silently and the plain copy stayed in /proc/<pid>/environ. Old
+    // code started on the file, so this fails on it.
     const env = { BOSSMAN_RUNNER_TOKEN_FILE: tokenFile("from-file"), BOSSMAN_RUNNER_TOKEN: "from-env" };
-    expect(runnerToken(env)).toEqual({ token: "from-file", fromEnv: false });
-    expect(env.BOSSMAN_RUNNER_TOKEN).toBe("from-env");
+    expect(() => safeRunnerToken(env)).toThrow(/BOSSMAN_RUNNER_TOKEN_FILE/);
+    expect(env).not.toHaveProperty("BOSSMAN_RUNNER_TOKEN");
+  });
+
+  it("clears the plain token when the file setting wins, so the runner's own copy is not handed on", () => {
+    const env = { BOSSMAN_RUNNER_TOKEN_FILE: tokenFile("from-file"), BOSSMAN_RUNNER_TOKEN: "from-env" };
+    expect(runnerToken(env)).toEqual({ token: "from-file", fromEnv: true });
+    expect(env).not.toHaveProperty("BOSSMAN_RUNNER_TOKEN");
   });
 
   it("reports no token when neither is set", () => {
