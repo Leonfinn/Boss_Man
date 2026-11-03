@@ -83,7 +83,7 @@ docker compose version
 git --version && flock --version | head -1 && curl --version | head -1
 ```
 
-**Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. On 3 Nov 2026 the live commit is 2d5e3035; other merges may still change it before stage 3, so the stage 3 and 4 cards confirm the final commit.
+**Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. On 3 Nov 2026 the live commit is d86dbe1f (deployed 12:34 UTC on 3 Nov 2026, includes migration 0099; if you already built 2d5e3035, move the checkout and rebuild the images); other merges may still change it before stage 3, so the stage 3 and 4 cards confirm the final commit.
 
 Make a deploy key for this host (separate from the old host's), add it as a read-only deploy key in the GitHub repository settings, then clone. The key steps are `docs/06-install-truenas.md` step 2; use `$BOSSMAN_HOME` for the folder.
 
