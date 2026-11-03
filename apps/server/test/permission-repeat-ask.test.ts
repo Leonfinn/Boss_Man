@@ -38,7 +38,7 @@ async function setup() {
     return { d, requestId };
   };
   const [ceo] = await db.select().from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, "ceo")));
-  return { ...built, db, close, sent, ask, emit, runId, ceo: ceo! };
+  return { ...built, db, close, sent, ask, emit, req, companyId, runId, ceo: ceo! };
 }
 
 beforeEach(async () => {
@@ -69,8 +69,9 @@ describe("one Allow once covers the one tool call (BOS-334)", () => {
     // Another command and another title are not this call.
     expect((await ctx.ask("rm -rf /tmp/other", "call-2")).d).toBeDefined();
     expect((await ctx.ask(CMD, "call-1", "Something else")).d).toBeDefined();
-    // The same command and title with no call id is the same ask, settled since BOS-376.
-    expect((await ctx.ask(CMD, undefined)).d).toBeUndefined();
+    // A folder ask carries a different input from the command ask (it lists the folder), so without the
+    // tool call id it is not the same exact request and raises its own card (BOS-376 security review).
+    expect((await ctx.ask(CMD, undefined)).d).toBeDefined();
   });
 
   it("does not carry over a Deny", async () => {
@@ -157,5 +158,48 @@ describe("an identical repeat in the same run is settled by the Allow once (BOS-
     await ctx.emit({ type: "run.permission_request", runId: otherRun, requestId, title: CMD, kind: "execute", rawInput: { command: CMD }, optionKinds: ["allow_once", "reject_once"] });
     const [d] = await ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
     expect(d).toBeDefined();
+  });
+});
+
+describe("a repeat never reuses an Allow once for a different address (BOS-376 security review)", () => {
+  // A company rule sends every web fetch to the owner, so a public fetch raises a card (otherwise the
+  // default policy allows reads/fetches outright and there is nothing to reuse). The home-network block is
+  // checked before any rule, so a private fetch is always a deny.
+  beforeEach(async () => {
+    await ctx.req("POST", "/api/policy-rules", { companyId: ctx.companyId, name: "Every fetch asks", match: { kinds: ["fetch"] }, outcome: "owner" });
+  });
+
+  const fetchAsk = async (url: string) => {
+    const requestId = randomUUID();
+    await ctx.emit({ type: "run.permission_request", runId: ctx.runId, requestId, title: "crawl4ai", kind: "fetch", rawInput: { url }, optionKinds: ["allow_once", "reject_once"] });
+    const [d] = await ctx.db.select().from(decisions).where(eq(decisions.dedupeKey, `permission:${requestId}`));
+    return { d, requestId };
+  };
+
+  it("a lone private-network fetch is denied", async () => {
+    const probe = await fetchAsk("http://192.168.68.67/admin");
+    expect(probe.d).toBeUndefined();
+    expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
+  });
+
+  it("a private-network fetch after an Allow once for a public fetch is denied, not allowed", async () => {
+    const pub = await fetchAsk("https://example.com/page");
+    expect(pub.d).toBeDefined();
+    await ctx.decisions.answer(pub.d!.id, "Allow once");
+    ctx.sent.length = 0;
+    const probe = await fetchAsk("http://192.168.68.67/admin");
+    expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
+    expect(ctx.sent).not.toContainEqual(expect.objectContaining({ requestId: probe.requestId, verdict: "allow" }));
+  });
+
+  it("a private-network fetch riding on an open public card is denied", async () => {
+    const pub = await fetchAsk("https://example.com/page");
+    expect(pub.d).toBeDefined();
+    ctx.sent.length = 0;
+    // The private fetch arrives while the public card is still open: it must be its own deny, not ride on it.
+    const probe = await fetchAsk("http://192.168.68.67/admin");
+    expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: probe.requestId, verdict: "deny" }));
+    await ctx.decisions.answer(pub.d!.id, "Allow once");
+    expect(ctx.sent).not.toContainEqual(expect.objectContaining({ requestId: probe.requestId, verdict: "allow" }));
   });
 });

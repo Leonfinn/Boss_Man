@@ -27,3 +27,4 @@ export * from "./runs.js";
 export * from "./retro.js";
 export * from "./sizing.js";
 export * from "./permission-judge.js";
+export * from "./second-opinion.js";
