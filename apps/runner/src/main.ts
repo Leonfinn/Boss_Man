@@ -8,15 +8,17 @@ import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
-import { runnerToken } from "./token.js";
+import { safeRunnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
 const env = process.env;
 const wsUrl = env.BOSSMAN_URL ?? "ws://server:3100/api/runner/connect";
 const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/api\/runner\/connect$/, "");
-const { token, fromEnv: tokenFromEnv } = runnerToken(env);
-if (tokenFromEnv) console.warn("[runner] BOSSMAN_RUNNER_TOKEN is in the process environment, which agent sessions may read; use BOSSMAN_RUNNER_TOKEN_FILE.");
-if (!token) throw new Error("Set BOSSMAN_RUNNER_TOKEN_FILE or BOSSMAN_RUNNER_TOKEN to the token from POST /api/companies/:id/runner.");
+// A token in the environment sits in /proc/<pid>/environ, which the kernel keeps for the life of the
+// process and a session's fence can't take away without also taking /proc away from its tools
+// (BOS-322). The file is the only route that stays out of a session's reach, so refuse rather than
+// run with a token any session can read.
+const token = safeRunnerToken(env);
 
 const dataDir = env.BOSSMAN_RUNNER_DATA ?? "/home/node/runner-data";
 mkdirSync(dataDir, { recursive: true });

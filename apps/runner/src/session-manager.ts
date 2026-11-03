@@ -150,8 +150,12 @@ export const stderrTail = (stderr: string) =>
 // can't find Chromium or start it without its sandbox, and Playwright can't find WebKit.
 export const BASE_ENV_KEYS = ["PATH", "HOME", "LANG", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "CLAUDE_CODE_EXECUTABLE", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "AGENT_BROWSER_EXECUTABLE_PATH", "AGENT_BROWSER_ARGS", "PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH"];
 
-/** Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the environment. */
-const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_ASKPASS|GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+))$/;
+/**
+ * Secrets only the daemon may hold: git authentication, in any of the ways git reads it from the
+ * environment (a token or credentials, an askpass helper, an ssh command, or the config variables
+ * that build a header), plus the forge tokens Claude Code and other tools push with on their own.
+ */
+const GIT_CREDENTIAL_NAMES = /^(GIT_TOKEN|GIT_USERNAME|GIT_PASSWORD|GIT_ASKPASS|GIT_SSH|GIT_SSH_COMMAND|GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_(GLOBAL|SYSTEM|KEY_\d+|VALUE_\d+)|GH_TOKEN|GITHUB_TOKEN|GITEA_TOKEN)$/;
 
 /** A run's granted secrets without the git credential, for the agent's own environment. */
 export function withoutGitCredentials(secrets: Record<string, string>): Record<string, string> {

@@ -2,15 +2,27 @@
 import { readFileSync } from "node:fs";
 
 /**
- * Reads the runner's token from a file (a Docker secret) or the environment.
- * A token from the environment is deleted from this process before it is returned, and `fromEnv`
- * tells the caller to warn: a child session could otherwise read it from /proc, and it stays in
- * the command that started the runner. The file is preferred because the fence (BOS-321) keeps
- * /run out of a session's read list, so a session cannot read the file either.
+ * Reads the runner's token from a file (a Docker secret) or, as a fallback, the environment.
+ * `fromEnv` tells the caller that route is unsafe: a token in the environment is in the command that
+ * started the runner, and deleting it from `process.env` does not scrub `/proc/<pid>/environ`, which
+ * the kernel exposes for the life of the process (BOS-322). The caller refuses to start on it, so the
+ * file is the only route that keeps the token out of a session's reach (the fence, BOS-321, keeps
+ * /run out of a session's read list and a session needs /proc for its own tools).
  */
 export function runnerToken(env: NodeJS.ProcessEnv): { token: string | undefined; fromEnv: boolean } {
   if (env.BOSSMAN_RUNNER_TOKEN_FILE) return { token: readFileSync(env.BOSSMAN_RUNNER_TOKEN_FILE, "utf8").trim(), fromEnv: false };
   const token = env.BOSSMAN_RUNNER_TOKEN?.trim();
   delete env.BOSSMAN_RUNNER_TOKEN;
   return { token, fromEnv: token !== undefined };
+}
+
+/**
+ * The runner's start-up guard: a token from the environment is refused because a session can read it
+ * from /proc (BOS-322). Returns the token to use, or throws with what to do instead.
+ */
+export function safeRunnerToken(env: NodeJS.ProcessEnv): string {
+  const { token, fromEnv } = runnerToken(env);
+  if (fromEnv) throw new Error("BOSSMAN_RUNNER_TOKEN was found in the environment, where a session can read it from /proc. Set BOSSMAN_RUNNER_TOKEN_FILE to a file instead.");
+  if (!token) throw new Error("Set BOSSMAN_RUNNER_TOKEN_FILE to the token from POST /api/companies/:id/runner.");
+  return token;
 }
