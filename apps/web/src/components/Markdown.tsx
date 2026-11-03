@@ -25,6 +25,16 @@ const plain = (node: ReactNode): string =>
 // sit inside an anchor, and the link already goes somewhere on click (BOS-330 review).
 const InLink = createContext(false);
 
+// A Markdown picture: plain inside a link (a button cannot sit in an anchor), otherwise enlargeable.
+function MarkdownImage({ src, alt }: { src?: string | URL; alt?: string }) {
+  const url = typeof src === "string" ? src : undefined;
+  return useContext(InLink) ? (
+    <img src={url} alt={alt ?? ""} />
+  ) : (
+    <EnlargeableImage src={url} alt={typeof alt === "string" ? alt : undefined} />
+  );
+}
+
 export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?: string }) {
   return (
     <div className="md">
@@ -49,12 +59,7 @@ export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?
               </a>
             ),
           // A picture opens enlarged over the page rather than in a new window (BOS-330).
-          img: ({ src, alt }) =>
-            useContext(InLink) ? (
-              <img src={typeof src === "string" ? src : undefined} alt={typeof alt === "string" ? alt : ""} />
-            ) : (
-              <EnlargeableImage src={typeof src === "string" ? src : undefined} alt={typeof alt === "string" ? alt : undefined} />
-            ),
+          img: MarkdownImage,
           table: ({ children }) => (
             <div className="md-table">
               <table>{children}</table>
