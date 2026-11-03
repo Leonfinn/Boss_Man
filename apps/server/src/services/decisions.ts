@@ -1965,8 +1965,12 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
             interrupt: false,
           });
         }
+        const [permRun] = await db.select({ endedAt: runs.endedAt }).from(runs).where(eq(runs.id, ctx.runId));
         delivered = send(ctx.runnerId, { type: "permission.decide", runId: ctx.runId, requestId: ctx.requestId, verdict: allowed ? "allow" : "deny" });
-        if (!delivered) {
+        if (!delivered && permRun?.endedAt) {
+          // The agent has finished, so there is nothing to deliver to: record that and don't alarm the owner (BOS-342).
+          await db.update(decisions).set({ context: { ...ctx, delivered: "run_ended" } }).where(eq(decisions.id, id));
+        } else if (!delivered) {
           // Never fail silently (R22): flag it, and re-send when the runner reconnects.
           await db.update(decisions).set({ context: { ...ctx, delivered: false } }).where(eq(decisions.id, id));
           await db
