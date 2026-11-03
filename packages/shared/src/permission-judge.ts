@@ -98,6 +98,10 @@ export function judgePermission(question: string, command: string | null, ownFol
   for (const segment of c.split(/[;&|\n]/)) {
     // Delete every quote and backslash from the whole segment first, so `g''it con"fi"g` reads as `git config`.
     const flat = segment.replace(/['"\\]/g, "");
+    // A `$`, `${`, `$(` or backtick next to git (or next to the text `config`) can build the subcommand at run time
+    // (`c=config; git $c`, `git ${X:-config}`, `git$IFS config`), so it is refused unless the subcommand is a literal safe one.
+    if (/\$|\x60/.test(flat) && (/^\s*(?:\w+=\S*\s+|sudo\s+|env\s+)*git\b|git[$\x60{]|config/.test(flat))
+      && !/^git (?:commit|log|add|status|diff|show|checkout|switch|branch|tag|stash|merge|rebase|rev-parse|grep|push|pull|fetch) /.test(segment.trim())) return result("outside");
     if (!/(?:^|\s)config(?:\s|$)/.test(flat) || !(/git/.test(flat) || /\$|\x60/.test(flat))) continue;
     const raw = segment.trim();
     // A literal `git <subcommand>` that cannot set config (no -c before it): `config` is only text in its arguments.
