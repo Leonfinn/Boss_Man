@@ -2,7 +2,7 @@
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePoll } from "../src/hooks";
-import { api, setUnshareablePaths } from "../src/api";
+import { api } from "../src/api";
 
 /**
  * BOS-408: usePoll keeps one chain per hook, pauses while the tab is hidden, and hooks polling the
@@ -34,7 +34,6 @@ beforeEach(() => {
   shown = true;
   vi.spyOn(document, "visibilityState", "get").mockImplementation(() => (shown ? "visible" : "hidden"));
   vi.spyOn(document, "hidden", "get").mockImplementation(() => !shown);
-  setUnshareablePaths((_path: string) => false);
   vi.useFakeTimers();
 });
 
@@ -121,7 +120,6 @@ describe("usePoll", () => {
       </>,
     );
     await settle();
-    expect(fetchMock.mock.calls.length).toBe(Math.max(1, fetchMock.mock.calls.length));
     expect(fetchMock.mock.calls.length).toBe(1);
   });
 });
