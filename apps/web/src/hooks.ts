@@ -13,10 +13,44 @@ export function useRoute(): [string[], (to: string) => void] {
   return [parts, (to: string) => (window.location.hash = `#/${to}`)];
 }
 
+type Shared = { promise: Promise<unknown> };
+
+const inFlight = new Map<string, Shared>();
+
+/**
+ * One request per URL at a time: two hooks reading the same path together (App.tsx and Funding.tsx both
+ * read /api/runs, several screens read /api/secrets and /api/funding-sources) cost one round trip, not two.
+ * For reads only: a POST is never shared, because sharing it would send it once for two callers.
+ */
+export function sharedGet<S>(key: string, send: (signal: AbortSignal) => Promise<S>): Promise<S> {
+  let entry = inFlight.get(key);
+  if (!entry) {
+    const shared: Shared = { promise: Promise.resolve() };
+    // Record the entry before the request can settle: a fast (or failing) answer must still find the entry
+    // it belongs to when it clears it, or a finished request would linger and be served to the next reader.
+    inFlight.set(key, shared);
+    shared.promise = send(new AbortController().signal);
+    const cleared = () => {
+      if (inFlight.get(key) === shared) inFlight.delete(key);
+    };
+    shared.promise.then(cleared, cleared);
+    entry = shared;
+  }
+  return entry.promise as Promise<S>;
+}
+
+function hidden() {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
 /**
  * Loads data now and again every `everyMs`, plus whenever the tab comes back into view.
  * The browser only ever reads: all autonomy runs on the server (R43), so a slow or closed
  * tab can't hold an agent up.
+ *
+ * At most one chain runs per hook: a reload asked for mid-request is remembered and happens
+ * when that request comes back, never alongside it. Timers stop while the tab is hidden, and
+ * one reload runs on return.
  */
 export function usePoll<T>(load: (signal: AbortSignal) => Promise<T>, everyMs: number, key: string) {
   const [data, setData] = useState<T | null>(null);
@@ -32,29 +66,64 @@ export function usePoll<T>(load: (signal: AbortSignal) => Promise<T>, everyMs: n
   }, [key]);
 
   useEffect(() => {
-    const ctrl = new AbortController();
+    let live = true;
+    let running = false;
+    let again = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = undefined;
+      if (!live || hidden()) return;
+      timer = setTimeout(() => void run(), everyMs);
+    };
+
     const run = async () => {
+      if (!live) return;
+      if (running) {
+        // Already out: ask for one more when it comes back rather than start a second chain.
+        again = true;
+        return;
+      }
+      clearTimeout(timer);
+      timer = undefined;
+      if (hidden()) return;
+      running = true;
       try {
-        setData(await loadRef.current(ctrl.signal));
+        const next = await loadRef.current(new AbortController().signal);
+        if (!live) return;
+        setData(next);
         setError(null);
       } catch (err) {
-        if ((err as Error).name === "AbortError") return;
+        if (!live || (err as Error).name === "AbortError") return;
         setError(err instanceof ApiError ? err : new ApiError(0, String(err)));
+      } finally {
+        running = false;
       }
-      if (!ctrl.signal.aborted) timer = setTimeout(run, everyMs);
+      if (!live) return;
+      if (again) {
+        again = false;
+        void run();
+      } else schedule();
     };
-    void run();
-    const onVisible = () => {
-      if (document.visibilityState !== "visible") return;
-      clearTimeout(timer);
-      void run();
+
+    const onVisibility = () => {
+      if (hidden()) {
+        // Going away: stop the timer so nothing is sent while nobody is looking.
+        clearTimeout(timer);
+        timer = undefined;
+        return;
+      }
+      if (running) again = true;
+      else void run();
     };
-    document.addEventListener("visibilitychange", onVisible);
+
+    if (!hidden()) void run();
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      ctrl.abort();
+      live = false;
       clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [everyMs, key, tick]);
 
