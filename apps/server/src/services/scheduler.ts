@@ -644,7 +644,7 @@ export function schedulerService(
             `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
           );
         lines.push("", PLAIN_SUMMARY_RULE);
-        lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
+        lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session." + (t.t.systemState === "review" ? " This ticket is already in review: a set_ticket_state to review only updates the note and does not re-request reviews (ticket_reply also works)." : ""));
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
         // The ticket's conversation with the owner (R65).
