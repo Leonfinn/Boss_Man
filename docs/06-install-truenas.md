@@ -24,7 +24,7 @@ Instead, this guide runs Boss Man with the `docker compose` command over SSH, as
 - TrueNAS SCALE 24.10 or later, with an apps pool chosen under Apps > Configuration > Choose Pool. The Docker service only runs once a pool is chosen.
 - A root shell on the NAS: TrueNAS UI > System > Shell, or `su -` over SSH. Every command in this guide is typed there, so none has `sudo` in front.
 - A Claude Pro or Max subscription for a setup-token, or an Anthropic API key.
-- A GitHub account that can create a fine-grained token for the repos the agents will work on, and access to the public repo `Leonfinn/Boss_Man`, which needs no key (the repo is public).
+- A GitHub account that can create a fine-grained token for the repos the agents will work on, and admin access to the private repo `Leonfinn/Boss_Man`, to add the NAS's read-only deploy key (step 2).
 
 The commands below put Boss Man in `/mnt/NVME_Apps/Container_files/boss-man`, next to your other container apps on the mirrored NVMe pool. If you keep it somewhere else, change that path everywhere it appears. Replace `<nas-ip>` with the NAS's LAN address. Your router is at 192.168.68.1, so the NAS is most likely on 192.168.68.x. Check it in the TrueNAS UI under Network.
 
