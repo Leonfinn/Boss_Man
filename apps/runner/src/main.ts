@@ -1,6 +1,6 @@
 // Runner daemon: one per company. Dials out to the Boss Man server, runs agents over ACP
 // on its commands, and journals every event until the server has it (R31).
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkClaude } from "./claude-check.js";
 import { runnerFence, sandboxSelfTest } from "./fence.js";
@@ -8,18 +8,14 @@ import { harnessVersions } from "./harness-versions.js";
 import { Journal } from "./journal.js";
 import { RunnerConnection } from "./connection.js";
 import { SessionManager } from "./session-manager.js";
+import { runnerToken } from "./token.js";
 import { Workspaces } from "./workspace.js";
 
 const env = process.env;
 const wsUrl = env.BOSSMAN_URL ?? "ws://server:3100/api/runner/connect";
 const httpBase = wsUrl.replace(/^ws/, "http").replace(/\/api\/runner\/connect$/, "");
-// The token comes from a file (a Docker secret) or the environment.
-const token = env.BOSSMAN_RUNNER_TOKEN_FILE ? readFileSync(env.BOSSMAN_RUNNER_TOKEN_FILE, "utf8").trim() : env.BOSSMAN_RUNNER_TOKEN?.trim();
-// Drop the variable from this process; /proc still shows how it started, so prefer the file (a session must not be able to read either).
-if (!env.BOSSMAN_RUNNER_TOKEN_FILE && env.BOSSMAN_RUNNER_TOKEN) {
-  console.warn("[runner] BOSSMAN_RUNNER_TOKEN is in the process environment, which agent sessions may read; use BOSSMAN_RUNNER_TOKEN_FILE.");
-  delete env.BOSSMAN_RUNNER_TOKEN;
-}
+const { token, fromEnv: tokenFromEnv } = runnerToken(env);
+if (tokenFromEnv) console.warn("[runner] BOSSMAN_RUNNER_TOKEN is in the process environment, which agent sessions may read; use BOSSMAN_RUNNER_TOKEN_FILE.");
 if (!token) throw new Error("Set BOSSMAN_RUNNER_TOKEN_FILE or BOSSMAN_RUNNER_TOKEN to the token from POST /api/companies/:id/runner.");
 
 const dataDir = env.BOSSMAN_RUNNER_DATA ?? "/home/node/runner-data";

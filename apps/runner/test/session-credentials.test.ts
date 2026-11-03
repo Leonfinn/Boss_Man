@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { SessionManager, withoutGitCredentials } from "../src/session-manager.js";
-import { gitAuthEnv } from "../src/workspace.js";
+import { gitAuthEnv, safeGitEnv } from "../src/workspace.js";
 
 const start = { type: "run.start", runId: randomUUID(), agentId: randomUUID(), agentKind: "claude", model: null, fundingSourceId: randomUUID(), cwd: "/tmp", prompt: "x", mcpToken: "bm_x" } as const;
 
@@ -43,5 +43,13 @@ describe("an agent session's environment", () => {
 
   it("leaves the daemon's own git authentication intact", () => {
     expect(gitAuthEnv(secrets).GIT_CONFIG_VALUE_0).toContain(Buffer.from("bot:ghp_secret_token").toString("base64"));
+  });
+
+  it("gives the daemon the auth header and the session none, from the same granted secrets", () => {
+    const daemon = safeGitEnv(gitAuthEnv(secrets));
+    const headers = Object.values(daemon).filter((v) => v.startsWith("Authorization: Basic "));
+    expect(headers).toHaveLength(1);
+    expect(headers[0]).toContain(Buffer.from("bot:ghp_secret_token").toString("base64"));
+    expect(JSON.stringify(launchEnv(secrets))).not.toContain("Authorization: Basic");
   });
 });
