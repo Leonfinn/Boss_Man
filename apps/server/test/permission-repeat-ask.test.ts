@@ -148,6 +148,21 @@ describe("an identical repeat in the same run is settled by the Allow once (BOS-
     expect(repeat.d).toBeDefined();
   });
 
+  it("never turns a Deny into an Allow for a repeat riding on the card", async () => {
+    const first = await ctx.ask(CMD, undefined);
+    const repeat = await ctx.ask(CMD, undefined);
+    // The repeat rides on the open card instead of raising its own (BOS-376).
+    expect(repeat.d).toBeUndefined();
+    ctx.sent.length = 0;
+    await ctx.decisions.answer(first.d!.id, "Deny");
+    // The one Deny must reach the waiting repeat as a deny, never as an allow.
+    expect(ctx.sent).toContainEqual(expect.objectContaining({ type: "permission.decide", requestId: repeat.requestId, verdict: "deny" }));
+    expect(ctx.sent).not.toContainEqual(expect.objectContaining({ requestId: repeat.requestId, verdict: "allow" }));
+    const [card] = await ctx.db.select().from(decisions).where(eq(decisions.id, first.d!.id));
+    const repeats = (card!.context as { repeats?: Array<{ requestId: string; settled?: string }> }).repeats;
+    expect(repeats?.find((r) => r.requestId === repeat.requestId)?.settled).toBe("deny");
+  });
+
   it("does not carry an Allow over to a different command, or to another run", async () => {
     const first = await ctx.ask(CMD, undefined);
     await ctx.decisions.answer(first.d!.id, "Allow once");

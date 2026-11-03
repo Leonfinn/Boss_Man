@@ -1063,7 +1063,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
    * nothing about this exact ask, or the ask moved to the CEO or a rule since.
    */
   async function repeatAnswer(event: PermissionEvent, fingerprint: string): Promise<{ allow: string | null; denied: boolean }> {
-    const since = new Date(Date.now() - REPEAT_ANSWER_MS);
+    const since = new Date(now().getTime() - REPEAT_ANSWER_MS);
     const rows = await db
       .select({ id: decisions.id, answer: decisions.answer, context: decisions.context, answeredAt: decisions.answeredAt })
       .from(decisions)
@@ -1092,7 +1092,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
    * the same command (BOS-376). Older than that is a new question, and a Deny is never read here.
    */
   async function allowedCommandOnRun(runId: string, event: PermissionEvent, fingerprint: string): Promise<string | null> {
-    const since = new Date(Date.now() - REPEAT_ANSWER_MS);
+    const since = new Date(now().getTime() - REPEAT_ANSWER_MS);
     const rows = await db
       .select({ id: decisions.id, context: decisions.context, answeredAt: decisions.answeredAt })
       .from(decisions)
@@ -2064,7 +2064,7 @@ export function decisionsService(db: Db, send: Sender, now: () => Date = () => n
       // A repeat of this command waited on this card (BOS-376): an Allow once settles it too, and a Deny
       // never turns into one. The card keeps what settled, so the audit shows the repeat.
       if (closed && ctx.type === "permission" && repeatsNow?.length) {
-        const say = answer === ALLOW || APPROVE_PLAN ? "allow" : "deny";
+        const say = answer === ALLOW || answer === APPROVE_PLAN ? "allow" : "deny";
         // Do not ignore the send result (BOS-376 review): a repeat whose runner has dropped off is not
         // settled yet, so it is left unmarked and a reconnect resend still answers it. Only mark a repeat
         // settled once its answer has actually been sent.
