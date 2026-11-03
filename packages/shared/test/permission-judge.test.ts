@@ -283,6 +283,27 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     });
   });
 
+  describe("10. Jane's round 11", () => {
+    denies([
+      "FOO=git git config core.fsmonitor /tmp/x",
+      "/opt/git/bin/git config core.fsmonitor /tmp/x",
+      "git --git-dir .git config core.fsmonitor /tmp/x",
+      "git --work-tree . config core.fsmonitor /tmp/x",
+      `git "config" core.fsmonitor /tmp/x`,
+      "git conf\\ig core.fsmonitor /tmp/x",
+      `x=1 $py -c "open('/home/node/.bashrc','w')"`,
+      `exec $py -c "open('/home/node/.bashrc','w')"`,
+      `command $py -c "open('/home/node/.bashrc','w')"`,
+      `timeout 5 $py -c "open('/home/node/.bashrc','w')"`,
+      `{ $py -c "open('/home/node/.bashrc','w')"; }`,
+      `if true; then $py -c "open('/home/node/.bashrc','w')"; fi`,
+      "$py - <<'EOF'\nopen('/home/node/.bashrc','w')\nEOF",
+      `echo "open('/home/node/.bashrc','w')" | $py`,
+      "7z x a.7z '-o/home/node'",
+    ]);
+    allows(["git --git-dir .git log", "git add config.txt"]);
+  });
+
   describe("9. Jane's round 10", () => {
     denies([
       "git config --get core.x && git config core.fsmonitor /tmp/x",
@@ -296,7 +317,7 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     ]);
     allows(["git config --get a && git config --get b", "git log --oneline | head -3"]);
     it("scans a long run of git -c options in linear time", () => {
-      for (const cmd of ["git" + " -c".repeat(60) + " x", "git" + " -c".repeat(5000) + " x", "git" + " -c a=b".repeat(500) + " status"]) {
+      for (const cmd of ["x=1 " + "$p ".repeat(2000), "$p " + "-c ".repeat(5000), "git " + "--git-dir x ".repeat(3000) + "status","git" + " -c".repeat(60) + " x", "git" + " -c".repeat(5000) + " x", "git" + " -c a=b".repeat(500) + " status"]) {
         const t = Date.now();
         judge(cmd);
         expect(Date.now() - t).toBeLessThan(200);

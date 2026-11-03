@@ -95,16 +95,22 @@ export function judgePermission(question: string, command: string | null, ownFol
   // would run in other agents' git); only the explicit read forms pass.
   // Linear scan, per command segment: a `git` word followed later by a `config` word. Every such segment must be a pure read.
   for (const segment of c.split(/[;&|\n]/)) {
-    const g = /\bgit\b/.exec(segment);
-    if (!g) continue;
-    // Walk the words after `git`: options (and the value of -c / -C) until the subcommand; only `config` matters.
-    const words = segment.slice(g.index + 3).match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
-    let k = 0;
-    while (k < words.length && words[k]!.startsWith("-")) k += /^-[cC]$/.test(words[k]!) ? 2 : 1;
-    if (words[k] !== "config") continue;
-    const args = words.slice(k + 1).join(" ");
-    const readOnly = /(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?=\s|$)/.test(args) && !/(?:^|\s)(?:--add|--unset(?:-all)?|--replace-all|--edit|-e|--rename-section|--remove-section|--set\S*|--file\S*|-f\S*|--global|--system|--worktree|--blob)(?=\s|=|$)/.test(args);
-    if (!readOnly) return result("outside");
+    // Words with quotes and backslashes removed (`"config"`, `conf\ig`) and leading ( { $( ` dropped.
+    const words = (segment.match(/'[^']*'|"[^"]*"|(?:\\.|[^\s'"])+/g) ?? []).map((w) => w.replace(/['"\\]/g, "").replace(/^[({`$]+/, ""));
+    // Every word whose basename is `git` starts a git command (`FOO=git git`, `/opt/git/bin/git`, a path argument).
+    for (let gi = 0; gi < words.length; gi++) {
+      if (words[gi]!.split("/").pop() !== "git") continue;
+      // Options (and the value of -c / -C and the separate-value long options) until the subcommand; only `config` matters.
+      let k = gi + 1;
+      while (k < words.length && words[k]!.startsWith("-")) {
+        const w = words[k]!;
+        k += /^-[cC]$/.test(w) || /^--(?:git-dir|work-tree|namespace|exec-path|config-env|super-prefix|attr-source)$/.test(w) ? 2 : 1;
+      }
+      if (words[k] !== "config") continue;
+      const args = words.slice(k + 1).join(" ");
+      const readOnly = /(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?=\s|$)/.test(args) && !/(?:^|\s)(?:--add|--unset(?:-all)?|--replace-all|--edit|-e|--rename-section|--remove-section|--set\S*|--file\S*|-f\S*|--global|--system|--worktree|--blob)(?=\s|=|$)/.test(args);
+      if (!readOnly) return result("outside");
+    }
   }
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
   if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
@@ -319,7 +325,7 @@ function toolTargets(c: string): string[] {
   for (const m of c.matchAll(/(?<![\w./-])(curl|wget|tar|unzip|7z|7za|7zr)\b((?:[^;&|\n'"]|'[^']*'|"[^"]*")*)/g)) {
     const tool = m[1]!;
     const { short, long } = spec[/^7z/.test(tool) ? "7z" : tool]!;
-    const toks = (m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map((t) => t);
+    const toks = (m[2]!.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map((t) => t.replace(/['"]/g, ""));
     for (let i = 0; i < toks.length; i++) {
       const t = toks[i]!;
       // tar -P / --absolute-names: members keep their absolute paths, so nothing can be placed.
@@ -336,6 +342,32 @@ function toolTargets(c: string): string[] {
 }
 
 /**
+ * True when a command word is a variable, `$(...)` or backtick (an unknown program) and it is given code: a -c/-e/-r/-E/-p
+ * option, `-` or a heredoc anywhere in its segment, or it receives a pipe. The command word is found after assignment
+ * prefixes and wrappers (exec, command, env, timeout, nice, xargs, then, do, `{`, `(`...). Linear: one pass over the words.
+ */
+function variableCommandWord(c: string): boolean {
+  const parts = c.split(/([;&|\n])/);
+  const wrappers = /^(?:exec|command|builtin|env|nohup|time|sudo|then|do|else|if|elif|while|until|!|\{|\(|timeout|nice|xargs|stdbuf|setsid)$/;
+  for (let i = 0; i < parts.length; i += 2) {
+    const seg = parts[i]!;
+    const words = seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    let k = 0;
+    while (k < words.length) {
+      const w = words[k]!.replace(/^[({]+(?=.)/, "");
+      if (/^\w+=/.test(w) || wrappers.test(w) || /^-\S*$/.test(w) || /^\d+[smhd]?$/.test(w)) k++;
+      else break;
+    }
+    const cw = words[k]?.replace(/^[({]+(?=.)/, "");
+    if (!cw || !/^"?\$\{?[A-Za-z_]\w*\}?"?$|^\$\(|^\x60/.test(cw)) continue;
+    const piped = i >= 2 && parts[i - 1] === "|";
+    const rest = words.slice(k + 1);
+    if (piped || /<</.test(seg) || rest.some((t) => t === "-" || /^-[A-Za-z]*[ceErp]$/.test(t))) return true;
+  }
+  return false;
+}
+
+/**
  * Inline code run by an interpreter (`python3 -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, an awk program, a
  * heredoc or pipe into one) is unknown and so denied, unless it provably does nothing that reaches a file: no file, process
  * or environment API at all, or only file APIs on literal paths that `writeOk` places, with no shell-out and no way to
@@ -347,7 +379,7 @@ function inlineCodeOk(c: string, writeOk: (t: string) => boolean): boolean {
   const re = new RegExp(`(?<![\\w.-])(?:[\\w./-]*/)?(${interp})(?![\\w./-])((?:[^;&|\\n'"]|'[^']*'|"[^"]*")*)`, "g");
   const piped = new RegExp(`\\|\\s*(?:${interp})\\b`);
   // A command word that is a variable, `$(...)` or backtick is an unknown program: with -c/-e/-r it may be an interpreter.
-  if (/(?:^|[;&|(\n])[ \t]*(?:env[ \t]+)?(?:"?\$\{?[A-Za-z_]\w*\}?"?|\$\(|\x60)[^;&|\n]*?[ \t]-[A-Za-z]*[ceErp](?=[ \t]|$)/.test(c)) return false;
+  if (variableCommandWord(c)) return false;
   for (const m of c.matchAll(re)) {
     const name = m[1]!;
     const seg = m[0]!;
