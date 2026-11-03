@@ -219,6 +219,36 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     expect(git(w.path, "status", "--porcelain")).toBe("");
   });
 
+  it("does not count a branch that merged this ticket in as carried (BOS-365)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    // The other ticket builds on this one by merging it in; this ticket never merges the other.
+    git(other.path, "merge", "--no-edit", `bossman/${ids.t}`);
+    expect(await ws.carried(spec, "main", [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }])).toEqual({ carried: [] });
+  });
+
+  it("still counts a branch this ticket fast-forwarded in (BOS-365)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    // A third ticket merges the other in before committing anything: a fast-forward.
+    const ffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const ff = await ws.ensure({ ...spec, ticketId: ffId });
+    git(ff.path, "merge", "--no-edit", `bossman/${ids2.other}`);
+    writeFileSync(path.join(ff.path, "ff.txt"), "own\n");
+    git(ff.path, "add", ".");
+    git(ff.path, "commit", "-qm", "ff ticket's work");
+    const hit = { ticketId: ids2.other, branch: `bossman/${ids2.other}` };
+    expect(await ws.carried({ ...spec, ticketId: ffId }, "main", [hit])).toEqual({ carried: [hit] });
+  });
+
   it("finds nothing once the carried branch has itself merged to the target", async () => {
     const o = origin();
     const { ws, spec, w } = await ticketWithCommit(o, "feature.txt", "new\n");

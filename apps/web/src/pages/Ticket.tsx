@@ -681,7 +681,7 @@ export function Ticket({ id, companies }: { id: string; companies: Company[] }) 
             </p>
           )}
 
-          <ScrumMasterLog companyId={t.companyId} ticketId={t.id} heading="Scrum Master" />
+          <ScrumMasterLog companyId={t.companyId} ticketId={t.id} folded />
           <TicketActivity ticketId={t.id} companyId={t.companyId} assignee={t.assignee} assigneeId={t.assigneeAgentId} agents={agents} reviews={reviews} />
         </div>
 
