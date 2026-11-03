@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, getTableName } from "drizzle-orm";
 import type { RunnerCommand, RunnerEvent } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
-import { openPglite } from "../src/db/client.js";
+import { openPglite, type Db } from "../src/db/client.js";
 import { runsService } from "../src/services/runs.js";
 import { decisionsService } from "../src/services/decisions.js";
 import { activity, agents, decisions, notifications, runs, runners, tickets, wakes } from "../src/db/schema.js";
@@ -17,8 +17,38 @@ afterEach(async () => {
 
 type Row = { id: string; kind: string; question: string; recommendedOption: string; score: number; reasons: string[]; blocks: Array<{ ticketId: string; depth: number }>; dueDate: string | null };
 
+/** Wraps a db so every select made while `reads.on` is set is counted, with the rows it returned (BOS-409). */
+function countReads(inner: Db) {
+  const reads = { on: false, queries: 0, rows: 0, byTable: {} as Record<string, number> };
+  const wrap = (b: object, table = ""): object =>
+    new Proxy(b, {
+      get(target, prop) {
+        const v = Reflect.get(target, prop, target);
+        if (typeof v !== "function") return v;
+        if (prop === "then")
+          return (ok?: (r: unknown) => unknown, bad?: (e: unknown) => unknown) =>
+            v.call(target, (r: unknown) => {
+              if (reads.on && Array.isArray(r)) {
+                reads.queries++;
+                reads.rows += r.length;
+                reads.byTable[table] = (reads.byTable[table] ?? 0) + r.length;
+              }
+              return ok ? ok(r) : r;
+            }, bad);
+        return (...a: unknown[]) => {
+          const out = v.apply(target, a);
+          const from = prop === "from" ? getTableName(a[0] as never) : table;
+          return out && typeof out === "object" ? wrap(out, from) : out;
+        };
+      },
+    });
+  const db = new Proxy(inner, { get: (t, p) => (p === "select" ? (...a: unknown[]) => wrap((t.select as (...x: unknown[]) => object)(...a)) : Reflect.get(t, p, t)) }) as Db;
+  return { db, reads };
+}
+
 async function setup() {
-  const { db, close } = await openPglite();
+  const { db: rawDb, close } = await openPglite();
+  const { db, reads } = countReads(rawDb);
   let offset = 0;
   const clock = () => new Date(Date.now() + offset);
   const built = await buildApp({ db, master: { version: 1, key: randomBytes(32) }, secureCookies: false, tickOnWake: false, limits: { quickBatchMs: 0 }, workspaceRoot: "/ws", now: clock });
@@ -40,7 +70,7 @@ async function setup() {
   const queue = async () => (await req("GET", "/api/decisions")).json() as Row[];
   const sweep = async () => (await req("POST", "/api/sweep")).json() as { staleBlockers: { open: number; raised: number }; stalledRuns: { open: number; raised: number }; lostRuns: number; longTicketlessRuns: { raised: number } };
   const advance = (ms: number) => (offset += ms);
-  return { ...built, db, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
+  return { ...built, db, reads, close, req, company, ceo, worker, project, commands, emit, ticket, queue, sweep, advance, clock, offline, online };
 }
 
 describe("ranked decision queue (R20)", () => {
@@ -273,6 +303,48 @@ describe("stale blockers (R21)", () => {
     const open = await ctx.db.select().from(decisions).where(and(eq(decisions.kind, "stale_blocker"), eq(decisions.status, "open")));
     expect(open).toHaveLength(1);
     expect(open[0]!.question).toContain("Get certs");
+  });
+
+  it("reads the same rows however many done tickets or unrelated runs exist, and a fixed number of queries per live dependency count (BOS-409)", async () => {
+    ctx = await setup();
+    const measure = async () => {
+      ctx.reads.queries = 0;
+      ctx.reads.rows = 0;
+      ctx.reads.byTable = {};
+      ctx.reads.on = true;
+      await ctx.sweep();
+      ctx.reads.on = false;
+      return { queries: ctx.reads.queries, deps: ctx.reads.byTable["ticket_dependencies"] ?? 0, runs: ctx.reads.byTable["runs"] ?? 0 };
+    };
+    const pair = async (title: string) => {
+      const blocker = await ctx.ticket({ title: `Blocker ${title}`, assigneeAgentId: ctx.ceo.id });
+      const waiting = await ctx.ticket({ title: `Waiting ${title}`, state: "blocked", assigneeAgentId: ctx.worker.id });
+      await ctx.req("POST", `/api/tickets/${waiting.id}/dependencies`, { ticketId: blocker.id });
+      return { blocker, waiting };
+    };
+    await pair("a");
+    await pair("b");
+    ctx.advance(25 * HOUR);
+    await ctx.sweep(); // raises both cards, so the measured passes are steady-state
+    const two = await measure();
+
+    // Done tickets with dependencies, and runs on tickets nobody is waiting on, must not be read.
+    let loose = { id: "" };
+    for (let i = 0; i < 4; i++) {
+      const { waiting } = await pair(`done${i}`);
+      await ctx.req("PATCH", `/api/tickets/${waiting.id}`, { state: "done" });
+      loose = waiting;
+    }
+    const at = ctx.clock();
+    for (let i = 0; i < 6; i++) await ctx.db.insert(runs).values({ companyId: ctx.company.id, agentId: ctx.worker.id, ticketId: loose.id, status: "succeeded", startedAt: at, lastEventAt: at, endedAt: at } as never);
+    expect(await measure()).toEqual(two);
+
+    // More live dependencies add no queries: blockers and engagements are fetched in one query each.
+    for (let i = 0; i < 6; i++) await pair(`live${i}`);
+    ctx.advance(25 * HOUR);
+    await ctx.sweep();
+    const eight = await measure();
+    expect(eight.queries).toBe(two.queries);
   });
 
   it("withdraws the row once the blocker is done", async () => {
