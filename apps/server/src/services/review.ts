@@ -64,6 +64,7 @@ export const LOCK_RETRY_TEXT = "Merge check waiting for lock, retrying";
 
 /** How long the server waits for the runner to merge or push an approved branch. */
 export const MERGE_WAIT_MS = 10 * 60_000;
+const CHECK_MERGED_KEY = "check_merged_result";
 /** How often a landing in progress says it is still active, so a sweep never starts a second one beside it. */
 export const MERGE_ACTIVITY_MS = 60_000;
 
@@ -72,7 +73,7 @@ export const NOTHING_CHANGED = "Nothing in the repository changed. Make the chan
 
 /** The plain-words outcome of landing, for a non-developer. */
 export function landingText(r: { outcome: string; detail?: unknown }, ctx: { branch: string; assignee: string | null }): string {
-  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string };
+  const d = (r.detail ?? {}) as { timedOut?: boolean; exitCode?: number; ms?: number; files?: string[]; problems?: string[]; url?: string | null; note?: string; carried?: Array<{ title: string }>; unchecked?: string };
   const back = `It's gone back to ${ctx.assignee ?? "the assignee"}`;
   switch (r.outcome) {
     case "merged":
@@ -93,6 +94,8 @@ export function landingText(r: { outcome: string; detail?: unknown }, ctx: { bra
       return "Approved, but not merged: the check couldn't finish. This isn't a problem with the agent's work; it's in your Decisions.";
     case "conflicts":
       return `Approved, but not merged: the work conflicts with ${ctx.branch} in ${(d.files ?? []).join(", ")}. ${back} to sort out.`;
+    case "migration_journal":
+      return `Approved, but not merged: the migration journal would make drizzle skip a migration (${(d.problems ?? []).join(" ")}). ${back} to fix.`;
     case "uncommitted":
       return `Approved, but not merged: some work isn't saved to the branch yet (${(d.files ?? []).join(", ")}). ${back} to commit it.`;
     default:
@@ -348,6 +351,12 @@ export function reviewService(
     if (!ticket.assigneeAgentId || !wake) throw new ReviewError(409, "The ticket has no assignee to send this to.");
     const w = (await wake(ticket.assigneeAgentId, { ticketId: ticket.id, reason, priority: 3, note: text, causedByRunId })) as { status: string };
     return w.status === "steered" ? "sent to the running agent" : "the assignee will be woken with it";
+  }
+
+  /** BOS-313: whether the merge gate checks the merged result it pushes. Off until the owner turns it on; off keeps the old path. */
+  async function checkMergedResult(): Promise<boolean> {
+    const [row] = await db.select({ value: settings.value }).from(settings).where(eq(settings.key, CHECK_MERGED_KEY));
+    return row?.value === true;
   }
 
   async function templates(companyId: string): Promise<GitTemplates> {
@@ -690,7 +699,7 @@ export function reviewService(
      * default branch, and the merge closes the ticket. A failed check, a conflict or
      * uncommitted work sends the ticket back to the agent with what to do.
      */
-    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried"; delivered: string | null; detail?: unknown }> {
+    async land(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       try {
         // A merge check that only waited too long for the shared lock is queued again, with a longer pause each time.
         // The ticket stays in review; the pause counts as activity so the unmerged-approvals sweep leaves it alone.
@@ -735,7 +744,7 @@ export function reviewService(
       }
     },
 
-    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried"; delivered: string | null; detail?: unknown }> {
+    async landOnce(ticketId: string, reviewer: string, causedByRunId?: string | null, opts?: LandOptions): Promise<{ outcome: "done" | "merged" | "pull_request" | "empty" | "verify_failed" | "check_stuck" | "lock_wait" | "conflicts" | "uncommitted" | "carried" | "migration_journal"; delivered: string | null; detail?: unknown }> {
       const { t, repoUrl, defaultBranch, verifyCommand, deepVerifyCommand, landing, gitHost, gitApiBase } = await ticketWithRepo(ticketId);
       // An answer to an older "merge stuck" ask can arrive after the ticket merged: nothing to do again.
       if (t.systemState === "done") return { outcome: "done", delivered: null, detail: { note: "It was already finished, so nothing ran again." } };
@@ -810,7 +819,26 @@ export function reviewService(
 
       // The project's check, plus its deeper one for high and critical work (R47, R48).
       const checks = opts?.skipChecks ? [] : [verifyCommand, deepChecks(t.risk) ? deepVerifyCommand : null].filter((c): c is string => !!c);
-      for (const command of checks) {
+      const kindOf = (command: string) => (command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify");
+      // A failed check: wait for the lock, a stuck check, or the ticket goes back with the output (shared by both ways of checking).
+      const checkFailed = async (command: string, v: VerifyResult): Promise<{ outcome: "verify_failed" | "check_stuck" | "lock_wait"; delivered: string | null; detail: unknown }> => {
+        // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
+        if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
+        const never = checkNeverFinished(v);
+        if (never) {
+          const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
+          await raiseCheckStuck(db, t, command, reason, v.output);
+          return { outcome: "check_stuck", delivered: null, detail: v };
+        }
+        const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
+        // The same failing check again and again means the agent is going round in circles (R50).
+        const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });
+        const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
+        return { outcome: "verify_failed", delivered, detail: v };
+      };
+      // BOS-313 (F6): with the setting on, the checks run on the merge commit that will be pushed, inside the merge itself.
+      const checkMerged = landing !== "pull_request" && checks.length > 0 && (await checkMergedResult());
+      for (const command of checkMerged ? [] : checks) {
         await touch();
         const runCheck = () => whileActive(() => ask<VerifyResult>((requestId) => ({ type: "workspace.verify", requestId, projectId: t.projectId, ticketId, command }), VERIFY_ASK_TIMEOUT_MS));
         let v = await runCheck();
@@ -820,22 +848,8 @@ export function reviewService(
           await record(db, { companyId: t.companyId, ticketId, kind: "merge_check_lock_wait", summary: `The merge check ${first === "killed" ? "was killed" : "ran out of memory"} before it finished; running it once more. Nothing to do.` });
           v = await runCheck();
         }
-        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: command === deepVerifyCommand && command !== verifyCommand ? "deep_verify" : "verify", passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
-        if (!v.ok) {
-          // Only the wait for the shared lock ran out: no step ran, so nothing is wrong with the work. land() tries again.
-          if (checkWaitedForLock(v)) return { outcome: "lock_wait", delivered: null, detail: { ...v, command } };
-          const never = checkNeverFinished(v);
-          if (never) {
-            const reason = never === "timed_out" ? `timed out after ${Math.max(1, Math.round(v.ms / 60_000))} min` : never === "out_of_memory" ? "ran out of memory" : "was killed";
-            await raiseCheckStuck(db, t, command, reason, v.output);
-            return { outcome: "check_stuck", delivered: null, detail: v };
-          }
-          const why = v.timedOut ? "timed out" : `exited with code ${v.exitCode}`;
-          // The same failing check again and again means the agent is going round in circles (R50).
-          const loop = await deps.loops.failure({ companyId: t.companyId, ticketId, agentId: t.assigneeAgentId, text: v.timedOut ? `timeout: ${command}` : v.output, what: "The check" });
-          const delivered = await sendBack(`The review was approved, but the check \`${command}\` ${why}, so the ticket can't be merged yet. Fix it, then move the ticket back to review.\n\nLast output:\n${v.output.slice(-4000)}${loop.circular ? DIFFERENT_APPROACH(loop.count) : ""}`, "verify failed");
-          return { outcome: "verify_failed", delivered, detail: v };
-        }
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(command), passed: v.ok, detail: v.ok ? null : v.output.slice(-500) });
+        if (!v.ok) return checkFailed(command, v);
       }
 
       // Its migrations must not take a number another branch already has (BOS-219): the merge is the
@@ -858,11 +872,27 @@ export function reviewService(
       await touch();
       const m: MergeResult | PushResult = pr
         ? await whileActive(() => ask<PushResult>((requestId) => ({ type: "workspace.push", requestId, projectId: t.projectId, ticketId, target: defaultBranch }), MERGE_WAIT_MS))
-        : await whileActive(() => ask<MergeResult>((requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})` }), MERGE_WAIT_MS));
+        : await whileActive(() =>
+            ask<MergeResult>(
+              (requestId) => ({ type: "workspace.merge", requestId, projectId: t.projectId, ticketId, target: defaultBranch, message: `Merge "${t.title}" (${ticketId})`, ...(checkMerged ? { checks } : {}) }),
+              // The runner may check up to three merged results, one after another.
+              checkMerged ? MERGE_WAIT_MS + 3 * checks.length * VERIFY_ASK_TIMEOUT_MS : MERGE_WAIT_MS,
+            ),
+          );
+      if (m.status === "check_failed") {
+        await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: t.pullRequestHead, kind: kindOf(m.command), passed: false, detail: m.result.output.slice(-500) });
+        return checkFailed(m.command, m.result);
+      }
+      // The target kept moving while the merged result was checked; nothing was pushed, so land() tries again.
+      if (m.status === "main_moved") return { outcome: "lock_wait", delivered: null, detail: m };
       if (m.status === "uncommitted") {
         const tpl = (await templates(t.companyId)).commit;
         const delivered = await sendBack(`The review was approved, but these files aren't committed: ${m.files.join(", ")}. ${renderTemplate(tpl, { branch: t.branch ?? `bossman/${t.id}`, base_ref: defaultBranch, ticket: t.title })} Then move the ticket back to review.`, "commit");
         return { outcome: "uncommitted", delivered, detail: m };
+      }
+      if (m.status === "migration_journal") {
+        const delivered = await sendBack(`The review was approved, but the migration journal would make drizzle skip a migration, so nothing was merged. ${m.problems.join(" ")} Then run the checks${verifyCommand ? ` (\`${verifyCommand}\`)` : ""}, commit, and move the ticket back to review.`, "migration journal");
+        return { outcome: "migration_journal", delivered, detail: m };
       }
       if (m.status === "conflicts") {
         const delivered = await sendBack(
@@ -886,7 +916,11 @@ export function reviewService(
         await db.update(tickets).set({ pullRequestUrl: opened.url, pullRequestNumber: opened.number, pullRequestHead: m.commit, pullRequestNote: null }).where(eq(tickets.id, ticketId));
         return this.mergePullRequest(ticketId);
       }
-      await db.update(tickets).set({ mergeCommit: m.commit }).where(eq(tickets.id, ticketId));
+      const checkedSha = m.status === "merged" ? m.checked?.sha : undefined;
+      if (checkedSha) {
+        for (const command of checks) await db.insert(checkResults).values({ companyId: t.companyId, ticketId, sha: checkedSha, kind: kindOf(command), passed: true, detail: null });
+      }
+      await db.update(tickets).set({ mergeCommit: m.commit, ...(checkedSha ? { checkedCommit: checkedSha } : {}) }).where(eq(tickets.id, ticketId));
       await deps.work.updateTicket(ticketId, { state: "done", outcome: "completed", overLimit: true });
       return { outcome: "merged", delivered: null, detail: m };
     },
@@ -961,6 +995,12 @@ export function reviewService(
     },
 
     templates,
+
+    checkMergedResult,
+    async setCheckMergedResult(on: boolean) {
+      await db.insert(settings).values({ key: CHECK_MERGED_KEY, value: on }).onConflictDoUpdate({ target: settings.key, set: { value: on } });
+      return on;
+    },
 
     async setTemplates(companyId: string, patch: Partial<GitTemplates>) {
       const next = { ...(await templates(companyId)), ...patch };

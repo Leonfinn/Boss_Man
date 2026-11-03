@@ -129,6 +129,19 @@ describe("verify before done (R47)", () => {
     expect(await ws.verify(spec, "sleep 5", 200)).toMatchObject({ ok: false, timedOut: true });
   });
 
+  it("shares check-all's queue folder with the agents' checks, when the runner has one (BOS-321)", async () => {
+    const o = origin();
+    const { spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const plain = new Workspaces(mkdtempSync(path.join(tmpdir(), "bm-ws-root-")));
+    await plain.ensure(spec);
+    expect((await plain.verify(spec, 'echo "lock=${CHECK_ALL_LOCK:-unset}"')).output).toContain("lock=unset");
+    const root = mkdtempSync(path.join(tmpdir(), "bm-ws-root-"));
+    const ws = new Workspaces(root, process.env, path.join(root, ".bossman-coord"));
+    await ws.ensure(spec);
+    const res = await ws.verify(spec, 'echo "lock=$CHECK_ALL_LOCK store=$BOSSMAN_CHECK_STORE"');
+    expect(res.output).toContain(`lock=${path.join(root, ".bossman-coord", "queue", "check-all")} store=${path.join(root, ".bossman-coord", "gate", "check-results")}`);
+  });
+
   it("counts the timeout from when a queued check starts, not from when it was queued", async () => {
     const o = origin();
     const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
@@ -204,6 +217,36 @@ describe("the commits a branch carries from other open tickets (BOS-130)", () =>
     expect(await ws.carried(spec, "main", branches)).toEqual({ carried: [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }] });
     // Nothing merges with the guard in place: the branch is exactly as it was.
     expect(git(w.path, "status", "--porcelain")).toBe("");
+  });
+
+  it("does not count a branch that merged this ticket in as carried (BOS-365)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    // The other ticket builds on this one by merging it in; this ticket never merges the other.
+    git(other.path, "merge", "--no-edit", `bossman/${ids.t}`);
+    expect(await ws.carried(spec, "main", [{ ticketId: ids2.other, branch: `bossman/${ids2.other}` }])).toEqual({ carried: [] });
+  });
+
+  it("still counts a branch this ticket fast-forwarded in (BOS-365)", async () => {
+    const o = origin();
+    const { ws, spec } = await ticketWithCommit(o, "feature.txt", "new\n");
+    const other = await ws.ensure({ ...spec, ticketId: ids2.other });
+    writeFileSync(path.join(other.path, "other.txt"), "their work\n");
+    git(other.path, "add", ".");
+    git(other.path, "commit", "-qm", "other ticket's work");
+    // A third ticket merges the other in before committing anything: a fast-forward.
+    const ffId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const ff = await ws.ensure({ ...spec, ticketId: ffId });
+    git(ff.path, "merge", "--no-edit", `bossman/${ids2.other}`);
+    writeFileSync(path.join(ff.path, "ff.txt"), "own\n");
+    git(ff.path, "add", ".");
+    git(ff.path, "commit", "-qm", "ff ticket's work");
+    const hit = { ticketId: ids2.other, branch: `bossman/${ids2.other}` };
+    expect(await ws.carried({ ...spec, ticketId: ffId }, "main", [hit])).toEqual({ carried: [hit] });
   });
 
   it("finds nothing once the carried branch has itself merged to the target", async () => {
