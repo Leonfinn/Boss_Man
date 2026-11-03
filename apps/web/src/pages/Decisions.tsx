@@ -565,6 +565,7 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
               const x = d.context?.explain;
               const rule = d.context?.rule;
               const advice = d.context?.advice;
+              const ranOut = d.context?.handoverRanOut;
               const asking = advice?.state === "asking";
               const ticketId = d.context?.type === "risk_review" ? d.context.ticketId : null;
               const land = ticketId ? landings[ticketId] : null;
@@ -685,11 +686,13 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                       </>
                     )}
                     {advice?.state === "timed_out" && <p className="muted">You asked the CEO for advice, but the CEO didn't respond. It's back with you.</p>}
+                    {ranOut && advice?.state !== "advised" && <p className="muted">The CEO didn't get to this in time, so it reached you without their advice. They've been asked to add it.</p>}
                     {advice?.state === "advised" && (
                       <div className="ceo-advice">
                         <p style={{ fontWeight: 600 }}>The CEO's advice</p>
-                        {advice.what && <p>What it does: {advice.what}</p>}
-                        {advice.needed && <p>Does this ticket need it? {advice.needed}</p>}
+                        {advice.what && <p>What it's for: {advice.what}</p>}
+                        {advice.denyStops && <p>If you deny it, this won't get done: {advice.denyStops}</p>}
+                        {advice.needed && !advice.denyStops && <p>Does this ticket need it? {advice.needed}</p>}
                         {advice.recommendation && (
                           <p>
                             <span className={`tag ${advice.recommendation === "allow" ? "green" : "red"}`}>{advice.recommendation === "allow" ? "Recommend Allow" : "Recommend Deny"}</span>{" "}
