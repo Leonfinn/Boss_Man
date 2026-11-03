@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { and, eq, inArray, isNotNull, isNull, like, max, sql } from "drizzle-orm";
 import { z } from "zod";
-import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent } from "@boss-man/shared";
+import { AddonReport, type JournalEntry, type RUNNER_FEATURES, type RunnerCommand, type RunnerEvent, type SandboxReport } from "@boss-man/shared";
 import { hashToken } from "../auth.js";
 import type { Db } from "../db/client.js";
 import { record } from "./activity.js";
@@ -195,8 +195,14 @@ export function runnersService(db: Db, funding: ReturnType<typeof fundingService
       return true;
     },
 
-    async touch(runner: Runner, imageVersion: string | null) {
-      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion }).where(eq(runners.id, runner.id));
+    /** Keeps the runner's latest fence self-test (BOS-321). */
+    async recordSandbox(runnerId: string, report: SandboxReport, at: Date) {
+      await db.update(runners).set({ sandbox: report, sandboxCheckedAt: at }).where(eq(runners.id, runnerId));
+    },
+
+    async touch(runner: Runner, imageVersion: string | null, harnessVersions?: Record<string, string>) {
+      // An older runner sends none: keep what we last knew rather than blanking it.
+      await db.update(runners).set({ lastSeenAt: new Date(), imageVersion, ...(harnessVersions ? { harnessVersions } : {}) }).where(eq(runners.id, runner.id));
     },
 
     connect(runnerId: string, send: CommandSender, feats: string[] = []) {

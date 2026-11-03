@@ -11,9 +11,29 @@ export const HEARTBEAT_MS = 15_000;
 
 const Uuid = z.string().uuid();
 
+/**
+ * What a runner can fence agents with (DR-004, BOS-321), from its start-up self-test. full: Landlock
+ * ABI 6+; partial: ABI 2-5, files fenced but `missing` lists what isn't; unavailable: no usable
+ * Landlock (errno says why: ENOSYS not built or blocked, EOPNOTSUPP switched off at boot).
+ * probe: a fenced write outside its folder was refused and one inside worked (null if not tried).
+ */
+export const SandboxReport = z.object({
+  landlockAbi: z.number().int().nonnegative(),
+  errno: z.string().max(200).nullable(),
+  level: z.enum(["full", "partial", "unavailable"]),
+  missing: z.array(z.string().max(100)).max(10),
+  /** Unprivileged user namespaces (what bubblewrap needs); for information only. */
+  userns: z.boolean(),
+  probe: z.boolean().nullable(),
+});
+export type SandboxReport = z.infer<typeof SandboxReport>;
+
 export const RunnerEvent = z.discriminatedUnion("type", [
-  /** resumed: the run reopened the session it was asked to (resumeSessionId), rather than starting fresh. */
-  z.object({ type: z.literal("run.started"), runId: Uuid, agentId: Uuid.nullable(), acpSessionId: z.string(), model: z.string().nullable(), resumed: z.boolean().optional() }),
+  /**
+   * resumed: the run reopened the session it was asked to (resumeSessionId), rather than starting fresh.
+   * fenced: the agent runs inside the fence (run.start's fence, on a runner that can fence).
+   */
+  z.object({ type: z.literal("run.started"), runId: Uuid, agentId: Uuid.nullable(), acpSessionId: z.string(), model: z.string().nullable(), resumed: z.boolean().optional(), fenced: z.boolean().optional() }),
   /** How full the session's context is, in tokens (from ACP usage_update). */
   z.object({ type: z.literal("run.context"), runId: Uuid, used: z.number().int().nonnegative(), size: z.number().int().positive() }),
   z.object({ type: z.literal("run.update"), runId: Uuid, update: z.unknown() }),
@@ -67,6 +87,8 @@ export const RunnerEvent = z.discriminatedUnion("type", [
     /** Ticket folders git no longer knew about, removed in this pass. */
     removed: z.array(z.string()),
   }),
+  // The runner's start-up self-test of the agent fence (BOS-321).
+  z.object({ type: z.literal("runner.sandbox"), report: SandboxReport }),
 ]);
 export type RunnerEvent = z.infer<typeof RunnerEvent>;
 export type DiskReport = Omit<Extract<RunnerEvent, { type: "runner.disk" }>, "type">;
@@ -113,6 +135,11 @@ export const RunnerCommand = z.discriminatedUnion("type", [
       .array(z.object({ name: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64), files: z.array(z.object({ path: z.string().min(1).max(500), content: z.string() })).max(1000) }))
       .max(100)
       .optional(),
+    /**
+     * Run the agent inside the fence (DR-004, BOS-321). A runner that can't fence runs it as before
+     * and says so (run.started's fenced); one without the "fence" feature ignores it.
+     */
+    fence: z.boolean().optional(),
   }),
   /** The ticket is finished with its worktree: save any uncommitted work and free it (R38). */
   z.object({ type: z.literal("workspace.release"), projectId: Uuid, ticketId: Uuid }),
@@ -157,6 +184,10 @@ export const RunnerCommand = z.discriminatedUnion("type", [
 ]);
 export type RunnerCommand = z.infer<typeof RunnerCommand>;
 
+/** Harness name to exact version, e.g. { "claude-code": "2.1.0" }. */
+export const HarnessVersions = z.record(z.string().max(40), z.string().max(60));
+export type HarnessVersions = z.infer<typeof HarnessVersions>;
+
 /** Runner → server. */
 export const RunnerMessage = z.discriminatedUnion("type", [
   /**
@@ -168,6 +199,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     protocol: z.number().int(),
     runnerVersion: z.string(),
     imageVersion: z.string().nullable(),
+    /** Versions of the agent harnesses in this runner's image, by name (BOS-305); absent from an older runner. */
+    harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
@@ -180,8 +213,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
 ]);
 export type RunnerMessage = z.infer<typeof RunnerMessage>;
 
-/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). */
-export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check"] as const;
+/** Runner features (hello.features). "review-copy": run.start's workspace.review gives a reviewer its own copy. "addons": answers addons.check (docs/12). "carried-check": answers workspace.carried (BOS-130). "fence": honours run.start's fence and sends runner.sandbox (BOS-321). */
+export const RUNNER_FEATURES = ["review-copy", "addons", "carried-check", "fence"] as const;
 
 /** Server → runner. */
 export const ServerMessage = z.discriminatedUnion("type", [
@@ -212,15 +245,23 @@ export type WorkspaceDiff = {
 
 /** The outcome of a ticket's check (R47). */
 export type VerifyResult = { ok: boolean; exitCode: number | null; timedOut: boolean; output: string; ms: number };
-/** How long the runner lets a ticket's check run (R47), and how long the server waits for its answer (a minute longer). */
+/**
+ * How long the runner lets a ticket's check run (R47), counted from when it actually starts. A check that is waiting
+ * in scripts/check-all.sh's queue is given up to VERIFY_QUEUE_MAX_MS to reach the front first; the server waits for
+ * the answer a minute longer than both.
+ */
 export const VERIFY_TIMEOUT_MS = 30 * 60_000;
-export const VERIFY_ASK_TIMEOUT_MS = VERIFY_TIMEOUT_MS + 60_000;
+export const VERIFY_QUEUE_MAX_MS = 3 * 60 * 60_000;
+export const VERIFY_ASK_TIMEOUT_MS = VERIFY_QUEUE_MAX_MS + VERIFY_TIMEOUT_MS + 60_000;
+/** What scripts/check-all.sh prints while it waits for a slot, and when it gets one; the runner starts the 30-minute clock at the second. */
+export const CHECK_QUEUED_MARKER = "check-all: waiting for a free check slot";
+export const CHECK_STARTED_MARKER = "check-all: slot taken, running the checks";
 /**
  * How long an approved ticket can go without any activity before its merge is treated as stopped:
- * longer than the server waits for a merge check, so a check still running is never mistaken for one
- * that died. The unmerged-approvals sweep and the merge card's stale marker both use it.
+ * longer than a check runs, so a check still running is never mistaken for one that died. A check waiting
+ * in the queue beats every minute (whileActive), so it can wait for hours without tripping this. The unmerged-approvals sweep and the merge card's stale marker both use it.
  */
-export const MERGE_MISSED_AFTER_MS = VERIFY_ASK_TIMEOUT_MS + 5 * 60_000;
+export const MERGE_MISSED_AFTER_MS = VERIFY_TIMEOUT_MS + 60_000 + 5 * 60_000;
 
 /** Proposed merge checks, and which of CHECK_TOOLS the runner has (R57). */
 export type DetectResult = { checks: import("./checks.js").CheckPreset[]; tools: Record<string, boolean> };

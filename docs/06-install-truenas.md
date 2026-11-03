@@ -131,9 +131,9 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
   ```
 
   If either is taken, pick other free ports and use them in `.env` and in the addresses below.
-- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain HTTP on your LAN.
-  - With HTTPS in front of Boss Man, remove this line. That could be Tailscale Serve, or a reverse proxy on your OPNsense box.
-  - Browsers only allow notifications (R44) on HTTPS pages, so you need HTTPS for those anyway.
+- `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
+- Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
+  - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
 
 ## 5. Build the images and start the server
 
@@ -813,6 +813,14 @@ Then, in Boss Man, open **Notifications** and fill in **How you're told**:
 Choose **Send a test to my phone** to check it. If it fails, the message says what ntfy answered.
 
 ntfy's docs site wasn't reachable when this was written, so these links point at it but were checked against the same pages in [ntfy's repository](https://github.com/binwiederhier/ntfy/tree/main/docs). Setting up ntfy itself on TrueNAS isn't covered here.
+
+## 10b. HTTPS through Tailscale Serve (tailnet only)
+
+The steps are in [docs/20-https-tailscale.md](20-https-tailscale.md), which works on any Docker host. TrueNAS specifics:
+
+- `COMPOSE_FILE` becomes `docker-compose.yml:deploy/truenas.yml:deploy/tailscale.yml`, and the state folder is `/mnt/NVME_Apps/Container_files/boss-man/data/tailscale` (so create it there). Keep it in a dataset your snapshots cover.
+- Use the sidecar, not the TrueNAS Tailscale app: the app cannot show that LAN traffic is kept apart from the trusted address.
+- Blue/green (9d) is not covered yet.
 
 ## 11. Feedback portal (optional)
 
