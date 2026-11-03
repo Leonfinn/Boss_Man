@@ -8,6 +8,14 @@ export class ApiError extends Error {
   }
 }
 
+/** What a failed request means in plain words, for when the server sent no message of its own. */
+export function plainStatus(status: number, error?: unknown): string {
+  if (status === 502 || status === 503 || status === 504) return "Boss Man is restarting or switching versions for a moment, so your click may not have gone through. Wait a few seconds and look at the page: if the card is still there, press the button again.";
+  if (status === 404 && error === "not_open") return "This card was already closed, so there is nothing more to do here.";
+  if (status === 401) return "You have been signed out. Sign in again, then repeat that.";
+  return typeof error === "string" && error ? error : `Something went wrong (code ${status}). Nothing needs doing from you; try again, and tell the CEO if it keeps happening.`;
+}
+
 export async function api<T>(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   let res: Response;
   try {
@@ -23,11 +31,16 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     throw new ApiError(0, "Can't reach the Boss Man server.");
   }
   const text = await res.text();
-  const data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  let data: Record<string, unknown> = {};
+  try {
+    data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    // A proxy's own error page, not JSON: fall through to the plain message for the status.
+  }
   if (!res.ok) {
     // A rejected secret lists what's wrong with it; other errors carry a message.
     const problems = Array.isArray(data.problems) ? (data.problems as string[]).join(" ") : null;
-    throw new ApiError(res.status, problems ?? String(data.message ?? data.error ?? `HTTP ${res.status}`));
+    throw new ApiError(res.status, problems ?? String(data.message ?? plainStatus(res.status, data.error)));
   }
   return data as T;
 }
@@ -133,7 +146,7 @@ export type Decision = {
   parts: { blocking: number; urgency: number; age: number; liveRun: number };
   reasons: string[];
   dueDate: string | null;
-  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string }; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
+  context?: { type?: string; /** A stale blocker: the ticket in the way (absent when it is an engagement). */ blockerTicketId?: string | null; advice?: Advice; /** A skill the CEO proposed. */ proposalId?: string; /** Numbered steps when the owner must do something. */ steps?: string[]; /** An owner to-do (BOS-122): how to check the approved change worked. */ check?: string; /** An owner to-do: how to roll it back. */ rollback?: string; /** An owner to-do: the note from the last "A step failed". */ lastFailure?: { note: string; at: string }; /** What the agent tried first, and why it needs the owner. */ triedFirst?: string; /** An instruction change: the full new text (the question holds only its start). */ instructions?: string; /** A standing-rules change: the exact text that will be saved (already stripped and capped). */ text?: string; hires?: Array<{ name: string; template?: string; title?: string | null; model?: string | null; harness?: string; provider?: string; fundingSourceId?: string | null; skills?: string[]; reason: string }>; /** A model-setup change: current and proposed values, and when it was applied. */ agentId?: string; before?: ModelConfigView; proposed?: ModelConfigView; applied?: { at: string; afterRunId: string | null; config?: ModelConfigView }; output?: string; planText?: string | null; ticketId?: string | null; /** A Boss Man update card or to-do: what it contains, in plain words. */ update?: DeployUpdate; /** A hand-apply card: the steps the owner will need to do, shown before approval. */ handSteps?: string[]; explain?: PermissionExplanation; /** The rules judge's reading (BOS-337); `reason` is a fixed label. */ judge?: { mode: "watch" | "advise"; verdict: "allow" | "deny"; reason: string; /** The model second opinion (BOS-338); `reason` is the model's cleaned line, or why it failed. */ second?: { state: "pending" | "allow" | "deny" | "failed"; reason?: string } }; always?: Array<{ label: string }>; rule?: { name: string; outcome: string; match: { kinds?: string[]; commandPattern?: string; titlePattern?: string; safeOnly?: boolean } } };
   /** For a stalled run: what the owner needs to judge it, worked out by the server when asked. */
   evidence?: StallEvidence | null;
 };
