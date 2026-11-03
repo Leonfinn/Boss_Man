@@ -23,7 +23,7 @@ import { modelProbeService } from "./services/model-probe.js";
 import { parseRepoUrl, repoUrlAllowed } from "@boss-man/shared";
 import { gitHostService } from "./services/git-hosts.js";
 import { setupService } from "./services/setup.js";
-import { secretGrants, watchdogActions } from "./db/schema.js";
+import { secretGrants, secrets as secretsTable, watchdogActions } from "./db/schema.js";
 import { runnersService } from "./services/runners.js";
 import { LauncherError, launcherService, type LauncherOptions } from "./services/launcher.js";
 import { AnswerError, decisionsService } from "./services/decisions.js";
@@ -1032,6 +1032,8 @@ export async function buildApp(opts: AppOptions) {
       monthlyGrantUsd: z.number().nonnegative().optional(),
       cycleAnchor: z.coerce.date().optional(),
       secretId: Uuid.optional(),
+      /** Place in the owner's ordered list of Claude accounts (1 = first); null takes it out (BOS-383). */
+      fallbackRank: z.number().int().min(1).max(10).nullable().optional(),
       /** Hold routine work at this share of a subscription window (BOS-227). */
       quotaHoldAt: z.number().min(0.8).max(1).optional(),
       /** Whether extra usage may be spent: pause (default), urgent only, or all work. */
@@ -1044,8 +1046,19 @@ export async function buildApp(opts: AppOptions) {
       if (problem) ctx.addIssue({ code: "custom", path: ["provider"], message: problem });
     });
 
+    /** A ranked Claude account must be an Anthropic subscription, and its login a Claude setup-token secret (BOS-383). */
+    const rankProblem = async (kind: string, provider: string, rank: number | null | undefined, secretId: string | null | undefined) => {
+      if (rank == null) return null;
+      if (kind !== "subscription" || provider !== "anthropic") return "Only a Claude subscription can be put in the list of accounts.";
+      if (!secretId) return null;
+      const [s] = await db.select({ kind: secretsTable.kind }).from(secretsTable).where(eq(secretsTable.id, secretId));
+      return s?.kind === "claude_oauth_token" ? null : "Pick a Claude setup-token secret as this account's login.";
+    };
+
     owner.post("/api/funding-sources", async (req, reply) => {
       const b = FundingInput.parse(req.body);
+      const bad = await rankProblem(b.kind, b.provider, b.fallbackRank, b.secretId);
+      if (bad) return reply.code(400).send({ error: "invalid_request", message: bad });
       const row = await funding.create({
         name: b.name,
         kind: b.kind,
@@ -1053,6 +1066,7 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : null,
         cycleAnchor: b.cycleAnchor ?? null,
         secretId: b.secretId ?? null,
+        fallbackRank: b.fallbackRank ?? null,
         quotaHoldAt: b.quotaHoldAt ?? 0.95,
         quotaOverage: b.quotaOverage ?? "pause",
         quotaDisabledWindows: b.quotaDisabledWindows ?? [],
@@ -1072,6 +1086,8 @@ export async function buildApp(opts: AppOptions) {
       if (clash) return reply.code(409).send({ error: "already_exists", message: `There's already a funding source called ${b.name}.` });
       const problem = fundingComboError(b.kind ?? cur.kind, b.provider ?? cur.provider);
       if (problem) return reply.code(400).send({ error: "invalid_request", message: problem });
+      const badRank = await rankProblem(b.kind ?? cur.kind, b.provider ?? cur.provider, b.fallbackRank === undefined ? cur.fallbackRank : b.fallbackRank, b.secretId ?? cur.secretId);
+      if (badRank) return reply.code(400).send({ error: "invalid_request", message: badRank });
       const row = await funding.update(id, {
         name: b.name,
         kind: b.kind,
@@ -1079,6 +1095,7 @@ export async function buildApp(opts: AppOptions) {
         monthlyGrantMicros: b.monthlyGrantUsd != null ? usdToMicros(b.monthlyGrantUsd) : undefined,
         cycleAnchor: b.cycleAnchor,
         secretId: b.secretId,
+        fallbackRank: b.fallbackRank,
         quotaHoldAt: b.quotaHoldAt,
         quotaOverage: b.quotaOverage,
         quotaDisabledWindows: b.quotaDisabledWindows,
