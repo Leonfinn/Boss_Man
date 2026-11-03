@@ -782,7 +782,7 @@ export class SessionManager {
           pre = await mcpPreflight(this.opts.mcpUrl, cmd.mcpToken, { budgetMs: this.opts.mcpPreflightMs, ...this.opts.mcpPreflightTuning });
           if (!pre.ok) {
             emit({ type: "runner.log", level: "error", message: `mcp-preflight: Boss Man tools still unreachable for run ${cmd.runId} (${pre.lastError}); starting the turn without waiting longer.` });
-            emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools could not be reached after a retry, so this turn may run without them. I will not pretend otherwise." } });
+            emit({ type: "run.update", runId: cmd.runId, update: { kind: "agent_message", text: "Boss Man tools could not be reached after a retry; this turn may run without them." } });
           }
         }
       }
