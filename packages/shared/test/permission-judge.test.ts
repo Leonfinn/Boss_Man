@@ -283,6 +283,30 @@ describe("rules judge: write allow-list (BOS-357)", () => {
     });
   });
 
+  describe("11. Jane's round 12", () => {
+    denies([
+      "g''it config core.fsmonitor /tmp/x",
+      `gi"t" config core.fsmonitor /tmp/x`,
+      "git con''fig core.fsmonitor /tmp/x",
+      `git co"nf"ig core.fsmonitor /tmp/x`,
+      "g=git; $g config core.fsmonitor /tmp/x",
+      `$py -c"open('/home/node/.bashrc','w')"`,
+      `echo "open('/home/node/.bashrc','w')" |& $py`,
+      `sudo -u x $py -c "open('/home/node/.bashrc','w')"`,
+      `timeout -s KILL 5 $py -c "open('/home/node/.bashrc','w')"`,
+      `env -u X $py -c "open('/home/node/.bashrc','w')"`,
+      `echo "open('/home/node/.bashrc','w')" > /tmp/a.py; $py < /tmp/a.py`,
+    ]);
+    allows(["git config --get core.x", "echo $HOME -n > /tmp/x"]);
+    it("scans the new patterns in linear time", () => {
+      for (const cmd of ["g''".repeat(5000) + "it config x", "$p " + "-c\"x\" ".repeat(3000), "a |& ".repeat(3000) + "$p", "sudo " + "-u x ".repeat(3000) + "$p"]) {
+        const t = Date.now();
+        judge(cmd);
+        expect(Date.now() - t).toBeLessThan(200);
+      }
+    });
+  });
+
   describe("10. Jane's round 11", () => {
     denies([
       "FOO=git git config core.fsmonitor /tmp/x",

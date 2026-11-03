@@ -96,9 +96,13 @@ export function judgePermission(question: string, command: string | null, ownFol
   // Allow-list, linear, per command segment: if the segment mentions git and (quotes and backslashes removed) has a word
   // `config`, it must be exactly `git config --get…` / `git config --list` with no other option. Over-denial is fine.
   for (const segment of c.split(/[;&|\n]/)) {
-    const words = (segment.match(/'[^']*'|"[^"]*"|(?:\\.|[^\s'"])+/g) ?? []).map((w) => w.replace(/['"\\]/g, "").replace(/^[({`$]+/, ""));
-    if (!words.some((w) => /\bgit\b/.test(w)) || !words.includes("config")) continue;
-    const pureRead = words[0] === "git" && words[1] === "config" && /^(?:--get(?:-all|-regexp|-urlmatch)?|--list)$/.test(words[2] ?? "") && !words.slice(3).some((w) => w.startsWith("-"));
+    // Delete every quote and backslash from the whole segment first, so `g''it con"fi"g` reads as `git config`.
+    const flat = segment.replace(/['"\\]/g, "");
+    if (!/(?:^|\s)config(?:\s|$)/.test(flat) || !(/git/.test(flat) || /\$|\x60/.test(flat))) continue;
+    const raw = segment.trim();
+    // A literal `git <subcommand>` that cannot set config (no -c before it): `config` is only text in its arguments.
+    if (/^git (?:commit|log|add|status|diff|show|checkout|switch|branch|tag|stash|merge|rebase|rev-parse|grep|push|pull|fetch) /.test(raw)) continue;
+    const pureRead = /^git config (?:--get(?:-all|-regexp|-urlmatch)? [\w.-]+|--list)$/.test(raw);
     if (!pureRead) return result("outside");
   }
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
@@ -336,22 +340,22 @@ function toolTargets(c: string): string[] {
  * prefixes and wrappers (exec, command, env, timeout, nice, xargs, then, do, `{`, `(`...). Linear: one pass over the words.
  */
 function variableCommandWord(c: string): boolean {
-  const parts = c.split(/([;&|\n])/);
-  const wrappers = /^(?:exec|command|builtin|env|nohup|time|sudo|then|do|else|if|elif|while|until|!|\{|\(|timeout|nice|xargs|stdbuf|setsid)$/;
+  const parts = c.split(/(\|&|&&|\|\||[;&|\n])/);
+  const safeHead = /^(?:echo|printf|ls|cat|cd|test|\[|rm|cp|mv|mkdir|touch|for|read|export|local|unset|git|pnpm|npm)$/;
   for (let i = 0; i < parts.length; i += 2) {
     const seg = parts[i]!;
-    const words = seg.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+    const words = (seg.match(/(?:'[^']*'|"[^"]*"|\\.|[^\s'"\\])+/g) ?? []).map((w) => w.replace(/['"\\]/g, "").replace(/^[({]+(?=.)/, ""));
     let k = 0;
-    while (k < words.length) {
-      const w = words[k]!.replace(/^[({]+(?=.)/, "");
-      if (/^\w+=/.test(w) || wrappers.test(w) || /^-\S*$/.test(w) || /^\d+[smhd]?$/.test(w)) k++;
-      else break;
-    }
-    const cw = words[k]?.replace(/^[({]+(?=.)/, "");
-    if (!cw || !/^"?\$\{?[A-Za-z_]\w*\}?"?$|^\$\(|^\x60/.test(cw)) continue;
-    const piped = i >= 2 && parts[i - 1] === "|";
-    const rest = words.slice(k + 1);
-    if (piped || /<</.test(seg) || rest.some((t) => t === "-" || /^-[A-Za-z]*[ceErp]$/.test(t))) return true;
+    while (k < words.length && /^\w+=/.test(words[k]!)) k++;
+    const head = words[k];
+    // A variable word anywhere in the segment is an unknown program unless the segment starts with a known command
+    // that merely takes it as an argument.
+    if (head === undefined || safeHead.test(head)) continue;
+    const at = words.findIndex((w, j) => j >= k && /^\$\{?[A-Za-z_]\w*\}?$|^\$\(|^\x60/.test(w));
+    if (at < 0) continue;
+    const piped = i >= 2 && (parts[i - 1] === "|" || parts[i - 1] === "|&");
+    // Any option, a redirect or heredoc into it, or a pipe: deny. Over-denial is fine.
+    if (piped || /</.test(seg) || words.slice(at + 1).some((t) => t.startsWith("-"))) return true;
   }
   return false;
 }
