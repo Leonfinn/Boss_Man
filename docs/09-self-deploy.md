@@ -24,6 +24,15 @@ host script, every minute ─▶ outbox/available.json   "main is ahead of what 
 1. **Host script plus a one-minute TrueNAS cron job.** No container, no socket.
 2. **It reuses `scripts/deploy.sh`** (backup, build, restart, health) and `scripts/update-runner.sh`, so there is one deploy path. `deploy.sh` gained `--commit SHA` so it deploys exactly the commit that was checked, not whatever main is by then.
 3. **The git remote is the source of truth.** The `src` checkout pulls from its `origin`: https for a public repo, or an SSH remote with a read-only deploy key set as `core.sshCommand` for a private one (`docs/00`, step 2). The host decides what "the tip of main" is with `git ls-remote origin refs/heads/main` over the same remote: no API token, no extra credential.
+
+   Exact clone commands (full steps in `docs/00`, step 2), with `$B` as the install folder:
+
+   ```sh
+   # public repo
+   git clone <repo-https-url> $B/src
+   # private repo, read-only deploy key
+   git clone -c core.sshCommand="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" <repo-ssh-url> $B/src
+   ```
 4. **Server deploys and runner updates are separate approvals.** A runner update drains first (phase 2 below), so it no longer cuts off agent runs unless the owner says so.
 5. **Infra files are never auto-deployed.** `docker-compose.yml`, `deploy/`, Dockerfiles, the deploy scripts and the like (the exact list is in step 6 below) only deploy when the owner runs `scripts/deploy.sh` by hand on the host that runs Boss Man.
 6. **The failure alert is a generic webhook** configured on the host only (a root-owned file), not in Boss Man's database, because it must work when Boss Man is down. The owner points it at a Home Assistant webhook automation; ntfy works too.
