@@ -12,7 +12,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
 ## What you need first
 
-- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`; see "Memory limits" below for the server, database and tool servers) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
 - **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.
 - **An AI provider for at least one agent program.** The runner supports three:
@@ -341,6 +341,30 @@ Follow it under **Settings > Server and runner**, in **Runner update**, which al
 **Deploy latest** is optional. It needs the host deployer, a root script run by a one-minute cron job. [docs/06, 9a](06-install-truenas.md#9a-install-the-host-deployer-optional) is a worked example, and its paths are the TrueNAS ones: use `<install-dir>/deployer` in their place. Install the deployer's copy in `<install-dir>/deployer`: it uses the folder it sits in, and finds the code in `<install-dir>/src` beside it. Once it works, Boss Man asks "Deploy <commit>?" on **Decisions** when `main` moves, and **Settings > Server and runner > Updates > Deploy latest** asks on demand. The **Updates** section only appears once the deployer is set up. The deployer refuses changes to files like `scripts/`, `deploy/`, compose files and Dockerfiles. Apply those by hand with `scripts/deploy.sh`.
 
 **The infra rebuild script.** `scripts/rebuild-live.sh` is only for the optional blue/green setup ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)), which needs Docker Compose 2.24 or newer. It rebuilds the live copy in place after a change the deployer refuses, and the page is down for about 20 to 30 seconds. On a plain install, use `scripts/deploy.sh` instead. How it all fits together: [docs/09-self-deploy.md](09-self-deploy.md).
+
+## Memory limits (so one container can't take the whole host)
+
+On 3 Nov 2026 a headless browser with no memory limit used up the whole host's memory; the kernel then killed other things, including the proxy (BOS-392). Every container Boss Man starts now has a limit and a kill priority, set in `.env`. All of these are optional; the defaults are below.
+
+| Setting in `.env` | What it limits | Default |
+| --- | --- | --- |
+| `BOSSMAN_RUNNER_MEMORY` | each runner, including the browsers and test runs inside it (no swap on top) | `4g` |
+| `BOSSMAN_RUNNER_PIDS` | processes and threads per runner | `4096` |
+| `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it | `2g` / `512m` |
+| `BOSSMAN_DB_MEMORY` / `BOSSMAN_DB_MEMORY_RESERVED` | Postgres: limit / amount kept for it | `1g` / `256m` |
+| `BOSSMAN_TOOLSERVER_MEMORY`, `BOSSMAN_TOOLSERVER_PIDS`, `BOSSMAN_TOOLSERVER_SHM` | tool servers that run a browser (crawl4ai, scrapling), see below | `2g`, `512`, `512m` |
+
+- **Priority.** If the host runs out anyway, Linux stops runners and tool servers first (`oom_score_adj` 500) and the database, server and proxy last (-500, -500 and -900). A runaway browser hits its own limit first and only that container is stopped and restarted.
+- **Choose numbers for your host.** Add up the limits of everything that can run at once (every runner plus tool servers); keep that below the host's RAM with room for the server, database and proxy. Limits are ceilings, not reservations, so they can add up to more than the RAM, but then one busy moment can still run the host out.
+- **Tool servers are yours.** Boss Man does not start crawl4ai, scrapling or other tool servers you register in Settings, so it cannot limit them for you. Put them in compose with limits: [deploy/tool-servers.yml](../deploy/tool-servers.yml) is a commented example. One already running by hand: `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>` (lost if the container is recreated).
+- **Check it took effect.** `docker stats --no-stream` should show a number after the slash for each Boss Man container, not your whole RAM. `docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.OomScoreAdj}}' <container>` prints the limit in bytes and the priority (0 bytes = no limit).
+- **Applying a change.** `docker compose up -d` recreates the containers whose limits changed (the server and database restart for a few seconds). Runners started by the launcher pick up a new `BOSSMAN_RUNNER_MEMORY` when the launcher is recreated and the runner is next restarted.
+- **A test keeps this in place:** `apps/server/test/compose-memory-limits.test.ts` fails if a service loses its `mem_limit`.
+
+Per host:
+- **Plain Linux or a Proxmox VM:** nothing extra. If `docker info` warns "No swap limit support", the swap setting is ignored but the memory limit still works; to enable it, add `cgroup_enable=memory swapaccount=1` to the kernel command line and reboot.
+- **Proxmox LXC running Docker:** limits apply inside the LXC's own memory setting, so size the LXC first. Whether your LXC enforces swap limits is unknown; find out with the `docker inspect` line above and `docker stats` after starting.
+- **TrueNAS SCALE:** nothing extra; the same settings go in the `.env` from docs/06 step 4.
 
 ## Troubleshooting
 

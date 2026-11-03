@@ -88,6 +88,9 @@ export function containerSpec(cfg: LauncherConfig, slug: string) {
       // An init as PID 1 reaps the zombies agents' tools leave, which would otherwise fill the pid limit.
       Init: true,
       Memory: cfg.memoryBytes,
+      // No swap on top of the limit, and the first to be killed if the host itself runs out (BOS-395).
+      MemorySwap: cfg.memoryBytes,
+      OomScoreAdj: 500,
       RestartPolicy: { Name: "unless-stopped" },
     },
   };

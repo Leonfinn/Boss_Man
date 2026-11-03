@@ -52,6 +52,10 @@ x-runner: &runner
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   mem_limit: ${BOSSMAN_RUNNER_MEMORY:-4g}
+  # Same value: no swap on top, so a runaway browser is killed instead of thrashing the host.
+  memswap_limit: ${BOSSMAN_RUNNER_MEMORY:-4g}
+  # If the host itself runs out, runners (and their browsers) are the first to go; never the server, db or proxy.
+  oom_score_adj: 500
   pids_limit: ${BOSSMAN_RUNNER_PIDS:-4096}
   # An init as PID 1 reaps the zombies agents' tools leave behind.
   init: true
@@ -66,6 +70,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - db-data:/var/lib/postgresql/data
+    # Memory limits (docs/00-first-time-install.md, "Memory limits"): the database is among the last things the kernel kills.
+    mem_limit: ${BOSSMAN_DB_MEMORY:-1g}
+    mem_reservation: ${BOSSMAN_DB_MEMORY_RESERVED:-256m}
+    oom_score_adj: -500
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bossman -d bossman"]
       interval: 5s
@@ -100,6 +108,9 @@ services:
       BOSSMAN_PORTAL_URL: ${BOSSMAN_PORTAL_URL:-}
     secrets:
       - master_key
+    mem_limit: ${BOSSMAN_SERVER_MEMORY:-2g}
+    mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
+    oom_score_adj: -500
     volumes:
       # The key the launcher makes on first start; the server only reads it.
       - launcher-key:/run/launcher:ro
