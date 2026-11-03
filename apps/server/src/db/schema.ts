@@ -510,6 +510,8 @@ export const runTokens = pgTable("run_tokens", {
 
 export const runs = pgTable("runs", {
   id: id(),
+  /** The funding source this run was started on, when the scheduler chose one from the owner's list of subscriptions (BOS-383). */
+  fundingSourceId: uuid("funding_source_id").references(() => fundingSources.id, { onDelete: "set null" }),
   companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
   agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
   ticketId: uuid("ticket_id").references(() => tickets.id, { onDelete: "set null" }),
@@ -561,6 +563,8 @@ export const fundingSources = pgTable("funding_sources", {
   cycleAnchor: timestamp("cycle_anchor", { withTimezone: true }),
   /** The credential agents on this source use. */
   secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+  /** Position in the owner's ordered list of Claude subscriptions (1 = preferred). Null: not part of the list (BOS-383). */
+  fallbackRank: integer("fallback_rank"),
   /** Subscription utilisation at which routine work is held (0.8–1, default 0.95). */
   quotaHoldAt: real("quota_hold_at").notNull().default(0.95),
   /** Whether extra usage may be spent, and for which work: pause (default), urgent, or all. */
