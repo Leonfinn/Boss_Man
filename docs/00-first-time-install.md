@@ -22,7 +22,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
-- **Internet access from the host** to [github.com/Leonfinn/Boss_Man](https://github.com/Leonfinn/Boss_Man), where the code is (step 2).
+- **Read access from the host to the Boss Man code repo** (step 2): internet access to its https address if the repo is public, or a read-only deploy key if it is private.
 
 ## A note on commands
 
@@ -66,11 +66,36 @@ You should see the folder listed.
 
 ## 2. Get the code onto the host
 
-The code is public on GitHub, so you need no account or key to read it. Clone it into `<install-dir>/src`:
+How the host reads the code depends on the repo. Use the case that matches yours. Replace `<repo-https-url>` and `<repo-ssh-url>` with your repo's own addresses (the clone address your git host shows).
+
+**Public repo: https, no key.** Clone it into `<install-dir>/src`:
 
 ```sh
-git clone https://github.com/Leonfinn/Boss_Man.git $B/src
+git clone <repo-https-url> $B/src
 ```
+
+**Private repo: a read-only deploy key, one per host.** A deploy key is an SSH key that gives read access to one repo. Do not reuse another host's key.
+
+1. Make a key with no passphrase, so updates can run unattended:
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C "boss-man-$(hostname)" -f $B/deploy_key
+   ```
+
+2. Show the public half. It is safe to copy. Never copy the file without `.pub`.
+
+   ```sh
+   cat $B/deploy_key.pub
+   ```
+
+3. In your git host, add it as a deploy key on the repo, with write access **off**. On GitHub: the repo's Settings > Deploy keys > Add deploy key.
+4. Clone with the key. `-c core.sshCommand=...` also saves the setting in the checkout, so later `git pull` and `git ls-remote` use the same key:
+
+   ```sh
+   git clone -c core.sshCommand="ssh -i $B/deploy_key -o IdentitiesOnly=yes -o UserKnownHostsFile=$B/known_hosts" <repo-ssh-url> $B/src
+   ```
+
+   The first time, ssh asks whether to trust the git host. Type `yes` only if the fingerprint matches the one your git host publishes (for GitHub, its "SSH key fingerprints" page).
 
 Check it worked:
 
@@ -80,9 +105,9 @@ git -C $B/src log --oneline -1
 
 You should see one commit line.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
+If the clone hangs, check that the host can reach the git host: port 443 for https (`curl -sI <repo-https-url> | head -1` should print an HTTP status line), port 22 for ssh. If ssh says `Permission denied (publickey)`, the key is not added to the repo yet, or the `-i` path is wrong.
 
-**Older install with a deploy key?** It keeps working; see [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+The same remote is used by later pulls, `scripts/deploy.sh` and the host deployer's `git ls-remote`, so there is nothing more to set up. Moving to another host? Make a new key there; a deploy key is never shared between hosts.
 
 ## 3. Make the folders, the master key and the token file
 
