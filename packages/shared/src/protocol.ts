@@ -205,6 +205,8 @@ export const RunnerMessage = z.discriminatedUnion("type", [
     harnessVersions: HarnessVersions.optional(),
     /** What this runner can do beyond the base protocol, so a newer server asks an older runner only for what it knows. */
     features: z.array(z.string().max(40)).max(50).optional(),
+    /** New for every runner process start (BOS-352), so the server can tell a restart from a reconnect; absent from an older runner. */
+    bootId: z.string().max(100).optional(),
     pending: z.array(z.object({ runId: Uuid, requestId: z.string().max(100) })).max(500).optional(),
   }),
   z.object({ type: z.literal("event"), entry: JournalEntry }),
@@ -280,13 +282,16 @@ export type MergeResult =
   | { status: "already_merged"; commit: string }
   | { status: "conflicts"; files: string[] }
   | { status: "uncommitted"; files: string[] }
+  /** The merged journal would make drizzle skip a migration (BOS-360); `problems` ends with what to do. */
+  | { status: "migration_journal"; problems: string[] }
   /** Asked to check the merged result (BOS-313): a check failed on the merge commit, so nothing was pushed. */
   | { status: "check_failed"; command: string; result: VerifyResult }
   /** The target kept moving while its merged result was checked; nothing was pushed, try again. */
   | { status: "main_moved" };
 
 /** Another open ticket whose unmerged commits a ticket's branch carries (BOS-130). */
-export type CarriedTicket = { ticketId: string; branch: string };
+/** `contained`: this ticket's branch holds the other branch's whole tip, so merging this one lands it too (BOS-372). */
+export type CarriedTicket = { ticketId: string; branch: string; contained?: boolean };
 
 /** The answer to workspace.carried: the other tickets whose unmerged commits this branch has. */
 export type CarriedResult = { carried: CarriedTicket[] };

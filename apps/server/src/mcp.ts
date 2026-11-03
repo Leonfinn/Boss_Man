@@ -1692,6 +1692,8 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
           case "read": {
             if (!input.slug) return fail("Give the page's slug.");
             const p = await wiki.get(scope.companyId, input.slug);
+            // The exact app link, so an agent (or the CEO) pastes it rather than guessing the format (BOS-356).
+            const link = `#/wiki/${scope.companyId}/${p.slug}`;
             const sections = splitSections(p.body);
             const outline = (error?: string) =>
               [
@@ -1701,6 +1703,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
                 ...sections.map((s) => `- ${s.path} (${s.ownEnd - s.start} chars): ${p.body.slice(s.start, s.ownEnd).split("\n").find((l) => l.trim() && !/^#+\s/.test(l))?.trim().slice(0, 100) ?? ""}`),
                 "",
                 `Read a section with section="<heading>", or the whole page in parts with offset=0.`,
+                `Link: ${link}`,
               ].join("\n");
             let body: string;
             let shown: string;
@@ -1714,7 +1717,7 @@ function registerSharedTools(server: McpServer, db: Db, { notes, wiki, skills, s
               body = `${input.offset ? "" : `# ${p.title}\n\n`}${cut(p.body, CAP, (m) => `continue with offset=${m}`, input.offset ?? 0)}`;
             } else return text(outline());
             const l = await wiki.links(scope.companyId, p.slug, shown);
-            return text([body, ...(l.links.length ? [`Links: ${l.links.join(", ")}`] : []), ...(l.linkedFrom.length ? [`Linked from: ${l.linkedFrom.join(", ")}`] : [])].join("\n\n"));
+            return text([body, ...(l.links.length ? [`Links: ${l.links.join(", ")}`] : []), ...(l.linkedFrom.length ? [`Linked from: ${l.linkedFrom.join(", ")}`] : []), `Link: ${link}`].join("\n\n"));
           }
           case "write": {
             if (!input.title || input.body === undefined) return fail("Give a title and a body.");
@@ -1888,10 +1891,12 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // With criteria on the ticket, moving to review is only allowed once the state note reports
       // pass or fail for each of them; the refusal names the ones it can't find.
       const [withCriteria] = await db
-        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote })
+        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState })
         .from(tickets)
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!withCriteria) return fail("No ticket with that ID in your company.");
+      // Same state again (DR-010): only the note changes. No enter-state hooks, no new review round.
+      const sameState = withCriteria.prev === state;
       const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
       if (missing.length)
         return fail(
@@ -1916,7 +1921,7 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, ...(sameState && state === "done" ? {} : { outcome: state === "done" ? (outcome ?? "completed") : null }), ...(state === "done" && !sameState ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
@@ -1934,12 +1939,12 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
-      if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
-      if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
+      if (state === "done" && !sameState) await hooks.onTicketDone?.(ticketId, scope.runId);
+      if (state === "review" && !sameState) await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
       // The check that counts is at the merge, but telling the agent now saves it waiting hours to
       // find out its migration number is taken (BOS-219). It never holds the move up.
-      const warn = state === "review" ? await migrationWarning(review, ticketId, scope.companyId) : "";
-      return text(`Ticket ${ticketId} is now ${state}.${warn}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      const warn = state === "review" && !sameState ? await migrationWarning(review, ticketId, scope.companyId) : "";
+      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${warn}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
