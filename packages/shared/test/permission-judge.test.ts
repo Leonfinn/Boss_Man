@@ -301,7 +301,22 @@ describe("rules judge: write allow-list (BOS-357)", () => {
       `echo "open('/home/node/.bashrc','w')" | $py`,
       "7z x a.7z '-o/home/node'",
     ]);
-    allows(["git --git-dir .git log", "git add config.txt"]);
+    denies([
+      "git -c core.x=y config core.fsmonitor /tmp/x",
+      "git --exec-path /x config core.fsmonitor /tmp/x",
+      "git --no-pager -P --bare config alias.x '!id'",
+      "git config --get-all a -c b",
+      "git config --list --global",
+      "git" + " -c".repeat(40) + " config core.fsmonitor /tmp/x",
+    ]);
+    allows(["git config --get core.x", "git config --list", "git log --oneline"]);
+    it("keeps the git config scan fast on 40 repeated tokens", () => {
+      for (const cmd of ["git" + " -c".repeat(40) + " config x", "git" + " --git-dir".repeat(40) + " config x", "git config" + " --get".repeat(40)]) {
+        const t = Date.now();
+        judge(cmd);
+        expect(Date.now() - t).toBeLessThan(200);
+      }
+    });
   });
 
   describe("9. Jane's round 10", () => {

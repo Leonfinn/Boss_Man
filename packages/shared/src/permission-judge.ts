@@ -93,24 +93,13 @@ export function judgePermission(question: string, command: string | null, ownFol
   // `git -C dir config`), the git config environment variables, and npm-family config/global installs.
   // Every `git config` write is refused (worktrees share the repo config, so core.fsmonitor / sshCommand / alias.x '!..'
   // would run in other agents' git); only the explicit read forms pass.
-  // Linear scan, per command segment: a `git` word followed later by a `config` word. Every such segment must be a pure read.
+  // Allow-list, linear, per command segment: if the segment mentions git and (quotes and backslashes removed) has a word
+  // `config`, it must be exactly `git config --get…` / `git config --list` with no other option. Over-denial is fine.
   for (const segment of c.split(/[;&|\n]/)) {
-    // Words with quotes and backslashes removed (`"config"`, `conf\ig`) and leading ( { $( ` dropped.
     const words = (segment.match(/'[^']*'|"[^"]*"|(?:\\.|[^\s'"])+/g) ?? []).map((w) => w.replace(/['"\\]/g, "").replace(/^[({`$]+/, ""));
-    // Every word whose basename is `git` starts a git command (`FOO=git git`, `/opt/git/bin/git`, a path argument).
-    for (let gi = 0; gi < words.length; gi++) {
-      if (words[gi]!.split("/").pop() !== "git") continue;
-      // Options (and the value of -c / -C and the separate-value long options) until the subcommand; only `config` matters.
-      let k = gi + 1;
-      while (k < words.length && words[k]!.startsWith("-")) {
-        const w = words[k]!;
-        k += /^-[cC]$/.test(w) || /^--(?:git-dir|work-tree|namespace|exec-path|config-env|super-prefix|attr-source)$/.test(w) ? 2 : 1;
-      }
-      if (words[k] !== "config") continue;
-      const args = words.slice(k + 1).join(" ");
-      const readOnly = /(?:^|\s)(?:--get(?:-all|-regexp|-urlmatch)?|--list|-l)(?=\s|$)/.test(args) && !/(?:^|\s)(?:--add|--unset(?:-all)?|--replace-all|--edit|-e|--rename-section|--remove-section|--set\S*|--file\S*|-f\S*|--global|--system|--worktree|--blob)(?=\s|=|$)/.test(args);
-      if (!readOnly) return result("outside");
-    }
+    if (!words.some((w) => /\bgit\b/.test(w)) || !words.includes("config")) continue;
+    const pureRead = words[0] === "git" && words[1] === "config" && /^(?:--get(?:-all|-regexp|-urlmatch)?|--list)$/.test(words[2] ?? "") && !words.slice(3).some((w) => w.startsWith("-"));
+    if (!pureRead) return result("outside");
   }
   if (/\bpip3?\s+install\b[^;&|\n]*\s--(?:user|target|prefix|root)\b|\bxargs\b[^;&|\n]*\b(?:ba|z|da)?sh\s+-c\b/.test(c)) return result("outside");
   if (/\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*(--(global|system|file|worktree|blob)\b|\s-f\S*)|\bGIT_CONFIG\w*=|\b(npm|pnpm|yarn)\s+(config|c)\s+(set|delete|edit|rm)\b|\bnpm\s+set\b|\b(npm|pnpm|yarn)\b[^;&|\n]*\s(-g|--global|--location[= ]global)\b/.test(c)) return result("outside");
