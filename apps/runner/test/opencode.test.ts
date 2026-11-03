@@ -139,7 +139,7 @@ describe.skipIf(!process.env.OPENCODE_BIN || !existsSync(process.env.OPENCODE_BI
 
   it("sends shell commands to Boss Man for a verdict, and a denial stops them", async () => {
     const { events, cwd } = await ocRun("bash", { command: "echo hi > out.txt", description: "write" });
-    expect(events.find((e) => e.type === "run.permission_request")).toMatchObject({ kind: "execute", rawInput: { command: "echo hi > out.txt" } });
+    expect(events.find((e) => e.type === "run.permission_request")).toMatchObject({ kind: "execute", rawInput: { command: "echo hi > out.txt" }, toolCallId: expect.any(String) });
     expect(existsSync(path.join(cwd, "out.txt"))).toBe(false);
   }, 90_000);
 

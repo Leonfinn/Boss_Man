@@ -8,6 +8,9 @@ export const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 export const IMAGE = "boss-man-runner:current";
 export const LABEL = "boss-man.launcher";
 export const COMPANY_LABEL = "boss-man.company";
+/** The network guard (BOS-324): a sidecar in each runner's network namespace that blocks private networks. */
+export const NETGUARD_IMAGE = "boss-man-netguard:current";
+export const NETGUARD_LABEL = "boss-man.netguard";
 /** The folders a runner keeps between restarts, and where the runner sees them. */
 export const MOUNTS = [
   ["workspaces", "/home/node/workspaces"],
@@ -27,10 +30,37 @@ export type LauncherConfig = {
   memoryBytes: number;
   /** BOSSMAN_RUNNER_PIDS: process/thread ceiling per runner. */
   pidsLimit: number;
+  /** BOSSMAN_NETGUARD: "auto" (default) guards every runner, and lets a host that can't run the guard go without; "enforce" refuses runners there; "off" never guards. */
+  guardMode?: GuardMode;
+  /** BOSSMAN_NETGUARD_ALLOW: extra host:port entries every runner may reach on the private networks. */
+  guardAllow?: string[];
+  /** How long to wait for a new guard to load its rules (default 20 s). */
+  guardReadyMs?: number;
 };
 
+export type GuardMode = "auto" | "enforce" | "off";
+/** The exit code netguard.sh uses when the host can't load nftables rules. */
+export const NETGUARD_UNAVAILABLE_EXIT = 3;
+const ALLOW_ENTRY = /^[A-Za-z0-9.-]{1,253}:\d{1,5}$/;
+
+export function parseGuardMode(v: string | undefined): GuardMode {
+  const m = (v ?? "auto").trim().toLowerCase();
+  if (m !== "auto" && m !== "enforce" && m !== "off") throw new Error(`BOSSMAN_NETGUARD should be auto, enforce or off, not ${v}`);
+  return m;
+}
+
+/** host:port entries, space or comma separated; anything else is an error, because it would silently not open the port. */
+export function parseAllow(v: string | string[] | undefined): string[] {
+  const list = Array.isArray(v) ? v : (v ?? "").split(/[\s,]+/).filter(Boolean);
+  for (const e of list) if (!ALLOW_ENTRY.test(e) || Number(e.slice(e.lastIndexOf(":") + 1)) > 65535) throw new Error(`Not a host:port: ${e}`);
+  return [...new Set(list)];
+}
+
 export const containerName = (slug: string) => `boss-man-runner-${slug}`;
+export const netguardName = (slug: string) => `boss-man-netguard-${slug}`;
 export const companyDir = (cfg: LauncherConfig, slug: string) => path.join(cfg.dataRoot, "companies", slug);
+/** Where the launcher keeps a company's tool-server allow list; only the guard (read-only) mounts it, never the runner. */
+export const netguardDir = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "netguard");
 export const tokenFile = (cfg: LauncherConfig, slug: string) => path.join(companyDir(cfg, slug), "runner.token");
 
 /** The Docker create request for a company's runner. Snapshot-tested: change it on purpose only. */
@@ -77,4 +107,42 @@ export function parsePids(v: string | undefined, fallback = 4096): number {
   if (!v) return fallback;
   if (!/^\d+$/.test(v.trim()) || Number(v) < 64) throw new Error(`BOSSMAN_RUNNER_PIDS should be a whole number of at least 64, not ${v}`);
   return Number(v);
+}
+
+/** host:port of the server in a runner URL such as ws://server:3100/api/runner/connect. */
+export function serverAddress(serverUrl: string): string {
+  const u = new URL(serverUrl);
+  return `${u.hostname}:${u.port || (u.protocol === "wss:" || u.protocol === "https:" ? "443" : "80")}`;
+}
+
+/**
+ * The Docker create request for a runner's network guard. It shares the runner's network
+ * namespace, so the rules it installs bind every process in the runner; the runner itself keeps
+ * no capability. Snapshot-tested.
+ */
+export function netguardSpec(cfg: LauncherConfig, slug: string, runnerId: string) {
+  if (!SLUG.test(slug)) throw new Error("bad slug");
+  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(runnerId)) throw new Error("bad runner id");
+  return {
+    Image: NETGUARD_IMAGE,
+    Env: [`NETGUARD_ALLOW=${serverAddress(cfg.serverUrl)}`, ...(cfg.guardAllow?.length ? [`NETGUARD_EXTRA=${cfg.guardAllow.join(" ")}`] : [])],
+    // Healthy once the table is loaded: the launcher waits for it before it counts the runner as guarded.
+    Healthcheck: { Test: ["CMD", "nft", "list", "table", "inet", "bossman_netguard"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 3 },
+    Labels: { [NETGUARD_LABEL]: "1", [COMPANY_LABEL]: slug },
+    HostConfig: {
+      Binds: [`${netguardDir(cfg, slug)}:/etc/netguard:ro`],
+      NetworkMode: `container:${runnerId}`,
+      CapDrop: ["ALL"],
+      CapAdd: ["NET_ADMIN"],
+      SecurityOpt: ["no-new-privileges:true"],
+      Privileged: false,
+      Devices: [],
+      PidMode: "",
+      IpcMode: "private",
+      ReadonlyRootfs: true,
+      PidsLimit: 32,
+      Memory: 64 * 1024 ** 2,
+      RestartPolicy: { Name: "no" },
+    },
+  };
 }
