@@ -868,6 +868,12 @@ export function Decisions({ decisions, companies, loaded, agentsWorking, onAnswe
                           <p className="rec">
                             <strong>RECOMMENDED</strong>
                             {d.recommendedOption}
+                            {d.context?.judge?.mode === "advise" && <span className="muted"> — {d.context.judge.second?.state === "pending" ? "Waiting a few seconds for the second opinion" : d.context.judge.reason}.</span>}
+                            {d.context?.judge?.mode === "advise" && d.context.judge.second?.state === "deny" && (
+                              <span className="muted" style={{ display: "block" }}>
+                                Second opinion: {d.context.judge.second.reason}
+                              </span>
+                            )}
                           </p>
                         )}
                         {d.options.some((o) => o === "Keep planning" || o === "Send it back" || o === "A step failed") && (

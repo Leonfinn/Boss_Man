@@ -7,7 +7,7 @@ import { and, asc, count, desc, eq, gt, gte, inArray, isNull, ne, sql } from "dr
 import { readFileSync } from "node:fs";
 import { monthStartUtc, projectSpendMicros } from "./services/project-spend.js";
 import { z, ZodError } from "zod";
-import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, TOOL_KINDS, SENIOR_DEV, ruleFor } from "@boss-man/shared";
+import { FEATURE_STATUSES, HORIZONS, IMPORTANCE, NOTE_SOURCES, RISK_TIERS, SECRET_KINDS, SYSTEM_STATES, dateIn, findCredential, riskSummary, usdToMicros, REVIEW_KINDS, TOOL_KINDS, SENIOR_DEV, ruleFor, PERMISSION_JUDGE_MODES } from "@boss-man/shared";
 import { BLOCKED_UNTIL_MAX_DAYS, BLOCKED_UNTIL_MAX_MS, BLOCKED_UNTIL_REASON_MAX, CEO_TEMPLATE, timeZoneOr, WatchdogSettings } from "@boss-man/shared";
 import { NO_CHECK, RUNNER_ADDONS, STANDARD_CHECKS, THINKING_LEVELS, TICKET_PREFIX, defaultTicketPrefix, ticketRef, type DetectResult } from "@boss-man/shared";
 import { FUNDING_KINDS, FUNDING_PROVIDERS, fundingComboError, windowLabel } from "@boss-man/shared";
@@ -31,6 +31,7 @@ import { getHold, maintenanceService } from "./services/maintenance.js";
 import { createErrorBuffer, logCompany, logMessage } from "./services/error-buffer.js";
 import { serverStatusService } from "./services/server-status.js";
 import { selfDeployService } from "./services/self-deploy.js";
+import { releaseLogService } from "./services/release-log.js";
 import { closeStallAlertForRun, sweepService, type SweepLimits } from "./services/sweeps.js";
 import { WatchdogError, watchdogService } from "./services/watchdog.js";
 import { alertLadder } from "./services/alert-ladder.js";
@@ -62,6 +63,7 @@ import { skillProposalsService } from "./services/skill-proposals.js";
 import { TicketChatError, ticketChatService } from "./services/ticket-chat.js";
 import { buildBrief } from "./services/brief.js";
 import { wikiSemanticService } from "./services/wiki-semantic.js";
+import { SecondOpinionSettings, secondOpinionService } from "./services/second-opinion.js";
 import { cleanFolder, MAX_BODY, pageSlug, WikiError, wikiService } from "./services/wiki.js";
 import { DEFAULT_LIMITS, schedulerService, type Limits } from "./services/scheduler.js";
 import { exportCompany } from "./services/company-export.js";
@@ -230,9 +232,20 @@ export async function buildApp(opts: AppOptions) {
     if (blocked) return reply.code(503).header("retry-after", "2").send({ error: "standby", message: "This server is on standby (another copy is in charge); changes go to the leader. Retry in a moment." });
   });
   await runnerSocketRoutes(app, runners, secretsSvc, { heartbeatMs: opts.heartbeatMs, isLeader: () => leader.isLeader() });
-  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), log: (m) => app.log.warn(m) });
-  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m));
+  // The live commit each company's server runs (BOS-284): a deploy, a switch-back, a rollback or a
+  // restart after a hand-apply wakes the Release Manager. Its deps are filled in further down.
+  const releaseLog = releaseLogService(db, {
+    createTicket: (projectId, input) => work.createTicket(projectId, input),
+    notify: (agentId, input) => scheduler.notify(agentId, input),
+    log: (m) => app.log.warn(m),
+  });
+  const selfDeploy = selfDeployService(db, { dir: opts.deployerDir, notify: (n) => notes.notify(n), releaseLog, log: (m) => app.log.warn(m) });
+  const decisionsSvc = decisionsService(db, (runnerId, command) => runners.send(runnerId, command), opts.now, (runnerId) => runners.isConnected(runnerId), (m) => app.log.error(m), opts.workspaceRoot ?? "/home/node/workspaces");
   runners.setPermissionHook((runner, event) => decisionsSvc.onPermissionRequest(runner, event));
+  // The optional model second opinion on permission cards (BOS-338): off until the owner sets it up.
+  const secondOpinion = secondOpinionService(db, { reveal: (id) => secretsSvc.reveal(id), fetch: opts.fetch, workspaceRoot: opts.workspaceRoot ?? "/home/node/workspaces" });
+  decisionsSvc.setSecondOpinion(secondOpinion);
+  app.addHook("onClose", async () => decisionsSvc.drainSecondOpinions());
   const deploysSvc = deploysService(db, {
     now: opts.now,
     onShipped: async (ticketId) => {
@@ -309,6 +322,8 @@ export async function buildApp(opts: AppOptions) {
   const serverStatus = serverStatusService(db, {
     role: () => leader.role(),
     isConnected: (id) => runners.isConnected(id),
+    isSettling: (id, at) => runners.isSettling(id, at),
+    connectedSince: (id) => runners.connectedSince(id),
     deploy: () => selfDeploy.overview(),
     hold: async () => {
       const h = await getHold(db);
@@ -432,15 +447,18 @@ export async function buildApp(opts: AppOptions) {
       .catch((err) => app.log.error({ err, companyId: runner.companyId }, "closing a stall alert failed"));
   });
   const sweeps = sweepService(db, {
-    expireAdvice: () => decisionsSvc.expireAdvice(),
+    // The same sweep settles second opinions whose asker was lost to a restart (BOS-338).
+    expireAdvice: () => Promise.all([decisionsSvc.expireAdvice(), decisionsSvc.expireSecondOpinions()]),
     limits: opts.sweepLimits,
     now: opts.now,
     wake: (input) => scheduler.notify(input.agentId, input),
     isConnected: (runnerId) => runners.isConnected(runnerId),
+    runnerSettling: (runnerId) => runners.isSettling(runnerId, (opts.now ?? (() => new Date()))()),
     endRun: (runId, outcome, at) => runners.endRun(runId, outcome, at),
     endUnconfirmedCancels: (t) => runsSvc.endUnconfirmedCancels(t),
     // An approved merge cut off (e.g. by a deploy's hand-over) is tried once more, in the background.
     retryLand: (ticketId) => review.startLanding(ticketId, "Boss Man (trying an interrupted merge again)"),
+    landingActive: (ticketId) => review.landingActive(ticketId),
     expireSkills: () => skillProposals.expireOld(),
     // Stalled runs go to the Scrum Master first (BOS-119); `alerts` is built below.
     alert: (input) => alerts.raise(input),
@@ -691,7 +709,7 @@ export async function buildApp(opts: AppOptions) {
 
     owner.patch("/api/companies/:id", async (req, reply) => {
       const { id } = IdParam.parse(req.params);
-      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
+      const b = z.object({ name: z.string().trim().min(1).max(80), mission: z.string().max(2000).nullable(), ownerApprovesEngagements: z.boolean(), goalCheckDays: z.number().int().min(1).max(365), nudgesPerHour: z.number().int().min(1).max(1000), adviceTimeoutMinutes: z.number().int().min(5).max(1440), permissionJudge: z.enum(PERMISSION_JUDGE_MODES), diskCapGb: z.number().positive().max(100_000).nullable(), ticketPrefix: z.string().trim().toUpperCase().regex(TICKET_PREFIX, "1 to 10 letters or digits") }).partial().parse(req.body);
       const { diskCapGb, ...rest } = b;
       const patch = { ...rest, ...(diskCapGb !== undefined ? { diskCapBytes: diskCapGb === null ? null : Math.round(diskCapGb * 1024 ** 3) } : {}) };
       const [c] = await db.update(companies).set(patch).where(eq(companies.id, id)).returning();
@@ -853,6 +871,9 @@ export async function buildApp(opts: AppOptions) {
       await db.insert(settings).values({ key: "run_limits", value }).onConflictDoUpdate({ target: settings.key, set: { value } });
       return runLimits();
     });
+    // BOS-313: check the merged result before pushing it (off by default while it rolls out).
+    owner.get("/api/settings/check-merged-result", async () => ({ on: await review.checkMergedResult() }));
+    owner.put("/api/settings/check-merged-result", async (req) => ({ on: await review.setCheckMergedResult(z.object({ on: z.boolean() }).parse(req.body).on) }));
     owner.get("/api/notification-settings", async () => {
       const s = await notes.getSettings();
       return { ...s, ntfy: s.ntfy ? { url: s.ntfy.url, topic: s.ntfy.topic, hasToken: !!s.ntfy.tokenSecretId } : null };
@@ -994,10 +1015,12 @@ export async function buildApp(opts: AppOptions) {
       const [c] = await db.select({ id: companies.id }).from(companies).where(eq(companies.id, id));
       if (!c) return reply.code(404).send({ error: "not_found" });
       const [row] = await db.insert(mcpServers).values({ ...b, companyId: id }).onConflictDoNothing().returning();
+      if (row) void launch.syncAllow(id);
       return row ? reply.code(201).send(row) : reply.code(409).send({ error: "name_taken", message: "This company already has a tool server with that name." });
     });
     owner.delete("/api/mcp-servers/:id", async (req, reply) => {
-      const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id });
+      const [row] = await db.delete(mcpServers).where(eq(mcpServers.id, IdParam.parse(req.params).id)).returning({ id: mcpServers.id, companyId: mcpServers.companyId });
+      if (row) void launch.syncAllow(row.companyId);
       return row ? reply.code(204).send() : reply.code(404).send({ error: "not_found" });
     });
 
@@ -1692,6 +1715,18 @@ export async function buildApp(opts: AppOptions) {
       if (after.enabled && (!before.enabled || before.model !== after.model || before.baseUrl !== after.baseUrl || before.secretId !== after.secretId)) await semantic.reindexAll(id);
       return semanticView(after);
     });
+    // The model second opinion on permission cards (BOS-338). The key is picked from Secrets, never sent back.
+    owner.get("/api/companies/:id/second-opinion", async (req) => secondOpinion.settings(IdParam.parse(req.params).id));
+    owner.put("/api/companies/:id/second-opinion", async (req, reply) => {
+      const { id } = IdParam.parse(req.params);
+      const b = SecondOpinionSettings.parse(req.body);
+      if (b.enabled && (!b.model || !b.baseUrl)) return reply.code(400).send({ error: "invalid_request", message: "Set the provider address and the model first." });
+      return secondOpinion.setSettings(id, b);
+    });
+    owner.post("/api/companies/:id/second-opinion/test", async (req) => {
+      IdParam.parse(req.params);
+      return secondOpinion.test(SecondOpinionSettings.parse(req.body));
+    });
     owner.post("/api/companies/:id/wiki-semantic/reindex", async (req, reply) => reply.code(202).send({ pages: await semantic.reindexAll(IdParam.parse(req.params).id) }));
     owner.get("/api/tickets/:id/artifacts", async (req) => wiki.artifacts(IdParam.parse(req.params).id, { family: true }));
     owner.delete("/api/artifacts/:id", async (req, reply) => wiki.removeArtifact(IdParam.parse(req.params).id).then(() => reply.code(204).send(), wikiErrors(reply)));
@@ -2362,5 +2397,5 @@ export async function buildApp(opts: AppOptions) {
   if (opts.webDir) await serveWeb(app, opts.webDir);
 
   const briefUpkeep = () => refreshBriefs(db, { work, gitHosts, gitToken: async (companyId) => (await secretsSvc.resolveCompanyEnv(companyId, "check")).GIT_TOKEN, log: (m) => app.log.warn(m) });
-  return { app, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
+  return { app, releaseLog, briefUpkeep, retro, secrets: secretsSvc, funding, refreshSyntheticQuota, runners, decisions: decisionsSvc, selfDeploy, maintenance, scheduler, serverStatus, work, sweeps, watchdog, engagements: engagementsSvc, deploys: deploysSvc, runs: runsSvc, recovery, review, loops, alerts, disk, rules, notes, chapters, feedback, wiki, semantic, skills: skillsSvc, skillProposals, ticketChat };
 }
