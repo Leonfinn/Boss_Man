@@ -19,6 +19,7 @@ check apps/server/a no
 check docs/x no
 check apps/runner/Dockerfile yes
 check apps/launcher/src/m.ts yes
+check apps/netguard/netguard.sh yes
 check packages/shared/i.ts yes
 check pnpm-lock.yaml yes
 check apps/runner-extra/y no
