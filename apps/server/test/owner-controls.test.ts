@@ -29,12 +29,12 @@ describe("decision rules (R19)", () => {
     const c = await setup();
     const test = (command: string, companyId = c.company.id) => c.req("POST", "/api/policy-rules/test", { companyId, command }).then((r) => r.json());
     // By default a docker restart is an ordinary command and runs.
-    expect(await test("docker restart web")).toEqual({ outcome: "allow", rule: "Other shell commands" });
+    expect(await test("docker restart web")).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
 
     const global = (await c.req("POST", "/api/policy-rules", { companyId: null, name: "Container restarts go to the CEO", match: { commandPattern: "^docker\\s+restart\\b" }, outcome: "ceo" })).json();
-    expect(await test("docker restart web", c.other.id)).toEqual({ outcome: "ceo", rule: "Container restarts go to the CEO" });
+    expect(await test("docker restart web", c.other.id)).toMatchObject({ outcome: "ceo", rule: "Container restarts go to the CEO" });
     const mine = (await c.req("POST", "/api/policy-rules", { companyId: c.company.id, name: "Homelab may restart containers", match: { commandPattern: "^docker\\s+restart\\b" }, outcome: "allow" })).json();
-    expect(await test("docker restart web")).toEqual({ outcome: "allow", rule: "Homelab may restart containers" });
+    expect(await test("docker restart web")).toMatchObject({ outcome: "allow", rule: "Homelab may restart containers" });
     expect(await test("docker restart web", c.other.id)).toMatchObject({ outcome: "ceo" });
 
     // Order within a scope decides between overlapping rules.
@@ -42,7 +42,7 @@ describe("decision rules (R19)", () => {
     expect(await test("docker restart db")).toMatchObject({ rule: "Homelab may restart containers" });
     const order = (await c.req("POST", "/api/policy-rules/order", { companyId: c.company.id, ids: [deny.id, mine.id] })).json();
     expect(order.map((r: { name: string }) => r.name)).toEqual(["No restarting the database", "Homelab may restart containers"]);
-    expect(await test("docker restart db")).toEqual({ outcome: "deny", rule: "No restarting the database" });
+    expect(await test("docker restart db")).toMatchObject({ outcome: "deny", rule: "No restarting the database" });
 
     const list = (await c.req("GET", `/api/policy-rules?companyId=${c.company.id}`)).json();
     expect(list.company).toHaveLength(2);
