@@ -58,19 +58,13 @@ Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip
 cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
-The repo is public, so the NAS clones it over https with no key and no login:
-
-```sh
-git clone https://github.com/Leonfinn/Boss_Man.git src
-```
-
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read it the same way, so there is nothing to set up.
+The repo is private, so the NAS needs its own read-only deploy key. The key steps, the clone and the check are the same on every host: follow `docs/21-move-to-new-host.md` stage 1 ("Make the key" to "Check it reads the repository") with `BOSSMAN_HOME=/mnt/NVME_Apps/Container_files/boss-man`. Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` then use the same key through `core.sshCommand`.
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
 If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
 
-**Already installed with a deploy key?** Nothing to change. `src` keeps its `git@github.com:` address and the `core.sshCommand` setting, and updates keep working. To move to https later, run `git -C /mnt/NVME_Apps/Container_files/boss-man/src remote set-url origin https://github.com/Leonfinn/Boss_Man.git`; the old key can then be deleted from the repo's settings and the dataset.
+**Already installed with a deploy key?** Nothing to change. `src` keeps its `git@github.com:` address and the `core.sshCommand` setting, and updates keep working.
 
 
 ## 3. Folders and ownership

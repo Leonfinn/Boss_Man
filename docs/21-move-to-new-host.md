@@ -83,9 +83,35 @@ docker compose version
 git --version && flock --version | head -1 && curl --version | head -1
 ```
 
-**Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. On 3 Nov 2026 the live commit is d86dbe1f (deployed 12:34 UTC on 3 Nov 2026, includes migration 0099; if you already built 2d5e3035, move the checkout and rebuild the images); other merges may still change it before stage 3, so the stage 3 and 4 cards confirm the final commit.
+**Which commit:** check out the commit shown as live in Boss Man's server status, not the newest main. Merges may still change it before stage 3, so the stage 3 card names the final commit and stage 4 moves the checkout to it (`git -C "$BOSSMAN_HOME/src" reset --hard <commit>`) before building.
 
-Make a deploy key for this host (separate from the old host's), add it as a read-only deploy key in the GitHub repository settings, then clone. The key steps are `docs/06-install-truenas.md` step 2; use `$BOSSMAN_HOME` for the folder.
+The repository is private, so the new host needs its own read-only deploy key (never copy the old host's). Make the key:
+
+```sh
+ssh-keygen -t ed25519 -N "" -C "boss-man $(hostname)" -f "$BOSSMAN_HOME/deploy_key"
+```
+
+Print the public half and add it on GitHub: the repository's Settings > Deploy keys > Add deploy key, paste it, leave "Allow write access" unticked:
+
+```sh
+cat "$BOSSMAN_HOME/deploy_key.pub"
+```
+
+Clone with that key, and save the key in the checkout so later `git fetch`, `scripts/deploy.sh` and the host deployer's `git ls-remote` use it too (replace `OWNER/REPO` with your repository):
+
+```sh
+GIT_SSH_COMMAND="ssh -i $BOSSMAN_HOME/deploy_key -o IdentitiesOnly=yes" git clone git@github.com:OWNER/REPO.git "$BOSSMAN_HOME/src"
+```
+
+```sh
+git -C "$BOSSMAN_HOME/src" config core.sshCommand "ssh -i $BOSSMAN_HOME/deploy_key -o IdentitiesOnly=yes"
+```
+
+Check it reads the repository (prints commit ids, no password prompt):
+
+```sh
+git -C "$BOSSMAN_HOME/src" ls-remote origin HEAD
+```
 
 Check the Docker socket group, for `BOSSMAN_DOCKER_GID` in `.env`:
 
@@ -105,11 +131,13 @@ sudo chown -R 1000:1000 "$BOSSMAN_HOME/data/companies" "$BOSSMAN_HOME/src/secret
 
 Write `.env` by copying the old host's and changing only: `BOSSMAN_DATA`, `BOSSMAN_BIND`, `BOSSMAN_PORTAL_URL`, `BOSSMAN_DOCKER_GID`, `PENPOT_*` if used. Keep `POSTGRES_PASSWORD` the same as the old host's. Do not start the stack yet.
 
-Build the images (same as `docs/06` step 5):
+Don't build images yet. With blue/green in `COMPOSE_FILE` the plain `server` service is parked and nothing runs it, so building it only wastes time and disk. The images are built in stage 4, after the checkout is moved to the final commit:
 
 ```sh
-docker compose build server launcher
+docker compose build server-blue server-green launcher netguard
 ```
+
+Both colours come from the same Dockerfile; building both means either can be the live one. Without blue/green (single server), build `server launcher netguard` instead.
 
 ### Stage 2: rehearse the restore
 
@@ -123,7 +151,9 @@ docker compose up -d db
 scripts/restore-test.sh ../bossman-YYYY-MM-DD-HHMM.sql.gz
 ```
 
-It must end with a line starting `OK:`. The script was written to compare the restored copy with a live database (`bossman`) in the same Postgres. On a brand-new host that database is empty or missing, so the "live minus restored" column means nothing there, and the script may stop early. **Unconfirmed on a fresh host:** if it stops with an ERROR before restoring, the rehearsal cannot be done here; skip to stage 3 and rely on the old host's proven 27 Oct result and the count comparison in stage 4. Details: wiki `runbooks/database-restore-and-bluegreen-rollback`, section 1.
+It must end with a line starting `OK:`. The script compares the restored copy with the live database (`bossman`) in the same Postgres. On a brand-new host that database exists but is empty, so every table shows "missing in one side" and migrations show "live ?": that is expected. The pass checks look only at the restored copy. Proven on a fresh Proxmox VM on 3 Nov 2026: a 188 MB backup restored in 10 s with all data present. Details: wiki `runbooks/database-restore-and-bluegreen-rollback`, section 1.
+
+Backups and the files copied in stage 3 are usually readable by root only, while `scp` logs in as your own user. On the old host, put a private copy where your user can read it (`sudo install -d -m 700 -o <your-user> /tmp/bossman-move`, then `sudo install -m 600 -o <your-user> <file> /tmp/bossman-move/`), copy it with `scp`, then remove it (`sudo rm -r /tmp/bossman-move`). Never loosen the permissions on the originals. The stage cards give these as separate copy-ready commands.
 
 ### Stage 3: final backup and stop (on the OLD host)
 
