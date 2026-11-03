@@ -1,6 +1,6 @@
 {
-  "id": "7d1f2c4e-5b6a-4c8d-9e0f-1a2b3c4d5e6f",
-  "prevId": "b3ea7be0-a520-4d72-8352-ae717d0a4b6f",
+  "id": "92fb4a4b-261f-489c-bb8b-2aeaec293afa",
+  "prevId": "99cadf6e-fa67-4f6e-bf0a-377d998ba255",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5516,6 +5516,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "boot_pulled_at": {
+          "name": "boot_pulled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -7756,6 +7762,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "monitor_restart_at": {
+          "name": "monitor_restart_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -9696,9 +9708,6 @@
   },
   "schemas": {},
   "sequences": {},
-  "roles": {},
-  "policies": {},
-  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},
