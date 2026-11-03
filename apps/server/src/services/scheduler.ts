@@ -550,7 +550,7 @@ export function schedulerService(
     const paused = new Set((await db.select({ id: companies.id }).from(companies).where(eq(companies.paused, true))).map((c) => c.id));
     for (const x of due) {
       if (paused.has(x.companyId)) continue;
-      const claimed = await db.update(tickets).set({ monitorAt: null }).where(and(eq(tickets.id, x.id), eq(tickets.monitorAt, x.monitorAt!))).returning({ id: tickets.id });
+      const claimed = await db.update(tickets).set({ monitorAt: null, monitorRestartAt: null }).where(and(eq(tickets.id, x.id), eq(tickets.monitorAt, x.monitorAt!))).returning({ id: tickets.id });
       if (!claimed.length) continue;
       const log = (summary: string) => record(db, { companyId: x.companyId, agentId: x.assigneeAgentId, ticketId: x.id, kind: "monitor", summary, at: now() });
       if (!x.assigneeAgentId || (x.systemState !== "in_progress" && x.systemState !== "review")) {
@@ -565,10 +565,10 @@ export function schedulerService(
       }
       const n = x.monitorAttempts + 1;
       await db.update(tickets).set({ monitorAttempts: n }).where(eq(tickets.id, x.id));
-      const w = await self.notify(x.assigneeAgentId, { ticketId: x.id, reason: "check due", note: `Check due (${n} of ${x.monitorMax}): ${x.monitorNote}. Re-check it now. If you still need to wait, call schedule_check again; otherwise carry on or finish.` });
+      const w = await self.notify(x.assigneeAgentId, { ticketId: x.id, reason: "check due", note: `Check due (${n} of ${x.monitorMax}): ${x.monitorNote}. Re-check it now. If you still need to wait, call schedule_check again; otherwise carry on or finish.${x.monitorRestartAt ? ` The runner restarted at ${x.monitorRestartAt.toISOString()}; any background check you started is gone. Check its log and rerun only what you need.` : ""}` });
       if (w.status === "dropped") {
         // Retry next tick.
-        await db.update(tickets).set({ monitorAt: x.monitorAt, monitorAttempts: x.monitorAttempts }).where(eq(tickets.id, x.id));
+        await db.update(tickets).set({ monitorAt: x.monitorAt, monitorAttempts: x.monitorAttempts, monitorRestartAt: x.monitorRestartAt }).where(eq(tickets.id, x.id));
         continue;
       }
       await log(`Check ${n} of ${x.monitorMax} fired: ${x.monitorNote}`);
@@ -808,8 +808,8 @@ export function schedulerService(
       // A PA never gets Claude's own shell, file or web tools, however it was woken (R87).
       ...(chat || agent.duty === "assistant" ? { boardToolsOnly: true } : {}),
       // A ticket in a project with a repo works in its own worktree and branch (R38).
-      // A plan-first ticket starts in plan mode until its plan is approved (R40).
-      ...(ticket?.planFirst && !ticket.planApprovedAt ? { mode: "plan" as const } : {}),
+      // A plan-first ticket starts in plan mode until its plan is approved (R40). Plan mode is the assignee's: a reviewer is never put in it (BOS-371).
+      ...(ticket?.planFirst && !ticket.planApprovedAt && w.reason !== REVIEW_REASON ? { mode: "plan" as const } : {}),
       ...(ticket?.repoUrl && workTicketId && !copy ? { workspace: { projectId: ticket.projectId, ticketId: workTicketId, repoUrl: ticket.repoUrl, baseRef: ticket.defaultBranch } } : {}),
       ...(copy ? { workspace: { projectId: copy.projectId, ticketId: copy.ticketId, repoUrl: copy.repoUrl, baseRef: copy.baseRef, review: true } } : {}),
       prompt: chapter?.prompt ?? wakePrompt,

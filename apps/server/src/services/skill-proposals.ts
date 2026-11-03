@@ -127,6 +127,8 @@ export type SkillDeps = {
   tell?: (agentId: string, note: string) => Promise<unknown>;
   /** Closes an open review ticket when its proposal expires, so nobody keeps working a dead review. */
   closeReview?: (ticketId: string, stateNote: string) => Promise<unknown>;
+  /** Closes the review ticket as done once its verdict is in (BOS-304): the review is over, so its own reviewer finishes it. */
+  closeReviewDone?: (ticketId: string, stateNote: string) => Promise<unknown>;
   now?: () => Date;
 };
 
@@ -316,7 +318,19 @@ export function skillProposalsService(db: Db, skillsSvc: SkillsSvc, deps: SkillD
         .where(and(eq(skillProposals.id, p.id), eq(skillProposals.status, "in_review")))
         .returning();
       if (!row) throw new SkillError(409, "This proposal isn't waiting for a review.");
-      await record(db, { companyId, ticketId: p.reviewTicketId, agentId: reviewerId, kind: "skill.reviewed", summary: `Security review of ${p.name}: ${v.verdict === "conditions" ? "recommend with conditions" : v.verdict === "advise_against" ? "advise against" : "recommend"} (${(v.findings ?? []).length} finding${(v.findings ?? []).length === 1 ? "" : "s"}).` });
+      const verdictNote = `Security review of ${p.name}: ${v.verdict === "conditions" ? "recommend with conditions" : v.verdict === "advise_against" ? "advise against" : "recommend"} (${(v.findings ?? []).length} finding${(v.findings ?? []).length === 1 ? "" : "s"}).`;
+      await record(db, { companyId, ticketId: p.reviewTicketId, agentId: reviewerId, kind: "skill.reviewed", summary: verdictNote });
+      // The verdict ends the review, so this task closes itself (BOS-304): neither the reviewer nor
+      // the CEO should have to move it to done by hand. It is no code, so there is nothing to merge.
+      // The verdict is already saved; a failed close must not turn a good verdict into an error the
+      // reviewer would retry (which would hit "isn't waiting"). It is logged instead.
+      if (p.reviewTicketId) {
+        try {
+          await deps.closeReviewDone?.(p.reviewTicketId, verdictNote);
+        } catch (e) {
+          await record(db, { companyId, ticketId: p.reviewTicketId, agentId: null, kind: "skill.review_close_failed", summary: `The verdict was saved, but its review task was not closed: ${(e as Error).message}` });
+        }
+      }
       return this.toOwner(row);
     },
 

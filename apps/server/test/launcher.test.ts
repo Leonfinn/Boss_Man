@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
 import { notifications } from "../src/db/schema.js";
-import { slugify } from "../src/services/launcher.js";
+import { slugify, toolServerAddress } from "../src/services/launcher.js";
 
 let ctx: Awaited<ReturnType<typeof setup>> | undefined;
 afterEach(async () => {
@@ -59,7 +59,7 @@ describe("runners through the launcher (R55)", () => {
     await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
     const put = c.fake.calls.find((x) => x.method === "PUT")!;
     expect(put).toMatchObject({ path: "/runners/app-co", auth: `Bearer ${KEY}` });
-    expect(Object.keys(put.body as object)).toEqual(["token"]);
+    expect(Object.keys(put.body as object)).toEqual(["token", "allow"]);
     // The token the launcher got is the runner's real one.
     expect(await c.runners.authenticate((put.body as { token: string }).token)).toMatchObject({ companyId: company.id });
 
@@ -98,6 +98,19 @@ describe("runners through the launcher (R55)", () => {
     expect(slugify("  Ünïcode & Co!  ")).toBe("unicode-co");
     expect(slugify("***")).toBe("company");
     expect(slugify("x".repeat(80))).toHaveLength(34);
+  });
+
+  it("tells the launcher the company's tool servers, so the network guard keeps them reachable", async () => {
+    const c = (ctx = await setup());
+    const { company } = (await c.req("POST", "/api/companies", { name: "App Co" })).json() as { company: { id: string } };
+    await vi.waitFor(() => expect(c.fake.calls.some((x) => x.method === "PUT")).toBe(true));
+    const added = await c.req("POST", `/api/companies/${company.id}/mcp-servers`, { name: "crawl", url: "http://192.168.68.20:11235/mcp", transport: "http" });
+    expect(added.statusCode).toBe(201);
+    await vi.waitFor(() => expect(c.fake.calls.find((x) => x.path === "/runners/app-co/allow")?.body).toEqual({ allow: ["192.168.68.20:11235"] }));
+    await c.req("DELETE", `/api/mcp-servers/${(added.json() as { id: string }).id}`);
+    await vi.waitFor(() => expect(c.fake.calls.filter((x) => x.path === "/runners/app-co/allow").at(-1)?.body).toEqual({ allow: [] }));
+    expect(toolServerAddress("https://tools.lan/mcp")).toBe("tools.lan:443");
+    expect(toolServerAddress("http://[fd00::1]/mcp")).toBeNull();
   });
 
   it("does nothing without the launcher", async () => {
