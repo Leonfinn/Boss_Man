@@ -3,11 +3,8 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { createContext, useContext, type ReactNode } from "react";
+import { linkMarkdown, type LinkContext } from "../links";
 import { EnlargeableImage } from "./Lightbox";
-
-// [[slug]] and [[slug#Section]] become links to that wiki page when the company is known.
-const wikiLinks = (text: string, companyId: string) =>
-  text.replace(/\[\[([^\]#|]+?)(#[^\]]*)?\]\]/g, (_, slug: string, sec = "") => `[${slug.trim()}${sec}](#/wiki/${companyId}/${slug.trim()}${sec})`);
 
 /** The id a heading gets, so a link like slug#Heading can land on it. */
 export function headingId(text: string) {
@@ -35,7 +32,8 @@ function MarkdownImage({ src, alt }: { src?: string | URL; alt?: string }) {
   );
 }
 
-export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?: string }) {
+/** Markdown with links built by the one shared builder (BOS-358): page names, ticket references and routes. */
+export function Markdown({ text, wikiCompanyId, linkContext }: { text: string; wikiCompanyId?: string; linkContext?: LinkContext }) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -67,7 +65,7 @@ export function Markdown({ text, wikiCompanyId }: { text: string; wikiCompanyId?
           ),
         }}
       >
-        {wikiCompanyId ? wikiLinks(text, wikiCompanyId) : text}
+        {linkMarkdown(text, { ...linkContext, companyId: wikiCompanyId ?? linkContext?.companyId })}
       </ReactMarkdown>
     </div>
   );

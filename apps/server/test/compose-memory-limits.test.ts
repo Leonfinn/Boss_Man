@@ -9,7 +9,7 @@ const parse = (text: string) => parseYaml(text, { merge: true, logLevel: "error"
 
 // BOS-395: a container with no memory limit can take the whole host (BOS-392). Keep the limits in compose.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-type Service = { mem_limit?: string | number; oom_score_adj?: number; profiles?: string[]; command?: string[] };
+type Service = { cpu_shares?: number; mem_limit?: string | number; oom_score_adj?: number; profiles?: string[]; command?: string[] };
 const services = (file: string): Record<string, Service> => parse(readFileSync(path.join(root, file), "utf8")).services;
 // Build-only or parked services that never run a process of their own.
 const NOT_RUN = new Set(["netguard"]);
@@ -51,6 +51,24 @@ describe("compose memory limits", () => {
     const bg = services("deploy/truenas-bluegreen.yml");
     for (const n of ["server-blue", "server-green", "proxy"]) expect(bg[n]!.oom_score_adj, n).toBeLessThan(0);
     expect(bg.proxy!.oom_score_adj).toBeLessThanOrEqual(bg["server-blue"]!.oom_score_adj!);
+  });
+
+  // BOS-412: priority, not a cap. Runners get a lower CPU weight than the server, database and proxy; the hard cap is opt-in.
+  it("runners have a lower CPU weight than the server, database and proxy, and no cap by default", () => {
+    const main = services("docker-compose.yml");
+    const runner = parse(readFileSync(path.join(root, "docker-compose.yml"), "utf8"))["x-runner"];
+    expect(String(runner.cpu_shares)).toContain("BOSSMAN_RUNNER_CPU_SHARES:-512");
+    expect(String(runner.cpus)).toMatch(/^\$\{BOSSMAN_RUNNER_CPUS:-0\}$/);
+    const bg = services("deploy/truenas-bluegreen.yml");
+    // Unset = Docker default 1024, above the runner weight; only the proxy sets a value (2048). Setting 1024 on db/server would change their config for nothing.
+    for (const [n, s] of [["db", main.db], ["server", main.server], ["server-blue", bg["server-blue"]], ["server-green", bg["server-green"]]] as const) {
+      expect(s!.cpu_shares ?? 1024, n).toBeGreaterThan(512);
+    }
+    expect(bg.proxy!.cpu_shares).toBe(2048);
+    // The launcher gets the same two settings, so both places a runner is defined agree.
+    const launcherEnv = parse(readFileSync(path.join(root, "docker-compose.yml"), "utf8")).services.launcher.environment;
+    expect(launcherEnv.BOSSMAN_RUNNER_CPU_SHARES).toContain("BOSSMAN_RUNNER_CPU_SHARES:-512");
+    expect(launcherEnv.BOSSMAN_RUNNER_CPUS).toContain("BOSSMAN_RUNNER_CPUS");
   });
 
   it("tool servers are the first to be killed", () => {
