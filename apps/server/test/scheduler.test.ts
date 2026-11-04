@@ -530,7 +530,7 @@ describe("scheduler", () => {
     await ctx.scheduler.notify(worker.id, { ticketId: urgent.id, reason: "assigned", note: "The owner assigned this to you." });
     await ctx.scheduler.tick();
     const status = await ctx.serverStatus.status(ctx.company.id);
-    expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, agent: "Engineer", held: "runner offline" })]);
+    expect(status.wakes.waiting.filter((x) => x.ticketId === urgent.id)).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, agent: "Engineer", held: "runner offline" })]);
   });
 
   it("holds an urgent ticket assigned after it was marked urgent under the default pause, and shows why (BOS-253)", async () => {

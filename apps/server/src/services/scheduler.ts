@@ -4,7 +4,7 @@
 // and holds low-priority work while a subscription window is nearly used up (R33).
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, like, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import { agentIdentity, planningGuidance, quietHoursEnd, stateNoteLine, ticketRef, UNTRUSTED_NOTE, untrusted, windowLabel, type QuietHours } from "@boss-man/shared";
 import type { ChapterLaunch } from "./chapters.js";
 import { CHAT_REASON } from "./chat.js";
@@ -644,7 +644,7 @@ export function schedulerService(
             `If you are waiting on CI, a deploy, a review or an outside service, call schedule_check rather than ending without a plan. If you stop with work still to do (the next batch of a long job), call schedule_check for when to carry on and say when in your state note; if you set nothing, Boss Man wakes you ${CARRY_ON_MS / 60_000} minutes after a run that made progress.`,
           );
         lines.push("", PLAIN_SUMMARY_RULE);
-        lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session.");
+        lines.push("", "Before you end your run, record the ticket's current state in its note: call set_ticket_state with the ticket's current state and a summary (what's done, what's next, anything blocking), so colleagues read it from the ticket and not from your session." + (t.t.systemState === "review" ? " This ticket is already in review: a set_ticket_state to review only updates the note and does not re-request reviews (ticket_reply also works)." : ""));
         if (t.t.planFirst && !t.t.planApprovedAt) lines.push("", "This ticket is plan-first: you're in plan mode. Investigate, then present your plan with ExitPlanMode. Nothing can change until the plan is approved.");
         else if (t.t.plan && t.t.planApprovedAt) lines.push("", "The approved plan for this ticket:", cut(t.t.plan, 8000, () => "read the full ticket with tickets read"));
         // The ticket's conversation with the owner (R65).
@@ -724,6 +724,18 @@ export function schedulerService(
       .innerJoin(projects, eq(projects.id, tickets.projectId))
       .where(and(eq(tickets.id, id), eq(tickets.companyId, w.companyId)));
     return t?.repoUrl ? { ...t, repoUrl: t.repoUrl } : null;
+  }
+
+  /**
+   * A run that could not start is a card on the first failure, naming the reason (BOS-314), not
+   * after three. One card per agent at a time: while one is open, further failed starts add none.
+   */
+  async function flagFailedStart(w: typeof wakes.$inferSelect, reason: string) {
+    const [open] = await db.select({ id: decisions.id }).from(decisions).where(and(like(decisions.dedupeKey, `start-fail:${w.agentId}:%`), eq(decisions.status, "open"))).limit(1);
+    if (open) return;
+    const [agent] = await db.select({ name: agents.name }).from(agents).where(eq(agents.id, w.agentId));
+    const [t] = w.ticketId ? await db.select({ title: tickets.title }).from(tickets).where(eq(tickets.id, w.ticketId)) : [];
+    await deps.alert(w.companyId, `${agent?.name ?? "An agent"} could not start${t ? ` on "${t.title}"` : ""} (wake: ${w.reason}): ${reason}. Boss Man will keep trying; look into it if the reason does not clear.`, { about: [w.agentId], ticketId: w.ticketId, dedupeKey: `start-fail:${w.agentId}:${w.id}` });
   }
 
   /** The owner's ranked Claude subscriptions in order, when this source is one of them (BOS-383). */
@@ -1394,6 +1406,7 @@ export function schedulerService(
           // Another pass already took it; leave its state alone.
           if ("claimed" in launched) continue;
           await wait(launched.reason);
+          await flagFailedStart(w, launched.reason);
           continue;
         }
         result.launched++;
