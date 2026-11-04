@@ -57,6 +57,10 @@ x-runner: &runner
   # If the host itself runs out, runners (and their browsers) are the first to go; never the server, db or proxy.
   oom_score_adj: 500
   pids_limit: ${BOSSMAN_RUNNER_PIDS:-4096}
+  # CPU priority, not a cap (BOS-412): half the default weight of 1024, so on a busy host the server and database win; idle, runners use every core.
+  cpu_shares: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
+  # Optional hard cap in CPUs for hosts shared with other workloads. 0 = none (the default).
+  cpus: ${BOSSMAN_RUNNER_CPUS:-0}
   # An init as PID 1 reaps the zombies agents' tools leave behind.
   init: true
 
@@ -72,6 +76,8 @@ services:
       - db-data:/var/lib/postgresql/data
     # Memory limits (docs/00-first-time-install.md, "Memory limits"): the database is among the last things the kernel kills.
     # 0 = no cap: the db row of the owner's docker stats reading (BOS-405) was cut off, so 1g is unverified. Set BOSSMAN_DB_MEMORY to cap it.
+    # Full CPU weight (BOS-412): runners get 512, so the database wins on a busy host.
+    cpu_shares: 1024
     mem_limit: ${BOSSMAN_DB_MEMORY:-0}
     mem_reservation: ${BOSSMAN_DB_MEMORY_RESERVED:-256m}
     oom_score_adj: -500
@@ -110,6 +116,8 @@ services:
     secrets:
       - master_key
     # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
+    # Full CPU weight (BOS-412): runners get 512, so the server wins on a busy host.
+    cpu_shares: 1024
     mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
     mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
     oom_score_adj: -500
@@ -137,6 +145,8 @@ services:
       BOSSMAN_RUNNER_URL: ws://server:3100/api/runner/connect
       BOSSMAN_RUNNER_MEMORY: ${BOSSMAN_RUNNER_MEMORY:-4g}
       BOSSMAN_RUNNER_PIDS: ${BOSSMAN_RUNNER_PIDS:-4096}
+      BOSSMAN_RUNNER_CPU_SHARES: ${BOSSMAN_RUNNER_CPU_SHARES:-512}
+      BOSSMAN_RUNNER_CPUS: ${BOSSMAN_RUNNER_CPUS:-}
       BOSSMAN_NETGUARD: ${BOSSMAN_NETGUARD:-auto}
       BOSSMAN_NETGUARD_ALLOW: ${BOSSMAN_NETGUARD_ALLOW:-}
       BOSSMAN_LAUNCHER_KEY_FILE: /run/launcher/key

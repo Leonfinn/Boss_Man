@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ContainerInfo, ContainerSummary, Docker } from "../src/docker.js";
 import { launcher, launcherServer } from "../src/launcher.js";
-import { containerSpec, netguardSpec, parseAllow, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
+import { containerSpec, netguardSpec, parseAllow, parseCpuShares, parseCpus, parseGuardMode, parseMemory, parsePids, serverAddress, type LauncherConfig } from "../src/spec.js";
 
 const KEY = "k".repeat(43);
 const TOKEN = `bmr_${"t".repeat(43)}`;
@@ -113,9 +113,23 @@ describe("the runner launcher (R55)", () => {
         Memory: 4294967296,
         MemorySwap: 4294967296,
         OomScoreAdj: 500,
+        CpuShares: 512,
         RestartPolicy: { Name: "unless-stopped" },
       },
     });
+    // BOS-412: weight can be changed, and a hard cap is only set when asked for.
+    expect(containerSpec({ ...config(), cpuShares: 256, cpus: 1.5 }, "app-co").HostConfig).toMatchObject({ CpuShares: 256, NanoCpus: 1_500_000_000 });
+    expect(containerSpec(config(), "app-co").HostConfig).not.toHaveProperty("NanoCpus");
+    expect(parseCpuShares(undefined)).toBe(512);
+    expect(parseCpuShares("1024")).toBe(1024);
+    expect(() => parseCpuShares("1")).toThrow();
+    expect(() => parseCpuShares("lots")).toThrow();
+    expect(parseCpus(undefined)).toBeUndefined();
+    expect(parseCpus("0")).toBeUndefined();
+    expect(parseCpus("2")).toBe(2);
+    expect(parseCpus("0.5")).toBe(0.5);
+    expect(() => parseCpus("-1")).toThrow();
+    expect(() => parseCpus("many")).toThrow();
     const cfg = config();
     expect(() => containerSpec({ ...cfg, network: "host" }, "app-co")).toThrow();
     expect(() => containerSpec(cfg, "../etc")).toThrow();
