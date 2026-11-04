@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
@@ -626,9 +626,9 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
     }
   });
 
-  it("the same company rule still catches other tools and commands", () => {
+  it("the same company rule still catches other tools; plain commands are built-in allows (BOS-307)", () => {
     expect(evaluatePermission(tool("mcp__other__thing"), toCeo).outcome).toBe("ceo");
-    expect(evaluatePermission({ title: "git status", kind: "execute", rawInput: { command: "git status" } }, toCeo).outcome).toBe("ceo");
+    expect(evaluatePermission({ title: "git status", kind: "execute", rawInput: { command: "git status" } }, toCeo).outcome).toBe("allow");
   });
 
   it("a company rule can still deny a Boss Man tool", () => {
@@ -660,5 +660,84 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
   it("a company allow rule that matches a Boss Man tool is honoured", () => {
     const allow = [{ name: "Wiki is fine", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "allow" as const }, ...toCeo];
     expect(evaluatePermission(tool("mcp__bossman__wiki"), allow)).toMatchObject({ outcome: "allow", rule: "Wiki is fine" });
+  });
+});
+
+describe("the ordered permission table (BOS-307)", () => {
+  const catchAll = (outcome: "ceo" | "owner") => [{ name: "catch-all", match: { kinds: ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"] }, outcome }];
+  const broadAllow = [{ name: "broad allow", match: { kinds: ["execute"] }, outcome: "allow" as const }];
+  const cases: Array<[string, { title: string | null; kind: string; rawInput: unknown }]> = [
+    ["plain shell", exec("git status")],
+    ["read", { title: "Read file", kind: "read", rawInput: {} }],
+    ["edit", { title: "Edit file", kind: "edit", rawInput: {} }],
+    ["Boss Man tool", { title: "mcp__bossman__wiki", kind: "other", rawInput: {} }],
+  ];
+
+  it("row 6 vs row 7: a catch-all CEO or owner rule never catches what the built-ins allow", () => {
+    for (const [name, info] of cases) for (const o of ["ceo", "owner"] as const) {
+      expect(decidePermission(info, catchAll(o)), name).toMatchObject({ outcome: "allow", row: 6 });
+    }
+  });
+
+  it("row 7: a routing rule still applies to a request that would ask", () => {
+    const outside = { title: "mcp__other__thing", kind: "other", rawInput: {} };
+    expect(decidePermission(outside, catchAll("ceo"))).toMatchObject({ outcome: "ceo", row: 7 });
+    expect(decidePermission(outside, [])).toMatchObject({ outcome: "owner", row: 8 });
+  });
+
+  it("row 3 vs row 7: guards still ask, and routing changes who is asked", () => {
+    for (const c of ["rm -rf /srv/x", "git push origin main", "rm -rf /tmp/x"]) {
+      expect(decidePermission(exec(c), catchAll("ceo")), c).toMatchObject({ outcome: "ceo", row: 7 });
+      expect(decidePermission(exec(c), []).row, c).toBe(3);
+    }
+  });
+
+  it("row 3 vs row 5: a broad company allow cannot lift a destructive command, push or cleanup", () => {
+    for (const c of ["rm -rf /srv/x", "git push origin main", "rm -rf /tmp/x", "docker system prune -a"]) {
+      expect(decidePermission(exec(c), broadAllow).outcome, c).not.toBe("allow");
+    }
+    expect(decidePermission(exec("git status"), broadAllow)).toMatchObject({ outcome: "allow", row: 5 });
+  });
+
+  it("row 3 vs row 5: the owner's /tmp-only switch still lifts a /tmp cleanup", () => {
+    expect(decidePermission(exec("rm -rf /tmp/fp2"), [SCRATCH_RULE])).toMatchObject({ outcome: "allow", row: 5 });
+  });
+
+  it("row 4 vs rows 5 and 6: a company deny beats a company allow and a built-in allow", () => {
+    const deny = { name: "no shell", match: { kinds: ["execute"] }, outcome: "deny" as const };
+    expect(decidePermission(exec("git status"), [...broadAllow, deny])).toMatchObject({ outcome: "deny", row: 4 });
+    expect(decidePermission(exec("git status"), [deny])).toMatchObject({ outcome: "deny", row: 4 });
+    // Row 4 is a separate row above the allow, so the owner's order between them doesn't matter.
+    expect(decidePermission(exec("git status"), [deny, ...broadAllow])).toMatchObject({ outcome: "deny", row: 4 });
+  });
+
+  it("row 1 vs rows 4 to 6: the network guard beats a company allow", () => {
+    const fetchIt = { title: "fetch", kind: "fetch", rawInput: { url: "http://192.168.1.5/x" } };
+    expect(decidePermission(fetchIt, [{ name: "all", match: { kinds: ["fetch"] }, outcome: "allow" }])).toMatchObject({ outcome: "deny", row: 1 });
+  });
+
+  it("the test screen and the live path give the same answer", () => {
+    for (const [, info] of cases) {
+      const d = decidePermission(info, catchAll("ceo"));
+      expect(evaluatePermission(info, catchAll("ceo"))).toEqual({ outcome: d.outcome, rule: d.rule, position: d.row });
+    }
+  });
+
+  it("row 5 vs row 7: the owner's order between an allow and an ask rule is kept (Freddy, Jane round 1)", () => {
+    const ask = { name: "ask first", match: { titlePattern: "^mcp__x__delete" }, outcome: "owner" as const };
+    const allowAll = { name: "allow every x tool", match: { titlePattern: "^mcp__x__" }, outcome: "allow" as const };
+    const req = { title: "mcp__x__delete_all", kind: "other", rawInput: null };
+    expect(decidePermission(req, [ask, allowAll])).toMatchObject({ outcome: "owner", row: 7 });
+    expect(decidePermission(req, [allowAll, ask])).toMatchObject({ outcome: "allow", row: 5 });
+    expect(decidePermission({ title: "mcp__x__list", kind: "other", rawInput: null }, [ask, allowAll])).toMatchObject({ outcome: "allow", row: 5 });
+  });
+
+  it("shadowedRoutingRules lists routing rules the built-in allows cover", () => {
+    const ssh = { name: "ask before ssh", match: { kinds: ["execute"], commandPattern: "ssh" }, outcome: "owner" as const };
+    const del = { name: "ask before delete", match: { kinds: ["delete"] }, outcome: "owner" as const };
+    const byTitle = { name: "t", match: { titlePattern: "x" }, outcome: "ceo" as const };
+    const cmdOnly = { name: "c", match: { commandPattern: "ssh" }, outcome: "owner" as const };
+    const mixed = { name: "m", match: { kinds: ["execute", "delete"] }, outcome: "owner" as const };
+    expect(shadowedRoutingRules([ssh, del, byTitle, cmdOnly, mixed, ...broadAllow]).map((r) => r.name)).toEqual(["ask before ssh", "t", "c", "m"]);
   });
 });
