@@ -111,6 +111,8 @@ describe("the runner launcher (R55)", () => {
         PidsLimit: 4096,
         Init: true,
         Memory: 4294967296,
+        MemorySwap: 4294967296,
+        OomScoreAdj: 500,
         RestartPolicy: { Name: "unless-stopped" },
       },
     });

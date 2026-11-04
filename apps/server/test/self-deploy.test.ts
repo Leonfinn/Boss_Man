@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
@@ -476,5 +476,57 @@ describe("self-deploy (docs/09-self-deploy.md)", () => {
     expect((await c.req("GET", "/api/self-deploy")).json()).toMatchObject({ enabled: false, status: null });
     await c.selfDeploy.sync();
     expect(await c.open()).toHaveLength(0);
+  });
+
+  describe("runner update waits for the server update trial (BOS-368)", () => {
+    afterEach(() => vi.useRealTimers());
+    const target = (d: { context: unknown }) => d.context as { target: string; commit: string };
+
+    async function deployedInTrial() {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-03T01:00:00Z"));
+      const c = (ctx = await setup());
+      // A runner card from before the server update, for what ran then.
+      await c.available({ deployed: A, tip: A });
+      await c.req("POST", "/api/self-deploy/update-runners");
+      const [early] = await c.open();
+      await c.available({ runnerChanged: true });
+      await c.selfDeploy.sync();
+      const [server] = (await c.open()).filter((d) => target(d).target === "server");
+      await c.req("POST", `/api/decisions/${server!.id}/answer`, { answer: "Deploy" });
+      await rm(path.join(c.dir, "inbox", "request.json"));
+      await c.status({ id: server!.id, result: "deployed", message: "Switched in.", ended: "2026-11-03T01:01:00Z" });
+      await c.available({ deployed: B, tip: B, runnerChanged: true });
+      await c.selfDeploy.sync();
+      return { c, early: early!, server: server! };
+    }
+
+    it("holds the runner offer until the trial is over, and refuses the button and a runner card during it", async () => {
+      const { c, early } = await deployedInTrial();
+      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(0);
+      expect((await c.req("POST", "/api/self-deploy/update-runners")).json().message).toContain("15-minute trial");
+      const r = await c.req("POST", `/api/decisions/${early.id}/answer`, { answer: "Update runners" });
+      expect(r.statusCode).toBeGreaterThanOrEqual(400);
+      expect(r.json().message ?? r.body).toContain("15-minute trial");
+      // After the trial (900 s soak + 120 s margin), still on B: the runner card appears by itself.
+      vi.setSystemTime(new Date("2026-11-03T01:18:01Z"));
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === B)).toHaveLength(1);
+    });
+
+    it("withdraws runner cards and drops the held offer when the server is switched back", async () => {
+      const { c, server } = await deployedInTrial();
+      // Switched back two minutes in; the host may name the commits either way round.
+      await c.status({ id: server.id, result: "rolled_back", message: "Switched back.", from_commit: B, to_commit: A, ended: "2026-11-03T01:03:00Z" });
+      await c.available({ deployed: A, tip: B, runnerChanged: true });
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(0);
+      vi.setSystemTime(new Date("2026-11-03T01:30:00Z"));
+      await c.selfDeploy.sync();
+      expect((await c.open()).filter((d) => target(d).target === "runner")).toHaveLength(0);
+      // The withdrawn card for A must not block a fresh runner offer for A (Freddy, round 6: dedupe key kept).
+      await c.req("POST", "/api/self-deploy/update-runners");
+      expect((await c.open()).filter((d) => target(d).target === "runner" && target(d).commit === A)).toHaveLength(1);
+    });
   });
 });

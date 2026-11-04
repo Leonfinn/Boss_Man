@@ -66,7 +66,7 @@ Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` r
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
+If the clone hangs, see the troubleshooting lines in [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host).
 
 
 
@@ -133,6 +133,8 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
 - Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
   - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
+
+Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/00, "Memory limits"](00-first-time-install.md#memory-limits-so-one-container-cant-take-the-whole-host). Nothing to add on TrueNAS; the defaults apply.
 
 ## 5. Build the images and start the server
 

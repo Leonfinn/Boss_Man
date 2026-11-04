@@ -28,7 +28,7 @@ import { startRefusal, WorkError, type workService } from "./services/work.js";
 import { FeedbackError, type feedbackService } from "./services/feedback.js";
 import { acceptanceCriteriaSchema, missingVerdicts, readVerdicts } from "@boss-man/shared";
 import { TicketChatError, type ticketChatService } from "./services/ticket-chat.js";
-import { findSection, splitSections, WikiError, type wikiService } from "./services/wiki.js";
+import { findSection, missingPageNote, splitSections, WikiError, type wikiService } from "./services/wiki.js";
 import { conversationLines } from "./services/ticket-chat.js";
 import { SkillError, type skillsService } from "./services/skills.js";
 import type { SkillFinding } from "./db/schema.js";
@@ -451,7 +451,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       // A reply that asks the owner to act doesn't reach their queue (BOS-122). Say so in the result so the
       // agent's next turn raises a decision; the reply still posts, so a status update isn't blocked.
       const hint = await ownerActionHint(db, scope, ticketId, body);
-      return text(`Posted on the ticket's conversation.${hint ? `\n\n${hint}` : ""}`);
+      const links = await missingPageNote(db, scope.companyId, body);
+      return text(`Posted on the ticket's conversation.${links ? `\n\n${links}` : ""}${hint ? `\n\n${hint}` : ""}`);
     },
   );
 
@@ -519,7 +520,8 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
         if (err instanceof WorkError) return fail(err.message);
         throw err;
       }
-      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.`);
+      const links = await missingPageNote(db, scope.companyId, `${question}\n${options.join("\n")}\n${steps?.join("\n") ?? ""}`);
+      return text(`Decision ${d.id} is in the owner's queue. You'll be woken with the answer; don't wait in this turn.${links ? `\n\n${links}` : ""}`);
     },
   );
 
@@ -734,7 +736,9 @@ function registerRunTools(server: McpServer, db: Db, { decisions, engagements, d
       const link = input.link ?? (input.ticketId ? `#/tickets/${input.ticketId}` : `#/runs/${scope.runId}`);
       const n = await notes.notify({ companyId: scope.companyId, agentId: scope.agentId, level: input.level, title: input.title, body: input.body ?? null, link });
       if (!n) return fail("Couldn't record that notification.");
-      return text(n.level === input.level ? `Sent as a ${n.level}.` : `Sent as a ${n.level} instead of a ${input.level} (${n.demotedBy}).`);
+      const links = await missingPageNote(db, scope.companyId, `${input.title}\n${input.body ?? ""}`);
+      const sent = n.level === input.level ? `Sent as a ${n.level}.` : `Sent as a ${n.level} instead of a ${input.level} (${n.demotedBy}).`;
+      return text(`${sent}${links ? `\n\n${links}` : ""}`);
     },
   );
 
@@ -1891,10 +1895,12 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       // With criteria on the ticket, moving to review is only allowed once the state note reports
       // pass or fail for each of them; the refusal names the ones it can't find.
       const [withCriteria] = await db
-        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote })
+        .select({ criteria: tickets.acceptanceCriteria, current: tickets.stateNote, prev: tickets.systemState })
         .from(tickets)
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId)));
       if (!withCriteria) return fail("No ticket with that ID in your company.");
+      // Same state again (DR-010): only the note changes. No enter-state hooks, no new review round.
+      const sameState = withCriteria.prev === state;
       const missing = state === "review" ? missingVerdicts(withCriteria.criteria, summary ?? withCriteria.current) : [];
       if (missing.length)
         return fail(
@@ -1919,10 +1925,12 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const rows = await db
         .update(tickets)
         // One timestamp for both, so a fresh note isn't called out of date.
-        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, outcome: state === "done" ? (outcome ?? "completed") : null, ...(state === "done" ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null } : {}) })
+        .set({ systemState: state, columnId: sql`case when ${tickets.systemState} = ${state} then ${tickets.columnId} else ${col?.id ?? null}::uuid end`, ...(sameState && state === "done" ? {} : { outcome: state === "done" ? (outcome ?? "completed") : null }), ...(state === "done" && !sameState ? { monitorAt: null } : {}), lastActivityAt: at, ...(state === "blocked" ? { blockedUntil: until, blockedUntilReason: until ? blocked_reason?.trim() || null : null } : {}), ...(summary?.trim() ? { stateNote: summary.trim(), stateNoteAt: at, stateNoteStaleAt: null, lastPostAt: at } : {}) })
         // The version is checked in the same statement, so a change between read and write can't slip through (R81).
         .where(and(eq(tickets.id, ticketId), eq(tickets.companyId, scope.companyId), expected_version === undefined ? undefined : eq(tickets.version, expected_version)))
         .returning({ id: tickets.id });
+      // A state note is a post: the run's silence is measured from it (BOS-314).
+      if (rows.length && summary?.trim() && scope.agentId) await db.update(runsTable).set({ lastPostAt: at }).where(eq(runsTable.id, scope.runId));
       if (!rows.length) {
         const [now] = await db
           .select({ state: tickets.systemState, version: tickets.version, changed: tickets.lastActivityAt, assignee: agents.name })
@@ -1937,12 +1945,12 @@ function registerTicketMoves(server: McpServer, db: Db, { review, work, feedback
       const [moved] = await db.select({ featureId: tickets.featureId }).from(tickets).where(eq(tickets.id, ticketId));
       await feedback.syncFeature(moved?.featureId);
       // Work that waited on this ticket can start; the wake carries this run's chain depth.
-      if (state === "done") await hooks.onTicketDone?.(ticketId, scope.runId);
-      if (state === "review") await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
+      if (state === "done" && !sameState) await hooks.onTicketDone?.(ticketId, scope.runId);
+      if (state === "review" && !sameState) await hooks.onTicketReview?.(ticketId, scope.agentId, scope.runId);
       // The check that counts is at the merge, but telling the agent now saves it waiting hours to
       // find out its migration number is taken (BOS-219). It never holds the move up.
-      const warn = state === "review" ? await migrationWarning(review, ticketId, scope.companyId) : "";
-      return text(`Ticket ${ticketId} is now ${state}.${warn}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
+      const warn = state === "review" && !sameState ? await migrationWarning(review, ticketId, scope.companyId) : "";
+      return text(`Ticket ${ticketId} is now ${state}.${sameState ? " It was already there, so only the note changed and no reviews were re-requested." : ""}${warn}${(await getHold(db)) ? ` ${WRAP_UP}` : ""}`);
     },
   );
 
