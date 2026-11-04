@@ -12,7 +12,7 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
 ## What you need first
 
-- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
+- **A 64-bit Linux host** with **Docker Engine** and **Docker Compose v2** (the `docker compose` command). Check with `docker compose version`. The compose files use secrets, profiles and the top-level `name:` setting. The repo doesn't state an exact minimum Compose version, except that the optional blue/green setup needs 2.24 or newer. It doesn't state a minimum amount of RAM or disk either. Each runner is limited to 4 GB of memory by default (`BOSSMAN_RUNNER_MEMORY`; see "Memory limits" below for the server, database and tool servers) and 4096 processes and threads (`BOSSMAN_RUNNER_PIDS`); raise the second if parallel test runs fail with `spawn EAGAIN`.
 - **These tools on the host:** `git`, `openssl`, `curl`, and a normal Linux shell with `stat`.
 - **A git host account and token.** GitHub (a fine-grained token) or Gitea. You make the token in step 9.
 - **An AI provider for at least one agent program.** The runner supports three:
@@ -22,7 +22,8 @@ This is the short path from nothing to a working Boss Man on a Linux host with D
 
   The CEO is a Claude Code agent unless you change it, so the easiest start is a Claude subscription.
 - **A second computer** (or the host itself) with a web browser. It is also where you make the Claude token in step 9.
-- **Internet access from the host** to [github.com/Leonfinn/Boss_Man](https://github.com/Leonfinn/Boss_Man), where the code is (step 2).
+- **Internet access from the host** to GitHub (port 22, for SSH), where the code is (step 2).
+- **Admin access to the Boss Man repository on GitHub.** The repository is private, and only an admin can add the deploy key in step 2.
 
 ## A note on commands
 
@@ -66,13 +67,41 @@ You should see the folder listed.
 
 ## 2. Get the code onto the host
 
-The code is public on GitHub, so you need no account or key to read it. Clone it into `<install-dir>/src`:
+The repository is private, so the host needs its own read-only deploy key. You need admin access to the repository to add one. Replace `OWNER/REPO` below with your repository.
+
+1. Make the key:
+
+   ```sh
+   ssh-keygen -t ed25519 -N "" -C "boss-man $(hostname)" -f "$B/deploy_key"
+   ```
+
+2. Print the public half:
+
+   ```sh
+   cat "$B/deploy_key.pub"
+   ```
+
+3. On GitHub, open the repository's **Settings > Deploy keys > Add deploy key**. Paste the line from step 2. Leave **Allow write access** unticked.
+
+4. Clone with that key into `<install-dir>/src`:
+
+   ```sh
+   GIT_SSH_COMMAND="ssh -i $B/deploy_key -o IdentitiesOnly=yes" git clone git@github.com:OWNER/REPO.git $B/src
+   ```
+
+5. Save the key in the checkout, so later `git fetch`, `scripts/deploy.sh` and the host deployer's `git ls-remote` use it too:
+
+   ```sh
+   git -C $B/src config core.sshCommand "ssh -i $B/deploy_key -o IdentitiesOnly=yes"
+   ```
+
+Check it worked. This prints a commit id and does not ask for a password:
 
 ```sh
-git clone https://github.com/Leonfinn/Boss_Man.git $B/src
+git -C $B/src ls-remote origin HEAD
 ```
 
-Check it worked:
+Then check the clone:
 
 ```sh
 git -C $B/src log --oneline -1
@@ -80,9 +109,7 @@ git -C $B/src log --oneline -1
 
 You should see one commit line.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
-
-**Older install with a deploy key?** It keeps working; see [docs/06, step 2](06-install-truenas.md#2-get-the-code).
+If the clone says `Permission denied (publickey)`, the deploy key is not on the repository yet, or you pasted the wrong half. Add the contents of `deploy_key.pub` as in step 3. If it hangs, check that the host can reach github.com on port 22 (`ssh -T -i $B/deploy_key -o IdentitiesOnly=yes git@github.com` should greet you, then close).
 
 ## 3. Make the folders, the master key and the token file
 
@@ -179,10 +206,16 @@ Go to the repo folder. Every `docker compose` command must run from here.
 cd $B/src
 ```
 
-Build the server (it includes the web page) and the launcher:
+Build the server (it includes the web page), the launcher and netguard. The launcher starts netguard beside every runner, so it must be built too:
 
 ```sh
-docker compose build server launcher
+docker compose build server launcher netguard
+```
+
+Using the optional blue/green setup? Build both server copies instead:
+
+```sh
+docker compose build server-blue server-green launcher netguard
 ```
 
 Build the runner image. This builds it, runs a safety check (the "canary") with networking off and no credentials, and only then marks it ready. It then starts everything.
@@ -342,6 +375,30 @@ Follow it under **Settings > Server and runner**, in **Runner update**, which al
 
 **The infra rebuild script.** `scripts/rebuild-live.sh` is only for the optional blue/green setup ([docs/06, 9d](06-install-truenas.md#9d-switch-to-bluegreen-optional)), which needs Docker Compose 2.24 or newer. It rebuilds the live copy in place after a change the deployer refuses, and the page is down for about 20 to 30 seconds. On a plain install, use `scripts/deploy.sh` instead. How it all fits together: [docs/09-self-deploy.md](09-self-deploy.md).
 
+## Memory limits (so one container can't take the whole host)
+
+On 3 Nov 2026 a headless browser with no memory limit used up the whole host's memory; the kernel then killed other things, including the proxy (BOS-392). Every container Boss Man starts now has a limit and a kill priority, set in `.env`. All of these are optional; the defaults are below.
+
+| Setting in `.env` | What it limits | Default |
+| --- | --- | --- |
+| `BOSSMAN_RUNNER_MEMORY` | each runner, including the browsers and test runs inside it (no swap on top) | `4g` |
+| `BOSSMAN_RUNNER_PIDS` | processes and threads per runner | `4096` |
+| `BOSSMAN_SERVER_MEMORY` / `BOSSMAN_SERVER_MEMORY_RESERVED` | the server (single, or each blue/green colour): limit / amount kept for it. No cap by default (`0`), because the server currently uses 10-13 GiB; set a value only once measured | `0` / `512m` |
+| `BOSSMAN_DB_MEMORY` / `BOSSMAN_DB_MEMORY_RESERVED` | Postgres: limit / amount kept for it | `0` (no cap) / `256m` |
+| `BOSSMAN_TOOLSERVER_MEMORY`, `BOSSMAN_TOOLSERVER_PIDS`, `BOSSMAN_TOOLSERVER_SHM` | tool servers that run a browser (crawl4ai, scrapling), see below | `2g`, `512`, `512m` |
+
+- **Priority.** If the host runs out anyway, Linux stops runners and tool servers first (`oom_score_adj` 500) and the database, server and proxy last (-500, -500 and -900). A runaway browser hits its own limit first and only that container is stopped and restarted.
+- **Choose numbers for your host.** Add up the limits of everything that can run at once (every runner plus tool servers); keep that below the host's RAM with room for the server, database and proxy. Limits are ceilings, not reservations, so they can add up to more than the RAM, but then one busy moment can still run the host out.
+- **Tool servers are yours.** Boss Man does not start crawl4ai, scrapling or other tool servers you register in Settings, so it cannot limit them for you. Put them in compose with limits: [deploy/tool-servers.yml](../deploy/tool-servers.yml) is a commented example. One already running by hand: `docker update --memory 2g --memory-swap 2g --pids-limit 512 <container>` (lost if the container is recreated).
+- **Check it took effect.** `docker stats --no-stream` should show a number after the slash for each Boss Man container, not your whole RAM. `docker inspect -f '{{.HostConfig.Memory}} {{.HostConfig.OomScoreAdj}}' <container>` prints the limit in bytes and the priority (0 bytes = no limit).
+- **Applying a change.** `docker compose up -d` recreates the containers whose limits changed (the server and database restart for a few seconds). Runners started by the launcher pick up a new `BOSSMAN_RUNNER_MEMORY` when the launcher is recreated and the runner is next restarted.
+- **A test keeps this in place:** `apps/server/test/compose-memory-limits.test.ts` fails if a service loses its `mem_limit`.
+
+Per host:
+- **Plain Linux or a Proxmox VM:** nothing extra. If `docker info` warns "No swap limit support", the swap setting is ignored but the memory limit still works; to enable it, add `cgroup_enable=memory swapaccount=1` to the kernel command line and reboot.
+- **Proxmox LXC running Docker:** limits apply inside the LXC's own memory setting, so size the LXC first. Whether your LXC enforces swap limits is unknown; find out with the `docker inspect` line above and `docker stats` after starting.
+- **TrueNAS SCALE:** nothing extra; the same settings go in the `.env` from docs/06 step 4.
+
 ## Troubleshooting
 
 The commands below use `$B` from step 1. If you opened a new shell, set it again first.
@@ -416,14 +473,29 @@ cd $B/src && docker compose logs --tail 100 server
 
 If a migration failed, don't edit the database by hand. Keep the log. Restore from a backup if you have one (`scripts/deploy.sh` keeps them in `$B`). Also check Postgres is healthy with `docker compose ps`.
 
+**Where Boss Man backups are saved.**
+Every script that makes a backup writes it straight into your backup folder, which is `<install-dir>` (`$B` in this guide), next to `src`. The file names tell you which script made them:
+- `bossman-YYYY-MM-DD-HHMM.sql.gz`: made before each update (`scripts/deploy.sh`) and by the host deployer.
+- `rebuild-YYYY-MM-DD-HHMM.sql.gz`: made by `scripts/rebuild-live.sh`.
+- `restore-test-*.sql.gz`: made by `scripts/restore-test.sh --fresh-backup`.
+- `penpot-YYYY-MM-DD-HHMM.tar`: made by `scripts/backup-penpot.sh`, if you use Penpot.
+
+If you set `BOSSMAN_BACKUP_DIR`, they go there instead. Backups made by current scripts are readable by their owner only (mode 600).
+
 **Lock down backups made before this fix.**
-Backups written by current scripts are readable by their owner only (mode 600). Older ones may be readable by every user on the host and hold password hashes and sessions. Once, inside your backup folder (`$B` in this guide), run:
+Older backups may be readable by every user on the host and hold password hashes and sessions. To list the ones that are not owner-only, run:
 
 ```sh
-chmod 600 bossman-*.sql.gz restore-test-*.sql.gz
+find $B -maxdepth 1 -type f \( -name 'bossman-*.sql.gz' -o -name 'rebuild-*.sql.gz' -o -name 'restore-test-*.sql.gz' -o -name 'penpot-*.tar' \) -perm /077 -print
 ```
 
-A pattern that matches no files prints an error; that is harmless.
+To lock them all down, run this once. It is safe to run again, and it only changes files in that folder (not folders below it). If you set `BOSSMAN_BACKUP_DIR`, put that folder in place of `$B`:
+
+```sh
+find $B -maxdepth 1 -type f \( -name 'bossman-*.sql.gz' -o -name 'rebuild-*.sql.gz' -o -name 'restore-test-*.sql.gz' -o -name 'penpot-*.tar' \) -exec chmod 600 {} +
+```
+
+Run the first command again: it should print nothing.
 
 **The disk is filling up.**
 Check the host and Docker:

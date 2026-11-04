@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { cleanupScope, explainCommand, tempCleanup } from "../src/explain.js";
-import { commandOf, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
+import { commandOf, decidePermission, evaluatePermission, isBossmanCall, isBossmanTool, recommendedVerdict, shadowedRoutingRules, SCRATCH_RULE, TEMP_CLEANUP_RULE, WORKING_COPY_RULE } from "../src/policy.js";
 
 const exec = (command: string) => ({ title: command, kind: "execute", rawInput: { command } });
 
 describe("the /tmp-only switch", () => {
   it("allows commands that only work in /tmp when on, and still asks when off", () => {
     for (const c of ["rm -rf /tmp/fp2", "mkdir -p /tmp/a && cp -r src /tmp/a", "find /tmp/x -delete"]) {
-      expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toEqual({ outcome: "allow", rule: SCRATCH_RULE.name });
+      expect(evaluatePermission(exec(c), [SCRATCH_RULE])).toMatchObject({ outcome: "allow", rule: SCRATCH_RULE.name });
     }
     expect(evaluatePermission(exec("rm -rf /tmp/fp2"), []).outcome).toBe("ceo");
     expect(evaluatePermission(exec("rm -rf /tmp/fp2/x"), []).outcome).toBe("owner");
@@ -57,13 +57,13 @@ describe("evaluatePermission defaults", () => {
 
   it("treats a shell command asked about as kind other like any shell command", () => {
     const other = (command: string) => ({ title: command, kind: "other", rawInput: { command } });
-    expect(evaluatePermission(other("cd /tmp/opencode/bm && git grep -n brief"), [])).toEqual({ outcome: "allow", rule: "Other shell commands" });
+    expect(evaluatePermission(other("cd /tmp/opencode/bm && git grep -n brief"), [])).toMatchObject({ outcome: "allow", rule: "Other shell commands" });
     expect(evaluatePermission(other("git push origin main"), []).outcome).toBe("owner");
     expect(evaluatePermission({ title: "mcp__scrapling__get", kind: "other", rawInput: { url: "https://example.com" } }, []).outcome).toBe("owner");
   });
 
   it("falls through to the owner for unknown kinds", () => {
-    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toEqual({ outcome: "owner", rule: "No rule matched" });
+    expect(evaluatePermission({ title: "Delete file", kind: "delete", rawInput: {} }, [])).toMatchObject({ outcome: "owner", rule: "No rule matched" });
   });
 
   it("company rules win over defaults, first match first", () => {
@@ -71,7 +71,7 @@ describe("evaluatePermission defaults", () => {
       { name: "Homelab may restart containers", match: { commandPattern: String.raw`^docker\s+restart\b` }, outcome: "allow" as const },
       { name: "No curl", match: { commandPattern: String.raw`\bcurl\b` }, outcome: "deny" as const },
     ];
-    expect(evaluatePermission(exec("docker restart web"), rules)).toEqual({ outcome: "allow", rule: "Homelab may restart containers" });
+    expect(evaluatePermission(exec("docker restart web"), rules)).toMatchObject({ outcome: "allow", rule: "Homelab may restart containers" });
     expect(evaluatePermission(exec("curl https://example.com"), rules).outcome).toBe("deny");
   });
 
@@ -141,7 +141,7 @@ describe("temp-file cleanup (BOS-111)", () => {
       // A `;` between chains does not break it: each write stays in the && chain of its own delete.
       "rm -rf /tmp/a && mkdir /tmp/a; rm -rf /tmp/b && mkdir /tmp/b",
     ]) {
-      expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+      expect(route(c), c).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
     }
   });
@@ -284,14 +284,16 @@ describe("temp-file cleanup (BOS-111)", () => {
   });
 
   it("lets the company's own rules win", () => {
-    expect(route("rm -rf /tmp/a")).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(route("rm -rf /tmp/a")).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
     const mine = [{ name: "Owner sees every rm", match: { commandPattern: "\\brm\\b" }, outcome: "owner" as const }];
     expect(evaluatePermission(exec("rm -rf /tmp/a"), mine).outcome).toBe("owner");
   });
 
   it("doesn't recommend Deny just because a command deletes files", () => {
-    for (const c of ["rm -rf node_modules dist", "rm -rf apps/web/dist/", "pnpm build && rm -rf coverage 2>/dev/null"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
-    for (const c of ["rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "cd /tmp/x && rm -rf build", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
+    for (const c of ["rm -rf node_modules dist", "pnpm build && rm -rf coverage 2>/dev/null"]) expect(recommendedVerdict(exec(c)), c).toBe("allow");
+    // BOS-150: a trailing slash makes rm follow a symlink into its target, and a deeper build path
+    // (apps/web/dist) still follows a symlinked dist; only single components are recommended Allow.
+    for (const c of ["rm -rf dist/", "rm -rf node_modules/", "rm -rf a/b/", "rm -rf apps/web/dist", "rm -rf apps/web/dist/", "rm -rf src", "rm -rf apps/web/src", "rm -rf node_modules src", "find . -name '*.ts' -delete", "rm -rf ~/x", "rm -rf /home/node/x", "rm -rf $DIR", "rm -rf *", "rm -rf ../x", "rm -rf .git", "rm -rf a/../../b", "cd .. && rm -rf x", "cd /tmp/x && rm -rf build", "rm -rf /tmp", "docker system prune -a", "git push --force origin x", "shred a.txt", "zfs destroy tank/a"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
   });
 
   it("doesn't follow any cd (BOS-111 security re-checks)", () => {
@@ -316,7 +318,7 @@ describe("working-copy cleanup (BOS-120)", () => {
   it("sends deletes of plain relative paths in the working copy to the CEO", () => {
     for (const [c, files, tmp] of [
       ["rm -f test/zz-probe.test.ts", ["test/zz-probe.test.ts"], []],
-      ["rm -rf dist apps/web/dist/", ["dist", "apps/web/dist/"], []],
+      ["rm -rf dist apps/web/dist", ["dist", "apps/web/dist"], []],
       ["rm -rf .turbo node_modules/.cache", [".turbo", "node_modules/.cache"], []],
       ["rm -rf dist /tmp/x", ["dist"], ["/tmp/x"]],
       ["rm -rf /tmp/x; rm -f test/zz-probe.test.ts 2>/dev/null; git status", ["test/zz-probe.test.ts"], ["/tmp/x"]],
@@ -326,7 +328,7 @@ describe("working-copy cleanup (BOS-120)", () => {
       // A /tmp entry deleted on its own earlier in the && chain may still be written to.
       ["rm -rf /tmp/x && rm -rf dist && mkdir /tmp/x", ["dist"], ["/tmp/x"]],
     ] as const) {
-      expect(route(c), c).toEqual({ outcome: "ceo", rule: WORKING_COPY_RULE });
+      expect(route(c), c).toMatchObject({ outcome: "ceo", rule: WORKING_COPY_RULE });
       expect(cleanupScope(c), c).toEqual({ workingCopy: files, tmp });
       // Not temp cleanup: the server checks the run has a checkout before it recommends Allow.
       expect(tempCleanup(c), c).toBe(false);
@@ -337,6 +339,8 @@ describe("working-copy cleanup (BOS-120)", () => {
     for (const c of [
       // Leaving the copy, or its root.
       "rm -rf ..", "rm -rf ../x", "rm -rf a/../../b", "rm -rf a/..", "rm -rf ./x", "rm -rf .", "rm -rf ./", "rm -rf a/./b",
+      // A trailing slash (BOS-150): rm -rf NAME/ follows a symlink into the folder it points to.
+      "rm -rf dist/", "rm -rf node_modules/", "rm -rf a/b/",
       "rm -rf /home/node/x", "rm -rf //x", "rm -rf /tmp/a/b", "rm -rf ~/x", "rm -rf ~", "rm -rf -- -x", "rm -rf -x",
       // The repository itself, at any depth and in any case.
       "rm -rf .git", "rm -rf .git/", "rm -rf .git/hooks", "rm -rf a/.git/x", "rm -rf a/.git", "rm -rf .GIT", "rm -rf .Git/objects",
@@ -395,20 +399,20 @@ describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
       "rm -rf /tmp/a && git worktree remove --force /tmp/lnk",
     ]) {
       expect(tempCleanup(c), c).toBe(false);
-      expect(route(c), c).toEqual(OWNER);
+      expect(route(c), c).toMatchObject(OWNER);
     }
   });
 
   it("still sends the ticket's example to the CEO with Allow, and the unprovable ones to the owner with Deny", () => {
     const example = "rm -rf /tmp/rv86 /tmp/rv86-install.log && git worktree add /tmp/rv86 origin/main && cd /tmp/rv86 && pnpm install > /tmp/rv86-install.log 2>&1";
     expect(tempCleanup(example)).toBe(true);
-    expect(route(example)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(route(example)).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
     expect(recommendedVerdict(exec(example))).toBe("allow");
     for (const c of ["rm -rf /tmp/../home", "rm -rf /tmp/$X", "rm -rf /tmp /home", "rm -rf /tmp/a /home/node/x"]) {
-      expect(route(c), c).toEqual(OWNER);
+      expect(route(c), c).toMatchObject(OWNER);
       expect(recommendedVerdict(exec(c)), c).toBe("deny");
     }
-    for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(route(c), c).toEqual(OWNER);
+    for (const c of ["rm -rf /tmp/*", "rm -rf /tmp/[ab]", "rm -rf /tmp/rv8?"]) expect(route(c), c).toMatchObject(OWNER);
   });
 
   // Found in the BOS-126 run: a glob inside /tmp was recommended Allow, because the command counted as /tmp-only work.
@@ -421,7 +425,7 @@ describe("temp-file cleanup, round-4 regressions (BOS-126)", () => {
   // "rm /tmp/a -rf" is a plain /tmp cleanup; routing it to the owner is a deliberately conservative side effect of the widened pattern.
   it("pins the widened destructive pattern: flags after the file, and find -delete, go to the owner with Deny", () => {
     for (const c of ["rm file -rf", "rm a.txt -rf", "rm /tmp/a -rf", "find . -name x -delete", "find /tmp -name x -delete"]) {
-      expect(route(c), c).toEqual(OWNER);
+      expect(route(c), c).toMatchObject(OWNER);
       expect(tempCleanup(c), c).toBe(false);
     }
     for (const c of ["rm file -rf", "find . -name x -delete"]) expect(recommendedVerdict(exec(c)), c).toBe("deny");
@@ -541,7 +545,7 @@ describe("temp-file cleanup, round-5 fixes (BOS-111)", () => {
       "rm -rf /tmp/a && cd /tmp/a && pnpm install",
       "rm -rf /tmp/a && cd /tmp/a && pnpm install > /tmp/a.log 2>&1",
     ]) {
-      expect(route(c), c).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+      expect(route(c), c).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
       expect(recommendedVerdict(exec(c)), c).toBe("allow");
     }
     expect(explainCommand(own).scratch).toBeUndefined();
@@ -583,7 +587,7 @@ describe("temp-file cleanup, round-5 regression pins (BOS-153)", () => {
   it("pins the route of a command whose only delete is a /tmp entry (finding 2)", () => {
     // Checked out into the same /tmp entry first, the install log is a plain temp cleanup: CEO first, Allow.
     const c = "rm -rf /tmp/a && mkdir /tmp/a && cd /tmp/a && pnpm install > /tmp/a.log 2>&1";
-    expect(route(c)).toEqual({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
+    expect(route(c)).toMatchObject({ outcome: "ceo", rule: TEMP_CLEANUP_RULE });
     expect(recommendedVerdict(exec(c))).toBe("allow");
     // Known limit: an install outside the checkout still goes to the owner. It must stay off the CEO route either way.
     const bare = "rm -rf /tmp/a && pnpm install > /tmp/a.log 2>&1";
@@ -618,18 +622,18 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
 
   it("a catch-all company rule that routes to the CEO doesn't catch Boss Man's own tools", () => {
     for (const t of ["mcp__bossman__ticket_reply", "mcp__bossman__decisions", "mcp__bossman__set_ticket_state", "mcp__bossman__wiki"]) {
-      expect(evaluatePermission(tool(t), toCeo), t).toEqual({ outcome: "allow", rule: "Boss Man's own tools" });
+      expect(evaluatePermission(tool(t), toCeo), t).toMatchObject({ outcome: "allow", rule: "Boss Man's own tools" });
     }
   });
 
-  it("the same company rule still catches other tools and commands", () => {
+  it("the same company rule still catches other tools; plain commands are built-in allows (BOS-307)", () => {
     expect(evaluatePermission(tool("mcp__other__thing"), toCeo).outcome).toBe("ceo");
-    expect(evaluatePermission({ title: "git status", kind: "execute", rawInput: { command: "git status" } }, toCeo).outcome).toBe("ceo");
+    expect(evaluatePermission({ title: "git status", kind: "execute", rawInput: { command: "git status" } }, toCeo).outcome).toBe("allow");
   });
 
   it("a company rule can still deny a Boss Man tool", () => {
     const deny = [{ name: "No wiki writes", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "deny" as const }];
-    expect(evaluatePermission(tool("mcp__bossman__wiki"), deny)).toEqual({ outcome: "deny", rule: "No wiki writes" });
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), deny)).toMatchObject({ outcome: "deny", rule: "No wiki writes" });
   });
 
   it("a command titled like a Boss Man tool is still checked as a command (security review)", () => {
@@ -655,6 +659,85 @@ describe("company rules and Boss Man's own tools (BOS-292)", () => {
 
   it("a company allow rule that matches a Boss Man tool is honoured", () => {
     const allow = [{ name: "Wiki is fine", match: { titlePattern: "^mcp__bossman__wiki$" }, outcome: "allow" as const }, ...toCeo];
-    expect(evaluatePermission(tool("mcp__bossman__wiki"), allow)).toEqual({ outcome: "allow", rule: "Wiki is fine" });
+    expect(evaluatePermission(tool("mcp__bossman__wiki"), allow)).toMatchObject({ outcome: "allow", rule: "Wiki is fine" });
+  });
+});
+
+describe("the ordered permission table (BOS-307)", () => {
+  const catchAll = (outcome: "ceo" | "owner") => [{ name: "catch-all", match: { kinds: ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"] }, outcome }];
+  const broadAllow = [{ name: "broad allow", match: { kinds: ["execute"] }, outcome: "allow" as const }];
+  const cases: Array<[string, { title: string | null; kind: string; rawInput: unknown }]> = [
+    ["plain shell", exec("git status")],
+    ["read", { title: "Read file", kind: "read", rawInput: {} }],
+    ["edit", { title: "Edit file", kind: "edit", rawInput: {} }],
+    ["Boss Man tool", { title: "mcp__bossman__wiki", kind: "other", rawInput: {} }],
+  ];
+
+  it("row 6 vs row 7: a catch-all CEO or owner rule never catches what the built-ins allow", () => {
+    for (const [name, info] of cases) for (const o of ["ceo", "owner"] as const) {
+      expect(decidePermission(info, catchAll(o)), name).toMatchObject({ outcome: "allow", row: 6 });
+    }
+  });
+
+  it("row 7: a routing rule still applies to a request that would ask", () => {
+    const outside = { title: "mcp__other__thing", kind: "other", rawInput: {} };
+    expect(decidePermission(outside, catchAll("ceo"))).toMatchObject({ outcome: "ceo", row: 7 });
+    expect(decidePermission(outside, [])).toMatchObject({ outcome: "owner", row: 8 });
+  });
+
+  it("row 3 vs row 7: guards still ask, and routing changes who is asked", () => {
+    for (const c of ["rm -rf /srv/x", "git push origin main", "rm -rf /tmp/x"]) {
+      expect(decidePermission(exec(c), catchAll("ceo")), c).toMatchObject({ outcome: "ceo", row: 7 });
+      expect(decidePermission(exec(c), []).row, c).toBe(3);
+    }
+  });
+
+  it("row 3 vs row 5: a broad company allow cannot lift a destructive command, push or cleanup", () => {
+    for (const c of ["rm -rf /srv/x", "git push origin main", "rm -rf /tmp/x", "docker system prune -a"]) {
+      expect(decidePermission(exec(c), broadAllow).outcome, c).not.toBe("allow");
+    }
+    expect(decidePermission(exec("git status"), broadAllow)).toMatchObject({ outcome: "allow", row: 5 });
+  });
+
+  it("row 3 vs row 5: the owner's /tmp-only switch still lifts a /tmp cleanup", () => {
+    expect(decidePermission(exec("rm -rf /tmp/fp2"), [SCRATCH_RULE])).toMatchObject({ outcome: "allow", row: 5 });
+  });
+
+  it("row 4 vs rows 5 and 6: a company deny beats a company allow and a built-in allow", () => {
+    const deny = { name: "no shell", match: { kinds: ["execute"] }, outcome: "deny" as const };
+    expect(decidePermission(exec("git status"), [...broadAllow, deny])).toMatchObject({ outcome: "deny", row: 4 });
+    expect(decidePermission(exec("git status"), [deny])).toMatchObject({ outcome: "deny", row: 4 });
+    // Row 4 is a separate row above the allow, so the owner's order between them doesn't matter.
+    expect(decidePermission(exec("git status"), [deny, ...broadAllow])).toMatchObject({ outcome: "deny", row: 4 });
+  });
+
+  it("row 1 vs rows 4 to 6: the network guard beats a company allow", () => {
+    const fetchIt = { title: "fetch", kind: "fetch", rawInput: { url: "http://192.168.1.5/x" } };
+    expect(decidePermission(fetchIt, [{ name: "all", match: { kinds: ["fetch"] }, outcome: "allow" }])).toMatchObject({ outcome: "deny", row: 1 });
+  });
+
+  it("the test screen and the live path give the same answer", () => {
+    for (const [, info] of cases) {
+      const d = decidePermission(info, catchAll("ceo"));
+      expect(evaluatePermission(info, catchAll("ceo"))).toEqual({ outcome: d.outcome, rule: d.rule, position: d.row });
+    }
+  });
+
+  it("row 5 vs row 7: the owner's order between an allow and an ask rule is kept (Freddy, Jane round 1)", () => {
+    const ask = { name: "ask first", match: { titlePattern: "^mcp__x__delete" }, outcome: "owner" as const };
+    const allowAll = { name: "allow every x tool", match: { titlePattern: "^mcp__x__" }, outcome: "allow" as const };
+    const req = { title: "mcp__x__delete_all", kind: "other", rawInput: null };
+    expect(decidePermission(req, [ask, allowAll])).toMatchObject({ outcome: "owner", row: 7 });
+    expect(decidePermission(req, [allowAll, ask])).toMatchObject({ outcome: "allow", row: 5 });
+    expect(decidePermission({ title: "mcp__x__list", kind: "other", rawInput: null }, [ask, allowAll])).toMatchObject({ outcome: "allow", row: 5 });
+  });
+
+  it("shadowedRoutingRules lists routing rules the built-in allows cover", () => {
+    const ssh = { name: "ask before ssh", match: { kinds: ["execute"], commandPattern: "ssh" }, outcome: "owner" as const };
+    const del = { name: "ask before delete", match: { kinds: ["delete"] }, outcome: "owner" as const };
+    const byTitle = { name: "t", match: { titlePattern: "x" }, outcome: "ceo" as const };
+    const cmdOnly = { name: "c", match: { commandPattern: "ssh" }, outcome: "owner" as const };
+    const mixed = { name: "m", match: { kinds: ["execute", "delete"] }, outcome: "owner" as const };
+    expect(shadowedRoutingRules([ssh, del, byTitle, cmdOnly, mixed, ...broadAllow]).map((r) => r.name)).toEqual(["ask before ssh", "t", "c", "m"]);
   });
 });
