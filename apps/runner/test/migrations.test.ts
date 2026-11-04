@@ -148,3 +148,36 @@ describe("reading git's name-status output", () => {
     expect(numberOf("README.md")).toBeNull();
   });
 });
+
+describe("the merge gate and the migration journal (BOS-360)", () => {
+  const stepsToTake = "merge origin/main";
+  it("merges a migration with a number and time after main's", async () => {
+    const { ws, spec } = await ticket(3, "ok", Date.now());
+    expect(await ws.merge(spec, "main", "Merge")).toMatchObject({ status: "merged" });
+  });
+
+  it("refuses a 'when' that isn't later than main's newest, and says what to do", async () => {
+    const { ws, spec, o } = await ticket(3, "old", 1500); // main's newest is 2000
+    const r = await ws.merge(spec, "main", "Merge");
+    expect(r.status).toBe("migration_journal");
+    if (r.status !== "migration_journal") return;
+    expect(r.problems.join(" ")).toContain("0003_old");
+    expect(r.problems.join(" ")).toContain(stepsToTake);
+    expect(r.problems.join(" ")).toContain("Date.now()");
+    expect(git(o.url, "rev-parse", "main")).toBe(git(o.seed, "rev-parse", "HEAD")); // nothing was pushed
+  });
+
+  it("refuses a 'when' more than 10 minutes in the future", async () => {
+    const { ws, spec } = await ticket(3, "future", Date.now() + 60 * 60_000);
+    const r = await ws.merge(spec, "main", "Merge");
+    expect(r).toMatchObject({ status: "migration_journal" });
+    expect(JSON.stringify(r)).toContain("in the future");
+  });
+
+  it("refuses a number main already has", async () => {
+    const { ws, spec } = await ticket(2, "twin", Date.now());
+    const r = await ws.merge(spec, "main", "Merge");
+    expect(r.status).toBe("migration_journal");
+    expect(JSON.stringify(r)).toContain("Migration number 0002");
+  });
+});

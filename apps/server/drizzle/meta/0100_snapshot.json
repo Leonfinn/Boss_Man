@@ -1,6 +1,6 @@
 {
   "id": "eea47ee9-ab49-4065-9952-8e5026a2e58b",
-  "prevId": "7d1f2c4e-5b6a-4c8d-9e0f-1a2b3c4d5e6f",
+  "prevId": "641425d6-d130-41be-a945-856f0086c468",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -5685,6 +5685,18 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "last_post_at": {
+          "name": "last_post_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "silent_steered_at": {
+          "name": "silent_steered_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -7517,12 +7529,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "checked_commit": {
-          "name": "checked_commit",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "pull_request_url": {
           "name": "pull_request_url",
           "type": "text",
@@ -7712,6 +7718,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "last_post_at": {
+          "name": "last_post_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "state_note_stale_at": {
           "name": "state_note_stale_at",
           "type": "timestamp with time zone",
@@ -7756,6 +7768,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "checked_commit": {
+          "name": "checked_commit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
