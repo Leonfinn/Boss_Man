@@ -76,6 +76,8 @@ export const WATCH_REASON = "ticket watch";
 // TREE_REASON (mcp.ts) wakes the watcher when everything in its watched tree has stopped.
 /** An assigned ticket nobody is working on, found by the sweep (R82). */
 export const MISSED_REASON = "missed work";
+/** An urgent ticket in progress that nobody is working on, found by the sweep (BOS-346). */
+export const URGENT_IDLE_REASON = "urgent idle";
 /** An agent's question answered by the owner (decisions.ts). */
 export const ANSWER_REASON = "decision answered";
 /** A card waits on the CEO. All of them share one batched wake (BOS-180), so it never counts toward the ticketless cap (BOS-272). */
@@ -1250,7 +1252,10 @@ export function schedulerService(
       // low-priority watch can't wait for ever behind a full house (DR-002). The stored priority, and
       // so the quota hold, is untouched. Someone-is-waiting wakes go first. The sort is stable, so
       // equal ranks stay oldest first.
-      const rank = (w: (typeof queue)[number]) => w.priority + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
+      // A wake for an urgent ticket gains 1 more, within its class (BOS-346): the ticket's flag counts, not only the reason.
+      const queuedTicketIds = [...new Set(queue.flatMap((w) => (w.ticketId ? [w.ticketId] : [])))];
+      const urgentIds = new Set(queuedTicketIds.length ? (await db.select({ id: tickets.id }).from(tickets).where(and(eq(tickets.urgent, true), inArray(tickets.id, queuedTicketIds)))).map((r) => r.id) : []);
+      const rank = (w: (typeof queue)[number]) => w.priority + (w.ticketId && urgentIds.has(w.ticketId) ? 1 : 0) + (wakeClassOf(w) === "scheduled" ? Math.floor((t.getTime() - w.createdAt.getTime()) / AGE_STEP_MS) : 0);
       const first = (w: (typeof queue)[number]) => (wakeClassOf(w) === "waiting" ? 1 : 0);
       queue.sort((a, b) => first(b) - first(a) || rank(b) - rank(a));
 
