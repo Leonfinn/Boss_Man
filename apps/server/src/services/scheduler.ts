@@ -1417,13 +1417,13 @@ export function schedulerService(
             // An account after the first with no login (its secret was deleted) would silently run on the company's default token, so it counts as unavailable.
             const usable = pool.filter((a, i) => i === 0 || a.secretId);
             const accounts = usable.length ? usable : [source];
-            const checked: { source: typeof source; rank: number; passes: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
+            const checked: { source: typeof source; rank: number; passes: boolean; hasRoom: boolean; full: Awaited<ReturnType<typeof latestQuotaWindows>> }[] = [];
             for (const a of accounts) {
               const samples = await latestQuotaWindows(a.id);
               const full = holdingWindows(a, samples, t);
               // Urgent work passes the threshold in every mode; only "urgent" and "all" let it past
               // the limit itself, so the default "pause" never spends unapproved extra usage.
-              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), full });
+              checked.push({ source: a, rank: a.fallbackRank ?? 0, passes: quotaPasses(a, full, samples, !!urgentTicket?.urgent), hasRoom: full.length === 0, full });
             }
             const picked = pickAccount(checked);
             if (holdApplies && !picked) {
