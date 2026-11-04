@@ -16,6 +16,11 @@ export async function openPostgres(url: string, opts: { migrate?: boolean } = {}
   if (opts.migrate === false) await assertMigrated(url, migrationsFolder);
   else await runMigrations(url, { folder: migrationsFolder });
   const pool = new Pool({ connectionString: url });
+  // A database restart drops idle connections; pg reports that as an error event, and with no listener Node exits.
+  // Log it and carry on: the pool discards the dead client and the next query connects again.
+  const onError = (err: Error) => console.error("[db] connection error (will reconnect on next query):", err.message);
+  pool.on("error", onError);
+  pool.on("connect", (client) => client.on("error", onError));
   const db = drizzle(pool, { schema });
   return { db: db as unknown as Db, close: () => pool.end() };
 }

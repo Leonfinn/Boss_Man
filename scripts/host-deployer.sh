@@ -273,14 +273,28 @@ bg_fail() { BG_RESULT=$1; BG_MSG=$2; return 1; }
 switch_back() {
   local ok=1
   log "Switching back from $BG_IDLE to $BG_LIVE."
+  # Never roll back to nothing: with the old colour not running there is nothing to go back to, so the new one is left alone.
+  [[ -n $(compose ps -q "server-$BG_LIVE" 2>/dev/null) ]] || { log "server-$BG_LIVE is not running; leaving server-$BG_IDLE as it is."; return 1; }
   compose kill -s USR1 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
   compose kill -s USR2 "server-$BG_LIVE" >>"$LOG" 2>&1 || ok=0
   if ((ok)); then wait_ready "server-$BG_LIVE" leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
   if ((ok)); then flip_proxy "$BG_LIVE" || ok=0; fi
   if ((ok)); then wait_ready proxy leader "" "$BG_HANDOVER_SECONDS" || ok=0; fi
-  compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
-  g reset --quiet --hard "$BG_PREV" || true
+  if ((ok)); then
+    compose stop "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+    g reset --quiet --hard "$BG_PREV" || true
+  else
+    # The old colour did not take over: put the new one back in charge and keep it running (the checkout stays on what runs).
+    log "The switch-back to $BG_LIVE failed; keeping server-$BG_IDLE running."
+    compose kill -s USR2 "server-$BG_IDLE" >>"$LOG" 2>&1 || true
+  fi
   ((ok))
+}
+
+# What to type on the host when both automatic paths failed (generic: the configured checkout, no fixed paths or names).
+recovery_hint() {
+  printf 'Look at the host now. In %s run: docker compose ps. To start the colour that should be live and make it lead: docker compose up -d --no-deps server-%s, then docker compose kill -s USR2 server-%s. If server-%s is running, docker compose kill -s USR2 server-%s makes it lead instead. Log: %s' \
+    "$REPO" "$BG_LIVE" "$BG_LIVE" "$BG_IDLE" "$BG_IDLE" "$LOG"
 }
 
 # After the swap: the proxy answers as the new leader at the new commit, and the portal answers.
@@ -316,7 +330,7 @@ do_deploy_bluegreen() {
   g merge --ff-only --quiet "$COMMIT" || { bg_fail failed "Could not move the checkout to ${COMMIT:0:8}."; return 1; }
   BOSSMAN_COMMIT="$COMMIT" compose build "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Building $BG_IDLE failed."; return 1; }
   # Expand-only migrations: the live colour keeps working on the new schema.
-  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
+  BOSSMAN_MIGRATE_TAG="$BG_IDLE" compose run --rm --no-deps migrate >>"$LOG" 2>&1 || { pre_fail "The migration failed (the database rolled it back)."; return 1; }
   compose up -d --no-deps --force-recreate "server-$BG_IDLE" >>"$LOG" 2>&1 || { pre_fail "Starting $BG_IDLE failed."; return 1; }
   # It is a standby because the live colour holds the leader lock; seeing that also shows the lock works.
   wait_ready "server-$BG_IDLE" standby "$COMMIT" "$BG_READY_SECONDS" || { pre_fail "$BG_IDLE did not come up as a standby at ${COMMIT:0:8} within ${BG_READY_SECONDS}s."; return 1; }
@@ -333,7 +347,7 @@ do_deploy_bluegreen() {
   [[ -n $why ]] || verify_live "$COMMIT" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "$why Switched back to $BG_LIVE automatically. Backup: $BG_BACKUP"
-    else bg_fail failed "$why The switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "$why The switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
 
@@ -369,7 +383,7 @@ soak_tick() {
   REQ_ID="auto-rollback-$(date +%s)" TARGET=server STARTED="$(now)" FROM="$prev" COMMIT="$commit"
   rm -f "$f"
   if switch_back; then finish rolled_back "The update to ${commit:0:8} was switched back: right after it went live, $VERIFY_WHY. Boss Man went back to the previous version (${prev:0:8}) automatically and is running normally on it."
-  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: look at the host now (docker compose ps; $LOG)."; fi
+  else finish failed "The checks on $new failed and the automatic switch-back to $old ALSO failed: $(recovery_hint)"; fi
 }
 
 # By hand, any time (also after the soak window): go back to the other colour, i.e. the previous release.
@@ -411,7 +425,7 @@ do_rollback_bluegreen() {
   [[ -n $why ]] || verify_live "$ocommit" "$BG_READY_SECONDS" || why="${VERIFY_WHY:-The checks through the proxy failed.}"
   if [[ -n $why ]]; then
     if switch_back; then bg_fail rolled_back "Rollback failed ($why); $BG_LIVE is live again. Backup: $BG_BACKUP"
-    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: look at the host now (docker compose ps; $LOG). Backup: $BG_BACKUP"; fi
+    else bg_fail failed "Rollback failed ($why) and the switch-back ALSO failed: $(recovery_hint) Backup: $BG_BACKUP"; fi
     return 1
   fi
   # The bad release stays stopped (not removed); the checkout follows what runs.

@@ -90,7 +90,7 @@ rebuild_and_start() {
   step "Building (${svcs[*]})"
   run docker compose build "${svcs[@]}"
   step "Restarting"
-  run docker compose up -d
+  run docker compose up -d --no-deps "${svcs[@]}"
   step "Waiting for the server to be healthy (up to ${HEALTH_TIMEOUT}s)"
   wait_healthy
 }

@@ -46,7 +46,7 @@ step "2/5 Build server-$colour"
 BOSSMAN_COMMIT="$commit" docker compose build "server-$colour" || die "the build failed; $colour still runs its old image. Backup: $backup"
 
 step "3/5 Migrate"
-BOSSMAN_MIGRATE_TAG="$colour" docker compose run --rm migrate || die "the migration failed; $colour still runs its old image. Backup: $backup"
+BOSSMAN_MIGRATE_TAG="$colour" docker compose run --rm --no-deps migrate || die "the migration failed; $colour still runs its old image. Backup: $backup"
 
 step "4/5 Restart server-$colour"
 docker compose up -d --no-deps --force-recreate "server-$colour" || die "the restart failed. Backup: $backup"
