@@ -56,17 +56,11 @@ Open a root shell on the NAS (TrueNAS UI > System > Shell, or `ssh admin@<nas-ip
 cd /mnt/NVME_Apps/Container_files/boss-man
 ```
 
-The repo is public, so the NAS clones it over https with no key and no login:
-
-```sh
-git clone https://github.com/Leonfinn/Boss_Man.git src
-```
-
-Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` read it the same way, so there is nothing to set up.
+The repository is private, so the NAS needs its own read-only deploy key. Follow [docs/00, step 2](00-first-time-install.md#2-get-the-code-onto-the-host), with `B` set to this dataset and the clone going to `src`. Later `git pull`s, `scripts/deploy.sh` and the host deployer's `git ls-remote` use the key saved in `core.sshCommand`.
 
 If git isn't on the host (`git --version` fails), let me know: the throwaway-container route isn't covered by this guide yet.
 
-If the clone hangs, check that the host can reach github.com on port 443 (`curl -sI https://github.com | head -1` should print an HTTP status line).
+If the clone hangs, check that the host can reach github.com on port 22 (see docs/00, step 2).
 
 **Already installed with a deploy key?** Nothing to change. `src` keeps its `git@github.com:` address and the `core.sshCommand` setting, and updates keep working. To move to https later, run `git -C /mnt/NVME_Apps/Container_files/boss-man/src remote set-url origin https://github.com/Leonfinn/Boss_Man.git`; the old key can then be deleted from the repo's settings and the dataset.
 
@@ -134,6 +128,8 @@ chmod 600 /mnt/NVME_Apps/Container_files/boss-man/src/.env
 - `BOSSMAN_INSECURE_COOKIES=1` lets you log in over plain `http://<nas-ip>:3101` on your LAN. Once the Tailscale sidecar of section 10b is running (it sets `BOSSMAN_TRUSTED_PROXIES`), Boss Man decides per request: Secure on HTTPS through the sidecar, off on plain LAN http, whatever this line says, so you can leave it or remove it. Without the sidecar, removing it makes the cookie always Secure and plain http login fails.
 - Plain LAN login only works because `BOSSMAN_BIND` is set to the NAS address above (the default, 127.0.0.1, is reachable from the NAS itself only).
   - Browsers only allow notifications (R44) and the installable web app on HTTPS pages, so do 10b.
+
+Memory limits for the server, database, runners and tool servers are set from this file too: see [docs/00, "Memory limits"](00-first-time-install.md#memory-limits-so-one-container-cant-take-the-whole-host). Nothing to add on TrueNAS; the defaults apply.
 
 ## 5. Build the images and start the server
 
@@ -492,7 +488,7 @@ chown root:root $D/host.conf && chmod 600 $D/host.conf
 ```
 
 - `WEBHOOK_ON_SUCCESS=1` also posts when a deploy works; `0` (the default) posts only failures (`failed`, `partial`, `rolled_back`, `rejected`).
-- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`.
+- Optional lines: `REPO=` (the checkout; default `$D/../src`), `RATE_LIMIT_SECONDS=600` and, with blue/green (9d), `SOAK_SECONDS=900`. The host publishes `SOAK_SECONDS` in `outbox/available.json` as `soakSeconds`, so Boss Man's runner-update trial uses the same length you set here (no second place to keep in step).
 - The script refuses to start if this file is not owned by the user running it with mode 600.
 - It sends `POST` with `Content-Type: application/json` and a body like `{"result":"failed","message":"...","from_commit":"...","to_commit":"...","at":"2026-10-20T12:03:00Z"}`. Any service that takes a JSON webhook works. ntfy's JSON publish needs a `topic` field this body does not have, so for ntfy use a small relay or Home Assistant; that is untested.
 

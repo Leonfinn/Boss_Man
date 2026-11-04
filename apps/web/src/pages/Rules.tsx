@@ -6,7 +6,7 @@ import { usePoll } from "../hooks";
 type Outcome = "allow" | "ceo" | "owner" | "deny";
 type Match = { agentIds?: string[]; safeOnly?: boolean; kinds?: string[]; commandPattern?: string; titlePattern?: string; scratchOnly?: boolean; workingCopyOnly?: boolean };
 type Rule = { id: string; companyId: string | null; name: string; match: Match; outcome: Outcome; position: number; createdAt?: string | null; createdBy?: string | null; sourceDecisionId?: string | null };
-type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }> };
+type RuleList = { company: Rule[]; global: Rule[]; defaults: Array<{ name: string; match: Match; outcome: Outcome }>; shadowedIds?: string[] };
 
 const KINDS = ["read", "edit", "delete", "move", "search", "execute", "think", "fetch", "other"];
 export const OUTCOMES: Array<{ value: Outcome; label: string; tone: string }> = [
@@ -32,7 +32,7 @@ function describeMatch(m: Match) {
   return parts.join(" and ");
 }
 
-function RuleRows({ rules, onMove, onChange, onDelete }: { rules: Rule[]; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
+function RuleRows({ rules, shadowed, onMove, onChange, onDelete }: { rules: Rule[]; shadowed: string[]; onMove: (i: number, d: -1 | 1) => void; onChange: (r: Rule, o: Outcome) => void; onDelete: (r: Rule) => void }) {
   if (!rules.length) return <p className="muted">None yet.</p>;
   return (
     <ol className="rules">
@@ -49,6 +49,7 @@ function RuleRows({ rules, onMove, onChange, onDelete }: { rules: Rule[]; onMove
                 Made by {r.createdBy}{r.createdAt ? ` on ${new Date(r.createdAt).toLocaleString()}` : ""}{r.sourceDecisionId ? " from a decision card (see Decisions, answered)" : ""}. Remove it with the button on this row.
               </p>
             )}
+            {shadowed.includes(r.id) && <p className="muted" style={{ fontSize: 12.5 }}>Built-in rules already allow these requests, so this rule no longer asks about them. It still applies to delete, push and other guarded requests.</p>}
           </div>
           <select aria-label={`Outcome of ${r.name}`} value={r.outcome} onChange={(e) => onChange(r, e.target.value as Outcome)}>
             {OUTCOMES.map((o) => (
@@ -146,7 +147,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         </div>
       </header>
       <p className="muted" style={{ fontSize: 14 }}>
-        Order of checking: a company's own rules, then rules for every company, then the built-in defaults. "Ask the CEO" puts it in the CEO's queue; "Ask me" puts it in yours.
+        Order of checking: network and safety guards, then your deny rules, then your allow rules (they cannot lift a safety guard), then the built-in allows, then your "Ask the CEO" and "Ask me" rules, which apply only to requests that would otherwise ask. "Ask the CEO" puts it in the CEO's queue; "Ask me" puts it in yours.
       </p>
       {error && (
         <p className="error" role="alert">
@@ -160,6 +161,7 @@ export function Rules({ companies, companyId, go }: { companies: Company[]; comp
         </h2>
         <RuleRows
           rules={rules}
+          shadowed={list.data?.shadowedIds ?? []}
           onMove={move}
           onChange={(r, outcome) => void act(() => api(`/api/policy-rules/${r.id}`, { method: "PATCH", body: { outcome } }))}
           onDelete={(r) => window.confirm(`Delete "${r.name}"?`) && void act(() => api(`/api/policy-rules/${r.id}`, { method: "DELETE" }))}

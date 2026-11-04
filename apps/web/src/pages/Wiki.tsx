@@ -233,7 +233,7 @@ function PageView({ companyId, slug, section, folders, go, onChanged, onNewHere 
           </button>
         </div>
       )}
-      <Markdown text={(old ?? p).body} wikiCompanyId={companyId} />
+      <Markdown text={(old ?? p).body} linkContext={{ companyId }} />
       {error && (
         <p className="error" role="alert">
           {error}
@@ -342,7 +342,7 @@ function BriefView({ companyId }: { companyId: string }) {
   return (
     <article className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <h2 style={{ fontSize: 22, fontWeight: 600 }}>Company brief</h2>
-      <Markdown text={brief.data.markdown} />
+      <Markdown text={brief.data.markdown} linkContext={{ companyId }} />
     </article>
   );
 }

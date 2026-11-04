@@ -121,13 +121,17 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
   const [holdAt, setHoldAt] = useState(Math.round((s.source.quotaHoldAt ?? 0.95) * 100));
   const [overage, setOverage] = useState<"pause" | "urgent" | "all">(s.source.quotaOverage ?? "pause");
   const [off, setOff] = useState<string[]>(s.source.quotaDisabledWindows ?? []);
+  const claude = s.source.provider === "anthropic";
+  const [rank, setRank] = useState<string>(s.source.fallbackRank ? String(s.source.fallbackRank) : "");
+  const [secretId, setSecretId] = useState<string>(s.source.secretId ?? "");
+  const tokens = usePoll((signal) => (claude ? api<Array<{ id: string; name: string; kind: string }>>("/api/secrets", { signal }) : Promise.resolve([])), 60_000, "secrets-for-funding");
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const windows = s.windowsSeen ?? s.quota.map((q) => q.window);
   const save = async () => {
     setError(null);
     try {
-      await api(`/api/funding-sources/${s.source.id}`, { method: "PATCH", body: { quotaHoldAt: holdAt / 100, quotaOverage: overage, quotaDisabledWindows: off } });
+      await api(`/api/funding-sources/${s.source.id}`, { method: "PATCH", body: { quotaHoldAt: holdAt / 100, quotaOverage: overage, quotaDisabledWindows: off, ...(claude ? { fallbackRank: rank ? Number(rank) : null, secretId: secretId || undefined } : {}) } });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -180,6 +184,27 @@ function QuotaSettings({ s }: { s: FundingStatus }) {
             These names come from Claude Code and aren't documented, so Boss Man doesn't guess what each one means.
           </span>
         </fieldset>
+      )}
+      {claude && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ fontWeight: 600, fontSize: 13 }}>Switch between Claude accounts</span>
+          <label className="field-stack">
+            <span>Order (1 is used first; leave empty to keep this account out of the list)</span>
+            <input aria-label="Claude account order" type="number" min={1} max={10} value={rank} onChange={(e) => setRank(e.target.value)} style={{ width: 96 }} />
+          </label>
+          <label className="field-stack">
+            <span>Login for this account</span>
+            <select aria-label="Claude account login" className="fill" value={secretId} onChange={(e) => setSecretId(e.target.value)}>
+              <option value="">The company's own Claude token (Settings, Secrets)</option>
+              {(tokens.data ?? []).filter((t) => t.kind === "claude_oauth_token").map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+          </label>
+          <span className="muted" style={{ fontSize: 12 }}>
+            When an account in the list reaches its hold level, new runs go to the next one with room, and back again once the first resets. Runs already going finish where they started. Add each plan's token first under Settings, Secrets (Add secret, kind Claude setup-token), then create a Claude subscription source here for it.
+          </span>
+        </div>
       )}
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <button type="button" className="btn" onClick={() => void save()}>
@@ -242,7 +267,11 @@ function SourceCard({ s }: { s: FundingStatus }) {
   return (
     <section className="card source-card" aria-labelledby={`fs-${s.source.id}`}>
       <div className="source-head">
-        <h2 id={`fs-${s.source.id}`}>{s.source.name}</h2>
+        <h2 id={`fs-${s.source.id}`}>
+          {s.source.name}
+          {s.source.fallbackRank ? <span className="muted" style={{ fontSize: 12, fontWeight: 400 }}> · account {s.source.fallbackRank}</span> : null}
+          {s.claudeActive ? <span className="pill" style={{ marginLeft: 8, fontSize: 12 }}>In use now</span> : null}
+        </h2>
         <span className="muted">
           {kind} · {s.source.provider}
         </span>

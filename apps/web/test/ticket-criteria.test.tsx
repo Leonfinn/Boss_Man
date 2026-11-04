@@ -83,6 +83,23 @@ describe("the no-code flag on the ticket page", () => {
     expect(screen.queryByLabelText(/Doesn't need code changes/)).toBeNull();
   });
 });
+describe("the last post on the ticket", () => {
+  it("shows how long ago an agent last posted, next to the ticket's activity", async () => {
+    const posted = new Date(Date.now() - 12 * 60_000).toISOString();
+    vi.stubGlobal("fetch", stub({ lastPostAt: posted }));
+    render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByText("Last activity");
+    expect(screen.getByText("Last post")).toBeTruthy();
+    expect(screen.getByText("12m ago")).toBeTruthy();
+  });
+
+  it("has nothing to show when no agent has posted", async () => {
+    vi.stubGlobal("fetch", stub({ lastPostAt: null }));
+    render(<Ticket id="t1" companies={[company]} />);
+    await screen.findByText("Last activity");
+    expect(screen.queryByText(/Last post/)).toBeNull();
+  });
+});
 describe("the collapsible Work panel", () => {
   it("hides and shows the panel, and remembers the choice on this device", async () => {
     localStorage.clear();
