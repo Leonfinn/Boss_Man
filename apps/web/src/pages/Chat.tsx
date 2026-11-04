@@ -127,7 +127,7 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
   const unread = (t: Thread) => !!t.last && t.last.role !== "owner" && t.id !== current?.id && (!seen[t.id] || seen[t.id]! < t.last.createdAt);
 
   return (
-    <>
+    <div className="chat-page">
       <header className="page-head">
         <div>
           <h1>Chat</h1>
@@ -239,6 +239,6 @@ export function ChatPage({ companies, companyId, agentId, go, onChanged }: { com
           )}
         </section>
       )}
-    </>
+    </div>
   );
 }
