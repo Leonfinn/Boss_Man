@@ -199,7 +199,8 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         } catch (err) {
           failed[r.slug] = (err as Error).message;
           deps.log?.(`drain: could not recreate ${r.slug}: ${(err as Error).message}`);
-        }      }
+        }
+      }
       h = { ...h, swapped, failed };
       await save(h);
 
