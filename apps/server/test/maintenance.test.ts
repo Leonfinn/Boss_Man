@@ -200,6 +200,26 @@ describe("runner update drain (docs/09-self-deploy.md, phase 2)", () => {
     expect(await c.open()).toHaveLength(0);
   });
 
+  it("pages once when no runner has been swapped for twice the reconnect time, naming who is waited on", async () => {
+    const c = (ctx = await setup({ reconnectMs: 5 * MIN }));
+    const a = await c.company("App Co", "app-co");
+    await c.wake(a);
+    await c.scheduler.tick();
+    await c.maintenance.start({ minutes: 60 });
+    await c.maintenance.step();
+    c.advance(9 * MIN);
+    await c.maintenance.step();
+    expect((await c.titles()).filter((t) => t.includes("Runner update is stuck"))).toHaveLength(0);
+    c.advance(2 * MIN);
+    await c.maintenance.step();
+    await c.maintenance.step();
+    const stuck = (await c.db.select().from(notifications)).filter((n) => n.title === "Runner update is stuck");
+    expect(stuck).toHaveLength(1);
+    expect(stuck[0]).toMatchObject({ level: "page" });
+    expect(stuck[0]!.body).toContain("app-co");
+    expect(await getHold(c.db)).not.toBeNull(); // the hold stays; the owner decides
+  });
+
   it("cancel lifts the hold and lets queued wakes run", async () => {
     const c = (ctx = await setup());
     const a = await c.company("App Co", "app-co");

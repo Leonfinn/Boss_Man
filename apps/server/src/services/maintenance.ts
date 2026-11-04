@@ -33,6 +33,8 @@ export type Hold = {
   failed?: Record<string, string>;
   /** slug -> failed recreate tries so far and when the last was; a recreate is tried up to RECREATE_TRIES times before it counts as failed. */
   tries?: Record<string, { n: number; at: string }>;
+  /** The "update is stuck" page has been sent for this hold (once). */
+  stalledPaged?: boolean;
 };
 
 export const RECREATE_TRIES = 3;
@@ -211,6 +213,15 @@ export function maintenanceService(db: Db, deps: MaintenanceDeps) {
         }
       }
       h = { ...h, swapped, failed, tries };
+      // No swap for twice the reconnect time while runners still wait: say so once, so a hold is never silently stuck.
+      const waiting = fleet.filter((r) => !r.current && !failed[r.slug] && !swapped[r.slug]);
+      if (waiting.length && !h.stalledPaged) {
+        const lastProgress = Math.max(new Date(h.since).getTime(), ...Object.values(swapped).map((s) => new Date(s).getTime()));
+        if (t.getTime() - lastProgress >= 2 * reconnectMs) {
+          h = { ...h, stalledPaged: true };
+          await deps.notify({ companyId: null, level: "page", title: "Runner update is stuck", body: `No runner has been swapped for ${Math.round((t.getTime() - lastProgress) / 60_000)} minutes. Still waiting on: ${waiting.map((r) => r.slug).join(", ")}. New runs are held everywhere. Open Settings > Server and runner: wait for that company to finish, or cancel the update.`, link: "#/settings" });
+        }
+      }
       await save(h);
 
       if (fleet.some((r) => !r.current && !failed[r.slug] && !swapped[r.slug])) return; // still waiting for an idle company
