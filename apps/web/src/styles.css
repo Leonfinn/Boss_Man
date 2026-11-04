@@ -80,15 +80,17 @@ p { margin: 0; }
    page matches, so every other page keeps its layout and scrolls as before. */
 .app:has(> main > .chat-page > .messenger) { height: 100dvh; min-height: 0; align-content: stretch; }
 .app:has(> main > .chat-page > .messenger) > main { flex: 1 1 0; height: auto; min-height: 0; overflow: hidden; }
-/* Wide enough for the menu beside the page: one row, so `main`'s height is the window's; the menu
-   keeps its own width and never stretches to share the height (BOS-270). */
-@media (min-width: 841px) {
+/* Wide enough for the menu beside the page (the same 641px where the side menu starts sitting
+   beside it, BOS-289): one row, so `main`'s height is the window's; the menu keeps its own width and
+   never stretches to share the height (BOS-270). */
+@media (min-width: 641px) {
   .app:has(> main > .chat-page > .messenger) { flex-wrap: nowrap; }
-  .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; }
+  .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; height: auto; align-self: auto; }
 }
-/* A phone stacks the menu above the page: the menu keeps its full width and natural height, and the
-   page takes what is left of the window under it (BOS-270). */
-@media (max-width: 840px) {
+/* A phone (below the 641px where the menu becomes a bar above the page) stacks the menu above the
+   chat: the bar keeps its full width and natural height, and the page takes what is left of the
+   window under it (BOS-270). */
+@media (max-width: 640px) {
   .app:has(> main > .chat-page > .messenger) { flex-direction: column; flex-wrap: nowrap; }
   .app:has(> main > .chat-page > .messenger) > nav { flex: 0 0 auto; width: 100%; height: auto; }
   .app:has(> main > .chat-page > .messenger) > nav.side { min-height: 0; }
