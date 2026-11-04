@@ -825,9 +825,12 @@ button.link { background: none; border: 0; padding: 0; color: var(--link); text-
 .image-thumbs img { width: 120px; height: 90px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
 .file-chip { display: inline-block; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Wide enough for the menu to sit beside the page: it stays in view while the page scrolls, and scrolls on its own where it is taller than the window. */
-@media (min-width: 840px) {
-  .app > nav.side { position: sticky; top: 0; align-self: flex-start; height: 100vh; min-height: 0; overflow-y: auto; }
+/* Wherever the menu sits beside the page (a phone turns it into a bar above the page at 640px), it fills the window and stays in view while the page scrolls, scrolling on its own where it is taller than the window. 100dvh follows a mobile browser's address bar; 100vh is the fallback where dvh is unsupported. */
+@media (min-width: 641px) {
+  /* From just above the phone bar the menu keeps its own column beside the page, so it never wraps onto a full-width row that the full-height rule would then stretch over the whole screen. */
+  .app { flex-wrap: nowrap; }
+  .app > nav.side { flex: 0 0 232px; position: sticky; top: 0; align-self: flex-start; height: 100vh; height: 100dvh; min-height: 0; overflow-y: auto; }
+  .app > main { flex: 1 1 0; }
 }
 .related { display: flex; flex-direction: column; gap: 8px; }
 .related .section-label { margin: 6px 0 0; }
