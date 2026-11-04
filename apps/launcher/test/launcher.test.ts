@@ -250,6 +250,42 @@ describe("the runner launcher (R55)", () => {
     expect(fake.containers.size).toBe(0);
   });
 
+  it("makes a runner again after its guard failed, waiting longer after each failure, and not after an owner Stop", async () => {
+    const cfg = config();
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    fake.fail.guard = true;
+    await expect(api.put("app-co", TOKEN)).rejects.toThrow("no such image");
+    expect(fake.containers.size).toBe(0);
+    // Still failing: tried now, then not again until the wait is over (10 s, then 20 s).
+    await expect(api.healMissing(1_000)).rejects.toThrow("app-co");
+    expect(await api.healMissing(5_000)).toEqual([]);
+    await expect(api.healMissing(12_000)).rejects.toThrow("app-co");
+    expect(await api.healMissing(20_000)).toEqual([]);
+    // The cause is gone: the next try after the wait brings it back.
+    fake.fail.guard = false;
+    expect(await api.healMissing(40_000)).toEqual(["app-co"]);
+    expect(fake.containers.has("boss-man-runner-app-co")).toBe(true);
+    expect(fake.containers.has("boss-man-netguard-app-co")).toBe(true);
+    // Nothing missing now.
+    expect(await api.healMissing(50_000)).toEqual([]);
+    // An owner Stop removes the token, so it stays stopped.
+    await api.remove("app-co");
+    expect(await api.healMissing(60_000)).toEqual([]);
+    expect(fake.containers.size).toBe(0);
+  });
+
+  it("does not keep trying when the host can't load the guard rules (enforce mode)", async () => {
+    const cfg = { ...config(), guardMode: "enforce" as const };
+    const fake = fakeDocker();
+    const api = launcher(cfg, fake.docker);
+    fake.fail.nft = true;
+    await expect(api.put("app-co", TOKEN)).rejects.toThrow();
+    fake.fail.nft = false;
+    expect(await api.healMissing(1_000_000)).toEqual([]);
+    expect(fake.containers.has("boss-man-runner-app-co")).toBe(false);
+  });
+
   it("restarts the guard after the runner restarts, and removes it with the runner", async () => {
     const cfg = config();
     const fake = fakeDocker();
