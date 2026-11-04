@@ -1,0 +1,70 @@
+# ntfy (phone notifications) as an optional add-on. OFF by default: the service is in the "ntfy"
+# profile, so a plain `docker compose up -d` starts nothing from this file.
+# It is its OWN Compose project, never merged with Boss Man's files (see docs/06-install-truenas.md, section 10):
+#   docker compose -p boss-man-ntfy --env-file .env -f deploy/ntfy.yml --profile ntfy up -d
+# Never add this file to COMPOSE_FILE: the required NTFY_* variables below are checked when the
+# file is parsed, so every compose command on the host (including the deployer) would fail.
+#
+# In .env (the address is not a secret; the topic and tokens never go in this file):
+#   NTFY_BASE_URL=https://<host-name>.<tailnet>.ts.net:8443  # the Tailscale Serve address, https only
+# Optional, with defaults that match BOS-242:
+#   NTFY_DATA=<folder>          # default $BOSSMAN_DATA/ntfy (BOSSMAN_DATA default /srv/boss-man/data); owned by uid 1000.
+#                               # Holds users, tokens and cache: include it in your backup and copy it when you move host.
+#   NTFY_EDGE_NETWORK=<name>    # default boss-man_edge, the "edge" network of deploy/tailscale.yml (the -p name of THIS file does not change it).
+#                               # Set it only if Boss Man runs under another Compose project name: <project>_edge.
+#   NTFY_EDGE_IP=<address>      # default 172.30.0.6, ntfy fixed address on edge. Must sit inside BOSSMAN_EDGE_SUBNET and never be
+#                               # BOSSMAN_EDGE_IP (the one address whose forwarded headers the server trusts) or the gateway (.1).
+# Optional: NTFY_IMAGE (pinned by digest below; change version and digest together), NTFY_CACHE_DURATION (1h),
+#   NTFY_UPSTREAM_BASE_URL (leave unset; iPhone only, see the doc).
+#
+# No port is published on the host at all. The container joins the "edge" network of the Tailscale sidecar
+# from deploy/tailscale.yml (BOS-242, set that up first); the sidecar's Serve config (deploy/tailscale/serve.json)
+# publishes it on tailnet port 8443 as http://ntfy:80. Never use Funnel.
+# Boss Man's server is on the same edge network and publishes to http://ntfy:80 directly (no ts.net name needed);
+# only the phone and the Approve buttons use the https address.
+# Access is deny-all: nobody can publish or read without a user or token made with `ntfy user` /
+# `ntfy token` / `ntfy access`. Sign-up and the web app are off. No upstream is set, so nothing is
+# relayed anywhere. Messages are kept for NTFY_CACHE_DURATION, then dropped.
+
+services:
+  ntfy:
+    profiles: ["ntfy"]
+    image: ${NTFY_IMAGE:-binwiederhier/ntfy:v2.11.0@sha256:4a7d0f0adc6d5d9fc36e64ab55ef676e76e124a2bdd50ce115b6d9c1c7430294}
+    command: ["serve"]
+    restart: unless-stopped
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes:
+      - ${NTFY_DATA:-${BOSSMAN_DATA:-/srv/boss-man/data}/ntfy}:/var/lib/ntfy
+    environment:
+      NTFY_BASE_URL: ${NTFY_BASE_URL:?Set NTFY_BASE_URL in .env to the https Tailscale Serve address}
+      NTFY_LISTEN_HTTP: ":80"
+      NTFY_BEHIND_PROXY: "true"
+      NTFY_AUTH_FILE: /var/lib/ntfy/user.db
+      NTFY_AUTH_DEFAULT_ACCESS: deny-all
+      NTFY_ENABLE_SIGNUP: "false"
+      NTFY_ENABLE_LOGIN: "true"
+      NTFY_WEB_ROOT: disable
+      NTFY_CACHE_FILE: /var/lib/ntfy/cache.db
+      NTFY_CACHE_DURATION: ${NTFY_CACHE_DURATION:-1h}
+      NTFY_UPSTREAM_BASE_URL: ${NTFY_UPSTREAM_BASE_URL:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:80/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      edge:
+        aliases: [ntfy]
+        # Fixed so Docker can never hand ntfy the Tailscale container address (BOSSMAN_EDGE_IP) if that container is recreated.
+        ipv4_address: ${NTFY_EDGE_IP:-172.30.0.6}
+    mem_limit: 256m
+    pids_limit: 128
+
+networks:
+  edge:
+    external: true
+    name: ${NTFY_EDGE_NETWORK:-boss-man_edge}

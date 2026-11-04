@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import type { RunnerCommand } from "@boss-man/shared";
 import { buildApp } from "../src/app.js";
 import { openPglite } from "../src/db/client.js";
-import { decisions, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
+import { decisions, fundingSources, notifications, runners, runTokens, runs, tickets, wakes } from "../src/db/schema.js";
 import { hashToken } from "../src/auth.js";
 import type { Limits } from "../src/services/scheduler.js";
 
@@ -530,7 +530,7 @@ describe("scheduler", () => {
     await ctx.scheduler.notify(worker.id, { ticketId: urgent.id, reason: "assigned", note: "The owner assigned this to you." });
     await ctx.scheduler.tick();
     const status = await ctx.serverStatus.status(ctx.company.id);
-    expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, agent: "Engineer", held: "runner offline" })]);
+    expect(status.wakes.waiting.filter((x) => x.ticketId === urgent.id)).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, agent: "Engineer", held: "runner offline" })]);
   });
 
   it("holds an urgent ticket assigned after it was marked urgent under the default pause, and shows why (BOS-253)", async () => {
@@ -550,5 +550,66 @@ describe("scheduler", () => {
     expect(held!.statusReason).toBe("subscription seven_day window nearly used up");
     const status = await ctx.serverStatus.status(ctx.company.id);
     expect(status.wakes.waiting).toEqual([expect.objectContaining({ ticketId: urgent.id, urgent: true, held: "subscription seven_day window nearly used up" })]);
+  });
+
+  describe("two Claude accounts (BOS-383)", () => {
+    const meta = (w: number) => ({ "_claude/rateLimit": { unifiedWindows: { seven_day: { utilization: w, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } } });
+    async function twoAccounts() {
+      ctx = await setup({ agent: 5 });
+      const a = (await ctx.req("POST", "/api/funding-sources", { name: "Max one", kind: "subscription", provider: "anthropic", fallbackRank: 1 })).json();
+      const sec = (await ctx.req("POST", "/api/secrets", { name: "Max two login", kind: "claude_oauth_token", value: "sk-ant-oat01-abcdefghijklmnop" })).json().secret.id as string;
+      const b = (await ctx.req("POST", "/api/funding-sources", { name: "Max two", kind: "subscription", provider: "anthropic", fallbackRank: 2, secretId: sec })).json();
+      await ctx.req("PATCH", `/api/agents/${ctx.ceo.id}`, { fundingSourceId: a.id });
+      return { a, b };
+    }
+    const lastRun = async () => (await ctx.db.select().from(runs))[0]!;
+
+    it("starts new runs on the first account while it has room", async () => {
+      const { a } = await twoAccounts();
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+      expect((await lastRun()).fundingSourceId).toBe(a.id);
+    });
+
+    it("moves new runs to the second account when the first is full, and tells the owner once", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      await ctx.req("POST", "/api/scheduler/tick");
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      const firstRun = await lastRun();
+      await ctx.db.update(runs).set({ endedAt: new Date() }).where(eq(runs.id, firstRun.id));
+      await ctx.db.delete(wakes);
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 1 });
+      const second = (await ctx.db.select().from(runs)).find((r) => r.id !== firstRun.id)!;
+      expect(second.fundingSourceId).toBe(b.id);
+      // The run that was already going keeps its account.
+      expect((await ctx.db.select().from(runs).where(eq(runs.id, firstRun.id)))[0]!.fundingSourceId).toBe(a.id);
+      expect((await ctx.db.select().from(notifications)).filter((n) => /New runs now use Max two/.test(n.title))).toHaveLength(1);
+    });
+
+    it("holds routine work when every account is full", async () => {
+      const { a, b } = await twoAccounts();
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: b.id, claudeMeta: meta(0.99) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    });
+
+    it("refuses a second account with no login, and skips one whose login was removed", async () => {
+      const { a, b } = await twoAccounts();
+      const bad = await ctx.req("POST", "/api/funding-sources", { name: "No login", kind: "subscription", provider: "anthropic", fallbackRank: 2 });
+      expect(bad.statusCode).toBe(400);
+      await ctx.db.update(fundingSources).set({ secretId: null }).where(eq(fundingSources.id, b.id));
+      await ctx.req("POST", "/api/quota-samples", { fundingSourceId: a.id, claudeMeta: meta(0.97) });
+      await ctx.req("POST", `/api/agents/${ctx.ceo.id}/wake`, { priority: 2 });
+      expect((await ctx.req("POST", "/api/scheduler/tick")).json()).toMatchObject({ launched: 0, deferred: 1 });
+    });
+
+    it("refuses a ranked account that is not a Claude subscription", async () => {
+      ctx = await setup({ agent: 5 });
+      const res = await ctx.req("POST", "/api/funding-sources", { name: "Plain", kind: "api_credit", provider: "anthropic", fallbackRank: 1 });
+      expect(res.statusCode).toBe(400);
+    });
   });
 });

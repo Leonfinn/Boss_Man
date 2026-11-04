@@ -23,6 +23,11 @@ x-server: &server
       condition: service_healthy
   secrets:
     - master_key
+  # Same limits and priority as the single server in docker-compose.yml.
+  # 0 = no cap (the server uses 10-13 GiB today, see BOS-405). Set BOSSMAN_SERVER_MEMORY to cap it.
+  mem_limit: ${BOSSMAN_SERVER_MEMORY:-0}
+  mem_reservation: ${BOSSMAN_SERVER_MEMORY_RESERVED:-512m}
+  oom_score_adj: -500
   networks: [default, launcher]
   # /api/ready: the database answers. Standby and leader are both ready; the role is in the body.
   healthcheck:
@@ -112,6 +117,9 @@ services:
     cap_add: [NET_BIND_SERVICE]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 128m
+    mem_reservation: 64m
+    # The proxy is the last thing the kernel may kill: when it dies, the UI is gone.
+    oom_score_adj: -900
     pids_limit: 64
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3100/api/ready"]

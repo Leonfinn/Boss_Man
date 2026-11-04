@@ -1,8 +1,9 @@
 // The runner's link to the Boss Man server (R31): dial out, say hello, replay what the
 // server hasn't stored, then stream live. Reconnects with backoff; a connection that
 // goes quiet for three heartbeats is dropped and redialled.
+import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
-import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type RunnerCommand, type RunnerEvent, type RunnerMessage } from "@boss-man/shared";
+import { HEARTBEAT_MS, PROTOCOL_VERSION, RUNNER_FEATURES, ServerMessage, type HarnessVersions, type RunnerCommand, type RunnerEvent, type RunnerMessage } from "@boss-man/shared";
 import type { Journal } from "./journal.js";
 
 export type ConnectionOptions = {
@@ -12,6 +13,8 @@ export type ConnectionOptions = {
   onCommand: (command: RunnerCommand) => void;
   runnerVersion: string;
   imageVersion?: string | null;
+  /** Versions of the harnesses in the image, told to the server in hello (BOS-305). */
+  harnessVersions?: HarnessVersions;
   heartbeatMs?: number;
   log?: (msg: string) => void;
   /** Permission requests still waiting for a verdict, re-asked on every (re)connect. */
@@ -27,6 +30,8 @@ export class RunnerConnection {
   private heartbeat: NodeJS.Timeout | null = null;
   private retry: NodeJS.Timeout | null = null;
   private readonly heartbeatMs: number;
+  /** New for each process start; sent in every hello so the server can tell a restart from a reconnect (BOS-352). */
+  private readonly bootId = randomUUID();
 
   constructor(private readonly opts: ConnectionOptions) {
     this.heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
@@ -76,7 +81,7 @@ export class RunnerConnection {
     ws.on("open", () => {
       this.attempt = 0;
       const pending = this.opts.pendingPermissions?.().slice(0, 500) ?? [];
-      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, features: [...RUNNER_FEATURES], ...(pending.length ? { pending } : {}) });
+      this.send({ type: "hello", protocol: PROTOCOL_VERSION, runnerVersion: this.opts.runnerVersion, imageVersion: this.opts.imageVersion ?? null, ...(this.opts.harnessVersions ? { harnessVersions: this.opts.harnessVersions } : {}),features: [...RUNNER_FEATURES], bootId: this.bootId, ...(pending.length ? { pending } : {}) });
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastHeard > this.heartbeatMs * 3) {
           this.opts.log?.("server silent for 3 heartbeats; reconnecting");

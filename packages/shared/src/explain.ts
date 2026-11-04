@@ -299,9 +299,11 @@ const DELETE = /^(?:rm|rmdir|unlink)(?:\s+(?:--?[A-Za-z][A-Za-z-]*|--))*((?:\s+[
 /**
  * A plain relative path in the agent's working copy (BOS-120): no leading / - or ~, and no . .. or
  * .git part at any depth (so not a submodule's .git either). Other dot folders (.turbo, .cache) are fine.
+ * No trailing slash (BOS-150): rm -rf NAME/ follows a symlink as if NAME were the target, while
+ * rm -rf NAME removes the link itself; `rm -rf dist` cleans up just the same.
  */
-const WORKING_PATH = /^[A-Za-z0-9_+@.][A-Za-z0-9._+@-]*(?:\/[A-Za-z0-9._+@-]+)*\/?$/;
-const inWorkingCopy = (p: string) => WORKING_PATH.test(p) && p.replace(/\/$/, "").split("/").every((part) => part !== "." && part !== ".." && part.toLowerCase() !== ".git");
+const WORKING_PATH = /^[A-Za-z0-9_+@.][A-Za-z0-9._+@-]*(?:\/[A-Za-z0-9._+@-]+)*$/;
+const inWorkingCopy = (p: string) => WORKING_PATH.test(p) && p.split("/").every((part) => part !== "." && part !== ".." && part.toLowerCase() !== ".git");
 
 /** Any word that deletes, wherever it is: a second guard behind the allow-list, which must find none outside the accepted rm's. */
 const DELETING = String.raw`\b(?:rm|rmdir|unlink|shred|truncate|rmtree|rmSync|unlinkSync)\b|\s--?delete\b|\bgit\s+clean\b`;
@@ -377,6 +379,7 @@ export type CleanupScope = { tmp: string[]; workingCopy: string[] };
  * entry cleared as below. Temp deletes are one level only, because rm then removes a symlink as a
  * link and never follows it. Working-copy paths go deeper, so a symlinked folder on the way would
  * be followed: only the runner's filesystem could tell, which is why these still need the CEO.
+ * A trailing slash is refused in both (BOS-150): rm -rf NAME/ follows the link into its target.
  * With any working-copy path there may be no cd anywhere, so the paths are relative to the folder
  * each shell command starts in. The server sends these to the CEO only when the runner reported it
  * started the run in its ticket's worktree and the tool input names no other folder; it can't see
